@@ -505,108 +505,11 @@ def _usage_lines(usage: Any) -> list[str]:
     return lines
 
 
-class ReflectionControl(BehaviorControl):
-    """Turn reflection on or off, and choose which reflection blocks it sends."""
-
-    usage = "Usage: /reflection [on|off|config [BLOCK on|off]]"
-
-    @property
-    def name(self) -> str:
-        return "reflection"
-
-    @classmethod
-    def help_text(cls) -> dict[str, str]:
-        return {
-            "/reflection": "Show whether reflection is on, its blocks and its triggers",
-            "/reflection on|off": "Turn reflection on or off for this workspace",
-            "/reflection config": "List the registered reflection blocks",
-            "/reflection config BLOCK on|off": "Switch one block on or off",
-        }
-
-    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
-        valid = (
-            not args
-            or (len(args) == 1 and args[0] in ("on", "off", "config"))
-            or (len(args) == 3 and args[0] == "config" and args[2] in ("on", "off"))
-        )
-        return (True, None) if valid else (False, self.usage)
-
-    async def execute(self, args: list[str]) -> ControlResult:
-        settings = getattr(self.agent, "_reflection_settings", None)
-        blocks = getattr(self.agent, "reflection", None)
-        if settings is None or blocks is None:
-            return ControlResult.err("Reflection is not available for this agent.")
-        if args and args[0] in ("on", "off"):
-            settings.enabled = args[0] == "on"
-            path = self._persist_reflection(("enabled",), settings.enabled)
-            return ControlResult.ok(ControlMessage(f"Reflection is {args[0]} (saved to {path})."))
-        if args:  # config
-            if len(args) == 3:
-                name, on = args[1], args[2] == "on"
-                if name not in blocks.blocks:
-                    return ControlResult.err(
-                        f"No reflection block {name!r}. Blocks: {', '.join(blocks.blocks)}"
-                    )
-                settings.blocks[name] = on
-                path = self._persist_reflection(("blocks", name), on)
-                return ControlResult.ok(
-                    ControlMessage(f"Reflection block {name} is {args[2]} (saved to {path}).")
-                )
-            return ControlResult.ok(ControlMessage(_reflection_config(settings, blocks)))
-        return ControlResult.ok(ControlMessage(self._reflection_status(settings, blocks)))
-
-    def _persist_reflection(self, key: tuple[str, ...], value: object) -> Path:
-        from .settings import write_settings_updates
-
-        path, _ = write_settings_updates(
-            {("atom", "reflection", *key): value}, workspace=self.workspace
-        )
-        return path
-
-    def _reflection_status(self, settings: Any, blocks: Any) -> str:
-        timer = getattr(self.agent, "_reflection_timer", None)
-        if timer is not None:
-            state = "on" if timer.enabled() else "off"
-        else:
-            state = {True: "on", False: "off"}.get(settings.enabled, "default (on in ACP hosts)")
-        on = [name for name, block in blocks.blocks.items() if settings.block_on(name, block.on)]
-        triggers = [
-            f"every {settings.every_turns} turns" if settings.every_turns else None,
-            f"every {settings.every_minutes:g} minutes" if settings.every_minutes else None,
-            f"at {settings.context_fraction:.0%} context" if settings.context_fraction else None,
-        ]
-        lines = [
-            f"Reflection: {state}",
-            f"Blocks on: {', '.join(on) or 'none'}",
-            f"Triggers: {', '.join(t for t in triggers if t) or 'none'}; "
-            f"at least {settings.min_gap_turns} turns apart",
-        ]
-        if timer is not None and state == "on":
-            lines.append(f"Next: {timer.describe()}")
-        lines.append("Change blocks with /reflection config; triggers in atom.reflection.")
-        return "\n".join(lines)
-
-
-def _reflection_config(settings: Any, blocks: Any) -> str:
-    """Every registered block, its state and what it is."""
-    registered = blocks.blocks
-    width = max((len(name) for name in registered), default=0)
-    lines = ["Reflection blocks (/reflection config BLOCK on|off):"]
-    for name, block in registered.items():
-        state = "on " if settings.block_on(name, block.on) else "off"
-        what = f"snippet: {block.expr}" if block.expr else (block.text or "")
-        if len(what) > 60:
-            what = what[:57] + "..."
-        lines.append(f"  [{state}] {name:<{width}}  {what}")
-    return "```text\n" + "\n".join(lines) + "\n```"
-
-
 CONTROL_TYPES = {
     "skills": SkillsControl,
     "mcp": MCPControl,
     "trace-url": TraceUrlControl,
     "usage": UsageControl,
-    "reflection": ReflectionControl,
 }
 
 
@@ -628,7 +531,7 @@ class ControlCommand:
 def behavior_commands(
     agent: Any, config: Any, *, workspace: Path, command_registry: Any
 ) -> list[ControlCommand]:
-    """The ``/skills``, ``/mcp``, ``/trace-url``, ``/usage`` and ``/reflection`` controls, as plain commands."""
+    """The ``/skills``, ``/mcp``, ``/trace-url`` and ``/usage`` controls, as plain commands."""
     result = []
     for control_type in CONTROL_TYPES.values():
         control = control_type(
@@ -646,7 +549,6 @@ def behavior_commands(
                     "mcp": MCPControl.usage,
                     "trace-url": "",
                     "usage": "",
-                    "reflection": "[on|off|config [BLOCK on|off]]",
                 }[control.name],
                 invoke=control.invoke,
             )

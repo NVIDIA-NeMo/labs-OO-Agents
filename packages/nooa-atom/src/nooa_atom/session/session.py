@@ -76,18 +76,8 @@ from nooa_atom.session.items import (
     question_id,
 )
 from nooa_atom.session.options import SessionOptions
-from nooa_atom.session.reflection import (
-    REFLECTION_CHANNEL,
-    REFLECTION_SOURCE,
-    Reflection,
-    ReflectionBlocks,
-    ReflectionSettings,
-    context_fraction,
-    has_queue,
-    reflection_enabled,
-    runtime_evaluator,
-)
 from nooa_atom.session.store import SessionHandle
+from nooa_atom.skills.reflection import Reflection
 
 logger = logging.getLogger(__name__)
 
@@ -294,31 +284,6 @@ class Session:
         if isinstance(gate, _ReflectionGate):
             gate.start_session()  # creation/load anchor, not time spent constructing the agent
         self.handle = handle
-        # Reflection (nooa_atom.session.reflection): one per root session whose
-        # agent has a system_messages queue, else None. It reads the agent's
-        # settings at every turn, so /reflection on|off counts at once, and
-        # sends the blocks the agent owns (``agent.reflection``), their
-        # snippets evaluated as dynamic context blocks are.
-        settings = getattr(agent, "_reflection_settings", None)
-        self._reflection: Reflection | None = None
-        if self.parent_id is None and has_queue(agent, REFLECTION_CHANNEL):
-            blocks = getattr(agent, "reflection", None)
-            if not isinstance(blocks, ReflectionBlocks):
-                blocks = ReflectionBlocks()
-            self._reflection = Reflection(
-                settings or ReflectionSettings(),
-                blocks=blocks,
-                post=lambda text: self._admit(
-                    text, channel=REFLECTION_CHANNEL, source=REFLECTION_SOURCE
-                ),
-                evaluate=runtime_evaluator(agent),
-                enabled=lambda: reflection_enabled(
-                    settings, override=options.reflection, host=options.host, is_root=True
-                ),
-                context=lambda: context_fraction(agent),
-            )
-            if hasattr(agent, "_reflection_timer"):
-                agent._reflection_timer = self._reflection
         # A deep copy: the Session owns its usage totals and pushes them to
         # the handle, whose metadata other threads read under its lock.
         self.info: SessionInfo = info.model_copy(
@@ -431,15 +396,11 @@ class Session:
             prepare=self._prepare_turn,
             commit=self._commit_turn,
             after_settle=self._after_turn_settled
-            if self.options.experimental_done_reflection or self._reflection is not None
+            if self.options.experimental_done_reflection
             else None,
         )
 
     async def _after_turn_settled(self, event: TurnSettled) -> None:
-        # A reflection _settle found due: evaluated and posted here, between
-        # turns, because its snippets may await.
-        if self._reflection is not None and not self.closing:
-            await self._reflection.send()
         # _settle set this only after successful delivery and durable settlement.
         # Clear before awaiting; failure/timeout cannot recursively retry cleanup.
         pending = self._maintenance_ready
@@ -885,9 +846,14 @@ class Session:
         await self._apply_pending_model()
 
     def _check_reflection(self, kind: str) -> None:
-        """After a turn: let the reflection count it; a due one is sent after settlement."""
-        if self._reflection is not None and not (self._closing or self._closed):
-            self._reflection.turn_ended(kind)
+        """After a root session's turn: the reflection skill posts a due message."""
+        reflection = getattr(self._agent, "reflection", None)
+        if self.parent_id is None and not self.closing and isinstance(reflection, Reflection):
+            reflection.after_turn(
+                kind,
+                waiting=bool(self._waiting),
+                post=lambda text: self._admit(text, channel="system_messages", source="reflection"),
+            )
 
     def _commit_turn(self, notification: dict[str, list[Any]]) -> None:
         """No await/observers: atomic ledger first, identity ownership second."""

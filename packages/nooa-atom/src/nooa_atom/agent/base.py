@@ -49,7 +49,6 @@ from nooa_atom.session.items import (
     PlanEntry,
     TaskResult,
 )
-from nooa_atom.session.reflection import ReflectionBlocks
 from nooa_atom.session.registry import DepthLimitError
 from nooa_atom.skills.manager import SkillManager
 from nooa_atom.tools.repo_tools import RepoTools
@@ -174,14 +173,6 @@ class AtomAgentBase(InteractiveAgent):
     _command_registry: Annotated[Any, hidden, nosnapshot]
     _system_messages_in: Annotated[Channel, hidden, nosnapshot]
     system_messages: Annotated[Any, nosnapshot]
-    # The workspace's atom.reflection settings; the Session reads them
-    # (nooa_atom.session.reflection). create_session_agent() sets them.
-    _reflection_settings: Annotated[Any, hidden, nosnapshot]
-    # The reflection message's blocks (nooa_atom.session.reflection), owned by
-    # the agent from construction; skills register and unregister their own here.
-    reflection: Annotated[ReflectionBlocks, hidden, nosnapshot]
-    # The root session's Reflection, set by the Session; /reflection reads it.
-    _reflection_timer: Annotated[Any, hidden, nosnapshot]
     shell: Annotated[ActivityShellTools, nosnapshot]
     repo: Annotated[RepoTools, nosnapshot]
     todo: TodoManager
@@ -235,9 +226,6 @@ class AtomAgentBase(InteractiveAgent):
         self._jobs_running = {}
         self.jobs = JobsApi(self)
         self.todo = TodoManager()
-        # Before any skill attaches, so every skill can register its blocks.
-        self.reflection = ReflectionBlocks()
-        self._reflection_timer = None
         self.skills = SkillManager(self)
         self.skills.register("nemo.shell", self.shell)
         self.skills.register("nemo.repo", self.repo)
@@ -301,7 +289,6 @@ class AtomAgentBase(InteractiveAgent):
         self.context_manager.remove_protected("events_api")
 
         self._summarization = summarization or SummarizationConfig()
-        self._reflection_settings = None
         install_summarizer(self._summarization, self)
 
     @no_trace

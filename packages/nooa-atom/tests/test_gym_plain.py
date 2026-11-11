@@ -10,7 +10,7 @@ import pytest
 from atom_test_agents import CellLLM, cell
 from nooa_atom.benchmark_policy import POLICY
 from nooa_atom.gym import AtomHarness
-from nooa_atom.session.reflection import ReflectionSettings, reflection_enabled
+from nooa_atom.skills.reflection import Reflection
 
 from nooa.runtime.hooks import hooks_scope
 
@@ -183,9 +183,4 @@ def test_plain_harness_leaves_reflection_off_unless_an_arm_turns_it_on(tmp_path)
     arm = AtomHarness(CellLLM([]), workdir=tmp_path, reflection=True)
     assert arm.options.reflection is True
     for options, expected in ((plain.options, False), (arm.options, True)):
-        assert (
-            reflection_enabled(
-                ReflectionSettings(), override=options.reflection, host=options.host, is_root=True
-            )
-            is expected
-        )
+        assert Reflection(host=options.host, override=options.reflection).enabled() is expected
