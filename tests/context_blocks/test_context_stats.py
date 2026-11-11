@@ -215,51 +215,22 @@ class TestProviderTokenAttribution:
 
 
 class TestContextWindowStatsTruncation:
-    """The renderer reports view-owned eviction but never performs it."""
+    """The renderer counts blocks the view evicted but never evicts itself."""
 
-    def test_context_blocks_dropped_on_truncation(self):
+    def test_counts_blocks_the_view_marked_truncated(self):
         blocks = [
-            Block(key="small", content="#" * 100),
-            Block(key="large", content="$" * 5000),
+            Block(key="kept", content="#" * 100),
+            Block(key="evicted", content="[EVICTED]", metadata=BlockMetadata(truncated=True)),
         ]
         stats = render_context(
             blocks,
             block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
-            context_limit=1000,
         ).stats
-        assert stats.context_blocks_dropped == 0
-        assert stats.context_blocks_chars == 5100
+        assert stats.context_blocks_dropped == 1
+        assert stats.context_blocks_count == 2
 
-    def test_context_blocks_dropped_multiple(self):
-        blocks = [
-            Block(key="tiny", content="#" * 50),
-            Block(key="medium", content="$" * 3000),
-            Block(key="huge", content="@" * 8000),
-        ]
-        stats = render_context(
-            blocks,
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
-            context_limit=500,
-        ).stats
-        assert stats.context_blocks_dropped == 0
-
-    def test_no_drops_when_under_budget(self):
-        blocks = [
-            Block(key="a", content="hello"),
-            Block(key="b", content="world"),
-        ]
-        stats = render_context(
-            blocks,
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
-            context_limit=10000,
-        ).stats
-        assert stats.context_blocks_dropped == 0
-        assert stats.events_dropped == 0
-
-    def test_all_context_blocks_dropped(self):
+    def test_never_drops_blocks_itself(self):
         blocks = [
             Block(key="a", content="x" * 5000),
             Block(key="b", content="y" * 5000),
@@ -268,28 +239,11 @@ class TestContextWindowStatsTruncation:
             blocks,
             block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
-            context_limit=1,
         ).stats
         assert stats.context_blocks_dropped == 0
         assert stats.context_blocks_count == 2
-
-    def test_context_blocks_dropped_with_user_blocks(self):
-        """User blocks (from self.context) are dropped first."""
-        blocks = [
-            Block(key="framework", content="x" * 100),
-            Block(
-                key="user_data",
-                content="y" * 5000,
-                metadata=BlockMetadata(user_block=True),
-            ),
-        ]
-        stats = render_context(
-            blocks,
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
-            context_limit=500,
-        ).stats
-        assert stats.context_blocks_dropped == 0
+        assert stats.context_blocks_chars == 10_000
+        assert stats.events_dropped == 0
 
 
 class TestContextWindowStatsToolCallEvents:
@@ -328,7 +282,6 @@ class TestContextWindowStatsEdgeCases:
             blocks,
             block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
-            context_limit=10000,
         ).stats
         assert stats.context_blocks_dropped == 0
         assert stats.context_blocks_count == 2

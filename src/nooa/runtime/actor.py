@@ -165,18 +165,11 @@ def _dynamic_context_trace_snapshot(items: tuple[Any, ...], messages: list[Any])
     return (message.content or "") if blocks else ""
 
 
-def _snapshot_llm_request(
-    event_manager: Any,
-    messages: list[Any],
-    generation_id: str,
-    dynamic_context_snapshot: str = "",
-) -> str:
-    """Snapshot the rendered request for observability consumers (e.g. ATIF).
+def _record_system_prompt(event_manager: Any, messages: list[Any], generation_id: str) -> None:
+    """Record the rendered system prompt for observability consumers (e.g. ATIF).
 
-    Emits a :class:`SystemPrompt` event carrying ``messages[0].content`` and
-    returns the trailing block text captured during rendering. The returned
-    text is stamped onto the matching :class:`LLMResponse`. ``record=False``
-    keeps the snapshot out of the LLM-visible event timeline.
+    Emits a :class:`SystemPrompt` event carrying ``messages[0].content``.
+    ``record=False`` keeps the snapshot out of the LLM-visible event timeline.
     """
     if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
         content = messages[0].get("content", "")
@@ -186,7 +179,6 @@ def _snapshot_llm_request(
             SystemPrompt(content=content, generation_id=generation_id),
             record=False,
         )
-    return dynamic_context_snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -1059,14 +1051,10 @@ class ActorRuntime:
 
         current_generation_id = self._generation_id_stack[-1] if self._generation_id_stack else None
 
-        # Snapshot system prompt + dynamic context from the rendered messages
-        # (consumed by the ATIF exporter). Captured here, at render time.
-        _dynamic_context = _snapshot_llm_request(
-            self.event_manager,
-            messages,
-            current_generation_id or "",
-            self._last_dynamic_context_snapshot,
-        )
+        # Record the system prompt and keep the trailing context captured at
+        # render time (both consumed by the ATIF exporter).
+        _record_system_prompt(self.event_manager, messages, current_generation_id or "")
+        _dynamic_context = self._last_dynamic_context_snapshot
 
         # --- Middleware: llm_call -------------------------------------------
         # record_turn() first so turn_count reflects THIS turn (1-indexed) —
@@ -1183,12 +1171,10 @@ class ActorRuntime:
                             llm_client=ctx.client,
                         )
                         ctx.event_ids = self._last_context_event_ids
-                        _dynamic_context = _snapshot_llm_request(
-                            self.event_manager,
-                            ctx.messages,
-                            current_generation_id or "",
-                            self._last_dynamic_context_snapshot,
+                        _record_system_prompt(
+                            self.event_manager, ctx.messages, current_generation_id or ""
                         )
+                        _dynamic_context = self._last_dynamic_context_snapshot
                         ctx = await em.run_middleware("llm_call", ctx, _core_llm)
                 except Exception as _exc:
                     _emit_llm_end(success=False, exception_type=type(_exc).__name__)
@@ -1274,12 +1260,10 @@ class ActorRuntime:
                             tools=tools,
                             request_params=_recovery_kw,
                         )
-                        _dynamic_context = _snapshot_llm_request(
-                            self.event_manager,
-                            messages,
-                            current_generation_id or "",
-                            self._last_dynamic_context_snapshot,
+                        _record_system_prompt(
+                            self.event_manager, messages, current_generation_id or ""
                         )
+                        _dynamic_context = self._last_dynamic_context_snapshot
                         # Reuse _kwargs (already has the per-(agent, strategy) key set)
                         # so recovery lands on the same shard as the original attempt.
                         response = await llm_client.acall(
@@ -3326,26 +3310,17 @@ class ActorRuntime:
                 context_limit=effective_context_limit,
                 count_tokens=count_tokens,
             )
-        from nooa.context_view import Block
-
-        context_blocks_dropped = sum(
-            isinstance(block, Block) and block.metadata is not None and block.metadata.truncated
-            for block in blocks
-        )
-
         try:
             with hm.timer("time_render_context"):
                 result = render_context(
                     blocks,
                     block_formatter=self.agent.render_config.block_formatter,
                     provider_formatter=self.agent.render_config.provider_formatter,
-                    context_limit=effective_context_limit,
                     context_format=tc.context_block_format,
                     event_format=tc.event_format,
                     event_format_resolver=self._event_format_for_event,
                     model_context_window=ctx_window,
                     reserved_output_tokens=reserved_output,
-                    context_blocks_dropped=context_blocks_dropped,
                 )
         except ContextAssemblyError:
             raise
@@ -3390,7 +3365,10 @@ class ActorRuntime:
             item.id for item in blocks if isinstance(item, EventBase)
         )
         self._last_context_stats = result.stats.model_copy(
-            update={"output_reserve_is_fallback": limits.reserve_is_fallback}
+            update={
+                "max_context_tokens": effective_context_limit,
+                "output_reserve_is_fallback": limits.reserve_is_fallback,
+            }
         )
         self._last_prompt_tokens_actual = None
         return messages

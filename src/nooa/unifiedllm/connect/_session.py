@@ -179,10 +179,9 @@ def _reasoning_values(response):
 
 async def session_steps(alias, entry, *, api_key, budget_tokens):
     """Three configured-cap turns, without retries; never execute model tools."""
-    from nooa.context_blocks.formatter import OpenAIProviderFormatter
+    from nooa.context_blocks.formatter import OpenAIProviderFormatter, XMLBlockFormatter
     from nooa.context_blocks.models import BlockMetadata, Role
     from nooa.context_blocks.renderer import render_context
-    from nooa.context_blocks.renderers.cached import CachedBlockFormatter
     from nooa.context_view import Block
     from nooa.unifiedllm import CacheBoundary, RetryConfig, Tool
     from nooa.unifiedllm.connect import ProbeRecord, ProbeUpdate, _include_rejected
@@ -227,7 +226,7 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
     def probe_tool(value: str):
         raise RuntimeError("Setup checks never execute model tools")
 
-    formatter = CachedBlockFormatter()
+    formatter = XMLBlockFormatter()
     provider = OpenAIProviderFormatter()
     # Non-repetitive lines give a reusable prefix without any user's private data.
     # Short hex ids in place of zero-padded decimal digit runs measurably lower

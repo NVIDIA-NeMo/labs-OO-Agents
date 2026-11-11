@@ -97,13 +97,10 @@ def _render_default(blocks, limit):
         _context_token_counter=_count_words,
     )
     budgeted = apply_context_budget(items, call=call, evictable=evictable)
-    dropped = sum(block.metadata.truncated for block in budgeted)
     return render_context(
         budgeted,
         block_formatter=XMLBlockFormatter(),
         provider_formatter=OpenAIProviderFormatter(),
-        context_limit=limit,
-        context_blocks_dropped=dropped,
     )
 
 

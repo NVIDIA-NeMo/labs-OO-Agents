@@ -16,10 +16,9 @@ import pytest
 
 from nooa import CacheBoundary
 from nooa.context_blocks.events import ToolCallEvent, ToolResult, UserEvent
-from nooa.context_blocks.formatter import OpenAIProviderFormatter
+from nooa.context_blocks.formatter import OpenAIProviderFormatter, XMLBlockFormatter
 from nooa.context_blocks.models import BlockMetadata, Role
 from nooa.context_blocks.renderer import render_context
-from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.context_view import Block, ContextItem
 from nooa.nemo_relay_middleware import _reconcile_messages
 from nooa.storage import SQLiteStorageManager
@@ -185,7 +184,7 @@ def _render(turn, state):
         )
     )
     return render_context(
-        blocks, block_formatter=CachedBlockFormatter(), provider_formatter=OpenAIProviderFormatter()
+        blocks, block_formatter=XMLBlockFormatter(), provider_formatter=OpenAIProviderFormatter()
     ).output
 
 

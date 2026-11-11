@@ -184,7 +184,7 @@ Keep `agent.context`, context managers, event creation, strategy/scoped override
 
 These are the default application's context APIs, not requirements of `ContextView`. A custom view may use an independent state API. Native iterative strategies still use NOOA events unless replaced together with the strategy.
 
-Legacy implicit policy is removed: `cache_control_injection_points` raises `ValueError`; `CachedBlockFormatter` no longer chooses placement; and `render_context(context_limit=...)` reports the limit but leaves eviction to the view.
+Legacy implicit policy is removed: `cache_control_injection_points` raises `ValueError`; `CachedBlockFormatter` is removed (views choose placement; `XMLBlockFormatter` is the default); and `render_context()` takes no context limit: it counts blocks the view marked evicted and never evicts.
 
 Direct UnifiedLLM callers place boundaries explicitly; without one, NOOA adds no explicit cache marker:
 

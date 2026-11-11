@@ -6,8 +6,8 @@ from nooa.context_blocks.formatter import (
     BlockFormatter,
     OpenAIProviderFormatter,
     ProviderFormatter,
+    XMLBlockFormatter,
 )
-from nooa.context_blocks.renderers import CachedBlockFormatter
 
 
 class RenderConfig(BaseModel):
@@ -19,5 +19,5 @@ class RenderConfig(BaseModel):
 
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
-    block_formatter: BlockFormatter = Field(default_factory=CachedBlockFormatter)
+    block_formatter: BlockFormatter = Field(default_factory=XMLBlockFormatter)
     provider_formatter: ProviderFormatter = Field(default_factory=OpenAIProviderFormatter)

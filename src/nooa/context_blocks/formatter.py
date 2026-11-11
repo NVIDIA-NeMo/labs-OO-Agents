@@ -500,9 +500,8 @@ class MarkdownBlockFormatter(BlockFormatter):
         return (
             "Your prompt is organized in context blocks with markdown headers: "
             "`# Block Name`.\n"
-            "Blocks produced by `self.context.set_dynamic()` carry an inline "
-            '`{"expr": "..."}` annotation whose value is the Python expression '
-            "re-evaluated each turn."
+            'A block with an inline `{"expr": "..."}` annotation shows the Python '
+            "expression that produces its content."
         )
 
     def format(self, blocks: list[ResolvedBlock]) -> list[RenderedMessage]:

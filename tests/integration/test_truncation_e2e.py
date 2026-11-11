@@ -133,13 +133,10 @@ def _render_default_budget(blocks, limit):
         _context_token_counter=_count_tokens,
     )
     budgeted = apply_context_budget(items, call=call, evictable=evictable)
-    dropped = sum(block.metadata.truncated for block in budgeted)
     return render_context(
         budgeted,
         block_formatter=XMLBlockFormatter(),
         provider_formatter=_openai_formatter(),
-        context_limit=limit,
-        context_blocks_dropped=dropped,
     )
 
 
@@ -493,7 +490,6 @@ class TestL4ContextBlockEviction:
             [system_block, event_block],
             block_formatter=XMLBlockFormatter(),
             provider_formatter=_openai_formatter(),
-            context_limit=10,
         )
         # Context block eviction should not drop events
         assert result.stats.context_blocks_dropped == 0
