@@ -59,6 +59,7 @@ from nooa.snapshot._raw import (
     _raw_namespace,
     _safe_mro,
 )
+from nooa.snapshot._render import key_text
 from nooa.snapshot._shapes import (
     _DATACLASS,
     _PYDANTIC,
@@ -79,7 +80,13 @@ from nooa.snapshot._std import (
     _TextView,
     _View,
 )
-from nooa.snapshot._visibility import _Fields, _Omitted, _plain_entries, _Scoped
+from nooa.snapshot._visibility import (
+    _Fields,
+    _Omitted,
+    _plain_entries,
+    _Scoped,
+    _visibility_overrides,
+)
 
 
 class _Built(NamedTuple):
@@ -263,10 +270,11 @@ def _enter(
 ) -> _Built:
     """``build()`` the container ``value`` while it is active.
 
-    At ``max_depth`` it is ``empty`` (a node without entries, cut ``max_depth``);
-    inside itself, a ``Ref`` to its active ancestor.
+    At ``max_depth`` it is ``empty`` (a node without entries, cut ``max_depth``),
+    unless it has no entries to cut; inside itself, a ``Ref`` to its active ancestor.
     """
-    if depth >= state.limits.max_depth:
+    empty_container = (type(empty) is Sequence or type(empty) is Mapping) and empty.length == 0
+    if depth >= state.limits.max_depth and not empty_container:  # an empty one is whole anyway
         return _Built(empty, 2)
     marker = id(value)
     found = state.active.get(marker)
@@ -398,6 +406,9 @@ def _container(
             key, child = entry
             state.take_node()
             segment = json_key(key, live=True)
+            if segment is None:
+                key = _key_node(key, state)  # a tuple, an enum member...: a node key
+                segment = key_text(key) if key is not None else None
             if segment is None or segment in seen:
                 # No JSON key, or one that collides in JSON (``1`` and ``"1"``):
                 # stop here, as ``render_json`` would, keeping the first.
@@ -468,6 +479,25 @@ def _container(
     return _Built(node, box.size)
 
 
+_KEY_LIMITS = Limits(max_chars=400, max_nodes=50, max_depth=2, max_items=8, max_string=50)
+"""The bounds of a node key: a key is a label, so it is kept small."""
+
+
+def _key_node(key: Any, state: _State) -> Snapshot | None:
+    """A key that has no JSON form, captured small (``Limits.fallback`` as the mapping's).
+
+    ``None`` (the mapping stops with ``"key"``) when no inspection work is
+    left, for an ``int`` or ``float`` key, and for a key capture cannot read (an
+    ``Unavailable`` label says nothing). The key's own capture is not
+    charged to the mapping's budget beyond the one node of the key.
+    """
+    if state.nodes_left <= 0 or type(key) is int or type(key) is float:
+        return None  # a number json_key refused (a huge int, nan) stays refused
+    limits = dataclasses.replace(_KEY_LIMITS, fallback=state.limits.fallback)
+    node = _build(key, limits.max_chars, 0, "", _State(limits)).node
+    return None if type(node) is Unavailable else node
+
+
 class _Part:
     """A slot builder of a shape: a field, an item or a level built only once its slot is known.
 
@@ -507,15 +537,20 @@ def _build_slot(child: Any, max_size: int, depth: int, path: str, state: _State)
     return _build(child, max_size, depth, path, state)
 
 
+def _scoped_limits(outer: Limits, limits: dict[str, Any]) -> Limits:
+    """``outer`` with a field's ``spec()`` ``max_string`` / ``max_length`` (as ``max_items``)."""
+    changes: dict[str, Any] = {}
+    if "max_string" in limits:
+        changes["max_string"] = limits["max_string"]
+    if "max_length" in limits:
+        changes["max_items"] = limits["max_length"]
+    return dataclasses.replace(outer, **changes)
+
+
 def _build_scoped(child: _Scoped, max_size: int, depth: int, path: str, state: _State) -> _Built:
     """A field with its own ``spec(max_string=..., max_length=...)``: built under them, subtree-wide."""
     outer = state.limits
-    changes: dict[str, Any] = {}
-    if "max_string" in child.limits:
-        changes["max_string"] = child.limits["max_string"]
-    if "max_length" in child.limits:
-        changes["max_items"] = child.limits["max_length"]
-    state.limits = dataclasses.replace(outer, **changes)
+    state.limits = _scoped_limits(outer, child.limits)
     try:
         return _build(child.value, max_size, depth, path, state)
     finally:
@@ -724,16 +759,27 @@ def _structure_part(
 def _shape_fields(
     shape: _ObjectLike | _Collection | _NdarrayLike,
     value: Any,
+    mro: tuple[type[Any], ...],
     type_name: str,
     max_size: int,
     depth: int,
     path: str,
     state: _State,
 ) -> _Built:
-    """A registered shape's ``Object``: its accessor fields, then its structure."""
-    entries: list[tuple[str, Any]] = [
-        (name, _lazy(functools.partial(function, value), state)) for name, function in shape.fields
-    ]
+    """A registered shape's ``Object``: its accessor fields, then its structure.
+
+    A ``spec(cls, name, ...)`` override on the class applies to the accessor
+    field ``name``: ``hidden=True`` leaves it out (its accessor never runs),
+    ``max_string`` / ``max_length`` bound its subtree.
+    """
+    overrides = _class_overrides(mro, state) if shape.fields else {}
+    entries: list[tuple[str, Any]] = []
+    for name, function in shape.fields:
+        flags = overrides.get(name, {})
+        if flags.get("hidden"):
+            continue
+        part = _lazy(functools.partial(function, value), state)
+        entries.append((name, _scoped_part(part, flags, state)))
     max_items = state.limits.max_items
     cut = max_items is not None and len(entries) > max_items
     del entries[max_items if cut else len(entries) :]
@@ -763,6 +809,31 @@ def _shape_fields(
         reserves=reserves,
         capped=False,
     )
+
+
+def _class_overrides(mro: tuple[type[Any], ...], state: _State) -> dict[str, dict[str, Any]]:
+    """The ``spec(cls, name, ...)`` overrides of the classes of ``mro``; none when unreadable."""
+    try:
+        return _visibility_overrides({}, mro, state)
+    except _FailClosed:
+        return {}
+
+
+def _scoped_part(part: _Part, flags: dict[str, Any], state: _State) -> _Part:
+    """``part`` built under a field's own ``max_string`` / ``max_length`` (when it has them)."""
+    limits = {key: flags[key] for key in ("max_string", "max_length") if key in flags}
+    if not limits:
+        return part
+
+    def build(max_size: int, depth: int, path: str) -> _Built:
+        outer = state.limits
+        state.limits = _scoped_limits(outer, limits)
+        try:
+            return part.build(max_size, depth, path)
+        finally:
+            state.limits = outer
+
+    return _Part(build, part.min_nodes, part.exhausted)
 
 
 def _structure(
@@ -1049,7 +1120,9 @@ def _build_shape(
                 depth,
                 path,
                 state,
-                lambda: _shape_fields(accessors, value, type_name, max_size, depth, path, state),
+                lambda: _shape_fields(
+                    accessors, value, mro, type_name, max_size, depth, path, state
+                ),
             )
 
 

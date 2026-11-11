@@ -109,8 +109,22 @@ def _python_text(text: Text) -> str:
     return ", ".join(parts) + ")"
 
 
+_NODE_TYPES = (Scalar, Text, Sequence, Mapping, Object, Unavailable, Ref)
+
+
+def _is_node(key: Any) -> bool:
+    return any(type(key) is node_type for node_type in _NODE_TYPES)
+
+
+def key_text(node: Snapshot) -> str:
+    """A node key's text: its ``render_python`` notation without registered hooks (one line)."""
+    return PythonRenderer({}).render(node)
+
+
 def _python_key(key: Any) -> str:
     """A mapping key as agentdoc shows it (string keys cut to 50 characters)."""
+    if _is_node(key):
+        return key_text(key)
     if type(key) is str and len(key) > _MAX_KEY_CHARS:
         head_n = (_MAX_KEY_CHARS + 1) // 2
         tail_n = _MAX_KEY_CHARS - head_n
@@ -729,16 +743,16 @@ def _json_entries(
     output: dict[str, Any] = {}
     box = Container(max_size)
     for key, child in entries:
-        key_text = json_key(key, live=False)  # a detached snapshot key
-        if key_text is None or key_text in output:
+        text = key_text(key) if _is_node(key) else json_key(key, live=False)  # a detached key
+        if text is None or text in output:
             box.stop("key")
             break
-        slot = box.slot(key_text)
+        slot = box.slot(text)
         if slot is None:
             break
         overhead, available = slot
-        value, child_size = _json(child, available, pointer_child(path, key_text), report)
-        output[key_text] = value
+        value, child_size = _json(child, available, pointer_child(path, text), report)
+        output[text] = value
         box.commit(overhead, child_size)
     if box.reason is not None:
         report.incomplete(path, box.reason)

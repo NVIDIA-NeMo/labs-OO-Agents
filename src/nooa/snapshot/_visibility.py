@@ -540,6 +540,52 @@ def _plain_annotation_spec(name: str, mro: tuple[type[Any], ...], state: _State)
     return {}
 
 
+def _class_defaults(mro: tuple[type[Any], ...], state: _State) -> list[tuple[str, Any]]:
+    """The annotated class attributes of ``mro`` with a plain (non-descriptor) value, bases first.
+
+    ``label: str = "ok"`` declared on a class is a field of its instances
+    until they set their own. A value whose type defines ``__get__`` (a
+    function, a property) is not a field: reading it through the instance
+    would run it.
+    """
+    found: dict[str, Any] = {}
+    for base in reversed(mro):
+        if base is object:
+            continue
+        namespace = _namespace(base, state)
+        annotations = dict.get(namespace, "__annotations__")
+        if type(annotations) is not dict:
+            continue
+        for name in list(dict.keys(annotations)):
+            if not state.take_node():
+                raise _FailClosed
+            if type(name) is not str or name not in namespace:
+                continue
+            default = dict.__getitem__(namespace, name)
+            if not _is_descriptor(default, state):
+                found.pop(name, None)  # a subclass's declaration comes later
+                found[name] = default
+    return list(found.items())
+
+
+def _is_descriptor(value: Any, state: _State) -> bool:
+    """Whether ``type(value)`` defines ``__get__`` (raw namespaces; ``True`` when unreadable)."""
+    cls = type(value)
+    try:
+        mro = _TYPE_MRO.__get__(cls, type(cls))
+    except Exception:
+        return True
+    if type(mro) is not tuple:
+        return True
+    for base in mro:
+        if base is object:
+            continue
+        namespace = _raw_namespace(base, state)
+        if namespace is None or "__get__" in namespace:
+            return True
+    return False
+
+
 def _is_class(value: Any, state: _State) -> bool:
     """Whether ``value`` is a class: ``type`` in its type's raw MRO (``isinstance`` reads ``__class__``)."""
     cls = type(value)
@@ -586,7 +632,14 @@ def _plain_entries(
         storage = _copy_storage(_instance_storage(value, mro, state), state) if has_dict else {}
         overrides = _visibility_overrides(storage, mro, state)
         hide_empty = _class_hide_empty(mro, state)
-        found: list[tuple[str, Any]] = list(dict.items(storage))
+        found: list[tuple[str, Any]] = []
+        for name, default in _class_defaults(mro, state):
+            if name in storage:
+                found.append((name, dict.__getitem__(storage, name)))
+            elif name not in slots:
+                found.append((name, default))
+        declared = {name for name, _value in found}
+        found += [(name, item) for name, item in dict.items(storage) if name not in declared]
         for name in slots:
             if name in storage or name in ("__dict__", "__weakref__"):
                 continue

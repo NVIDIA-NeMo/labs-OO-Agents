@@ -65,9 +65,6 @@ Whether a spill file holds the whole content is not a reason: ``Text.full``
 says it.
 """
 
-Key = str | int | float | bool | None
-"""A mapping key kept in a snapshot: an exact ``str``, ``int``, ``float``, ``bool`` or ``None``."""
-
 
 @dataclass(frozen=True)
 class Spill:
@@ -225,7 +222,8 @@ class Mapping:
       ``mapping_like`` without fields.
     - ``length``: the number of entries in the original.
     - ``head``: the ``(key, node)`` entries kept from the start. Keys are
-      exact ``str``, ``int``, ``float``, ``bool`` or ``None``.
+      exact ``str``, ``int``, ``float``, ``bool`` or ``None``, or a small
+      snapshot node of another key (see ``Key``).
     - ``reason``: ``None`` when every entry is kept, else ``"max_items"``,
       ``"max_length"``, ``"max_nodes"``, ``"max_depth"`` (no entries kept),
       ``"key"`` (it stopped at a key with no JSON form, or one whose JSON
@@ -359,3 +357,11 @@ class Ref:
 
 Snapshot = Scalar | Text | Sequence | Mapping | Object | Unavailable | Ref
 """One node of a snapshot tree: ``Scalar | Text | Sequence | Mapping | Object | Unavailable | Ref``."""
+
+Key = str | int | float | bool | None | Snapshot
+"""A mapping key kept in a snapshot: an exact ``str``, ``int``, ``float``, ``bool`` or ``None``,
+or, for any other key (a tuple, an enum member...), its own small snapshot node.
+
+A node key's JSON object key is its ``render_python`` text (``"(1, 2)"``), so
+it collides like any other key whose JSON form an earlier kept key has.
+"""
