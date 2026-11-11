@@ -172,12 +172,17 @@ Rules:
 
 # Cell execution
 
-CodeAct's in-process backend runs every cell in an owned
-`ExecutionNamespace` (`nooa.runtime.execution_namespace`): one authoritative
-globals dictionary per call, from `Agent.execution_namespace_for(call)` (a
-fresh namespace per call by default; Atom's `handle` keeps one per live
-session). Runtime names (`self`, `print`, `return_result`...) resolve through
-the builtin fallback; framework names come from the namespace providers
+In-process cells have one execution path: `ActorRuntime.execute_code` runs
+every cell in an owned `ExecutionNamespace` (`nooa.runtime.execution_namespace`),
+one authoritative globals dictionary that the cell's bindings are written to.
+CodeAct and PurePython take it from `call_execution_namespace(agent, call)`,
+i.e. `Agent.execution_namespace_for(call)` (a fresh namespace per call by
+default; Atom's `handle` keeps one per live session). A direct `execute_code`
+call without a namespace runs in a fresh one for that cell, and its
+`ExecutionResult.captured_locals` lists the names the cell bound. Runtime names
+(`self`, `print`, `return_result`...) resolve through the builtin fallback;
+framework names come from the namespace providers
 (`nooa.runtime.namespace_providers`). Caller `_session_locals` seed the
-namespace and are written back when the call ends. The sandbox backend keeps
-its worker's namespace.
+namespace as user globals and are written back when the call ends. The
+sandbox backend follows the same contract (one owned globals dictionary per
+session) in its worker process; the parent passes no namespace there.

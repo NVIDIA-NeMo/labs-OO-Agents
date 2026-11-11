@@ -18,6 +18,7 @@ Reference: "Executable Code Actions Elicit Better LLM Agents" (Wang et al.)
 
 import ast
 import asyncio
+import contextlib
 import contextvars
 import inspect
 import json
@@ -63,7 +64,7 @@ from nooa.events import (
     Task,
     TextOnlyReply,
 )
-from nooa.runtime.execution_namespace import ExecutionNamespace
+from nooa.runtime.execution_namespace import ExecutionNamespace, call_execution_namespace
 from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.runtime.hooks import call_after_hook, call_before_hook
 from nooa.runtime.sandbox.errors import SandboxExecutionError
@@ -79,9 +80,7 @@ from nooa.strategies.codeact_errors import (
 )
 from nooa.strategies.composite import CompositeStrategy
 from nooa.strategies.generated_code import (
-    ExecutionNamespaceBuilder,
     GeneratedCodeValidator,
-    HelperFunctionManager,
 )
 from nooa.strategies.loop_guard import LoopGuard, action_fingerprint, mentions_return_result
 from nooa.strategies.template import TemplateStrategy
@@ -1023,30 +1022,16 @@ Standard Python builtins and agent instance (`self`) are available."""
         """
         ...
 
-    # Keys added by the session itself that should not leak to the caller.
-    _SESSION_INTERNAL_KEYS = frozenset({"Out", "__repl_captured_locals__"})
-
     @staticmethod
     def _sync_session_locals(call: "CurrentCall", session: "CodeActSession") -> None:
-        """Write back session_locals to caller's dict, filtering session internals."""
-        if call.session_locals is None:
+        """Write the names cells bound back to the caller's ``session_locals`` seed.
+
+        The sandbox worker keeps its own namespace: the caller's dict stays as given.
+        """
+        if call.session_locals is None or session.execution_namespace is None:
             return
-        namespace = session.execution_namespace
-        if namespace is not None:
-            # Only names cells (or the caller's seed) bound, not the seeded runtime.
-            filtered = {
-                k: namespace.globals[k]
-                for k in namespace.user_names
-                if k in namespace.globals and k not in CodeActStrategy._SESSION_INTERNAL_KEYS
-            }
-        else:
-            filtered = {
-                k: v
-                for k, v in session.session_locals.items()
-                if k not in CodeActStrategy._SESSION_INTERNAL_KEYS
-            }
         call.session_locals.clear()
-        call.session_locals.update(filtered)
+        call.session_locals.update(session.execution_namespace.user_values())
 
     def _create_sandbox_executor(
         self, runtime: RuntimeServices, call: "CurrentCall", builtins: dict[str, Any]
@@ -1113,17 +1098,10 @@ Standard Python builtins and agent instance (`self`) are available."""
         session_holder: dict[str, Any] = {}
         namespace = None  # The sandbox backend keeps its worker's namespace.
         if self.config.execution_backend == "inprocess":
-            from nooa.runtime.execution_namespace import default_execution_namespace
-
-            selector = getattr(runtime.agent, "execution_namespace_for", None)  # None: not an Agent
-            namespace = selector(call) if selector is not None else None
-            if namespace is None:
-                namespace = default_execution_namespace(call)
+            namespace = call_execution_namespace(runtime.agent, call)
         call.execution_namespace = namespace
         try:
-            if namespace is None:
-                return await self._run_generation(runtime, call, session_holder)
-            with namespace.enter({}):
+            with namespace.enter({}) if namespace is not None else contextlib.nullcontext():
                 return await self._run_generation(runtime, call, session_holder)
         finally:
             session = session_holder.get("session")
@@ -1160,18 +1138,8 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         session.execution_namespace = call.execution_namespace
         if session.execution_namespace is not None:
-            namespace = session.execution_namespace
-            session.session_locals = namespace.globals
-            # Caller-provided locals (persistent stack) seed the owned namespace
-            # as user globals; _sync_session_locals writes them back.
-            if call.session_locals is not None:
-                for name, value in call.session_locals.items():
-                    if name not in namespace.reserved:
-                        namespace.globals[name] = value
-                        namespace.user_names.add(name)
-        elif call.session_locals is not None:
-            # Seed session_locals from caller-provided dict (persistent stack)
-            session.session_locals.update(call.session_locals)
+            # The cells' globals (seeded with the caller's session_locals).
+            session.session_locals = session.execution_namespace.globals
         # Expose this live dictionary to dynamic context renderers. Unlike
         # call.session_locals, this also receives names defined by model cells.
         call.execution_locals = session.session_locals
@@ -2305,25 +2273,6 @@ Standard Python builtins and agent instance (`self`) are available."""
                 result_status=final_status,
             ),
         )
-
-        # Merge captured locals into session for REPL-style persistence
-        if result.captured_locals:
-            session.session_locals.update(result.captured_locals)
-            logger.debug(f"[CODEACT] Captured locals: {list(result.captured_locals.keys())}")
-
-        # Re-inject return type names into session_locals if the model clobbered them.
-        # Defense-in-depth: even if the E501 validator misses an assignment that
-        # shadows the return type, this ensures they're always fresh for the next cell.
-        # Handles complex types like Optional[Answer], list[Answer] by extracting
-        # all protected names and re-injecting from the execution builtins.
-        if return_type is not None and session.execution_namespace is None:
-            from nooa.runtime.code_validator import _collect_type_names
-
-            protected_names = _collect_type_names(return_type, builtins)
-            for name in protected_names:
-                original = builtins.get(name)
-                if original is not None and session.session_locals.get(name) is not original:
-                    session.session_locals[name] = original
 
         # Check if return_result() was called inline (signals task completion)
         if result.signal and isinstance(result.signal, _ReturnResultSignal):
@@ -3470,14 +3419,6 @@ Standard Python builtins and agent instance (`self`) are available."""
         finally:
             _current_cell.reset(token)
 
-        # Merge captured locals into session (persists for next steps and LLM turns)
-        if result.captured_locals:
-            session.session_locals.update(result.captured_locals)
-            logger.debug(
-                f"[CODEACT] Prefill ({prefill_type}) captured locals: "
-                f"{list(result.captured_locals.keys())}"
-            )
-
         # Preserve the receipt text; only observability status changes.
         final_status = ResultStatus.ERROR if result.error else ResultStatus.COMPLETE
         runtime.event_manager.update(
@@ -3567,60 +3508,20 @@ Standard Python builtins and agent instance (`self`) are available."""
             return ExecutionResult(stdout="", error=Exception(error_msg), defined_methods={})
 
         # Sandbox backend: the worker owns the persistent namespace and compiles
-        # its own helpers, so we skip the parent-side namespace/helper build and
-        # delegate the cell to the guarded worker process. Routing through
-        # execute_code (rather than the executor directly) keeps the execute_python
-        # middleware, before/after_code_execution hooks and events firing.
+        # its own helpers, so the cell goes to the guarded worker process. Routing
+        # through execute_code (rather than the executor directly) keeps the
+        # execute_python middleware, before/after_code_execution hooks and events.
         run_kwargs: dict[str, Any]
-        if session.execution_namespace is not None:
-            # One compiler executes definitions once. No predefinition, copying,
-            # captured-local merge or helper-global repair on this engine.
+        if session.sandbox_executor is not None:
+            # Validation of restrictions and the cell guard still runs on the parent.
+            run_kwargs = {"sandbox_executor": session.sandbox_executor}
+        else:
+            # One compiler executes definitions once in the owned namespace.
             run_kwargs = {
                 "builtins": builtins,
                 "execution_namespace": session.execution_namespace,
                 "framework_bindings": self._framework_bindings(runtime),
             }
-        elif session.sandbox_executor is not None:
-            # Validation of restrictions and the cell guard still runs on the parent.
-            run_kwargs = {"sandbox_executor": session.sandbox_executor}
-        else:
-            # Build execution namespace
-            strategy_extras: dict[str, Any] = {
-                "CodeActStrategy": type(self),
-            }
-            try:
-                from nooa.strategies.predict import PredictStrategy
-
-                strategy_extras["PredictStrategy"] = PredictStrategy
-            except ImportError:
-                pass
-
-            namespace = ExecutionNamespaceBuilder.build(
-                runtime.agent, extra={**builtins, **session.session_locals, **strategy_extras}
-            )
-
-            # Pre-compile helper function defs so @strategy decorators can see
-            # _generated_source at decoration time. Helpers are never attached to the agent.
-            helper_compiler = HelperFunctionManager()
-            helper_result = helper_compiler.apply(
-                code,
-                runtime.agent,
-                session.session_locals,
-                namespace=namespace,
-            )
-
-            if helper_result.errors:
-                error_msg = "Failed to define helper function(s):\n" + "\n".join(
-                    f"- {e}" for e in helper_result.errors
-                )
-                logger.warning(f"[CODEACT] Helper compile errors: {helper_result.errors}")
-                return ExecutionResult(stdout="", error=Exception(error_msg), defined_methods={})
-
-            if helper_result.installed:
-                logger.debug(f"[CODEACT] Compiled helpers: {helper_result.installed}")
-
-            # Execute with session locals
-            run_kwargs = {"builtins": {**builtins, **session.session_locals}}
 
         # Track this execution so the /activity slash command can report that
         # the agent is currently running a code cell (vs blocked on an LLM call).

@@ -51,27 +51,6 @@ class TestPopGenerationId:
             _generation_id_stack_var.reset(token)
 
 
-class TestExtractCapturedLocals:
-    """_extract_captured_locals() skips bound methods (line 188)."""
-
-    def test_bound_method_skipped(self):
-        from nooa.runtime.actor import _extract_captured_locals
-
-        class _MyClass:
-            def method(self) -> None:
-                pass
-
-        obj = _MyClass()
-        # A bound method has __self__
-        bound = obj.method
-        assert callable(bound) and hasattr(bound, "__self__")
-
-        exec_globals = {"__repl_captured_locals__": {"bm": bound, "x": 42}}
-        result = _extract_captured_locals(exec_globals)
-        assert "bm" not in result  # bound method skipped
-        assert result["x"] == 42  # regular value kept
-
-
 class TestActorGetCode:
     """RuntimeActor.get_code() returns None for nonexistent methods (line 1193)."""
 
@@ -264,42 +243,6 @@ class TestActorExpandVariables:
         )
         # Should keep the placeholder since format raises
         assert "{x!r:.2f}" in result
-
-
-class TestActorIndentCode:
-    """_indent_code() with multi-line strings (lines 2000-2001, 2008) and tokenization error (2014-2016)."""
-
-    def _make_runtime(self):
-        from nooa.agent import Agent
-
-        llm = FakeLLMClient()
-
-        class _A(Agent, llm=llm):
-            async def run(self) -> str:
-                """Run."""
-                ...
-
-        return _A().runtime
-
-    def test_indent_code_with_multiline_string(self):
-        runtime = self._make_runtime()
-        code = 'x = """line1\nline2\nline3"""'
-        indented = runtime._indent_code(code, "    ")
-        # First line gets indented
-        assert indented.split("\n")[0].startswith("    ")
-        # String continuation lines preserved
-        assert "line2" in indented
-        assert "line3" in indented
-
-    def test_indent_code_tokenization_fallback(self):
-        """Lines 2014-2016: tokenization fails → simple indentation."""
-        runtime = self._make_runtime()
-        # Malformed code that triggers tokenize.TokenError
-        bad_code = "x = '''\nunclosed triple"
-        # Should not raise; falls back to simple indentation
-        result = runtime._indent_code(bad_code, "    ")
-        assert isinstance(result, str)
-        assert "    " in result
 
 
 class TestActorGenerate:
