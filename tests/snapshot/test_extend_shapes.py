@@ -323,7 +323,7 @@ class _BigText:
         return bytes(b"\xc3\xa9"[i % 2] for i in range(start, stop))  # "é" repeated
 
 
-TEXT = text_like(lambda v: v.size, lambda v, start, stop: v.read(start, stop), kind="fake.text")
+TEXT = text_like(lambda v: v.size, lambda v, start, stop: v.read(start, stop))
 BYTES = text_like(lambda v: v.size, lambda v, start, stop: v.read(start, stop), unit="bytes")
 
 
@@ -452,15 +452,12 @@ def test_text_like_errors(registered) -> None:
 
 
 def test_kind_feeds_the_render_hooks(registered, hooks) -> None:
-    registered(_BigText, TEXT)
     Bag = _named("Bag")
     registered(Bag, array_like(lambda v: 1, lambda v: [1], fields={"n": lambda v: 1}, kind="k.bag"))
     hooks(render_python, "k.bag", lambda node, r: f"bag<{r.render(node.field('items'))}>")
 
     assert render_python(capture([Bag()])) == "[bag<[1]>]"
     assert render_output(capture(Bag())) == "Bag(n=1, items=[1])"  # no hooks: generic
-    # A Text has no kind: text_like's kind is for Object-shaped nodes only.
-    assert isinstance(capture(_BigText(3)), Text)
 
 
 # --- budget and determinism ------------------------------------------------------------

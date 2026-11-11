@@ -2,11 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """The public capture entry points: ``capture`` (with its registry) and ``capture_fields``.
 
-The top of the capture layers (``_limits`` <- ``_raw`` <- {``_fields``,
-``_shapes``, ``_std``} <- ``_walk`` <- ``_capture``). It checks the arguments, starts
-one ``_State`` per call and hands the value to the ``_walk`` builder. The
-builder is based on the bounded trace JSON builder of PR #342 (Severin
-Klingler).
+This is the top of the capture layers (``_limits`` <- ``_raw`` <-
+{``_fields``, ``_shapes``, ``_std``} <- ``_walk`` <- ``_capture``). It checks
+the arguments, starts one ``_State`` per call and hands the value to the
+``_walk`` builder.
 """
 
 from __future__ import annotations
@@ -49,8 +48,8 @@ class _CaptureFunction:
     Arguments:
 
     - ``value``: any Python object.
-    - ``limits``: the shared budget (``Limits``); the default is
-      ``Limits()``, #342's trace preview bounds.
+    - ``limits``: the bounds of this capture (``Limits``); the default,
+      ``Limits()``, suits trace previews.
 
     Returns a ``Snapshot`` node holding no live objects. What becomes what:
 
@@ -76,7 +75,7 @@ class _CaptureFunction:
     - with ``Limits(fallback="repr")`` (model-facing previews), a value
       whose class defines its own ``__repr__`` (a generated dataclass or
       Pydantic repr does not count: those were read above): its bounded
-      ``repr``, as below; traces never run it;
+      ``repr``, as below; with the default ``"opaque"`` it never runs;
     - a plain object (no ``__getattribute__`` in its MRO, the standard
       ``__dict__`` slot or ``__slots__``): an ``Object`` of its public
       instance attributes;
@@ -84,35 +83,46 @@ class _CaptureFunction:
       named ``module.QualName``, or with ``Limits(fallback="repr")`` its
       bounded ``repr``.
 
-    Guarantees:
+    Guarantees (the code that may run is listed in the first one; the others
+    hold for what capture itself reads):
 
-    - No user code runs on values: no ``repr``, ``str``, truthiness,
-      properties, descriptors, ``__getattr__``, custom iteration, hashing or
-      equality of an inspected value, its class or its metaclass. Instances
-      are read from raw storage (``__dict__`` or ``__slots__``) through the
-      native descriptors. The only code that runs is class metadata,
-      evaluated the way Python does (``typing.get_type_hints(cls,
-      include_extras=True)`` for a dataclass with string annotations; a
-      success is cached by class identity, a failure is retried by the next
-      ``capture``) and the accessors of registered shapes.
+    - No value methods run: no ``repr``, ``str``, truthiness, properties,
+      descriptors, ``__getattr__``, custom iteration, hashing or equality of
+      an inspected value, its class or its metaclass. Instances are read
+      from raw storage (``__dict__`` or ``__slots__``) through the native
+      descriptors. Three kinds of code do run, and only these: class
+      metadata, evaluated the way Python does
+      (``typing.get_type_hints(cls, include_extras=True)`` for a dataclass
+      with string annotations; a success is cached by class identity, a
+      failure is retried by the next ``capture``); the accessors of shapes
+      registered with ``capture.register`` (trusted code: they run with
+      every ``Limits``, traces included); and, only with
+      ``Limits(fallback="repr")``, ``repr(value)``.
     - agentdoc's ``spec(max_string=..., max_length=...)`` on a field bounds
       that field's subtree; ``spec(hide_empty=True)`` (on the class or the
       field) leaves out a ``None`` or empty field.
-    - Hidden fields are never read: agentdoc ``hidden`` /
+    - The field readers never read hidden fields: agentdoc ``hidden`` /
       ``spec(hidden=True)`` markers and ``spec()`` overrides, Pydantic
       ``exclude=True`` / ``repr=False``, dataclass ``repr=False``,
-      ``_private``, ``ClassVar`` and ``InitVar`` fields.
+      ``_private``, ``ClassVar`` and ``InitVar`` fields. A shape's accessors
+      and an opted-in ``repr`` are not field readers: they see what their
+      code chooses to show, private data included.
     - Fail closed: fields whose visibility cannot be read safely are left
       out and the object gets reason ``"unreadable"``; an accessor that
       raises becomes ``Unavailable("error")``. A value that cannot be read
       becomes a node, not an exception.
     - Bounded: the snapshot's canonical JSON is at most ``max_chars``
-      characters, and the work is at most ``max_nodes`` units and
-      ``max_depth`` levels (plus what registered accessors spend). A long
-      string or bytes value is sliced, never copied whole.
+      characters, and capture's own work is at most ``max_nodes`` units and
+      ``max_depth`` levels. A long string or bytes value is sliced, never
+      copied whole. The time and memory of the code listed above (class
+      metadata, accessors, an opted-in ``repr``) are not bounded: only what
+      is kept of their result is.
     - Exact accounting: ``render_json(snapshot, max_chars=limits.max_chars)``
-      keeps everything the snapshot holds; on #342's domain it is #342's
-      text.
+      keeps everything the snapshot holds.
+    - Local completeness: a node's ``complete`` (and ``reason``) says
+      whether *that node* was cut; a complete container may hold a cut
+      child. ``render_trace``'s ``incomplete`` attribute covers the whole
+      tree.
     - UTF-8-safe cuts: a cut bytes value starts and ends on code point
       boundaries.
 
@@ -129,7 +139,10 @@ class _CaptureFunction:
     """
 
     def __call__(self, value: object, limits: Limits = DEFAULT_LIMITS) -> Snapshot:
-        """A bounded snapshot of ``value`` under ``limits``; see ``capture``."""
+        """A bounded snapshot of ``value`` under ``limits``; see ``capture``.
+
+        Raises ``ValueError`` when ``limits`` is out of range.
+        """
         _validate_limits(limits)
         state = _State(limits)
         return _build(value, limits.max_chars, 0, "", state).node
@@ -144,8 +157,8 @@ class _CaptureFunction:
         - ``shape``: what ``array_like``, ``ndarray_like``, ``mapping_like``,
           ``object_like`` or ``text_like`` returned.
 
-        The registry is process-wide. Registering ``cls`` again replaces its
-        shape. At capture time the value's raw MRO is compared with the
+        The registry is process-wide. Registering ``cls`` again overrides its
+        earlier shape. At capture time the value's raw MRO is compared with the
         registered classes by identity (``is``): the nearest registered
         class wins, also over the Pydantic and dataclass readers. No class
         is hashed or compared with ``==``, and no accessor runs during the
@@ -153,8 +166,10 @@ class _CaptureFunction:
         ``float``, ``bool``, ``None``, ``list``, ``tuple``, ``dict``) are
         always captured natively, whatever is registered.
 
-        Accessors are trusted code. They run only when capture keeps their
-        result, and an ``Exception`` they raise becomes
+        Accessors are trusted code: they run in every capture of an instance,
+        with any ``Limits`` (traces included), and their time, memory and
+        what they read are not bounded by ``Limits``. They run only when
+        capture keeps their result, and an ``Exception`` they raise becomes
         ``Unavailable("error")`` (see the shape constructors).
 
         Raises ``TypeError`` when ``cls`` is not a class or ``shape`` is not
@@ -181,19 +196,32 @@ class _CaptureFunction:
         _REGISTRY.append((cls, shape))
 
     def unregister(self, cls: type[Any]) -> None:
-        """Remove the registration of exactly ``cls`` (not of its bases); a no-op when there is none."""
+        """Remove the registration of exactly ``cls`` (not of its bases or subclasses).
+
+        A no-op when ``cls`` is not registered; never raises.
+        """
         _REGISTRY[:] = [entry for entry in _REGISTRY if entry[0] is not cls]
 
 
 capture = _CaptureFunction()
+"""The process-wide ``capture`` function with its shape registry (see ``_CaptureFunction``)."""
 
 
 def _field_placeholder(value: Any, state: _State) -> tuple[Any, Snapshot]:
-    """One framework wrapper field's minimal JSON root value, and its node when no work is left.
+    """The minimal JSON value a ``capture_fields`` field reserves, and its node when no work is left.
 
     An exact built-in type other than ``bytes`` reserves its smallest
     fallback (``""``, ``[]``, ``{}``, ``0``, ...), a Pydantic model ``{}``,
-    anything else ``null`` (#342's ``trace_fields``).
+    anything else ``null``. Costs one unit of work; only identity checks on
+    the value's type and raw MRO.
+
+    Returns:
+        ``(json_value, node)``: the reserved JSON value, and the node the
+        field becomes if capture reaches it with no work left (reason
+        ``"max_nodes"``).
+
+    Raises:
+        ValueError: no work is left to classify the field.
     """
     if not state.take_node():
         raise ValueError("snapshot max_nodes cannot classify wrapper fields")
@@ -209,7 +237,7 @@ def _field_placeholder(value: Any, state: _State) -> tuple[Any, Snapshot]:
 
 
 def capture_fields(*, limits: Limits = DEFAULT_LIMITS, **fields: object) -> Mapping:
-    """Capture a framework-owned wrapper (``args=..., kwargs=...``) so that every field survives.
+    """Capture named parts together (a call's ``args=..., kwargs=...``) so that every part survives.
 
     Arguments:
 
@@ -223,8 +251,9 @@ def capture_fields(*, limits: Limits = DEFAULT_LIMITS, **fields: object) -> Mapp
     Pydantic model, ``null`` for anything else. Then the fields are captured in order, each
     with the room the earlier ones left. A field reached with no
     inspection work left keeps its minimal value (reason ``"max_nodes"``).
-    ``render_json`` keeps every field of the wrapper too. This is #342's
-    ``trace_fields``; the guarantees of ``capture`` hold for every field.
+    ``render_json`` keeps every field of the wrapper too. The guarantees of
+    ``capture`` hold for every field, and the ``Limits`` are shared by all
+    of them (``max_chars`` and ``max_nodes`` for the whole wrapper).
 
     Raises ``ValueError`` when ``limits`` is out of range, or when it cannot
     hold the wrapper with every field at its minimal value (``max_chars``),

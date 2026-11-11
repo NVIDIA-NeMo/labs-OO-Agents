@@ -165,11 +165,11 @@ class Widget:
         ([object(), 1], "[<opaque: object>, 1]", ["0", "[]", "[0]", '["<"]', '["<opaque:"]'], "/0"),
     ],
 )
-def test_uninspected_values_render_as_before(
+def test_uninspected_values_render_as_opaque_labels(
     value: Any, python: str, json_by_budget: list[str], path: str
 ) -> None:
-    # ``Opaque`` became ``Unavailable("opaque", type_name, module)`` (P3b); every
-    # notation is unchanged (outputs recorded from the former ``Opaque`` node).
+    # An uninspected value is ``Unavailable("opaque")``; its notation in every
+    # renderer and at every JSON budget is pinned here.
     snapshot = capture(value)
     name = python.removeprefix("[").split(",")[0]
 

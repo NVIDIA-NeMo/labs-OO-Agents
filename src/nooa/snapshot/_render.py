@@ -6,6 +6,14 @@ Rendering is the last step: it reads detached nodes only, never a live
 value, and does not import the capture layers. It shares the JSON
 accounting with capture through ``_codec``, so ``render_json`` of a
 captured snapshot keeps exactly what capture kept.
+
+- ``render_output``: command output (a ``Text`` as its content with one
+  notice line where it was cut).
+- ``render_python``: agentdoc's prefill notation, with per-kind hooks; its
+  hooks receive a ``PythonRenderer``.
+- ``render_json``: plain JSON within ``max_chars``.
+- ``render_trace``: ``render_json`` text plus span attributes saying what
+  was cut, from one walk.
 """
 
 from __future__ import annotations
@@ -45,22 +53,26 @@ __all__ = [
     "render_trace",
 ]
 
-PREVIEW_VERSION = 1
-_MAX_INCOMPLETE_PATHS = 32
-_MAX_INCOMPLETE_PATH_CHARS = 2_048
-_MAX_KEY_CHARS = 50
+PREVIEW_VERSION = 1  # the ``nooa.<direction>.preview.version`` attribute of render_trace
+_MAX_INCOMPLETE_PATHS = 32  # at most this many paths in ``preview.paths``...
+_MAX_INCOMPLETE_PATH_CHARS = 2_048  # ...of at most this many characters together
+_MAX_KEY_CHARS = 50  # render_python cuts a longer string key
 
 
 # --- output notation ---------------------------------------------------------------
 
 
 def _shown(part: str | bytes) -> str:
-    """A kept part as text to print: bytes decode as UTF-8, with replacement."""
+    """A kept part as text to print: a ``str`` as it is, bytes decoded as UTF-8 with replacement."""
     return decode(part) if isinstance(part, bytes) else part
 
 
 def _output_text(text: Text) -> str:
-    """``text`` in the output notation: whole, or head and tail around one line."""
+    """``text`` in the output notation: its content when complete, else head, notice line, tail.
+
+    The notice says how many units were left out and where the whole
+    output is (``Text.full``); see ``render_output``.
+    """
     head, tail = _shown(text.head), _shown(text.tail)
     if text.complete:
         return head + tail
@@ -79,7 +91,11 @@ def _output_text(text: Text) -> str:
 
 
 def _multiline(s: str) -> str:
-    """agentdoc's triple-quoted form for strings with newlines or both quote kinds."""
+    """``s`` in triple quotes, as agentdoc shows a string with newlines or both quote kinds.
+
+    Single triple quotes unless ``s`` contains them, then double triple
+    quotes; ``repr(s)`` when it contains both.
+    """
     if "'''" in s and '"""' in s:
         return repr(s)
     quote = '"""' if "'''" in s else "'''"
@@ -87,6 +103,7 @@ def _multiline(s: str) -> str:
 
 
 def _python_str(s: str) -> str:
+    """``s`` as a Python literal: ``repr``, or triple-quoted when it has newlines or both quote kinds."""
     if "\n" in s or ("'" in s and '"' in s):
         return _multiline(s)
     return repr(s)
@@ -109,20 +126,30 @@ def _python_text(text: Text) -> str:
     return ", ".join(parts) + ")"
 
 
-_NODE_TYPES = (Scalar, Text, Sequence, Mapping, Object, Unavailable, Ref)
+_NODE_TYPES = (Scalar, Text, Sequence, Mapping, Object, Unavailable, Ref)  # the node classes
 
 
 def _is_node(key: Any) -> bool:
+    """Whether ``key`` is a snapshot node (exact type check), not a plain JSON-scalar key."""
     return any(type(key) is node_type for node_type in _NODE_TYPES)
 
 
 def key_text(node: Snapshot) -> str:
-    """A node key's text: its ``render_python`` notation without registered hooks (one line)."""
+    """A node key's text: its ``render_python`` notation on one line, standard hooks only.
+
+    Capture and ``render_json`` both use it as the node key's JSON object
+    key, so they agree on which keys collide. Registered hooks are left out,
+    so the key does not change when a hook is registered.
+    """
     return PythonRenderer({}).render(node)
 
 
 def _python_key(key: Any) -> str:
-    """A mapping key as agentdoc shows it (string keys cut to 50 characters)."""
+    """A mapping key as agentdoc shows it: a literal, a node key's notation, or a cut long string.
+
+    A string key longer than 50 characters shows as
+    ``str(len=N, [:25]=..., [-25:]=...)``.
+    """
     if _is_node(key):
         return key_text(key)
     if type(key) is str and len(key) > _MAX_KEY_CHARS:
@@ -133,6 +160,7 @@ def _python_key(key: Any) -> str:
 
 
 def _brackets(type_name: str) -> tuple[str, str]:
+    """The opening and closing brackets of a sequence named ``type_name``: ``()``, ``{}``, ``frozenset({})`` or ``[]``."""
     if type_name == "tuple":
         return "(", ")"
     if type_name == "set":
@@ -142,8 +170,8 @@ def _brackets(type_name: str) -> tuple[str, str]:
     return "[", "]"
 
 
-_UNORDERED = ("set", "frozenset")
-_SEQUENCE_TYPES = ("list", "tuple", "set", "frozenset")
+_UNORDERED = ("set", "frozenset")  # sequences that keep a head only and print as sets
+_SEQUENCE_TYPES = ("list", "tuple", "set", "frozenset")  # printed as bare literals
 
 
 TextHook = Callable[[Object, "PythonRenderer"], str]
@@ -168,6 +196,10 @@ class PythonRenderer:
     or builds new nodes of its kind, still ends, well inside Python's
     recursion limit. There is no length limit: the nodes were bounded by
     ``capture``, and the string a hook returns is not checked for length.
+
+    Args:
+        hooks: the registered hooks by kind (the standard ones apply too).
+        width: the layout width (see ``render_python``); ``None``: one line.
     """
 
     def __init__(self, hooks: dict[str, TextHook], width: int | None = None) -> None:
@@ -252,9 +284,11 @@ class PythonRenderer:
             self._level -= 1
 
     def _lines(self, inner: str, rendered: list[str]) -> str:
+        """One line per rendered item, indented by ``inner``, each followed by a comma."""
         return "".join(f"{inner}{item},\n" for item in rendered)
 
     def _items(self, type_name: str, items: tuple[Snapshot, ...]) -> str:
+        """``items`` rendered on one line between the brackets of ``type_name`` (a one-item tuple keeps its comma)."""
         left, right = _brackets(type_name)
         inner = ", ".join(self.render(item) for item in items)
         if type_name == "tuple" and len(items) == 1:
@@ -283,6 +317,10 @@ class PythonRenderer:
         )
 
     def _sequence(self, node: Sequence) -> str:
+        """A ``Sequence``: a literal when complete, else ``[list: N items]`` at ``max_depth``,
+        ``set(len=N, items={..., ...})`` for an unordered one, or
+        ``list(len=N, [:h]=[...], [-t:]=[...])``.
+        """
         left, right = _brackets(node.type_name)
         unordered = node.type_name in _UNORDERED
         if node.complete:
@@ -327,9 +365,13 @@ class PythonRenderer:
         return self._layout(flat, expanded)
 
     def _entries(self, items: tuple[tuple[Any, Snapshot], ...]) -> list[str]:
+        """Each ``(key, value)`` entry as ``key: value``."""
         return [f"{_python_key(key)}: {self.render(value)}" for key, value in items]
 
     def _mapping(self, node: Mapping) -> str:
+        """A ``Mapping``: a literal when complete (``Counter({...})`` for a named one),
+        ``{dict: N items}`` at ``max_depth``, else ``dict(len=N, items={..., ..., ...})``.
+        """
         if node.complete:
             if not node.head:
                 return "{}" if node.type_name == "dict" else f"{node.type_name}({{}})"
@@ -363,6 +405,11 @@ class PythonRenderer:
         return self._layout(flat_cut, expanded_cut)
 
     def _object(self, node: Object) -> str:
+        """An ``Object`` in the generic notation: ``Type(a=1, b=2)``.
+
+        A cut object ends with ``...``, or ``... of N attributes`` when it knows its
+        attribute count.
+        """
         parts = [f"{name}={self.render(value)}" for name, value in node.fields]
         if not node.complete:
             parts.append("..." if node.length is None else f"... of {node.length:,} attributes")
@@ -373,7 +420,11 @@ class PythonRenderer:
 
 
 def _whole(node: Snapshot | None) -> str | bytes:
-    """A complete ``Text`` / bytes ``Scalar``'s content; a hook that meets anything else falls back."""
+    """The content of a complete ``Text`` or a bytes ``Scalar``.
+
+    Raises ``TypeError`` for anything else, so the standard hook that asked
+    falls back to the generic notation.
+    """
     if type(node) is Text and node.complete:
         return node.head
     if type(node) is Scalar and type(node.value) is bytes:
@@ -382,12 +433,14 @@ def _whole(node: Snapshot | None) -> str | bytes:
 
 
 def _scalar(node: Snapshot | None) -> Any:
+    """The value of a ``Scalar``; raises ``TypeError`` (the hook falls back) for anything else."""
     if type(node) is not Scalar:
         raise TypeError("not a scalar")
     return node.value
 
 
 def _repr_hook(node: Object, r: PythonRenderer) -> str:
+    """``python.repr``: the kept ``repr`` itself, or ``T(repr_len=N, [:h]='...', [-t:]='...')`` when cut."""
     text = node.field("repr")
     if type(text) is not Text:
         raise TypeError("no repr")
@@ -400,6 +453,12 @@ def _repr_hook(node: Object, r: PythonRenderer) -> str:
 
 
 def _iso_hook(parse: Callable[[str], Any]) -> TextHook:
+    """A hook for ``python.datetime`` / ``date`` / ``time``: the ``repr`` of ``parse(iso)``.
+
+    Args:
+        parse: the type's ``fromisoformat``.
+    """
+
     def hook(node: Object, r: PythonRenderer) -> str:
         return repr(parse(cast(str, _whole(node.field("iso")))))
 
@@ -407,6 +466,7 @@ def _iso_hook(parse: Callable[[str], Any]) -> TextHook:
 
 
 def _timedelta_hook(node: Object, r: PythonRenderer) -> str:
+    """``python.timedelta``: ``datetime.timedelta(days=..., seconds=...)``."""
     days, seconds, micros = (
         _scalar(node.field(name)) for name in ("days", "seconds", "microseconds")
     )
@@ -414,18 +474,22 @@ def _timedelta_hook(node: Object, r: PythonRenderer) -> str:
 
 
 def _decimal_hook(node: Object, r: PythonRenderer) -> str:
+    """``python.decimal``: ``Decimal('1.50')``."""
     return f"Decimal({_whole(node.field('value'))!r})"
 
 
 def _uuid_hook(node: Object, r: PythonRenderer) -> str:
+    """``python.uuid``: ``UUID('...')``."""
     return f"UUID({_whole(node.field('hex'))!r})"
 
 
 def _path_hook(node: Object, r: PythonRenderer) -> str:
+    """``python.path``: ``PosixPath('/tmp/x')`` (the node's class name)."""
     return f"{node.type_name}({_whole(node.field('path'))!r})"
 
 
 def _pattern_hook(node: Object, r: PythonRenderer) -> str:
+    """``python.pattern``: ``re.compile('a+b')``, with its flags when it has any beyond ``re.UNICODE`` for a str pattern."""
     pattern = _whole(node.field("pattern"))
     flags = _scalar(node.field("flags"))
     if type(flags) is not int:
@@ -438,11 +502,13 @@ def _pattern_hook(node: Object, r: PythonRenderer) -> str:
 
 
 def _range_hook(node: Object, r: PythonRenderer) -> str:
+    """``python.range``: ``range(0, 10)``."""
     start, stop, step = (_scalar(node.field(name)) for name in ("start", "stop", "step"))
     return repr(range(start, stop, step))
 
 
 def _int_hook(node: Object, r: PythonRenderer) -> str:
+    """``python.int``: ``int(200,001 digits)``, with ``, negative`` for a negative one."""
     digits = _scalar(node.field("digits"))
     if type(digits) is not int:
         raise TypeError("no digit count")
@@ -451,10 +517,17 @@ def _int_hook(node: Object, r: PythonRenderer) -> str:
 
 
 def _complex_hook(node: Object, r: PythonRenderer) -> str:
+    """``python.complex``: ``(1+2j)``."""
     return repr(complex(_scalar(node.field("real")), _scalar(node.field("imag"))))
 
 
 def _function_hook(prefix: str) -> TextHook:
+    """A hook for functions, methods and built-ins: ``<prefix name(signature)>``.
+
+    Args:
+        prefix: ``"function"``, ``"bound method"`` or ``"built-in function"``.
+    """
+
     def hook(node: Object, r: PythonRenderer) -> str:
         name = _whole(node.field("name"))
         signature = node.field("signature")
@@ -465,6 +538,12 @@ def _function_hook(prefix: str) -> TextHook:
 
 
 def _named_hook(prefix: str) -> TextHook:
+    """A hook for modules and classes: ``<prefix 'name'>``.
+
+    Args:
+        prefix: ``"module"`` or ``"class"``.
+    """
+
     def hook(node: Object, r: PythonRenderer) -> str:
         return f"<{prefix} {_whole(node.field('name'))!r}>"
 
@@ -472,6 +551,7 @@ def _named_hook(prefix: str) -> TextHook:
 
 
 def _enum_hook(node: Object, r: PythonRenderer) -> str:
+    """``python.enum``: ``<Color.RED: 1>`` (``<Color: 1>`` for a member without a name)."""
     value = node.field("value")
     if value is None:
         raise TypeError("no value")
@@ -482,6 +562,7 @@ def _enum_hook(node: Object, r: PythonRenderer) -> str:
 
 
 def _exception_hook(node: Object, r: PythonRenderer) -> str:
+    """``python.exception``: ``ValueError('boom')``, or ``ValueError(args=...)`` when its args were cut."""
     args = node.field("args")
     if type(args) is Sequence and args.complete:
         return f"{node.type_name}(" + ", ".join(r.render(item) for item in args.head) + ")"
@@ -518,6 +599,7 @@ class _OutputNotation(PythonRenderer):
     """``render_output``'s walk: ``Text`` in the output notation, no hooks."""
 
     def _text(self, text: Text) -> str:
+        """A ``Text`` node in the output notation (``_output_text``), not as a literal."""
         return _output_text(text)
 
 
@@ -545,7 +627,7 @@ class _RenderPython:
     ``<module 'json'>``; a ``repr`` fallback (``Limits.fallback="repr"``)
     as the repr itself, or ``T(repr_len=N, [:h]='...', [-t:]='...')`` when
     cut. A registered hook for one of their kinds (``"python.datetime"``...)
-    replaces the standard one.
+    is used instead of the standard one.
 
     String keys longer than 50 characters are cut the same way. The output
     has no length limit: it formats what ``capture`` bounded. With
@@ -573,6 +655,7 @@ class _RenderPython:
     """
 
     def __init__(self) -> None:
+        """An empty hook registry (the module makes the one ``render_python``)."""
         self._hooks: dict[str, TextHook] = {}
 
     def __call__(self, snapshot: Snapshot, *, width: int | None = None) -> str:
@@ -596,7 +679,7 @@ class _RenderPython:
           decorator, ``@render_python.register("numpy.ndarray")``.
 
         Returns the hook (or the decorator). Registering a kind again
-        replaces its hook. A hook renders children only through
+        overrides its earlier hook. A hook renders children only through
         ``r.render(child)``; one that raises an ``Exception`` or returns a
         non-``str`` falls back to the generic notation. Raises ``TypeError``
         when ``kind`` is not a non-empty ``str``.
@@ -611,11 +694,12 @@ class _RenderPython:
         return add(function) if function is not None else add
 
     def unregister(self, kind: str) -> None:
-        """Remove the hook for ``kind``; a no-op when there is none."""
+        """Remove the hook registered for ``kind``; a no-op when there is none (never raises)."""
         self._hooks.pop(kind, None)
 
 
 render_python = _RenderPython()
+"""The process-wide ``render_python`` function with its hook registry (see ``_RenderPython``)."""
 
 
 def render_output(snapshot: Snapshot) -> str:
@@ -649,15 +733,23 @@ def render_output(snapshot: Snapshot) -> str:
 
 
 class _Report:
-    """Incomplete JSON Pointer paths (bounded, collapsing to the root) and reasons."""
+    """What one JSON walk cut: the incomplete JSON Pointer paths and the reasons.
+
+    ``paths`` keeps at most ``_MAX_INCOMPLETE_PATHS`` paths of at most
+    ``_MAX_INCOMPLETE_PATH_CHARS`` characters together; past that it
+    collapses to ``[""]`` (the root) and adds no more. ``reasons`` keeps
+    every reason seen.
+    """
 
     def __init__(self) -> None:
+        """An empty report."""
         self.paths: list[str] = []
         self.path_chars = 0
         self.collapsed = False
         self.reasons: set[str] = set()
 
     def incomplete(self, path: str, reason: str | None) -> None:
+        """Record that the node at ``path`` is incomplete, for ``reason`` (``None``: no reason to add)."""
         if reason is not None:
             self.reasons.add(reason)
         if self.collapsed or path in self.paths:
@@ -675,7 +767,10 @@ class _Report:
 
 
 def _spill_paths(node: Snapshot, found: list[str]) -> list[str]:
-    """Every spill file of ``node``, depth first (heads and tails, fields), once each."""
+    """Every spill file path in ``node``'s tree, depth first (heads, tails, fields), once each.
+
+    Appends to ``found`` and returns it.
+    """
     if type(node) is Text:
         if node.full is not None and node.full.path not in found:
             found.append(node.full.path)
@@ -692,7 +787,11 @@ def _spill_paths(node: Snapshot, found: list[str]) -> list[str]:
 
 
 def _placeholder(node: Snapshot) -> Any:
-    """The minimal value of a wrapper entry's own type (#342's ``trace_fields``)."""
+    """The minimal JSON value a ``capture_fields`` entry reserves, from its node.
+
+    The same value ``capture_fields`` reserved for the live field: ``""``,
+    ``[]``, ``{}``, ``0``, ``0.0``, ``false`` or ``null`` by type.
+    """
     node_type = type(node)
     if node_type is Text:
         return ""
@@ -722,7 +821,17 @@ def _placeholder(node: Snapshot) -> Any:
 def _json_wrapper(
     entries: tuple[tuple[Any, Snapshot], ...], max_size: int, path: str, report: _Report
 ) -> tuple[dict[str, Any], int] | None:
-    """A ``capture_fields`` wrapper: each entry reserves its placeholder first."""
+    """A ``capture_fields`` wrapper as a JSON object that keeps every entry.
+
+    Each entry first reserves its placeholder (``_placeholder``); then the
+    entries are rendered in order, each with the room the earlier ones
+    left.
+
+    Returns:
+        ``(object, size)``, or ``None`` when a key is not a unique ``str``
+        or the placeholders alone do not fit (the caller then renders it as
+        an ordinary mapping).
+    """
     shapes: dict[str, Any] = {}
     for key, child in entries:
         if type(key) is not str or key in shapes:
@@ -748,7 +857,16 @@ def _json_entries(
     path: str,
     report: _Report,
 ) -> tuple[Any, int]:
-    """A ``Mapping``'s items or an ``Object``'s fields, cut with ``reason`` (``None``: whole)."""
+    """A ``Mapping``'s entries or an ``Object``'s fields as a JSON object within ``max_size``.
+
+    Stops at a key with no JSON form or one that collides with an earlier
+    key (reason ``"key"``), or at the first entry that does not fit.
+    ``reason`` is the node's own (``None``: it was complete); both are
+    reported at ``path``.
+
+    Returns:
+        ``(object, size)``.
+    """
     output: dict[str, Any] = {}
     box = Container(max_size)
     for key, child in entries:
@@ -771,7 +889,7 @@ def _json_entries(
 
 
 def _json_string(text: str, max_size: int, path: str, report: _Report) -> tuple[Any, int]:
-    """A string's longest prefix that fits; a shorter one is reported as cut."""
+    """``text``'s longest prefix that fits ``max_size``, as ``(value, size)``; a shorter one is reported as cut."""
     value, size = fit_string(text, max_size)
     if type(value) is not str or len(value) < len(text):
         report.incomplete(path, "max_length")
@@ -779,6 +897,11 @@ def _json_string(text: str, max_size: int, path: str, report: _Report) -> tuple[
 
 
 def _json_text(node: Text, max_size: int, path: str, report: _Report) -> tuple[Any, int]:
+    """A ``Text``'s head as a JSON string (bytes decoded), fitted to ``max_size``.
+
+    The tail is not shown. A cut node is reported with its reason. Raises
+    ``TypeError`` when the head's type does not match the unit.
+    """
     chars = node.unit == "chars"
     head = node.head
     if type(head) is not (str if chars else bytes):
@@ -791,6 +914,9 @@ def _json_text(node: Text, max_size: int, path: str, report: _Report) -> tuple[A
 
 
 def _json_scalar(node: Scalar, max_size: int, path: str, report: _Report) -> tuple[Any, int]:
+    """A ``Scalar`` as JSON: its value, short bytes decoded as a string, or the
+    smallest fallback of its type when it does not fit (reported).
+    """
     scalar = node.value
     if type(scalar) is bytes:  # short bytes: shown decoded, like a bytes ``Text``
         return _json_string(decode(scalar), max_size, path, report)
@@ -802,6 +928,11 @@ def _json_scalar(node: Scalar, max_size: int, path: str, report: _Report) -> tup
 
 
 def _json_sequence(node: Sequence, max_size: int, path: str, report: _Report) -> tuple[Any, int]:
+    """A ``Sequence``'s head as a JSON array within ``max_size`` (the tail is not shown).
+
+    Stops at the first item that does not fit; reports that and the node's
+    own reason.
+    """
     output: list[Any] = []
     box = Container(max_size)
     for index, child in enumerate(node.head):
@@ -820,6 +951,12 @@ def _json_sequence(node: Sequence, max_size: int, path: str, report: _Report) ->
 def _json_unavailable(
     node: Unavailable, max_size: int, path: str, report: _Report
 ) -> tuple[Any, int]:
+    """An ``Unavailable`` node as JSON, reported with its reason.
+
+    An opaque value is its ``"<opaque: Type>"`` label (``0.0`` for a
+    non-finite float that has no room for it); anything else the smallest
+    fallback of its type.
+    """
     report.incomplete(path, node.reason)
     if node.reason == "opaque":
         fallback_type = "float" if node.builtin else ""  # builtin: a non-finite float
@@ -828,10 +965,13 @@ def _json_unavailable(
 
 
 def _json(node: Snapshot, max_size: int, path: str, report: _Report) -> tuple[Any, int]:
-    """One node as a JSON-compatible value fitted to ``max_size`` (#342's accounting).
+    """One node as a JSON-compatible value fitted to ``max_size``, and its encoded size.
 
-    One small rule per node type, by exact type. A container with less than
-    2 characters left has no room for its brackets: a fallback.
+    One small rule per node type, by exact type; every cut is recorded in
+    ``report`` at ``path``. A container with less than 2 characters left
+    has no room for its brackets and becomes the smallest fallback. A
+    ``Ref`` becomes ``[]`` or ``{}``. Raises ``TypeError`` for a value that
+    is not a snapshot node.
     """
     if type(node) is Scalar:
         return _json_scalar(node, max_size, path, report)
@@ -860,7 +1000,13 @@ def _json(node: Snapshot, max_size: int, path: str, report: _Report) -> tuple[An
 
 
 def _render(snapshot: Snapshot, max_chars: int) -> tuple[str, _Report]:
-    """The JSON text and its report (incomplete paths and reasons), from one walk."""
+    """``snapshot`` as JSON text of at most ``max_chars`` characters, and its report, from one walk.
+
+    Raises ``ValueError`` when ``max_chars`` is less than 1, ``TypeError``
+    for a value that is not a snapshot node, and ``AssertionError`` if the
+    size accounting ever disagrees with the encoded text (an internal
+    error).
+    """
     if max_chars < 1:
         raise ValueError("render_json max_chars must be at least 1")
     report = _Report()
@@ -888,8 +1034,7 @@ def render_json(snapshot: Snapshot, *, max_chars: int) -> str:
 
     Exact accounting: for ``snapshot = capture(v, limits)``,
     ``render_json(snapshot, max_chars=limits.max_chars)`` cuts nothing
-    further, and on #342's domain it is #342's text. A smaller
-    ``max_chars`` cuts further and stays valid.
+    further. A smaller ``max_chars`` cuts further and stays valid.
 
     Raises ``ValueError`` when ``max_chars`` is less than 1, ``TypeError``
     for a node that is not a snapshot node.
@@ -902,7 +1047,7 @@ def render_json(snapshot: Snapshot, *, max_chars: int) -> str:
 
 
 def _attributes(direction: str, report: _Report, snapshot: Snapshot) -> dict[str, Any]:
-    """The span attributes of a report, plus the spill files of ``snapshot``."""
+    """The ``render_trace`` span attributes of ``report``, plus the spill files of ``snapshot`` (see ``render_trace``)."""
     prefix = f"nooa.{direction}.preview"
     attributes: dict[str, Any] = {
         f"{prefix}.version": PREVIEW_VERSION,
@@ -942,8 +1087,9 @@ def render_trace(
     - ``{prefix}.full_output``: when any ``Text`` in the snapshot spilled,
       the spill file paths, depth first, whatever the text shows.
 
-    The version, incomplete and paths attributes are #342's. Raises as
-    ``render_json`` does.
+    ``incomplete`` covers the whole tree: it is true when any node was cut,
+    by capture or by this rendering, even when the root node is complete.
+    Raises as ``render_json`` does.
 
     >>> from nooa.snapshot import capture, render_trace
     >>> text, attributes = render_trace(capture({"a": "x" * 30}), direction="output", max_chars=20)

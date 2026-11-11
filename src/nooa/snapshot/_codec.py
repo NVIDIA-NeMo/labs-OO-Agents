@@ -3,11 +3,11 @@
 """Encoding and accounting shared by capture, rendering and streams (a leaf module).
 
 What lives here: the canonical JSON encoding (``dumps``) and its size
-accounting (``Container``), #342's typed fallbacks and opaque label, string
-prefixes, JSON Pointers, the mapping-key conversion, and the UTF-8 helpers
-(cut points, decoding with replacement). It is shared so that capture's
-sizes and ``render_json``'s output agree exactly, and so that every cut
-uses the same code point rules.
+accounting (``Container``), the typed smallest fallbacks and the opaque
+label, string prefixes, JSON Pointers, the mapping-key conversion, and the
+UTF-8 helpers (cut points, decoding with replacement). Capture and
+``render_json`` both use them, so capture's sizes and ``render_json``'s
+output agree exactly, and every cut follows the same code point rules.
 
 The helpers take built-in values only and run no user code. Each caller
 keeps its own policy where it differs: ``json_key(live=True)`` is capture's
@@ -21,13 +21,16 @@ import json
 import math
 from typing import Any
 
+# The canonical JSON options: ASCII-only, no NaN/Infinity, ", " and ": "
+# separators, keys in insertion order. Every size in this package is measured
+# in this encoding.
 _JSON_KWARGS: dict[str, Any] = {
     "ensure_ascii": True,
     "allow_nan": False,
     "separators": (", ", ": "),
     "sort_keys": False,
 }
-_OPAQUE_PREFIX = "<opaque: "
+_OPAQUE_PREFIX = "<opaque: "  # the opaque label is "<opaque: module.QualName>"
 _OPAQUE_SUFFIX = ">"
 
 
@@ -35,25 +38,43 @@ _OPAQUE_SUFFIX = ">"
 
 
 def dumps(value: Any) -> str:
-    """Encode with the canonical options used by accounting and by ``render_json``."""
+    """``value`` as canonical JSON text, the encoding every size here is measured in.
+
+    Raises whatever ``json.dumps`` raises: ``ValueError`` for a non-finite
+    float, ``TypeError`` for a value JSON cannot hold.
+
+    >>> dumps({"a": [1, None]})
+    '{"a": [1, null]}'
+    """
     return json.dumps(value, **_JSON_KWARGS)
 
 
 def pointer_child(path: str, component: str) -> str:
-    """Append one RFC 6901-escaped component to a JSON Pointer path."""
+    """``path`` with one more JSON Pointer component, escaped as RFC 6901 says.
+
+    >>> pointer_child("/a", "b/c~d")
+    '/a/b~1c~0d'
+    """
     escaped = component.replace("~", "~0").replace("/", "~1")
     return f"{path}/{escaped}"
 
 
 def json_key(key: Any, *, live: bool) -> str | None:
-    """The JSON object key a mapping key becomes, else None (not convertible).
+    """The JSON object key that mapping key ``key`` becomes, or ``None`` when it has none.
 
     Only exact ``str``, ``int``, ``float``, ``bool`` and ``None`` keys
-    convert, as ``json.dumps`` converts them (numbers by ``repr``). The two
-    policies stay explicit: ``live=True`` is capture's, for keys of a live
-    value: an ``int`` over 128 bits (unbounded decimal conversion) and a
-    non-finite ``float`` are refused. ``live=False`` is the renderer's, for
-    the keys of a detached snapshot: converted as they are.
+    convert, as ``json.dumps`` converts them (numbers by ``repr``); no user
+    code runs.
+
+    Args:
+        key: the mapping key.
+        live: ``True`` for a key of a live value (capture): an ``int`` over
+            128 bits (unbounded decimal conversion) and a non-finite
+            ``float`` are refused. ``False`` for a key of a detached
+            snapshot (the renderers): converted as they are.
+
+    >>> json_key(1, live=True), json_key(None, live=True), json_key((1,), live=True)
+    ('1', 'null', None)
     """
     key_type = type(key)
     if key_type is str:
@@ -78,8 +99,13 @@ class Container:
 
     ``size`` is the encoded size so far (``[]`` / ``{}``: 2); each entry after
     the first costs a 2-character separator, an object entry also its
-    ``"key": `` (``overhead``). Shared by capture and ``render_json``, whose
-    sizes must agree exactly.
+    ``"key": `` (``overhead``). ``count`` is the entries committed and
+    ``reason`` the first reason the container stopped (``None`` while it
+    goes on). Capture and ``render_json`` both size with it, so their sizes
+    agree exactly.
+
+    Args:
+        max_size: the most characters the encoded container may take.
     """
 
     def __init__(self, max_size: int) -> None:
@@ -89,19 +115,28 @@ class Container:
         self.reason: Any = None  # the first reason to stop, a ``Reason``
 
     def stop(self, reason: str) -> None:
+        """Record ``reason`` (a ``Reason``) as why the container stops, unless it already stopped."""
         if self.reason is None:
             self.reason = reason
 
     def room(self, overhead: int = 0) -> int:
+        """The characters left for the next entry's value, after its separator and ``overhead``."""
         separator = 2 if self.count else 0
         return self.max_size - self.size - separator - overhead
 
     def slot(self, key: str | None = None) -> tuple[int, int] | None:
-        """``(overhead, available)`` for the next entry (``key``: an object's), else None.
+        """Make room for the next entry: ``(overhead, available)``, or ``None``.
 
-        None stops the container with ``max_length``: the key, or a value of
-        at least one character, does not fit. JSON escaping never makes a
-        key shorter, so an obviously oversized key is rejected unencoded.
+        Args:
+            key: the entry's JSON key, for an object; ``None`` for an array.
+
+        Returns:
+            ``overhead``, the characters of ``"key": `` (0 for an array), and
+            ``available``, the characters left for the value. ``None`` (and
+            the container stops with ``"max_length"``) when the key, or a
+            value of at least one character, does not fit. JSON escaping
+            never makes a key shorter, so an obviously oversized key is
+            refused before it is encoded.
         """
         overhead = 0
         if key is not None:
@@ -116,22 +151,32 @@ class Container:
         return overhead, available
 
     def commit(self, overhead: int, size: int) -> None:
-        """Count an entry of ``size`` characters (plus its ``overhead``)."""
+        """Count an entry whose value took ``size`` characters, plus its ``overhead`` and separator."""
         self.size += (2 if self.count else 0) + overhead + size
         self.count += 1
 
     def pop(self, cost: int) -> None:
-        """Give back the last entry, which cost ``cost`` characters (its separator included)."""
+        """Remove the last entry, which cost ``cost`` characters (its separator included)."""
         self.size -= cost
         self.count -= 1
 
     def resume(self) -> None:
-        """Forget the stop reason: entries that were given back made room again."""
+        """Forget the stop reason, after removed entries made room again."""
         self.reason = None
 
 
 def fallback_candidates(type_name: str) -> tuple[Any, ...]:
-    """#342's type-oriented smallest JSON fallbacks, by built-in type name."""
+    """The smallest JSON values that still say a value's type, by built-in type name, best first.
+
+    A value too large for its slot keeps its type in JSON when the room
+    allows (``""`` for a ``str``, ``[]`` for a list or tuple, ``{}`` for a
+    dict, ``0`` for an int...); ``""`` or ``0`` for anything else. A
+    ``type_name`` that is not an exact ``str`` is never compared (no
+    ``__eq__`` runs).
+
+    >>> fallback_candidates("list"), fallback_candidates("float")
+    (([],), (0.0, 0))
+    """
     if type(type_name) is not str:
         return ("", 0)  # never compare a foreign object (its ``__eq__`` could run)
     if type_name == "str":
@@ -152,7 +197,12 @@ def fallback_candidates(type_name: str) -> tuple[Any, ...]:
 
 
 def fallback_json(type_name: str, max_size: int) -> tuple[Any, int]:
-    """The first fallback for ``type_name`` that fits ``max_size`` (else ``0``)."""
+    """The first of ``fallback_candidates(type_name)`` that fits ``max_size``.
+
+    Returns:
+        ``(value, size)``: the JSON value and its encoded size; ``(0, 1)``
+        when none fits (callers give at least one character).
+    """
     for candidate in fallback_candidates(type_name):
         encoded = dumps(candidate)
         if len(encoded) <= max_size:
@@ -162,7 +212,15 @@ def fallback_json(type_name: str, max_size: int) -> tuple[Any, int]:
 
 
 def fit_string(value: str, max_size: int) -> tuple[Any, int]:
-    """The longest prefix of ``value`` whose JSON encoding fits ``max_size`` (#342)."""
+    """The longest prefix of ``value`` whose JSON encoding fits ``max_size``.
+
+    Returns:
+        ``(prefix, size)``, the prefix and its encoded size; ``(0, 1)``
+        when not even ``""`` fits (``max_size`` below 2).
+
+    >>> fit_string("héllo", 8)
+    ('h', 3)
+    """
     if max_size < 2:
         return 0, 1
     raw_limit = max_size - 2
@@ -182,12 +240,23 @@ def fit_string(value: str, max_size: int) -> tuple[Any, int]:
 
 
 def opaque_name_budget(max_size: int) -> int:
-    """How many characters of a type name fit in an opaque label of ``max_size`` JSON characters."""
+    """How many characters of a type name fit in an opaque label of ``max_size`` JSON characters (at least 0)."""
     return max(0, max_size - len(_OPAQUE_PREFIX) - len(_OPAQUE_SUFFIX) - 2)
 
 
 def opaque_json(type_name: str, fallback_type: str, max_size: int) -> tuple[Any, int]:
-    """#342's ``"<opaque: Type>"`` label fitted to ``max_size``, else a smallest fallback."""
+    """The ``"<opaque: Type>"`` label of ``type_name`` fitted to ``max_size``.
+
+    Args:
+        type_name: the qualified type name to show (cut to fit).
+        fallback_type: the built-in type name whose smallest fallback is
+            used when the label does not fit (``""``: the generic one).
+        max_size: the room, in JSON characters.
+
+    Returns:
+        ``(value, size)``: the label, or a prefix of it, and its size; the
+        smallest fallback when not even that fits.
+    """
     fallback = fallback_json(fallback_type, max_size)
     if max_size < 2:
         return fallback
@@ -199,14 +268,19 @@ def opaque_json(type_name: str, fallback_type: str, max_size: int) -> tuple[Any,
 # --- UTF-8 ----------------------------------------------------------------------------
 # Three different questions: where to cut a head (``safe_end``), where a tail
 # may start (``safe_start``) and how much of a growing stream is complete
-# (``complete_prefix``). They are not interchangeable.
+# (``complete_prefix``). They are not interchangeable. None of them validates
+# UTF-8: invalid bytes are kept as they are and shown with replacement.
 
 
 def safe_end(data: bytes | bytearray, end: int) -> int:
-    """``end`` moved back to a UTF-8 code point boundary (0 when the first one is cut).
+    """``end`` moved back to a UTF-8 code point boundary of ``data``, for a head ``data[:end]``.
 
     A code point that does not fit whole is left out, never kept beyond
-    ``end`` (``max_string`` and the budget are upper bounds).
+    ``end`` (``max_string`` and the budget are upper bounds). Returns 0 when
+    even the first code point does not fit, and at most ``len(data)``.
+
+    >>> safe_end("aé".encode(), 2)
+    1
     """
     cut = min(end, len(data))
     while 0 < cut < len(data) and data[cut] & 0xC0 == 0x80:
@@ -215,7 +289,11 @@ def safe_end(data: bytes | bytearray, end: int) -> int:
 
 
 def safe_start(data: bytes | bytearray, start: int) -> int:
-    """``start`` moved forward past UTF-8 continuation bytes."""
+    """``start`` (at least 0) moved forward past UTF-8 continuation bytes, for a tail ``data[start:]``.
+
+    >>> safe_start("éa".encode(), 1)
+    2
+    """
     start = max(0, start)
     while start < len(data) and data[start] & 0xC0 == 0x80:
         start += 1
@@ -223,7 +301,13 @@ def safe_start(data: bytes | bytearray, start: int) -> int:
 
 
 def complete_prefix(data: bytes | bytearray) -> int:
-    """Length of ``data`` without a trailing, incomplete UTF-8 sequence."""
+    """The length of ``data`` without a trailing UTF-8 sequence that more bytes could complete.
+
+    Bytes that cannot start or continue a valid sequence count as complete.
+
+    >>> complete_prefix("a€".encode()[:3]), complete_prefix(bytes([97, 255]))
+    (1, 2)
+    """
     size = len(data)
     index = size - 1
     continuation = 0
@@ -247,15 +331,17 @@ def complete_prefix(data: bytes | bytearray) -> int:
 
 
 def decode(data: bytes | bytearray) -> str:
-    """``data`` decoded as UTF-8 with replacement (how every renderer shows bytes)."""
+    """``data`` decoded as UTF-8, invalid bytes as U+FFFD (how every renderer shows bytes)."""
     return bytes(data).decode("utf-8", errors="replace")
 
 
 def encode_text(text: str) -> bytes:
-    """``text`` as UTF-8 bytes: raw bytes for surrogate escapes, else ``\\udXXX`` text.
+    """``text`` as UTF-8 bytes; never raises.
 
-    How a bytes ``TextStream`` and ``cut(unit="bytes")`` encode a ``str``, and
-    how a chars stream writes its spill file.
+    A lone surrogate from ``surrogateescape`` decoding becomes its original
+    byte; any other lone surrogate is written as the text ``\\udXXX``. This
+    is how a bytes ``TextStream`` and ``cut(unit="bytes")`` encode a
+    ``str``, and how a chars stream writes its spill file.
     """
     try:
         return text.encode("utf-8", errors="surrogateescape")

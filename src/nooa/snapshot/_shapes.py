@@ -25,6 +25,8 @@ from nooa.snapshot._raw import _MAX_TYPE_NAME, _TYPE_MRO, _bounded_type_name
 # extension code: they run only when capture decides it needs their result.
 
 
+# The field names each collection shape uses for its own parts; a shape's
+# ``fields`` may not take them.
 _STRUCTURE_FIELDS = {
     "array": ("items",),
     "mapping": ("items",),
@@ -52,17 +54,30 @@ def _metadata(value: Any, what: str) -> str:
 
 
 def _accessor(function: Any, what: str) -> Callable[..., Any]:
+    """``function`` itself when it is callable; raises ``TypeError`` naming ``what`` otherwise."""
     if not callable(function):
         raise TypeError(f"{what} must be callable")
     return function
 
 
 def _kind(kind: Any) -> str | None:
+    """A shape's ``kind`` as an exact ``str`` (see ``_metadata``), or ``None``; raises ``TypeError``."""
     return None if kind is None else _metadata(kind, "kind")
 
 
 def _accessor_fields(fields: Any, shape: str) -> tuple[tuple[str, Callable[[Any], Any]], ...]:
-    """A shape's ``fields``: an ordered ``dict`` of ``str`` name -> accessor, copied."""
+    """A shape's ``fields`` argument, checked and copied as ``((name, accessor), ...)`` in order.
+
+    Args:
+        fields: ``None`` (no fields) or a ``dict`` of name -> accessor.
+        shape: the shape's family (``"array"``, ``"mapping"``,
+            ``"ndarray"``, ``"object"``), for its reserved names.
+
+    Raises:
+        TypeError: ``fields`` is not a ``dict``, a name is not a ``str`` or
+            is reserved by the shape (``_STRUCTURE_FIELDS``), or an accessor
+            is not callable.
+    """
     if fields is None:
         return ()
     if not isinstance(fields, dict):
@@ -79,7 +94,12 @@ def _accessor_fields(fields: Any, shape: str) -> tuple[tuple[str, Callable[[Any]
 
 @dataclass(frozen=True)
 class _Collection:
-    """The shape ``array_like`` or (``keyed``) ``mapping_like`` returns; pass it to ``capture.register``."""
+    """The shape ``array_like`` or (``keyed``) ``mapping_like`` returns; pass it to ``capture.register``.
+
+    Its fields hold the checked arguments: the ``length`` and ``items``
+    accessors, the ``(name, accessor)`` fields, the ``kind`` and whether
+    ``items`` yields ``(key, value)`` pairs (``keyed``).
+    """
 
     length: Callable[[Any], int]
     items: Callable[[Any], Iterable[Any]]
@@ -90,7 +110,12 @@ class _Collection:
 
 @dataclass(frozen=True)
 class _NdarrayLike:
-    """The shape ``ndarray_like`` returns; pass it to ``capture.register``."""
+    """The shape ``ndarray_like`` returns; pass it to ``capture.register``.
+
+    Its fields hold the checked arguments: the ``shape`` and ``element``
+    accessors, the ``(name, accessor)`` fields, the ``(axis, accessor)``
+    labels and the ``kind``.
+    """
 
     shape: Callable[[Any], tuple[int, ...]]
     element: Callable[[Any, tuple[int, ...]], Any]
@@ -101,7 +126,10 @@ class _NdarrayLike:
 
 @dataclass(frozen=True)
 class _ObjectLike:
-    """The shape ``object_like`` returns; pass it to ``capture.register``."""
+    """The shape ``object_like`` returns; pass it to ``capture.register``.
+
+    Its fields hold the checked ``(name, accessor)`` fields and the ``kind``.
+    """
 
     fields: tuple[tuple[str, Callable[[Any], Any]], ...]
     kind: str | None
@@ -109,16 +137,21 @@ class _ObjectLike:
 
 @dataclass(frozen=True)
 class _TextLike:
-    """The shape ``text_like`` returns; pass it to ``capture.register``."""
+    """The shape ``text_like`` returns; pass it to ``capture.register``.
+
+    Its fields hold the checked ``length`` and ``slice`` accessors and the
+    ``unit``.
+    """
 
     length: Callable[[Any], int]
     slice: Callable[[Any, int, int], str | bytes]
     unit: Literal["chars", "bytes"]
-    kind: str | None
 
 
 _Shape = _Collection | _NdarrayLike | _ObjectLike | _TextLike
+"""Any shape that ``capture.register`` accepts."""
 _SHAPE_TYPES: tuple[type[Any], ...] = (_Collection, _NdarrayLike, _ObjectLike, _TextLike)
+"""The shape classes, for ``capture.register``'s identity check of its argument."""
 
 
 def array_like(
@@ -158,8 +191,9 @@ def array_like(
     and the ``Sequence`` gets reason ``"error"``. A field accessor that
     raises makes its field ``Unavailable("error")``.
 
-    Accessors are trusted code; they run only when capture keeps their
-    result. What an accessor returns is captured like any value, under the
+    Accessors are trusted code: they run in every capture, whatever the
+    ``Limits`` (traces included), only when capture keeps their result, and
+    their own time and memory are not bounded. What an accessor returns is captured like any value, under the
     same budget: a list is a ``Sequence``, a registered type uses its own
     shape, an unknown type is ``Unavailable("opaque")``, and ``v`` itself is
     a ``Ref`` (a cycle).
@@ -220,13 +254,23 @@ def mapping_like(
     ``array_like``; a yielded item that is not a pair also ends the items
     with reason ``"error"``.
 
-    Accessors are trusted code; they run only when capture keeps their
-    result. What an accessor returns is captured like any value, under the
+    Accessors are trusted code: they run in every capture, whatever the
+    ``Limits`` (traces included), only when capture keeps their result, and
+    their own time and memory are not bounded. What an accessor returns is captured like any value, under the
     same budget: a list is a ``Sequence``, a registered type uses its own
     shape, an unknown type is ``Unavailable("opaque")``, and ``v`` itself is
     a ``Ref`` (a cycle).
 
     Raises ``TypeError`` as ``array_like`` does.
+
+    >>> from nooa.snapshot import Limits, capture, mapping_like, render_python
+    >>> class Table:
+    ...     def __init__(self, rows):
+    ...         self.rows = rows
+    >>> capture.register(Table, mapping_like(lambda t: len(t.rows), lambda t: iter(t.rows.items())))
+    >>> render_python(capture(Table({"a": 1, "b": 2, "c": 3}), Limits(max_items=2)))
+    "Table(len=3, items={'a': 1, 'b': 2})"
+    >>> capture.unregister(Table)
     """
     return _Collection(
         _accessor(length, "length"),
@@ -288,8 +332,9 @@ def ndarray_like(
     accessor that raises makes only that part ``Unavailable("error")``; so
     does a ``labels`` axis the shape does not have.
 
-    Accessors are trusted code; they run only when capture keeps their
-    result. What an accessor returns is captured like any value, under the
+    Accessors are trusted code: they run in every capture, whatever the
+    ``Limits`` (traces included), only when capture keeps their result, and
+    their own time and memory are not bounded. What an accessor returns is captured like any value, under the
     same budget: a list is a ``Sequence``, a registered type uses its own
     shape, an unknown type is ``Unavailable("opaque")``, and ``v`` itself is
     a ``Ref`` (a cycle).
@@ -331,14 +376,24 @@ def object_like(fields: dict[str, Callable[[Any], Any]], *, kind: str | None = N
     The value becomes an ``Object`` (``type_name``: the class name). A field
     accessor that raises makes its field ``Unavailable("error")``.
 
-    Accessors are trusted code; they run only when capture keeps their
-    result. What an accessor returns is captured like any value, under the
+    Accessors are trusted code: they run in every capture, whatever the
+    ``Limits`` (traces included), only when capture keeps their result, and
+    their own time and memory are not bounded. What an accessor returns is captured like any value, under the
     same budget: a list is a ``Sequence``, a registered type uses its own
     shape, an unknown type is ``Unavailable("opaque")``, and ``v`` itself is
     a ``Ref`` (a cycle).
 
     Raises ``TypeError`` when ``fields`` is not a ``dict``, an accessor is
     not callable, or a name or ``kind`` is not a ``str``.
+
+    >>> from nooa.snapshot import capture, object_like, render_python
+    >>> class Secretive:
+    ...     def __init__(self):
+    ...         self._data = {"public": 1}
+    >>> capture.register(Secretive, object_like({"public": lambda s: s._data["public"]}))
+    >>> render_python(capture(Secretive()))
+    'Secretive(public=1)'
+    >>> capture.unregister(Secretive)
     """
     if not isinstance(fields, dict):
         raise TypeError("fields must be a dict of name -> accessor")
@@ -350,7 +405,6 @@ def text_like(
     slice: Callable[[Any, int, int], str | bytes],
     *,
     unit: Literal["chars", "bytes"] = "chars",
-    kind: str | None = None,
 ) -> _TextLike:
     """A shape for text too large to copy, for ``capture.register``: a length and slices.
 
@@ -363,8 +417,6 @@ def text_like(
       ``bytes`` for ``"bytes"`` (a ``bytearray`` or ``memoryview`` is
       copied).
     - ``unit`` (default ``"chars"``): ``"chars"`` or ``"bytes"``.
-    - ``kind`` (default ``None``): checked and stored on the shape; a
-      ``Text`` has no ``kind``, so no hook uses it.
 
     The value becomes a ``Text`` with the right ``length``, ``omitted`` and
     ``unit``, cut exactly as a ``str`` or ``bytes`` of that content would
@@ -378,8 +430,8 @@ def text_like(
     or a slice has the wrong type or size, the whole value is
     ``Unavailable("error")``.
 
-    Raises ``TypeError`` when an accessor is not callable, ``unit`` is not
-    ``"chars"`` or ``"bytes"``, or ``kind`` is not a ``str``.
+    Raises ``TypeError`` when an accessor is not callable or ``unit`` is not
+    ``"chars"`` or ``"bytes"``.
 
     >>> from nooa.snapshot import Limits, capture, render_python, text_like
     >>> class Rope:
@@ -392,7 +444,7 @@ def text_like(
     """
     if unit != "chars" and unit != "bytes":
         raise TypeError('unit must be "chars" or "bytes"')
-    return _TextLike(_accessor(length, "length"), _accessor(slice, "slice"), unit, _kind(kind))
+    return _TextLike(_accessor(length, "length"), _accessor(slice, "slice"), unit)
 
 
 _REGISTRY: list[tuple[type[Any], _Shape]] = []
