@@ -43,7 +43,8 @@ Everything is importable from `nooa.snapshot`; see each docstring for arguments,
 | `capture_fields` | a call's arguments captured together, so every named part survives, at least in short form |
 | `TextStream`, `SpillTarget` | output that arrives over time, and its optional spill file |
 | `SpillDir` | a folder of spill files for many streams: at most `max_files` of `file_bytes` each, the oldest closed evicted |
-| `merge` | join two unread progress deltas |
+| `cut` | a string or bytes already whole, as a `Text` keeping its first `head` and last `tail` units (what a one-write `TextStream` gives) |
+| `merge` | join two `Text`s of the same unit (progress batches) |
 | `render_output` | command output: `HEAD`, `[... N bytes omitted; full output: PATH]`, `TAIL` |
 | `render_python`, `PythonRenderer` | agentdoc's prefill notation, its per-kind hooks, and the `r` a hook gets |
 | `render_json` | plain JSON within `max_chars` (trace previews) |

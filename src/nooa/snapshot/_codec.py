@@ -240,3 +240,15 @@ def complete_prefix(data: bytes | bytearray) -> int:
 def decode(data: bytes | bytearray) -> str:
     """``data`` decoded as UTF-8 with replacement (how every renderer shows bytes)."""
     return bytes(data).decode("utf-8", errors="replace")
+
+
+def encode_text(text: str) -> bytes:
+    """``text`` as UTF-8 bytes: raw bytes for surrogate escapes, else ``\\udXXX`` text.
+
+    How a bytes ``TextStream`` and ``cut(unit="bytes")`` encode a ``str``, and
+    how a chars stream writes its spill file.
+    """
+    try:
+        return text.encode("utf-8", errors="surrogateescape")
+    except UnicodeEncodeError:
+        return text.encode("utf-8", errors="backslashreplace")

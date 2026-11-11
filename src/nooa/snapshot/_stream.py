@@ -17,7 +17,7 @@ import collections
 import logging
 from typing import Literal
 
-from nooa.snapshot._codec import complete_prefix, safe_end, safe_start
+from nooa.snapshot._codec import complete_prefix, encode_text, safe_end, safe_start
 from nooa.snapshot._model import Spill, Text
 from nooa.snapshot._spill import SpillTarget, _SpillFile
 
@@ -175,7 +175,7 @@ class TextStream:
             raise ValueError("write to a closed TextStream")
         if self.unit == "bytes":
             if isinstance(data, str):
-                data = _encode(data)
+                data = encode_text(data)
             elif isinstance(data, (bytes, bytearray, memoryview)):
                 data = bytes(data)
             else:  # ``bytes(10)`` would be ten NUL bytes, ``bytes([1])`` a made-up byte
@@ -190,7 +190,7 @@ class TextStream:
                 "write bytes to a bytes stream"
             )
         elif self._file is not None:
-            self._spill(_encode(data))
+            self._spill(encode_text(data))
         self._total += len(data)
         self._window.write(data)
 
@@ -311,14 +311,6 @@ class _Window:
 
     def tail(self) -> str | bytes:
         return self._empty.join(self._tail)  # type: ignore[arg-type]
-
-
-def _encode(text: str) -> bytes:
-    """UTF-8 for the file: raw bytes for surrogate escapes, else ``\\udXXX`` text."""
-    try:
-        return text.encode("utf-8", errors="surrogateescape")
-    except UnicodeEncodeError:
-        return text.encode("utf-8", errors="backslashreplace")
 
 
 # --- merging deltas ----------------------------------------------------------------

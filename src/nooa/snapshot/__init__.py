@@ -18,6 +18,7 @@ Producers:
 - ``TextStream``: output that arrives over time, with an optional
   ``SpillTarget`` file; ``SpillDir`` bounds the files of many streams;
   ``merge`` joins two unread deltas.
+- ``cut(data, head=, tail=)``: a string or bytes that is already whole.
 
 Renderers: ``render_output`` (command output), ``render_python``
 (agentdoc's prefill notation; its hooks receive a ``PythonRenderer``),
@@ -62,6 +63,7 @@ from nooa.snapshot._render import (
 )
 from nooa.snapshot._spill import SpillDir, SpillTarget
 from nooa.snapshot._stream import TextStream, merge
+from nooa.snapshot._text import cut
 
 __all__ = [
     "Limits",
@@ -82,6 +84,7 @@ __all__ = [
     "array_like",
     "capture",
     "capture_fields",
+    "cut",
     "mapping_like",
     "merge",
     "ndarray_like",
