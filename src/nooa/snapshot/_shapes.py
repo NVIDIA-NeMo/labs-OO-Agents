@@ -114,7 +114,6 @@ class _TextLike:
     length: Callable[[Any], int]
     slice: Callable[[Any, int, int], str | bytes]
     unit: Literal["chars", "bytes"]
-    kind: str | None
 
 
 _Shape = _Collection | _NdarrayLike | _ObjectLike | _TextLike
@@ -350,7 +349,6 @@ def text_like(
     slice: Callable[[Any, int, int], str | bytes],
     *,
     unit: Literal["chars", "bytes"] = "chars",
-    kind: str | None = None,
 ) -> _TextLike:
     """A shape for text too large to copy, for ``capture.register``: a length and slices.
 
@@ -363,8 +361,6 @@ def text_like(
       ``bytes`` for ``"bytes"`` (a ``bytearray`` or ``memoryview`` is
       copied).
     - ``unit`` (default ``"chars"``): ``"chars"`` or ``"bytes"``.
-    - ``kind`` (default ``None``): checked and stored on the shape; a
-      ``Text`` has no ``kind``, so no hook uses it.
 
     The value becomes a ``Text`` with the right ``length``, ``omitted`` and
     ``unit``, cut exactly as a ``str`` or ``bytes`` of that content would
@@ -378,8 +374,8 @@ def text_like(
     or a slice has the wrong type or size, the whole value is
     ``Unavailable("error")``.
 
-    Raises ``TypeError`` when an accessor is not callable, ``unit`` is not
-    ``"chars"`` or ``"bytes"``, or ``kind`` is not a ``str``.
+    Raises ``TypeError`` when an accessor is not callable or ``unit`` is not
+    ``"chars"`` or ``"bytes"``.
 
     >>> from nooa.snapshot import Limits, capture, render_python, text_like
     >>> class Rope:
@@ -392,7 +388,7 @@ def text_like(
     """
     if unit != "chars" and unit != "bytes":
         raise TypeError('unit must be "chars" or "bytes"')
-    return _TextLike(_accessor(length, "length"), _accessor(slice, "slice"), unit, _kind(kind))
+    return _TextLike(_accessor(length, "length"), _accessor(slice, "slice"), unit)
 
 
 _REGISTRY: list[tuple[type[Any], _Shape]] = []
