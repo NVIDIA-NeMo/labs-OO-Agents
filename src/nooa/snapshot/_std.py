@@ -463,16 +463,19 @@ def _enum_view(value: Any, mro: tuple[type[Any], ...], state: _State) -> _View |
 def _mro_view(value: Any, mro: tuple[type[Any], ...], state: _State) -> _View | None:
     """The view of a value with a standard base in its raw MRO (identity checks), else ``None``.
 
-    In MRO order, the first of: ``enum.Enum``; ``BaseException`` (its
+    ``enum.Enum`` anywhere in the MRO first; then in MRO order, the first of: ``BaseException`` (its
     ``args``); ``type`` (the value is a class); a namedtuple (a ``tuple``
     whose class declares ``_fields``); a built-in container (``dict``,
     ``OrderedDict``, ``list``, ``tuple``, ``set``, ``frozenset``, ``str``)
     that no class above it in the MRO overrides an iteration method of.
     """
+    if any(base is enum.Enum for base in mro):  # before ``str`` / ``int`` (a StrEnum, an IntEnum)
+        try:
+            return _enum_view(value, mro, state)
+        except Exception:
+            return None
     for index, base in enumerate(mro):
         try:
-            if base is enum.Enum:
-                return _enum_view(value, mro, state)
             if base is BaseException:
                 args = _EXCEPTION_ARGS.__get__(value, BaseException)
                 if type(args) is not tuple:

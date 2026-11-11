@@ -262,3 +262,28 @@ def test_width_lays_containers_out_like_agentdoc() -> None:
     )
     assert render_python(capture([1, [2]]), width=0) == "[\n    1,\n    [\n        2,\n    ],\n]"
     assert render_python(capture([1, 2]), width=120) == "[1, 2]"
+
+
+# --- node keys and empty containers --------------------------------------------------------
+
+
+def test_keys_without_a_json_form_are_node_keys() -> None:
+    value = {(1, 2): "a", Color.RED: 1, frozenset({1}): 2}
+    snapshot = capture(value)
+
+    assert render_python(snapshot) == "{(1, 2): 'a', <Color.RED: 1>: 1, frozenset({1}): 2}"
+    assert json.loads(render_json(snapshot, max_chars=500)) == {
+        "(1, 2)": "a",
+        "<Color.RED: 1>": 1,
+        "frozenset({1})": 2,
+    }
+    # A key capture cannot read, or a number JSON cannot hold, still stops the mapping.
+    assert capture({"a": 1, object(): 2}).reason == "key"  # type: ignore[union-attr]
+    # A node key whose text an earlier key has collides like any other key.
+    assert capture({(1,): 1, "(1,)": 2}).reason == "key"  # type: ignore[union-attr]
+
+
+def test_empty_containers_at_max_depth_are_whole() -> None:
+    snapshot = capture([[], {}, [1]], Limits(max_depth=1))
+
+    assert render_python(snapshot) == "[[], {}, [list: 1 items]]"

@@ -76,7 +76,11 @@ def test_broken_repr_is_never_called():
             raise RuntimeError("boom")
 
     parsed, attributes = _output(Bomb())
-    assert parsed == "<opaque: Bomb>"
+    # The opaque label is module-qualified (PR 2c); traces never run repr.
+    assert (
+        parsed
+        == "<opaque: tests.tracing.test_trace_previews.test_broken_repr_is_never_called.<locals>.Bomb>"
+    )
     assert attributes["nooa.output.preview.reasons"] == ("opaque",)
 
 
