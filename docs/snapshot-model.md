@@ -6,7 +6,7 @@ This page is the contract of `nooa.snapshot`. The docstring of every public name
 
 Three rules decide every design question in this package. When code and these rules disagree, the code is wrong.
 
-1. **Never run code on values; read class metadata the way Python does.** Capture never calls a value's `repr`, `str`, properties, descriptors or iteration: values are captured over and over, and their code can be slow, have side effects or reveal hidden fields. Class declarations are different: annotations and field declarations are code the class's author wrote, which Python already runs when the class is defined. Capture reads them once per class with `typing.get_type_hints(cls, include_extras=True)`, cached by class identity, the same way `agentdoc` does. When that fails for the class, each annotation is resolved on its own, as agentdoc does. Only the fields whose annotations can't be read fail closed: they are left out and the object is marked incomplete.
+1. **Never run code on values; read class metadata the way Python does.** Capture never calls a value's `repr`, `str`, properties, descriptors or iteration: values are captured over and over, and their code can be slow, have side effects or reveal hidden fields. Class declarations are different: annotations and field declarations are code the class's author wrote, which Python already runs when the class is defined. Capture resolves the string annotations of a dataclass with `typing.get_type_hints(cls, include_extras=True)`, the same way `agentdoc` does; a success is cached by class identity, and a failure holds for that capture only (the next one tries again). When that fails, each annotation is resolved on its own, as agentdoc does, and only the fields whose annotations can't be read fail closed: they are left out and the object is marked incomplete. Pydantic models are read from the `FieldInfo`s Pydantic already built, and plain objects from their raw `__annotations__`.
 2. **Store what you cut in its own units.** A cut string keeps characters; cut bytes keep bytes. Nothing is decoded until it is rendered, so counts stay exact and no unit is reconstructed later.
 3. **One extension point per job, and nothing without a user.** Shapes are the only way to describe a type to capture, and `render_python` hooks the only way to change how a node prints. A field, reason or hook that no consumer reads is not added.
 
@@ -22,9 +22,9 @@ A snapshot is a frozen tree of nodes. It holds no live objects. Every node has `
 |---|---|
 | `Scalar` | a complete `None`, `bool`, `int`, finite `float` or short `bytes` |
 | `Text` | a string, bytes or a stream: kept head and tail in their own unit, `length`, `omitted`, and `full` (a `Spill`) |
-| `Sequence` | a list, tuple or `array_like` value: kept `head` and `tail` items, original `length` |
-| `Mapping` | a dict, `mapping_like` value or `capture_fields` wrapper: kept `head` and `tail` entries, original `length` |
-| `Object` | a Pydantic model, dataclass or shape with fields: kept fields in order, optional `kind` |
+| `Sequence` | a list, tuple, set, standard container or `array_like` value: kept `head` and `tail` items, original `length` |
+| `Mapping` | a dict, standard mapping, `mapping_like` value or `capture_fields` wrapper: kept `head` and `tail` entries (keys: JSON scalars, or a small node for any other key), original `length` |
+| `Object` | a Pydantic model, dataclass, namedtuple, plain object, standard type, shape with fields or bounded `repr`: kept fields in order, optional `kind` |
 | `Unavailable` | a value with no content kept: `opaque`, `error` or a limit |
 | `Ref` | a cycle: the JSON Pointer of the enclosing container |
 
@@ -58,7 +58,7 @@ Everything is importable from `nooa.snapshot`; see each docstring for arguments,
 
 ## Limits and guarantees
 
-- **No user code on values.** Capture never calls a value's `repr`, `str`, properties, descriptors, iteration, hashing or equality. It reads class metadata once per class with `typing.get_type_hints(cls, include_extras=True)`. `src/nooa/snapshot/_raw.py` and `_std.py` (the standard types, read through their C-level descriptors after an identity check) are the modules to audit. The one exception is explicit: `Limits(fallback="repr")` asks capture to run `repr()` on what it cannot read, for model-facing previews; the default (`"opaque"`, for traces) runs nothing and labels the value `<opaque: module.QualName>`.
+- **No user code on values.** Capture never calls a value's `repr`, `str`, properties, descriptors, iteration, hashing or equality. It reads class metadata the way Python does (see principle 1). `src/nooa/snapshot/_raw.py` and `_std.py` (the standard types, read through their C-level descriptors after an identity check) are the modules to audit. The one exception is explicit: `Limits(fallback="repr")` asks capture to run `repr()` on what it cannot read, for model-facing previews; the default (`"opaque"`, for traces) runs nothing and labels the value `<opaque: module.QualName>`.
 - **Standard types and plain objects are native.** Sets, ranges, complex numbers, dates and times, `Decimal`, `UUID`, paths, patterns, exceptions, enum members, namedtuples, `Counter`/`OrderedDict`/`defaultdict`, functions, classes and modules become nodes, and `render_python` prints them in their familiar notation. A plain object shows its public instance attributes.
 - **Fail closed.** Hidden fields are never read. A field whose visibility can't be read is left out, and the object gets reason `unreadable`. One unresolvable annotation (a name imported only under `TYPE_CHECKING`) costs only its own field.
 - **Bounded size, time and memory.** `Limits` bounds a capture: `max_chars` (canonical JSON), `max_nodes` (work), `max_depth`, `max_items`, `max_string`. `tail_share` keeps both ends of a cut string, list or dict in that ratio, whichever limit cuts it; at its default 0.0 a capture keeps a head only. A `TextStream` holds at most `head + tail` units; its spill file at most `SpillTarget.max_bytes` bytes. A `SpillTarget(path=...)` that already exists is refused with `FileExistsError`, never truncated; a new file is created exclusively, mode 0600.
@@ -70,6 +70,6 @@ Everything is importable from `nooa.snapshot`; see each docstring for arguments,
 
 ## Plan
 
-1. **PR 1 (this package), into `main`:** the model, `capture` and its registry, `TextStream`, `merge` and the renderers, with tests. No consumer changes.
+1. **PR 1 (this package), into `main`:** the model, `capture` and its registry, `TextStream`, `SpillDir`, `cut`, `merge` and the renderers, with tests. No consumer changes.
 2. **PR 2a, consumers the model doesn't read:** trace hooks (`capture` + `render_trace`) and ACP activity cards.
-3. **PR 2b, consumers the model reads:** `Shell`, progress, cell output, jobs, the core bash tool and prefill, after an A/B run. It ends by deleting `src/nooa/agentdoc/_truncating_stream.py`.
+3. **PR 2b, consumers the model reads:** `Shell`, progress, cell output, jobs, the core bash tool and prefill, after an A/B run. `src/nooa/agentdoc/_truncating_stream.py` is deleted once its last user moves (on the stack, after 2a).

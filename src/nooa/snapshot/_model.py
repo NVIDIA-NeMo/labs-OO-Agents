@@ -185,9 +185,11 @@ class Sequence:
 
     Fields:
 
-    - ``type_name``: ``"list"`` or ``"tuple"``, or the class name of a value
-      registered as ``array_like`` without fields; ``"list"`` for the
-      ``items``, ``data`` and ``labels`` parts of a shape.
+    - ``type_name``: ``"list"`` or ``"tuple"``, the class name of a
+      standard container read natively (``set``, ``frozenset``, a ``list``
+      subclass...) or of a value registered as ``array_like`` without
+      fields; ``"list"`` for the ``items``, ``data`` and ``labels`` parts of
+      a shape.
     - ``length``: the number of items in the original.
     - ``head``: the items kept from the start, as nodes.
     - ``reason``: ``None`` when every item is kept, else ``"max_items"``,
@@ -218,8 +220,10 @@ class Mapping:
 
     Fields:
 
-    - ``type_name``: ``"dict"``, or the class name of a value registered as
-      ``mapping_like`` without fields.
+    - ``type_name``: ``"dict"``, the class name of a standard mapping read
+      natively (``Counter``, ``OrderedDict``, ``defaultdict``, a ``dict``
+      subclass...) or of a value registered as ``mapping_like`` without
+      fields.
     - ``length``: the number of entries in the original.
     - ``head``: the ``(key, node)`` entries kept from the start. Keys are
       exact ``str``, ``int``, ``float``, ``bool`` or ``None``, or a small
@@ -253,7 +257,12 @@ class Mapping:
 
 @dataclass(frozen=True)
 class Object:
-    """A Pydantic model, a dataclass or a registered shape with fields: its kept fields, in order.
+    """A value read as named fields: its kept fields, in order.
+
+    A Pydantic model, a dataclass, a namedtuple, a plain object (its public
+    attributes), a registered shape with fields, a standard type read
+    natively (``kind`` ``"python.datetime"``, ``"python.enum"``...) or a
+    bounded ``repr`` (``kind`` ``"python.repr"``, ``Limits(fallback="repr")``).
 
     Fields:
 
@@ -267,8 +276,9 @@ class Object:
       could not be read safely; no fields at all when the field list itself
       could not be read). A shape accessor that fails makes only its own
       field ``Unavailable("error")``.
-    - ``kind``: the rendering key a shape set (``kind="numpy.ndarray"``), or
-      ``None``. ``render_python`` looks up its hook by it.
+    - ``kind``: the rendering key a shape set (``kind="numpy.ndarray"``), a
+      standard ``python.*`` key, or ``None``. ``render_python`` looks up its
+      hook by it.
 
     ``complete`` is ``reason is None``. ``field(name)`` looks a field up.
     """

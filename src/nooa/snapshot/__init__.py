@@ -17,7 +17,7 @@ Producers:
   ``capture_fields(**fields)`` captures a framework wrapper.
 - ``TextStream``: output that arrives over time, with an optional
   ``SpillTarget`` file; ``SpillDir`` bounds the files of many streams;
-  ``merge`` joins two unread deltas.
+  ``merge`` joins two ``Text``s (progress batches).
 - ``cut(data, head=, tail=)``: a string or bytes that is already whole.
 
 Renderers: ``render_output`` (command output), ``render_python``
