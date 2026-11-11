@@ -217,10 +217,10 @@ class TestProviderTokenAttribution:
 class TestContextWindowStatsTruncation:
     """The renderer counts blocks the view evicted but never evicts itself."""
 
-    def test_counts_blocks_the_view_marked_truncated(self):
+    def test_counts_blocks_the_view_marked_evicted(self):
         blocks = [
             Block(key="kept", content="#" * 100),
-            Block(key="evicted", content="[EVICTED]", metadata=BlockMetadata(truncated=True)),
+            Block(key="evicted", content="[EVICTED]", metadata=BlockMetadata(evicted=True)),
         ]
         stats = render_context(
             blocks,

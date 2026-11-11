@@ -164,7 +164,10 @@ class BlockMetadata(BaseModel):
         "Rendered as the block's label when set.",
     )
     tag: str | None = Field(default=None, description="Event position tag")
-    truncated: bool = Field(default=False, description="Whether content was truncated")
+    evicted: bool = Field(
+        default=False,
+        description="Whether the view's budget replaced this block's content with an eviction notice",
+    )
     user_block: bool = Field(
         default=False,
         description="Whether this is a user-set block (from self.context). "
