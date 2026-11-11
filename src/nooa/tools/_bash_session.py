@@ -32,13 +32,12 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 from nooa._platform import require_posix
-from nooa.snapshot import TextStream, render_output
+from nooa.snapshot import cut, render_output
 
 logger = logging.getLogger(__name__)
 
 MAX_OUTPUT_CHARS = 30_000
 """Characters kept of each of a command's stdout and stderr: the first and last half."""
-_BOUNDED_CHUNK_CHARS = 65_536  # Pieces fed to the bounded stream by _bounded
 _DRAIN_TIMEOUT = 0.05  # Seconds to wait for remaining output after sentinel
 _SIGTERM_GRACE = 5.0  # Seconds to wait for sentinel after SIGTERM
 _SIGKILL_GRACE = 2.0  # Seconds to wait for sentinel after SIGKILL
@@ -69,12 +68,7 @@ def _bounded(text: str) -> str:
     if len(text) <= MAX_OUTPUT_CHARS:
         return text
     head = MAX_OUTPUT_CHARS - MAX_OUTPUT_CHARS // 2
-    stream = TextStream(unit="chars", head=head, tail=MAX_OUTPUT_CHARS // 2)
-    # Feed the stream in bounded pieces: one write of the whole stream would
-    # copy everything past the head a second time before the tail is trimmed.
-    for start in range(0, len(text), _BOUNDED_CHUNK_CHARS):
-        stream.write(text[start : start + _BOUNDED_CHUNK_CHARS])
-    return render_output(stream.close())
+    return render_output(cut(text, head=head, tail=MAX_OUTPUT_CHARS // 2))
 
 
 def _process_start_time(pid: int) -> str | None:

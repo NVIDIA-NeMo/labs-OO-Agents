@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """The public capture entry points: ``capture`` (with its registry) and ``capture_fields``.
 
-The top of the capture layers (``_limits`` <- ``_raw`` <- ``_visibility``
-<- ``_shapes`` <- ``_walk`` <- ``_capture``). It checks the arguments, starts
+The top of the capture layers (``_limits`` <- ``_raw`` <- {``_fields``,
+``_shapes``, ``_std``} <- ``_walk`` <- ``_capture``). It checks the arguments, starts
 one ``_State`` per call and hands the value to the ``_walk`` builder. The
 builder is based on the bounded trace JSON builder of PR #342 (Severin
 Klingler).
@@ -20,6 +20,7 @@ from nooa.snapshot._limits import DEFAULT_LIMITS, Limits, _State, _validate_limi
 from nooa.snapshot._model import Key, Mapping, Object, Snapshot, Unavailable
 from nooa.snapshot._raw import _MAX_TYPE_NAME, _bounded_type_name, _builtin_name, _safe_mro
 from nooa.snapshot._shapes import (
+    _REGISTRY,
     _SHAPE_TYPES,
     _Shape,
     array_like,
@@ -28,7 +29,7 @@ from nooa.snapshot._shapes import (
     object_like,
     text_like,
 )
-from nooa.snapshot._walk import _REGISTRY, _build, _Built, _fallback
+from nooa.snapshot._walk import _build, _Built, _fallback
 
 __all__ = [
     "Limits",
@@ -58,11 +59,30 @@ class _CaptureFunction:
       kept whole, else a bytes ``Text`` of the original bytes;
     - exact ``list`` / ``tuple``: a ``Sequence``; exact ``dict``: a
       ``Mapping``;
+    - the standard types, read natively (``_std``): ``set`` / ``frozenset``
+      (a ``Sequence``, head only), ``Counter`` / ``OrderedDict`` /
+      ``defaultdict`` and other container subclasses that override no
+      iteration method (a ``Sequence`` / ``Mapping`` / ``Text`` named after
+      their class), and ``Object`` nodes with a ``python.*`` ``kind`` for
+      ``range``, ``complex``, ``datetime`` / ``date`` / ``time`` /
+      ``timedelta``, ``Decimal``, ``UUID``, ``pathlib`` paths, ``re.Pattern``,
+      exceptions (their ``args``), enum members, functions, methods,
+      built-in functions, modules and classes; a namedtuple is an
+      ``Object`` of its fields;
     - a Pydantic v2 model or a dataclass: an ``Object`` of its visible
       declared fields;
     - an instance of a class registered with ``capture.register``: what its
       shape describes;
-    - anything else, a non-finite ``float`` included: ``Unavailable("opaque")``.
+    - with ``Limits(fallback="repr")`` (model-facing previews), a value
+      whose class defines its own ``__repr__`` (a generated dataclass or
+      Pydantic repr does not count: those were read above): its bounded
+      ``repr``, as below; traces never run it;
+    - a plain object (no ``__getattribute__`` in its MRO, the standard
+      ``__dict__`` slot or ``__slots__``): an ``Object`` of its public
+      instance attributes;
+    - anything else, a non-finite ``float`` included: ``Unavailable("opaque")``
+      named ``module.QualName``, or with ``Limits(fallback="repr")`` its
+      bounded ``repr``.
 
     Guarantees:
 
@@ -75,6 +95,9 @@ class _CaptureFunction:
       include_extras=True)`` for a dataclass with string annotations; a
       success is cached by class identity, a failure is retried by the next
       ``capture``) and the accessors of registered shapes.
+    - agentdoc's ``spec(max_string=..., max_length=...)`` on a field bounds
+      that field's subtree; ``spec(hide_empty=True)`` (on the class or the
+      field) leaves out a ``None`` or empty field.
     - Hidden fields are never read: agentdoc ``hidden`` /
       ``spec(hidden=True)`` markers and ``spec()`` overrides, Pydantic
       ``exclude=True`` / ``repr=False``, dataclass ``repr=False``,

@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """The budget of one capture: the public ``Limits`` and the private traversal ``_State``.
 
-The lowest of the capture layers (``_limits`` <- ``_raw`` <- ``_visibility``
-<- ``_shapes`` <- ``_walk`` <- ``_capture``). Every layer charges the same
+The lowest of the capture layers (``_limits`` <- ``_raw`` <- {``_fields``,
+``_shapes``, ``_std``} <- ``_walk`` <- ``_capture``). Every layer charges the same
 ``_State``, so it lives below them all. Nothing here reads a live value.
 """
 
@@ -43,7 +43,17 @@ class Limits:
       A container the budget cuts keeps its head within the budget less
       ``tail_share`` of it, and its tail from the end with the rest; one
       that fits is kept whole. A shape read only forwards (``array_like``,
-      ``mapping_like``) keeps a head only. From 0 to 1.
+      ``mapping_like``, a ``set``) keeps a head only. From 0 to 1.
+    - ``fallback`` (default ``"opaque"``): what a value capture cannot read
+      becomes. ``"opaque"``: ``Unavailable("opaque")``, rendered
+      ``<opaque: module.QualName>`` (traces: no code runs). ``"repr"``: the
+      caller asks capture to run ``repr(value)``, and the result is kept as
+      an ``Object`` with ``kind="python.repr"`` and one ``repr`` field, a
+      ``Text`` cut like any string (``max_string``, ``tail_share``, the
+      budget). This runs the value's own code, unbounded in time and memory
+      before the cut: it is for model-facing previews, where a bounded view
+      beats ``<opaque: T>`` (which a model answers with ``print(x)``). A
+      ``repr`` that raises gives the opaque node.
 
     ``Limits`` does not check itself: ``capture`` and ``capture_fields``
     raise ``ValueError`` for values outside these ranges.
@@ -59,6 +69,7 @@ class Limits:
     max_items: int | None = None
     max_string: int | None = None
     tail_share: float = 0.0
+    fallback: Literal["opaque", "repr"] = "opaque"
 
 
 def _split(limits: Limits, kept: int) -> tuple[int, int]:
@@ -84,6 +95,8 @@ def _validate_limits(limits: Limits) -> None:
         raise ValueError("snapshot max_string must be non-negative or None")
     if not 0.0 <= limits.tail_share <= 1.0:
         raise ValueError("snapshot tail_share must be between 0 and 1")
+    if limits.fallback != "opaque" and limits.fallback != "repr":
+        raise ValueError('snapshot fallback must be "opaque" or "repr"')
 
 
 class _State:
@@ -98,7 +111,7 @@ class _State:
         self.namespaces: dict[int, tuple[Any, dict[str, Any] | None]] = {}
         # id(class) -> (class, the metadata of the hints that resolved one by one)
         # for a class whose ``get_type_hints`` failed in this capture; kept alive
-        # for the call and retried by the next one (see ``_visibility``).
+        # for the call and retried by the next one (see ``_fields``).
         self.unreadable_hints: dict[int, tuple[type[Any], dict[str, tuple[Any, ...]]]] = {}
 
     def take_node(self) -> bool:

@@ -26,8 +26,8 @@ from nooa.snapshot import (
     render_json,
     render_trace,
 )
+from nooa.snapshot._fields import _pydantic_fields
 from nooa.snapshot._limits import _State
-from nooa.snapshot._visibility import _pydantic_fields
 from tests.snapshot._trace import _attributes
 
 _DEFAULT = Limits()
@@ -217,8 +217,8 @@ def test_type_classification_does_not_call_metaclass_hooks() -> None:
 
     parsed, paths, _text = _parsed(Unknown())
 
-    assert parsed == "<opaque: Unknown>"
-    assert paths == ("",)
+    assert parsed == {}  # a plain object with no attributes, read without the metaclass
+    assert paths == ()
     assert calls == []
 
 

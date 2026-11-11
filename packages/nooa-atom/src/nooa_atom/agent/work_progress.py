@@ -16,7 +16,7 @@ import codecs
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from nooa.snapshot import Text, merge, render_output
+from nooa.snapshot import Text, cut, merge, render_output
 from nooa_atom.agent.work_manager import MAX_BYTES_LIMIT, Throttle, check_policy
 
 __all__ = ["MAX_BYTES_LIMIT", "ShellProgress", "Throttle"]
@@ -45,7 +45,7 @@ def _safe_start(data: bytes, start: int) -> int:
 def _text(text: str) -> Text:
     """One batch of a stream's output as a complete bytes ``Text`` (UTF-8)."""
     data = text.encode("utf-8", errors="surrogateescape")
-    return Text(head=data, length=len(data), unit="bytes")
+    return cut(data, head=len(data), tail=0)
 
 
 def _join(first: Text, later: Text, limit: int) -> Text:

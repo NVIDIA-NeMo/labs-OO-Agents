@@ -38,7 +38,7 @@ from pathlib import Path, PurePath
 from typing import Any, Protocol
 
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
-from nooa.snapshot import TextStream, render_output
+from nooa.snapshot import cut, render_output
 
 # ---------------------------------------------------------------------------
 # Traceback selection and IPython normalization policy
@@ -798,9 +798,7 @@ def _cut_text(text: str, limit: int, tail: int | None) -> str:
     the start; no file keeps the whole text, so the line ends ``full output not kept]``.
     """
     tail_chars = limit // 2 if tail is None else tail
-    stream = TextStream(unit="chars", head=limit - tail_chars, tail=tail_chars)
-    stream.write(text)
-    return render_output(stream.close())
+    return render_output(cut(text, head=limit - tail_chars, tail=tail_chars))
 
 
 def _hard_bound_text(text: str, limit: int) -> str:
@@ -810,15 +808,11 @@ def _hard_bound_text(text: str, limit: int) -> str:
     """
     if len(text) <= limit:
         return text
-    stream = TextStream(unit="chars", head=0, tail=0)
-    stream.write(text)
-    notice = render_output(stream.close())
+    notice = render_output(cut(text, head=0, tail=0))
     keep = limit - len(notice) - 1  # the head and its newline before the line
     if keep <= 0:
         return notice[:limit]
-    stream = TextStream(unit="chars", head=keep, tail=0)
-    stream.write(text)
-    return render_output(stream.close())
+    return render_output(cut(text, head=keep, tail=0))
 
 
 class ErrorFormatter(Protocol):
