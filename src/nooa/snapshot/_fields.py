@@ -326,11 +326,18 @@ def _pydantic_fields(mro: tuple[type[Any], ...], state: _State) -> dict[str, Fie
 
 
 class _Scoped:
-    """A field value with its own ``spec(max_string=..., max_length=...)`` limits.
+    """A field with its own ``spec(max_string=..., max_length=...)`` limits.
 
-    A field reader yields ``(name, _Scoped(value, limits))``; ``_walk`` builds
-    ``value`` under ``limits`` (``max_string`` / ``max_items`` replaced) for
-    its whole subtree. Private: only the readers here make it.
+    ``value`` is a live field value (from a field reader here) or a shape
+    accessor's lazy part (from ``_walk``). ``_walk`` builds it under
+    ``limits`` (``max_string`` replaced, ``max_length`` as ``max_items``) for
+    its whole subtree, then restores the outer limits. Private: only this
+    package makes one.
+
+    Args:
+        value: the field's live value, or a ``_walk._Part``.
+        limits: the field's ``max_string`` and/or ``max_length`` (``None``:
+            no cap); never empty.
     """
 
     __slots__ = ("limits", "value")

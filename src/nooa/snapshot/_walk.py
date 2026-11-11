@@ -630,7 +630,7 @@ def _build_scoped(child: _Scoped, max_size: int, depth: int, path: str, state: _
     outer = state.limits
     state.limits = _scoped_limits(outer, child.limits)
     try:
-        return _build(child.value, max_size, depth, path, state)
+        return _build_slot(child.value, max_size, depth, path, state)
     finally:
         state.limits = outer
 
@@ -715,10 +715,10 @@ def _min_size(child: Any) -> int:
     value is never compared, hashed or asked for attributes (a metaclass
     ``__eq__`` must not run).
     """
-    if type(child) is _Part:
-        return 2
     if type(child) is _Scoped:
         child = child.value
+    if type(child) is _Part:
+        return 2
     name = _builtin_name(child)
     return len(dumps(fallback_candidates(name)[0])) if name else 2
 
@@ -870,7 +870,7 @@ def _shape_fields(
         if flags.get("hidden"):
             continue
         part = _lazy(functools.partial(function, value), state)
-        entries.append((name, _scoped_part(part, flags, state)))
+        entries.append((name, _scoped_part(part, flags)))
     max_items = state.limits.max_items
     cut = max_items is not None and len(entries) > max_items
     del entries[max_items if cut else len(entries) :]
@@ -910,21 +910,10 @@ def _class_overrides(mro: tuple[type[Any], ...], state: _State) -> dict[str, dic
         return {}
 
 
-def _scoped_part(part: _Part, flags: dict[str, Any], state: _State) -> _Part:
-    """``part`` built under a field's own ``max_string`` / ``max_length`` (when it has them)."""
+def _scoped_part(part: _Part, flags: dict[str, Any]) -> _Part | _Scoped:
+    """``part`` under a field's own ``max_string`` / ``max_length``, when ``flags`` has them."""
     limits = {key: flags[key] for key in ("max_string", "max_length") if key in flags}
-    if not limits:
-        return part
-
-    def build(max_size: int, depth: int, path: str) -> _Built:
-        outer = state.limits
-        state.limits = _scoped_limits(outer, limits)
-        try:
-            return part.build(max_size, depth, path)
-        finally:
-            state.limits = outer
-
-    return _Part(build, part.min_nodes, part.exhausted)
+    return _Scoped(part, limits) if limits else part
 
 
 def _structure(
@@ -1231,6 +1220,8 @@ def _field_reserves(pairs: list[tuple[Any, Any]]) -> list[tuple[int, int]]:
     """Per field: the (chars, nodes) every later field needs for its minimal fallback."""
     needs: list[tuple[int, int]] = []
     for name, child in pairs:
+        if type(child) is _Scoped:
+            child = child.value
         # separator + "name": + minimal value; one node for the field, some for its value.
         nodes = 1 + (child.min_nodes if type(child) is _Part else 1)
         needs.append((2 + len(dumps(name)) + 2 + _min_size(child), nodes))
