@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A cell's stdout / stderr capture: a bounded ``nooa.snapshot.TextStream`` of characters.
 
-``CaptureBuffer`` replaces ``TruncatingStringIO`` for ``execute_code``'s
+``CaptureBuffer`` holds ``execute_code``'s
 streams. It keeps the head and the tail (``CaptureConfig.max_stdout`` /
 ``max_stderr`` characters together, ``CaptureConfig.tail`` of them, or half,
 from the end) and, when ``CaptureConfig.file_backed`` is set, spills the

@@ -6,6 +6,17 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Trace span `input.value` / `output.value` are `nooa.snapshot` previews:
+  `render_trace(capture(value))` JSON (at most 50,000 chars, always
+  `application/json`), with `nooa.{input,output}.preview.*` attributes saying
+  what was cut. Values are read without running their code, so an unknown
+  type shows as `"<opaque: Type>"` instead of its repr. ACP and CLI activity
+  cards cut output with `render_output`'s line instead of `<truncated-output>`.
+- `nooa.agentdoc.TruncatingStringIO` and `FileBackedTruncatingStringIO` (and
+  their `nooa.runtime` re-exports) are removed: use `nooa.snapshot.TextStream`
+  and `render_output`. `LineSplitter` and `bounded_lines` move from
+  `nooa.agentdoc` to `nooa_atom.agent.lines`.
+
 - The output the model reads goes through `nooa.snapshot` (limits unchanged;
   only the cut markers change, to `render_output`'s one line): `Shell`
   results (`[... N bytes omitted; full output: PATH]`, spill files from one

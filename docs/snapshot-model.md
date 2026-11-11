@@ -69,5 +69,5 @@ Everything is importable from `nooa.snapshot`; see each docstring for arguments,
 ## Plan
 
 1. **PR 1 (this package), into `main`:** the model, `capture` and its registry, `TextStream`, `merge` and the renderers, with tests. No consumer changes.
-2. **PR 2a, consumers the model doesn't read:** trace hooks (`capture` + `render_trace`) and ACP activity cards.
-3. **PR 2b, consumers the model reads:** `Shell`, progress, cell output, jobs, the core bash tool and prefill, after an A/B run. It ends by deleting `src/nooa/agentdoc/_truncating_stream.py`.
+2. **PR 2a, consumers the model doesn't read:** trace hooks (`capture` + `render_trace`) and ACP activity cards. It ends by deleting `src/nooa/agentdoc/_truncating_stream.py`.
+3. **PR 2b, consumers the model reads:** `Shell`, progress, cell output, jobs, the core bash tool and prefill, after an A/B run.

@@ -33,10 +33,6 @@ from typing import Annotated, Any
 from nooa._version import __version__ as __version__
 from nooa.agentdoc._docs import spec
 from nooa.agentdoc._pformat import _pformat
-from nooa.agentdoc._truncating_stream import (
-    FileBackedTruncatingStringIO,
-    TruncatingStringIO,
-)
 from nooa.agentdoc._visibility import hidden
 from nooa.agentdoc.core import doc
 from nooa.agentdoc.doc_config import DocConfig
@@ -173,6 +169,4 @@ __all__ = [
     "pformat",
     "pprint",
     "truncating_pformat",
-    "FileBackedTruncatingStringIO",
-    "TruncatingStringIO",
 ]

@@ -1424,3 +1424,16 @@ class TestFormatterReviewRegressions:
             + f"\n[... {len(whole) - max_error:,} chars omitted; full output not kept]\n"
             + whole[-tail:]
         )
+
+
+def test_docs_name_the_cut_line_cell_errors_emit():
+    """The Agent prompt and CaptureConfig describe the line a cut cell error really has."""
+    from nooa.agent import Agent
+    from nooa.config.truncation_config import CaptureConfig
+    from nooa.errors.formatting import format_error_for_llm
+
+    value = format_error_for_llm(RuntimeError("x" * 500), max_error=50, tail_chars=10)
+    assert "\n[... 464 chars omitted; full output not kept]\n" in value
+    for text in (Agent.__doc__, CaptureConfig.__doc__):
+        assert "full output not kept]" in text
+        assert "<truncated-output>" not in text and "<truncated>" not in text
