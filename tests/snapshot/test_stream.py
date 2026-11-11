@@ -177,7 +177,7 @@ def test_chars_stream_spills_utf8(tmp_path: Path) -> None:
 def test_chars_spill_cut_lands_on_a_code_point(tmp_path: Path) -> None:
     # Severin's repro (#515): max_bytes=3 used to keep b"\xc3\xa9\xc3".
     path = tmp_path / "s2.txt"
-    stream = _stream("chars", 1, 1, spill=SpillTarget(path=str(path), max_bytes=3, always=True))
+    stream = _stream("chars", 1, 1, spill=SpillTarget(path=str(path), max_bytes=3))
     stream.write("ééé")
     stream.write("x")  # fits the byte left, but the file is a prefix: not written
 
@@ -192,9 +192,7 @@ def test_chars_spill_cut_lands_on_a_code_point(tmp_path: Path) -> None:
 @pytest.mark.parametrize("max_bytes", range(10))
 def test_chars_spill_file_is_valid_utf8_for_any_max_bytes(tmp_path: Path, max_bytes: int) -> None:
     path = tmp_path / "out.txt"
-    stream = _stream(
-        "chars", 1, 1, spill=SpillTarget(path=str(path), max_bytes=max_bytes, always=True)
-    )
+    stream = _stream("chars", 1, 1, spill=SpillTarget(path=str(path), max_bytes=max_bytes))
     for part in ("a", "é€", "😀", "b"):
         stream.write(part)
 
@@ -212,7 +210,7 @@ def test_existing_spill_path_is_refused_not_truncated(tmp_path: Path) -> None:
     path.write_text("precious")
 
     with pytest.raises(FileExistsError):
-        _stream("chars", 10, 10, spill=SpillTarget(path=str(path), max_bytes=100, always=True))
+        _stream("chars", 10, 10, spill=SpillTarget(path=str(path), max_bytes=100))
 
     assert path.read_text() == "precious"
 
@@ -250,20 +248,6 @@ def test_uncut_stream_deletes_its_spill_file(tmp_path: Path) -> None:
 
     assert not path.exists()
     assert text.full is None and text.complete
-
-
-def test_always_keeps_the_spill_file(tmp_path: Path) -> None:
-    path = tmp_path / "out.log"
-    stream = TextStream(
-        unit="bytes", head=10, tail=10, spill=SpillTarget(path=str(path), always=True)
-    )
-    stream.write(b"small")
-
-    text = stream.close()
-
-    assert path.read_bytes() == b"small"
-    assert text.full == Spill(str(path), 5, 5)
-    assert render_output(text) == "small"
 
 
 def test_temp_spill_file_by_default() -> None:
@@ -320,12 +304,11 @@ def test_chars_lone_surrogate_without_spill_does_not_raise() -> None:
 
 def test_chars_lone_surrogate_spills_backslash_escaped(tmp_path: Path) -> None:
     path = tmp_path / "out.log"
-    spill = SpillTarget(path=str(path), always=True)
-    stream = TextStream(unit="chars", head=10, tail=10, spill=spill)
+    stream = TextStream(unit="chars", head=1, tail=1, spill=SpillTarget(path=str(path)))
     stream.write("a\ud800b")
 
     text = stream.close()
-    assert text.head == "a\ud800b" and text.full is not None
+    assert (text.head, text.tail) == ("a", "b") and text.full is not None
     assert path.read_bytes() == b"a\\ud800b" and text.full.kept == len(b"a\\ud800b")
 
 
@@ -336,17 +319,16 @@ def test_bytes_stream_accepts_str_with_lone_surrogate() -> None:
     assert stream.close().head == b"a\\ud800b"
 
 
-def test_running_snapshot_and_since_match_the_file_on_disk(tmp_path: Path) -> None:
+def test_running_snapshot_matches_the_file_on_disk(tmp_path: Path) -> None:
     path = tmp_path / "out.log"
-    spill = SpillTarget(path=str(path), always=True)
-    stream = TextStream(unit="bytes", head=10, tail=10, spill=spill)
+    stream = TextStream(unit="bytes", head=10, tail=10, spill=SpillTarget(path=str(path)))
     stream.write(b"y" * 100)
 
     text = stream.snapshot()
     assert text.full is not None and text.full.kept == 100 == os.path.getsize(path)
     stream.write(b"z" * 7)
-    delta, _ = stream.since(100)
-    assert delta.length == 7 and os.path.getsize(path) == 107
+    text = stream.snapshot()
+    assert text.full is not None and text.full.kept == 107 == os.path.getsize(path)
     stream.close()
 
 
@@ -383,13 +365,13 @@ def test_text_reads_do_not_rebind_the_writer_buffers() -> None:
     pieces = (list(head), list(tail))
 
     stream.snapshot()
-    stream.since(3)
+    stream.snapshot()
 
     assert stream._window._head is head and stream._window._tail is tail
     assert (list(head), list(tail)) == pieces
 
 
-# --- since / merge -----------------------------------------------------------------
+# --- write types / merge -----------------------------------------------------------------
 
 
 @pytest.mark.parametrize("data", [b"abc", bytearray(b"abc"), memoryview(b"abc")])
@@ -432,36 +414,6 @@ def test_bytes_stream_still_accepts_str() -> None:
     assert stream.close() == Text(head="é!".encode(), tail=b"", length=3, unit="bytes", reason=None)
 
 
-def test_since_returns_deltas_with_correct_lengths() -> None:
-    stream = TextStream(unit="chars", head=4, tail=4)
-    stream.write("abc")
-    first, mark = stream.since()
-    stream.write("defgh")
-    second, mark = stream.since(mark)
-    stream.write("x" * 100 + "yz")
-    third, mark = stream.since(mark)
-
-    assert first == Text(head="abc", tail="", length=3, unit="chars", reason=None)
-    assert second == Text(head="defgh", tail="", length=5, unit="chars", reason=None)
-    assert third.length == 102 and third.tail == "xxyz" and third.head == ""
-    assert third.omitted == 98
-    assert mark == 110
-    nothing, same = stream.since(mark)
-    assert nothing == Text(head="", tail="", length=0, unit="chars", reason=None) and same == mark
-
-
-def test_since_stops_before_an_incomplete_code_point() -> None:
-    stream = TextStream(unit="bytes", head=16, tail=16)
-    data = "a😀".encode()
-    stream.write(data[:3])  # "a" and half of the emoji
-    first, mark = stream.since()
-    stream.write(data[3:])
-    second, mark = stream.since(mark)
-
-    assert (first.head, first.length, mark) == (b"a", 1, 5)
-    assert (second.head, second.length) == ("😀".encode(), 4)
-
-
 def test_merge_keeps_length_and_bounds() -> None:
     a = Text(head="abcdef", tail="", length=6, unit="chars", reason=None)
     b = Text(
@@ -499,13 +451,14 @@ def test_merge_cuts_complete_deltas_that_are_too_long() -> None:
     assert render_output(merged) == "ab\n[... 5 chars omitted; full output not kept]\nhij"
 
 
-def test_merge_of_since_deltas_matches_the_stream_length() -> None:
+def test_merge_of_batches_matches_the_stream_length() -> None:
     stream = TextStream(unit="bytes", head=8, tail=8)
     merged: Text | None = None
-    mark = 0
     for chunk in (b"abc", "é€".encode() * 20, b"xyz" * 50, "😀".encode()):
         stream.write(chunk)
-        delta, mark = stream.since(mark)
+        batch = TextStream(unit="bytes", head=8, tail=8)
+        batch.write(chunk)
+        delta = batch.close()
         merged = delta if merged is None else merge(merged, delta, head=8, tail=8)
 
     assert merged is not None
@@ -543,18 +496,6 @@ def test_context_manager_closes() -> None:
 
 
 # --- review findings: short tails, split U+FFFD, merge units ------------------------
-
-
-@pytest.mark.parametrize("tail", [0, 1, 2])
-def test_since_mark_stops_before_an_incomplete_sequence_with_a_short_tail(tail: int) -> None:
-    stream = _stream("bytes", head=1, tail=tail)
-    stream.write(b"a\xf0\x9f\x98")
-
-    _delta, mark = stream.since()
-    assert mark == 1
-    stream.write(b"\x80b")
-    delta, mark = stream.since(mark)
-    assert mark == 6 and delta.length == 5
 
 
 def test_merge_keeps_raw_bytes_exactly() -> None:
@@ -640,22 +581,18 @@ def test_bytes_streams_and_merges_are_exact_for_random_splits(kinds: list[str]) 
         cuts = sorted(rng.sample(range(len(whole) + 1), min(len(whole) + 1, rng.randint(1, 6))))
         chunks = [whole[i:j] for i, j in zip([0, *cuts], [*cuts, len(whole)], strict=True)]
         data = b""
-        mark = 0
         merged: Text | None = None
-        merged_from = 0
         for chunk in chunks:
             data += chunk
             stream.write(chunk)
-            delta, new_mark = stream.since(mark)
-            _check(delta, data[mark:new_mark], head, tail)
+            batch = TextStream(unit="bytes", head=head, tail=tail)
+            batch.write(chunk)
+            delta = batch.close()
+            _check(delta, chunk, head, tail)
             if merged is None:
-                merged, merged_from = delta, mark
+                merged = delta
             else:
                 merged = merge(merged, delta, merge_head, merge_tail)
-                _check(merged, data[merged_from:new_mark], merge_head, merge_tail)
-            mark = new_mark
-        _check(stream.snapshot(), data, head, tail)
-        final = stream.close()
-        rest, _ = stream.since(mark)
-        _check(rest, data[mark:], head, tail)
-        _check(final, data, head, tail)
+                _check(merged, data, merge_head, merge_tail)
+            _check(stream.snapshot(), data, head, tail)
+        _check(stream.close(), data, head, tail)

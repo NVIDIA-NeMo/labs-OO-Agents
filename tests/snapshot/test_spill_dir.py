@@ -43,7 +43,7 @@ def test_defaults_and_private_folder() -> None:
     target = spills.target()
     assert target is not None and target.path is not None
     assert os.path.dirname(target.path) == spills.path
-    assert target.max_bytes == 64 * 2**20 // 20 and not target.always  # an equal share
+    assert target.max_bytes == 64 * 2**20 // 20  # an equal share
     spills.close()
     assert not os.path.exists(spills.path)
 
@@ -63,8 +63,8 @@ def test_invalid_arguments(tmp_path: Path) -> None:
 
 
 def test_target_without_a_folder_is_unchanged() -> None:
-    assert SpillTarget() == SpillTarget(path=None, max_bytes=64 * 2**20, always=False)
-    assert repr(SpillTarget(path="x")) == "SpillTarget(path='x', max_bytes=67108864, always=False)"
+    assert SpillTarget() == SpillTarget(path=None, max_bytes=64 * 2**20)
+    assert repr(SpillTarget(path="x")) == "SpillTarget(path='x', max_bytes=67108864)"
 
 
 def test_replace_keeps_the_folder(tmp_path: Path) -> None:
@@ -72,15 +72,15 @@ def test_replace_keeps_the_folder(tmp_path: Path) -> None:
     with SpillDir(str(tmp_path), max_files=5, max_bytes=1000) as spills:
         target = spills.target()
         assert target is not None and target.path is not None
-        kept = dataclasses.replace(target, always=True)
+        kept = dataclasses.replace(target, max_bytes=3)
 
-        assert kept._dir is spills and kept.always
+        assert kept._dir is spills and kept.max_bytes == 3
         assert kept == dataclasses.replace(kept, _dir=None)  # not compared
         assert "_dir" not in repr(kept)
         stream = _stream(kept)
-        stream.write(b"hi")
+        stream.write(b"hello")
         assert stream.close().full is not None
-        assert Path(target.path).read_bytes() == b"hi"  # always: kept, and still the folder's
+        assert Path(target.path).read_bytes() == b"hel"  # cut: kept, and still the folder's
     assert not os.path.exists(target.path)  # deleted by the folder's close()
 
 
@@ -96,7 +96,7 @@ def test_replace_cannot_raise_the_granted_bytes(tmp_path: Path) -> None:
 
 def test_one_target_opens_one_stream(tmp_path: Path) -> None:
     with SpillDir(str(tmp_path), max_files=2, max_bytes=100) as spills:
-        target = spills.target(always=True)
+        target = spills.target()
         assert target is not None and target.path is not None
         first = _stream(target)
         first.write(b"first")
@@ -107,40 +107,9 @@ def test_one_target_opens_one_stream(tmp_path: Path) -> None:
         assert Path(target.path).read_bytes() == b"first"
 
 
-def test_closed_always_file_is_evicted_oldest_first(tmp_path: Path) -> None:
-    # Keep the newest files: a closed always=True file makes room like any other.
-    with SpillDir(str(tmp_path), max_files=2, max_bytes=1000) as spills:
-        first = TextStream(unit="chars", head=1, tail=1, spill=spills.target(always=True))
-        first.write("hello world")
-        oldest = first.close().full
-        newer = _cut(spills)
-        assert oldest is not None and os.path.exists(oldest.path)
-
-        target = spills.target(always=True)  # count full: the oldest closed file goes
-        assert target is not None
-        assert not os.path.exists(oldest.path) and os.path.exists(newer)
-        with pytest.raises(FileNotFoundError):  # how a reader tells it is no longer kept
-            Path(oldest.path).open("rb").close()
-
-
-def test_always_set_by_replace_is_evicted_oldest_first(tmp_path: Path) -> None:
-    with SpillDir(str(tmp_path), max_files=2, max_bytes=1000) as spills:
-        target = spills.target()
-        assert target is not None
-        stream = _stream(dataclasses.replace(target, always=True))
-        stream.write(b"kept")
-        kept = stream.close().full
-        newer = _cut(spills)
-        assert kept is not None
-        assert spills.target() is not None  # evicts the older always=True file
-        assert not os.path.exists(kept.path) and os.path.exists(newer)
-        with pytest.raises(FileNotFoundError):
-            Path(kept.path).read_bytes()
-
-
-def test_open_always_stream_file_is_never_evicted(tmp_path: Path) -> None:
+def test_open_stream_file_is_never_evicted_by_count(tmp_path: Path) -> None:
     with SpillDir(str(tmp_path), max_files=1, max_bytes=1000) as spills:
-        open_target = spills.target(always=True)
+        open_target = spills.target()
         assert open_target is not None and open_target.path is not None
         running = _stream(open_target)
         running.write(b"0123456789")
@@ -243,19 +212,6 @@ def test_complete_output_deleted_by_its_stream_is_released(tmp_path: Path) -> No
         assert not os.path.exists(target.path)
         again = spills.target()
         assert again is not None and again.max_bytes == 10  # count and bytes free again
-
-
-def test_always_keeps_complete_output(tmp_path: Path) -> None:
-    with SpillDir(str(tmp_path), max_files=2, max_bytes=10) as spills:
-        target = spills.target(always=True)
-        assert target is not None and target.always and target.path is not None
-        stream = TextStream(unit="bytes", head=10, tail=10, spill=target)
-        stream.write(b"short")
-        assert stream.close().full is not None
-        assert Path(target.path).read_bytes() == b"short"
-        again = spills.target(max_bytes=5)
-        assert again is not None and again.max_bytes == 5
-        assert os.path.exists(target.path)
 
 
 def test_close_deletes_everything_and_is_idempotent() -> None:
@@ -364,7 +320,7 @@ def test_many_streams_never_exceed_the_byte_total(tmp_path: Path) -> None:
                 assert size <= max_bytes and files <= max_files
             else:
                 ask = rng.choice([None, rng.randrange(0, 3000)])
-                stream = _stream(spills.target(max_bytes=ask, always=rng.random() < 0.3))
+                stream = _stream(spills.target(max_bytes=ask))
                 running.append(stream)
             for stream in running:
                 chunk = os.urandom(rng.randrange(0, 1500))

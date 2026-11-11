@@ -52,10 +52,9 @@ class SpillTarget:
       always valid UTF-8 and may hold up to 3 bytes less; ``Spill.kept``
       counts the bytes actually written. A bytes stream's file holds the
       raw bytes as written.
-    - ``always`` (default ``False``): keep the file even when nothing was
-      cut. ``False``: ``close()`` deletes it when the final ``Text`` is
-      complete (the snapshot then holds everything). In a ``SpillDir`` a
-      closed file kept so is still evicted oldest-first like any other.
+
+    ``close()`` deletes the file when the final ``Text`` is complete (the
+    snapshot then holds everything).
 
     The stream owns the file it creates: apart from ``FileExistsError``
     for an existing ``path``, it never raises for a file error. When the
@@ -73,7 +72,6 @@ class SpillTarget:
 
     path: str | None = None
     max_bytes: int = DEFAULT_SPILL_BYTES
-    always: bool = False
     # The folder that handed this target out (``SpillDir.target``), or ``None``.
     # Private: only ``SpillDir.target`` passes it. A real (keyword-only) field,
     # so ``dataclasses.replace`` keeps it; left out of repr and comparison.
@@ -93,7 +91,7 @@ class TextStream:
     - ``spill`` (default ``None``): a ``SpillTarget`` to also write the
       whole output to a file while the stream runs; ``None``: memory only.
 
-    Methods: ``write(data)``, ``snapshot()``, ``since(mark)``, ``close()``.
+    Methods: ``write(data)``, ``snapshot()``, ``close()``.
     A ``TextStream`` is also a context manager that closes on exit.
 
     Guarantees:
@@ -110,9 +108,9 @@ class TextStream:
       boundary, so it is valid UTF-8); a file error never raises (see
       ``SpillTarget``).
 
-    Threads: one writer. ``snapshot()`` and ``since()`` only read memory
-    (and flush the spill file) but are not synchronised with ``write``:
-    call them from the writer's thread, or serialise them with writes.
+    Threads: one writer. ``snapshot()`` only reads memory (and flushes
+    the spill file) but is not synchronised with ``write``: call it from
+    the writer's thread, or serialise it with writes.
     There is no lock.
 
     Raises ``ValueError`` for an unknown ``unit``, a negative ``head`` or
@@ -153,12 +151,8 @@ class TextStream:
         self.head = head
         self.tail = tail
         self._spill_max = spill.max_bytes if spill is not None else 0
-        self._keep_file = spill is not None and spill.always  # kept even when nothing was cut
         self._total = 0  # units written
         self._window = _Window(head, tail, b"" if unit == "bytes" else "")
-        # The last bytes (up to 4) of a bytes stream, whatever head and tail
-        # keep: ``since()`` stops before an incomplete UTF-8 sequence in them.
-        self._last = b""
         self._closed: Text | None = None
         self._file: IO[bytes] | None = None
         self._path: str | None = None
@@ -304,7 +298,6 @@ class TextStream:
                     f"not {type(data).__name__}"
                 )
             self._spill(data)
-            self._last = (self._last + data[-4:])[-4:]
         elif not isinstance(data, str):
             raise TypeError(
                 f"a chars TextStream takes str, not {type(data).__name__}; "
@@ -318,9 +311,7 @@ class TextStream:
     # --- describing -------------------------------------------------------
 
     def _full(self, cut: bool) -> Spill | None:
-        if self._path is None or self._spill_failed:
-            return None
-        if not cut and not self._keep_file:
+        if not cut or self._path is None or self._spill_failed:
             return None
         return Spill(self._path, self._kept, self._produced)
 
@@ -358,48 +349,12 @@ class TextStream:
         self._flush()
         return self._text(0, self._total)
 
-    def _safe_total(self) -> int:
-        """The units written, without a trailing incomplete UTF-8 sequence (bytes)."""
-        if self.unit != "bytes":
-            return self._total
-        # ``_last`` holds the stream's last bytes even when head and tail keep
-        # fewer than a code point's width (a short tail, ``tail=0``).
-        last = self._last
-        return self._total - (len(last) - complete_prefix(last))
-
-    def since(self, mark: int = 0) -> tuple[Text, int]:
-        """What arrived after ``mark``, and the mark to pass next time: ``(Text, mark)``.
-
-        ``mark`` (default 0, the start) is a unit count returned by an
-        earlier ``since``; it is clamped to what was written. The ``Text``
-        has ``length`` = the units after ``mark`` and keeps what memory
-        still holds of them (in the head or the rolling tail); the rest is
-        omitted. A bytes stream's new mark stops before an incomplete UTF-8
-        sequence at the end, so the next delta starts with it. Join unread
-        deltas with ``merge``.
-
-        >>> from nooa.snapshot import TextStream
-        >>> stream = TextStream(unit="chars", head=3, tail=3)
-        >>> stream.write("hello")
-        >>> first, mark = stream.since()
-        >>> stream.write(" world")
-        >>> stream.since(mark)
-        (Text(head='', tail='rld', length=6, unit='chars', reason='max_length', full=None), 11)
-        """
-        if self._closed is not None:
-            end = self._total
-        else:
-            self._flush()
-            end = self._safe_total()
-        mark = min(max(0, mark), end)
-        return self._text(mark, end), end
-
     def close(self) -> Text:
         """Finish the stream and return the final ``Text``; later calls return the same one.
 
-        Closes the spill file and deletes it when the ``Text`` is complete,
-        unless ``SpillTarget.always`` is set. After ``close()``, ``write``
-        raises ``ValueError``; ``snapshot()`` and ``since()`` still work.
+        Closes the spill file and deletes it when the ``Text`` is complete.
+        After ``close()``, ``write`` raises ``ValueError``; ``snapshot()``
+        still works.
         """
         if self._closed is not None:
             return self._closed
@@ -410,12 +365,7 @@ class TextStream:
             except OSError:
                 self._fail()
         text = self._text(0, self._total)
-        delete = (
-            text.complete
-            and not self._keep_file
-            and self._path is not None
-            and not self._spill_failed
-        )
+        delete = text.complete and self._path is not None and not self._spill_failed
         if self._owner is not None:
             self._release(delete=delete)
         elif delete:
@@ -459,14 +409,13 @@ class SpillDir:
     - ``max_files``: at most this many of its files exist at once.
     - ``max_bytes``: its files hold at most this many bytes together.
 
-    ``target(*, always=False, max_bytes=None)`` hands out a ``SpillTarget``
+    ``target(*, max_bytes=None)`` hands out a ``SpillTarget``
     for one ``TextStream``, with a new empty file in the folder. The budget
     holds without watching writes: an open stream's file counts its
     target's ``max_bytes`` (a stream never writes more), a closed one its
     size on disk. To make room for a new target, ``target()`` deletes
-    closed files, oldest first, until the new one fits both limits,
-    including files kept with ``always=True``; it never deletes the file
-    of a stream still open. The new target's
+    closed files, oldest first, until the new one fits both limits; it
+    never deletes the file of a stream still open. The new target's
     ``max_bytes`` is the one asked for (default: an equal share,
     ``max_bytes // max_files``, so ``max_files`` default-size streams fit
     at once), cut to what is left. With no file or byte left,
@@ -476,7 +425,7 @@ class SpillDir:
 
     A full copy in a ``SpillDir`` is not permanent: ``Text.full`` (a
     ``Spill``) of an earlier stream can name a file deleted since, because
-    the folder needed room (``always=True`` included) or closed. Opening
+    the folder needed room or closed. Opening
     that path then raises ``FileNotFoundError``: that is how a reader
     tells the output is no longer kept.
 
@@ -529,16 +478,15 @@ class SpillDir:
         self._files: dict[str, _Entry] = {}  # in creation order: the oldest first
         self._closed = False
 
-    def target(self, *, always: bool = False, max_bytes: int | None = None) -> SpillTarget | None:
+    def target(self, *, max_bytes: int | None = None) -> SpillTarget | None:
         """A ``SpillTarget`` for one new stream, within the budget; ``None``: keep memory only.
 
-        - ``always``: as ``SpillTarget.always``.
         - ``max_bytes`` (default: an equal share, the folder's
           ``max_bytes // max_files``): the most the stream may write; cut to
           what the folder has left.
 
         Deletes the oldest closed files to make room (see ``SpillDir``),
-        ``always=True`` ones included, never an open stream's file. Returns
+        never an open stream's file. Returns
         ``None`` when no file or byte is left even so, or when the file
         cannot be created (logged). Raises ``ValueError`` after ``close()``
         or for a negative ``max_bytes``.
@@ -570,7 +518,7 @@ class SpillDir:
                 _log.warning("could not create a spill file; keeping memory only", exc_info=True)
                 return None
             self._files[path] = _Entry((info.st_dev, info.st_ino), room)
-        return SpillTarget(path=path, max_bytes=room, always=always, _dir=self)
+        return SpillTarget(path=path, max_bytes=room, _dir=self)
 
     def _used(self) -> int:
         return sum(entry.reserved for entry in self._files.values())
@@ -727,7 +675,7 @@ def _encode(text: str) -> bytes:
 def merge(a: Text, b: Text, head: int, tail: int) -> Text:
     """``a`` followed by ``b`` as one ``Text`` keeping at most ``head`` + ``tail`` units.
 
-    For unread progress deltas (two results of ``TextStream.since``).
+    For two batches of output read one after the other (progress deltas).
 
     - ``a``, ``b``: two ``Text`` of the same unit.
     - ``head``, ``tail``: the units the result may keep from its start and
