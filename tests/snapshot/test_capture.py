@@ -520,7 +520,7 @@ def test_dataclass_foreign_constraint_metadata_stays_visible() -> None:
 def test_dataclass_hints_are_evaluated_once_per_class(monkeypatch) -> None:
     import typing
 
-    from nooa.snapshot import _visibility
+    from nooa.snapshot import _fields
 
     calls: list[object] = []
     real = typing.get_type_hints
@@ -542,19 +542,19 @@ def test_dataclass_hints_are_evaluated_once_per_class(monkeypatch) -> None:
     assert calls == [Counted]
     calls.clear()
     key = id(Counted)
-    assert key in _visibility._HINTS
+    assert key in _fields._HINTS
     del Counted
     import gc
 
     gc.collect()
-    assert key not in _visibility._HINTS  # dropped with the class (weakref.finalize)
+    assert key not in _fields._HINTS  # dropped with the class (weakref.finalize)
 
 
 def test_dataclass_hints_that_fail_are_retried_by_the_next_capture(monkeypatch) -> None:
     import types
     import typing
 
-    from nooa.snapshot import _visibility
+    from nooa.snapshot import _fields
 
     calls: list[object] = []
     real = typing.get_type_hints
@@ -584,7 +584,7 @@ def test_dataclass_hints_that_fail_are_retried_by_the_next_capture(monkeypatch) 
     # each annotation once on its own (a probe class per annotation).
     assert [call for call in calls if call is later] == [later]
     assert len(calls) == 3
-    assert id(later) not in _visibility._HINTS  # and not cached for the process
+    assert id(later) not in _fields._HINTS  # and not cached for the process
     assert all(item.reason == "unreadable" for item in first.head)
     assert "s3cret" not in render_python(first)
 

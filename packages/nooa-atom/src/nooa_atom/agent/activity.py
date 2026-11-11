@@ -21,7 +21,7 @@ from nooa.context_blocks import EventBase
 from nooa.context_blocks.roles import Role
 from nooa.runtime.event_manager import EventManager
 from nooa.skill import Skill
-from nooa.snapshot import Limits, TextStream, capture, render_output, render_python
+from nooa.snapshot import TextStream, cut, render_output, render_python
 from nooa.tools import BashSession, StreamDone, StreamEvent
 from nooa.tools.shell_tools import (
     FileWrite,
@@ -38,18 +38,14 @@ _MAX_COMMAND_OUTPUT_CHARS = 30_000
 (``MAX_OUTPUT_CHARS`` of the core shell session), so the card shows what the model got."""
 _MAX_DIFF_INPUT_CHARS = 1_000_000
 _MAX_DIFF_INPUT_LINES = 20_000
-# Keep both ends of a cut text; ``max_chars`` (JSON size, 12 per escaped astral
-# char) is big enough that only ``max_string`` cuts.
-_EVENT_TEXT_LIMITS = Limits(
-    max_string=_MAX_EVENT_TEXT_CHARS, tail_share=0.5, max_chars=12 * _MAX_EVENT_TEXT_CHARS + 2
-)
 
 
 def _event_text(text: str) -> str:
     """``text`` itself, or past ``_MAX_EVENT_TEXT_CHARS`` its ``str(len=N, [:h]=..., [-t:]=...)`` cut."""
     if len(text) <= _MAX_EVENT_TEXT_CHARS:
         return text
-    return render_python(capture(text, _EVENT_TEXT_LIMITS))
+    tail = _MAX_EVENT_TEXT_CHARS // 2
+    return render_python(cut(text, head=_MAX_EVENT_TEXT_CHARS - tail, tail=tail))
 
 
 def _output_stream() -> TextStream:

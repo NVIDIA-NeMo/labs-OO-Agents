@@ -31,6 +31,7 @@ import sys
 import typing
 import weakref
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any, cast
 
 from pydantic import BaseModel
@@ -39,15 +40,16 @@ from pydantic.fields import FieldInfo
 from nooa.agentdoc._docs import SpecAnnotation
 from nooa.agentdoc._visibility import hidden
 from nooa.snapshot._limits import _State
-from nooa.snapshot._model import Reason
 from nooa.snapshot._raw import (
     _BASE_MODEL_DICT,
     _NO_SLOT,
     _TYPE_MRO,
     _copy_storage,
     _FailClosed,
+    _Fields,
     _instance_storage,
     _namespace,
+    _Omitted,
     _raw_namespace,
     _slot_value,
 )
@@ -333,25 +335,6 @@ def _pydantic_fields(mro: tuple[type[Any], ...], state: _State) -> dict[str, Fie
     raise _FailClosed
 
 
-class _Omitted:
-    """An entry stream's note that something was left out here, and why.
-
-    The one way a field reader or a shape's items say "incomplete because":
-    the builder keeps reading, and the first such reason is the node's when
-    the builder's own limits left it complete.
-    """
-
-    __slots__ = ("reason",)
-    reason: Reason
-
-    def __init__(self, reason: Reason) -> None:
-        self.reason = reason
-
-
-_Fields = typing.Iterator[tuple[str, Any] | _Omitted]
-"""A field reader's (name, value) fields and ``_Omitted`` notes; it raises ``_FailClosed``."""
-
-
 class _Scoped:
     """A field value with its own ``spec(max_string=..., max_length=...)`` limits.
 
@@ -598,8 +581,10 @@ def _is_class(value: Any, state: _State) -> bool:
 
 def _plain_entries(
     value: Any, mro: tuple[type[Any], ...], state: _State
-) -> list[tuple[str, Any] | _Omitted] | None:
-    """The public instance attributes of a plain object, read raw; ``None``: not a plain object.
+) -> tuple[list[tuple[str, Any] | _Omitted], int] | None:
+    """The public instance attributes of a plain object, read raw, and its attribute count.
+
+    ``None``: not a plain object.
 
     A plain object is an instance of a class whose MRO defines no
     ``__getattribute__`` (no proxies), with the standard ``__dict__`` slot
@@ -612,6 +597,11 @@ def _plain_entries(
     ``max_string``, ``max_length``). An object
     with no field left whose class defines ``__repr__`` is not a plain
     object either: its repr is all it shows.
+
+    A huge ``__dict__`` is read only up to a quarter of the node budget left (in
+    insertion order; the rest is ``_Omitted("max_items")``), so its first
+    attributes still show; the count is ``len(__dict__)`` plus the filled
+    slots.
     """
     try:
         has_dict = False
@@ -629,14 +619,20 @@ def _plain_entries(
         slots = _slot_names(mro, state)
         if not has_dict and not [name for name in slots if name not in ("__dict__", "__weakref__")]:
             return None
-        storage = _copy_storage(_instance_storage(value, mro, state), state) if has_dict else {}
+        raw = _instance_storage(value, mro, state) if has_dict else {}
+        if type(raw) is not dict:
+            return None
+        total = dict.__len__(raw)
+        # A quarter of the work left: the names cost as much again, the fields the rest.
+        storage = _copy_storage(raw, state, limit=max(1, state.nodes_left // 4))
+        partial = len(storage) < total
         overrides = _visibility_overrides(storage, mro, state)
         hide_empty = _class_hide_empty(mro, state)
         found: list[tuple[str, Any]] = []
         for name, default in _class_defaults(mro, state):
             if name in storage:
                 found.append((name, dict.__getitem__(storage, name)))
-            elif name not in slots:
+            elif name not in slots and not partial:  # beyond a partial copy: unknown
                 found.append((name, default))
         declared = {name for name, _value in found}
         found += [(name, item) for name, item in dict.items(storage) if name not in declared]
@@ -646,6 +642,7 @@ def _plain_entries(
             slot = _slot_value(name, mro, value, state)
             if slot is not _NO_SLOT:
                 found.append((name, slot))
+                total += 1
         entries: list[tuple[str, Any] | _Omitted] = []
         for name, field_value in found:
             if not state.take_node():
@@ -666,8 +663,25 @@ def _plain_entries(
             entry = _field_entry(name, field_value, flags, hide_empty)
             if entry is not None:
                 entries.append(entry)
+        if partial:
+            entries.append(_Omitted("max_items"))
     except _FailClosed:
         return None
     if not entries and defines_repr:
         return None
-    return entries
+    return entries, total
+
+
+@dataclass(frozen=True)
+class _FieldReader:
+    """The internal shape of Pydantic models and dataclasses: a privileged field reader.
+
+    ``read(value, mro, carrier, state)`` yields the fields of the class
+    ``carrier`` (the MRO entry that matched). Never registered by users.
+    """
+
+    read: Callable[[Any, tuple[type[Any], ...], type[Any], _State], _Fields]
+
+
+_PYDANTIC = _FieldReader(_pydantic_entries)
+_DATACLASS = _FieldReader(_dataclass_entries)

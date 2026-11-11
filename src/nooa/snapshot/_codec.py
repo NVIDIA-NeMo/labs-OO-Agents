@@ -120,6 +120,15 @@ class Container:
         self.size += (2 if self.count else 0) + overhead + size
         self.count += 1
 
+    def pop(self, cost: int) -> None:
+        """Give back the last entry, which cost ``cost`` characters (its separator included)."""
+        self.size -= cost
+        self.count -= 1
+
+    def resume(self) -> None:
+        """Forget the stop reason: entries that were given back made room again."""
+        self.reason = None
+
 
 def fallback_candidates(type_name: str) -> tuple[Any, ...]:
     """#342's type-oriented smallest JSON fallbacks, by built-in type name."""
@@ -240,3 +249,15 @@ def complete_prefix(data: bytes | bytearray) -> int:
 def decode(data: bytes | bytearray) -> str:
     """``data`` decoded as UTF-8 with replacement (how every renderer shows bytes)."""
     return bytes(data).decode("utf-8", errors="replace")
+
+
+def encode_text(text: str) -> bytes:
+    """``text`` as UTF-8 bytes: raw bytes for surrogate escapes, else ``\\udXXX`` text.
+
+    How a bytes ``TextStream`` and ``cut(unit="bytes")`` encode a ``str``, and
+    how a chars stream writes its spill file.
+    """
+    try:
+        return text.encode("utf-8", errors="surrogateescape")
+    except UnicodeEncodeError:
+        return text.encode("utf-8", errors="backslashreplace")

@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import logging
 import math
 import operator
+import time
 import typing
 from collections.abc import Callable, Iterable
 from typing import Any, Literal, NamedTuple, cast
@@ -38,6 +40,14 @@ from nooa.snapshot._codec import (
     safe_end,
     safe_start,
 )
+from nooa.snapshot._fields import (
+    _DATACLASS,
+    _PYDANTIC,
+    _FieldReader,
+    _plain_entries,
+    _Scoped,
+    _visibility_overrides,
+)
 from nooa.snapshot._limits import Limits, _split, _State
 from nooa.snapshot._model import (
     Key,
@@ -56,15 +66,15 @@ from nooa.snapshot._raw import (
     _bounded_type_name,
     _builtin_name,
     _FailClosed,
+    _Fields,
+    _Omitted,
     _raw_namespace,
     _safe_mro,
 )
 from nooa.snapshot._render import key_text
 from nooa.snapshot._shapes import (
-    _DATACLASS,
-    _PYDANTIC,
+    _REGISTRY,
     _Collection,
-    _FieldReader,
     _metadata,
     _NdarrayLike,
     _ObjectLike,
@@ -80,13 +90,6 @@ from nooa.snapshot._std import (
     _TextView,
     _View,
 )
-from nooa.snapshot._visibility import (
-    _Fields,
-    _Omitted,
-    _plain_entries,
-    _Scoped,
-    _visibility_overrides,
-)
 
 
 class _Built(NamedTuple):
@@ -95,6 +98,40 @@ class _Built(NamedTuple):
 
 
 # --- fallbacks -------------------------------------------------------------
+
+
+_log = logging.getLogger(__name__)
+
+SLOW_REPR_SECONDS = 0.1
+"""A ``repr`` the fallback runs that takes longer than this logs a developer warning."""
+LARGE_REPR_CHARS = 1_000_000
+"""A ``repr`` the fallback runs that returns more characters than this logs a developer warning."""
+
+
+def _run_repr(value: Any, state: _State) -> str | None:
+    """``repr(value)`` for the ``"repr"`` fallback; ``None`` when it raises or is not a ``str``.
+
+    The value's own code runs here, unbounded before the cut: one slower than
+    ``SLOW_REPR_SECONDS`` or longer than ``LARGE_REPR_CHARS`` logs a warning
+    naming the type, the time and the size, so a developer can give the type
+    a cheaper reading.
+    """
+    start = time.perf_counter()
+    try:
+        text = repr(value)
+    except Exception:
+        return None
+    elapsed = time.perf_counter() - start
+    if type(text) is not str:
+        return None
+    if elapsed > SLOW_REPR_SECONDS or str.__len__(text) > LARGE_REPR_CHARS:
+        _log.warning(
+            "snapshot: repr() of %s took %.3f s and returned %s characters",
+            _qualified_type_name(value, state),
+            elapsed,
+            f"{str.__len__(text):,}",
+        )
+    return text
 
 
 def _fallback(value: Any, reason: Reason, max_size: int) -> _Built:
@@ -211,21 +248,65 @@ def _cut_text(
     return _Built(node, cost(kept))
 
 
-def _build_integer(value: int, max_size: int) -> _Built:
-    """Encode an integer only when decimal conversion is itself bounded."""
+def _build_integer(value: int, max_size: int, depth: int, path: str, state: _State) -> _Built:
+    """Encode an integer only when decimal conversion is itself bounded; else its digit count."""
     bits = int.bit_length(value)
     # Decimal digits are approximately bits * log10(2). The upper bound keeps
     # conversion below both the output budget and Python's default digit guard.
     estimated_digits = (bits * 30_103) // 100_000 + 1 + (1 if value < 0 else 0)
     if estimated_digits > max_size or estimated_digits > 4_000:
-        return _fallback(value, "max_length", max_size)
+        return _big_integer(value, max_size, depth, path, state)
     try:
         encoded = dumps(value)
     except (ValueError, OverflowError):
-        return _fallback(value, "max_length", max_size)
+        return _big_integer(value, max_size, depth, path, state)
     if len(encoded) > max_size:
-        return _fallback(value, "max_length", max_size)
+        return _big_integer(value, max_size, depth, path, state)
     return _Built(Scalar(value), len(encoded))
+
+
+def _big_integer(value: int, max_size: int, depth: int, path: str, state: _State) -> _Built:
+    """An int too long to keep: an ``Object`` (``kind="python.int"``) of its digit count, cut.
+
+    The count comes from ``math.log10`` (no decimal conversion): exact but
+    within float precision of a power of ten, where it may be one off.
+    """
+    negative = value < 0
+    entries: list[tuple[str, Any]] = [
+        ("digits", int(math.log10(-value if negative else value)) + 1)
+    ]
+    if negative:
+        entries.append(("negative", True))
+    built = _object_fields("int", iter(entries), max_size, depth, path, state, "python.int")
+    node = cast(Object, built.node)
+    if len(node.fields) < len(entries):
+        return _fallback(value, "max_length", max_size)
+    return _Built(dataclasses.replace(node, reason="max_length"), built.size)
+
+
+def _repr_object(value: Any, max_size: int, depth: int, path: str, state: _State) -> _Built | None:
+    """``repr(value)`` (bounded, see ``_run_repr``) as an ``Object(kind="python.repr")``; ``None``: none."""
+    if max_size < 2:
+        return None
+    text = _run_repr(value, state)
+    if text is None:
+        return None
+    type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
+    entries = iter([("repr", text)])
+    return _object_fields(
+        type_name, entries, max_size, depth, path, state, "python.repr", capped=False
+    )
+
+
+def _defines_repr(mro: tuple[type[Any], ...], state: _State) -> bool:
+    """Whether a class in ``mro`` other than ``object`` defines ``__repr__`` (raw namespaces)."""
+    for base in mro:
+        if base is object:
+            continue
+        namespace = _raw_namespace(base, state)
+        if namespace is not None and "__repr__" in namespace:
+            return True
+    return False
 
 
 def _opaque(value: Any, max_size: int, depth: int, path: str, state: _State) -> _Built:
@@ -239,17 +320,10 @@ def _opaque(value: Any, max_size: int, depth: int, path: str, state: _State) -> 
     whose ``repr`` field is cut like a string; a raising ``repr`` gives the
     opaque node.
     """
-    if state.limits.fallback == "repr" and max_size >= 2:
-        try:
-            text = repr(value)
-        except Exception:
-            text = None
-        if type(text) is str:
-            type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
-            entries = iter([("repr", text)])
-            return _object_fields(
-                type_name, entries, max_size, depth, path, state, "python.repr", capped=False
-            )
+    if state.limits.fallback == "repr":
+        built = _repr_object(value, max_size, depth, path, state)
+        if built is not None:
+            return built
     name = _qualified_type_name(value, state)[: opaque_name_budget(max_size)]
     fallback_type = _builtin_name(value)
     _label, size = opaque_json(name, fallback_type, max_size)
@@ -316,16 +390,16 @@ def _build_sequence(
         state,
         lambda: _container(
             (get(cast(Any, value), index) for index in range(head_n)),
-            length,
-            type_name,
-            False,
-            max_size,
-            depth,
-            path,
-            state,
-            head_n,
-            tail_n,
-            lambda: (get(cast(Any, value), index) for index in range(length - 1, -1, -1)),
+            length=length,
+            type_name=type_name,
+            keyed=False,
+            max_size=max_size,
+            depth=depth,
+            path=path,
+            state=state,
+            head_n=head_n,
+            tail_n=tail_n,
+            backwards=lambda: (get(cast(Any, value), index) for index in range(length - 1, -1, -1)),
         ),
     )
 
@@ -346,22 +420,23 @@ def _build_dict(
         state,
         lambda: _container(
             dict.items(value),
-            length,
-            "dict",
-            True,
-            max_size,
-            depth,
-            path,
-            state,
-            head_n,
-            tail_n,
-            lambda: reversed(dict.items(value)),
+            length=length,
+            type_name="dict",
+            keyed=True,
+            max_size=max_size,
+            depth=depth,
+            path=path,
+            state=state,
+            head_n=head_n,
+            tail_n=tail_n,
+            backwards=lambda: reversed(dict.items(value)),
         ),
     )
 
 
 def _container(
     entries: Iterable[Any],
+    *,
     length: int,
     type_name: str,
     keyed: bool,
@@ -394,89 +469,118 @@ def _container(
     container that fits is kept as it is, and every entry is built once.
     ``tail_share`` 0 keeps a head only, as #342 does.
     """
-    box = Container(max_size)
-    seen: set[str] = set()  # the JSON keys kept so far (our own exact ``str``)
+    fill = _Fill(Container(max_size), keyed, depth, path, state)
+    head, omitted = fill.head(entries, head_n)
+    share = state.limits.tail_share
+    if budget_tail and backwards is not None and share > 0 and fill.box.reason == "max_length":
+        # The budget cut the head: give the end its share of the budget.
+        fill.shorten_head(head, max_size - int((max_size - 2) * share))
+        tail_n = length - len(head) if tail_n == 0 else tail_n
+    tail_n = min(tail_n, length - len(head))
+    tail: list[Any] = []
+    if fill.box.reason is None and tail_n and backwards is not None:
+        tail = fill.tail(backwards(), tail_n, length)
+    if omitted is None and len(head) + len(tail) == length:
+        head, tail = head + tail, []  # the two ends met: everything is kept
+    reason = fill.box.reason or omitted
+    if reason is None and len(head) + len(tail) < length:
+        reason = "max_items"
+    node_type = Mapping if keyed else Sequence
+    return _Built(node_type(type_name, length, tuple(head), reason, tuple(tail)), fill.box.size)
 
-    def add(entry: Any, index: int, kept: list[Any]) -> bool:
+
+class _Fill:
+    """One container being filled: its budget (``box``), the JSON keys kept, the head's costs.
+
+    Each entry is built once, by ``add``. ``head`` fills from the start;
+    ``shorten_head`` gives back the last head entries to make room for a
+    tail, and ``tail`` fills from the end.
+    """
+
+    def __init__(self, box: Container, keyed: bool, depth: int, path: str, state: _State) -> None:
+        self.box = box
+        self.keyed = keyed
+        self.depth = depth
+        self.path = path
+        self.state = state
+        self.seen: set[str] = set()  # the JSON keys kept so far (our own exact ``str``)
+        # Each head entry's share of ``box.size``, and its JSON key (a mapping's).
+        self.head_costs: list[tuple[int, str | None]] = []
+
+    def head(self, entries: Iterable[Any], head_n: int) -> tuple[list[Any], Reason | None]:
+        """Up to ``head_n`` entries from the start, and the reason of the first ``_Omitted`` note."""
+        head: list[Any] = []
+        omitted: Reason | None = None
+        iterator = iter(entries)
+        while len(head) < head_n:
+            if self.keyed and self.state.nodes_left <= 0:
+                self.box.stop("max_nodes")
+                break
+            try:
+                entry = next(iterator)
+            except StopIteration:
+                break
+            if type(entry) is _Omitted:
+                omitted = omitted or entry.reason
+                continue
+            if not self.add(entry, len(head), head, in_head=True):
+                break
+        return head, omitted
+
+    def shorten_head(self, head: list[Any], limit: int) -> None:
+        """Drop the last head entries until the box is at most ``limit``; the box may go on."""
+        while head and self.box.size > limit:
+            head.pop()
+            cost, segment = self.head_costs.pop()
+            self.box.pop(cost)
+            if segment is not None:
+                self.seen.discard(segment)
+        self.box.resume()
+
+    def tail(self, backwards: Iterable[Any], tail_n: int, length: int) -> list[Any]:
+        """Up to ``tail_n`` entries from the end (``backwards``: the last one first), in order."""
+        tail: list[Any] = []
+        for offset, entry in enumerate(backwards):
+            if offset >= tail_n or not self.add(entry, length - 1 - offset, tail, in_head=False):
+                break
+        tail.reverse()
+        return tail
+
+    def add(self, entry: Any, index: int, kept: list[Any], *, in_head: bool) -> bool:
+        """Build ``entry`` into the room left and append it to ``kept``; ``False``: the box stopped."""
+        box, state = self.box, self.state
         if state.nodes_left <= 0:
             box.stop("max_nodes")
             return False
         key: Any = None
-        if keyed:
+        if self.keyed:
             key, child = entry
             state.take_node()
             segment = json_key(key, live=True)
             if segment is None:
                 key = _key_node(key, state)  # a tuple, an enum member...: a node key
                 segment = key_text(key) if key is not None else None
-            if segment is None or segment in seen:
+            if segment is None or segment in self.seen:
                 # No JSON key, or one that collides in JSON (``1`` and ``"1"``):
                 # stop here, as ``render_json`` would, keeping the first.
                 box.stop("key")
                 return False
-            seen.add(segment)
+            self.seen.add(segment)
         else:
             child, segment = entry, str(index)
-        slot = box.slot(segment if keyed else None)
+        slot = box.slot(segment if self.keyed else None)
         if slot is None:
             return False
         overhead, available = slot
-        built = _build_slot(child, available, depth + 1, pointer_child(path, segment), state)
-        kept.append((cast(Key, key), built.node) if keyed else built.node)
+        built = _build_slot(
+            child, available, self.depth + 1, pointer_child(self.path, segment), state
+        )
+        kept.append((cast(Key, key), built.node) if self.keyed else built.node)
         cost = (2 if box.count else 0) + overhead + built.size
         box.commit(overhead, built.size)
-        if kept is head:
-            head_costs.append((cost, segment if keyed else None))
+        if in_head:
+            self.head_costs.append((cost, segment if self.keyed else None))
         return True
-
-    head: list[Any] = []
-    head_costs: list[tuple[int, str | None]] = []  # each head entry's share of ``box.size``
-    omitted: Reason | None = None
-    iterator = iter(entries)
-    while len(head) < head_n:
-        if keyed and state.nodes_left <= 0:
-            box.stop("max_nodes")
-            break
-        try:
-            entry = next(iterator)
-        except StopIteration:
-            break
-        if type(entry) is _Omitted:
-            omitted = omitted or entry.reason
-            continue
-        if not add(entry, len(head), head):
-            break
-    share = state.limits.tail_share
-    if budget_tail and backwards is not None and share > 0 and box.reason == "max_length":
-        # The budget cut the head: give the end its share of the budget.
-        head_limit = max_size - int((max_size - 2) * share)
-        while head and box.size > head_limit:
-            head.pop()
-            cost, segment = head_costs.pop()
-            box.size -= cost
-            box.count -= 1
-            if segment is not None:
-                seen.discard(segment)
-        box.reason = None
-        tail_n = length - len(head) if tail_n == 0 else tail_n
-    tail_n = min(tail_n, length - len(head))
-    kept_tail: list[Any] = []
-    if box.reason is None and tail_n and backwards is not None:
-        for offset, entry in enumerate(backwards()):
-            if offset >= tail_n or not add(entry, length - 1 - offset, kept_tail):
-                break
-        kept_tail.reverse()
-    if omitted is None and len(head) + len(kept_tail) == length:
-        head += kept_tail  # the two ends met: everything is kept
-        kept_tail = []
-    reason = box.reason or omitted
-    if reason is None and len(head) + len(kept_tail) < length:
-        reason = "max_items"
-    if keyed:
-        node: Snapshot = Mapping(type_name, length, tuple(head), reason, tuple(kept_tail))
-    else:
-        node = Sequence(type_name, length, tuple(head), reason, tuple(kept_tail))
-    return _Built(node, box.size)
 
 
 _KEY_LIMITS = Limits(max_chars=400, max_nodes=50, max_depth=2, max_items=8, max_string=50)
@@ -572,8 +676,11 @@ def _object_fields(
     kind: str | None = None,
     reserves: list[tuple[int, int]] | None = None,
     capped: bool = True,
+    length: int | None = None,
 ) -> _Built:
     """Emit the (name, value) fields of an object; a reader's ``_FailClosed`` keeps none.
+
+    ``length``: a plain object's attribute count, kept on the node when it is cut.
 
     A field value may be a shape's ``_Part``, built in its field's slot (see
     ``_build_slot``). ``reserves[i]``: (chars, nodes) held back while field
@@ -623,7 +730,7 @@ def _object_fields(
         fields.append((name, built.node))
         box.commit(overhead, built.size)
     reason = box.reason or omitted
-    node = Object(type_name, tuple(fields), reason, kind)
+    node = Object(type_name, tuple(fields), reason, kind, length if reason is not None else None)
     return _Built(node, box.size)
 
 
@@ -715,7 +822,17 @@ def _collection(
         return _error(type_name, max_size)
     head_n, _tail_n = _plan(length, state.limits, has_tail=False)
     items = _guarded(source, pairs=shape.keyed)
-    return _container(items, length, type_name, shape.keyed, max_size, depth, path, state, head_n)
+    return _container(
+        items,
+        length=length,
+        type_name=type_name,
+        keyed=shape.keyed,
+        max_size=max_size,
+        depth=depth,
+        path=path,
+        state=state,
+        head_n=head_n,
+    )
 
 
 def _lazy(read: Callable[[], Any], state: _State) -> _Part:
@@ -921,16 +1038,16 @@ def _indexed(
     head_n, tail_n = split
     return _container(
         (child(i) for i in range(head_n)),
-        length,
-        "list",
-        False,
-        max_size,
-        depth,
-        path,
-        state,
-        head_n,
-        tail_n,
-        lambda: (child(i) for i in range(length - 1, length - tail_n - 1, -1)),
+        length=length,
+        type_name="list",
+        keyed=False,
+        max_size=max_size,
+        depth=depth,
+        path=path,
+        state=state,
+        head_n=head_n,
+        tail_n=tail_n,
+        backwards=lambda: (child(i) for i in range(length - 1, length - tail_n - 1, -1)),
         budget_tail=False,  # the selection already fits both ends to the budget
     )
 
@@ -950,7 +1067,17 @@ def _ndarray_structure(
         count = len(labels)
 
         def build(slot: int, depth: int, path: str) -> _Built:
-            return _container(labels, count, "dict", True, slot, depth, path, state, count)
+            return _container(
+                labels,
+                length=count,
+                type_name="dict",
+                keyed=True,
+                max_size=slot,
+                depth=depth,
+                path=path,
+                state=state,
+                head_n=count,
+            )
 
         entries.append(("labels", _structure_part(Mapping, count, build, state)))
     entries.append(("data", _ndarray_part(shape, value, dims, selection, (), state)))
@@ -1143,14 +1270,6 @@ def _field_reserves(pairs: list[tuple[Any, Any]]) -> list[tuple[int, int]]:
     return reserves
 
 
-_REGISTRY: list[tuple[type[Any], _Shape]] = []
-"""The process-wide ``capture.register(T, shape)`` registrations, matched by class identity.
-
-Scanned with ``is``: a class is never hashed or compared with ``==``, so a
-metaclass ``__hash__`` / ``__eq__`` cannot run during dispatch.
-"""
-
-
 def _find_shape(
     mro: tuple[type[Any], ...], state: _State
 ) -> tuple[type[Any], _Shape | _FieldReader] | None:
@@ -1189,7 +1308,7 @@ def _build(value: Any, max_size: int, depth: int, path: str, state: _State) -> _
             return _Built(Scalar(value), len(encoded))
         return _fallback(value, "max_length", max_size)
     if value_type is int:
-        return _build_integer(value, max_size)
+        return _build_integer(value, max_size, depth, path, state)
     if value_type is float:
         if not math.isfinite(value):
             return _opaque(value, max_size, depth, path, state)
@@ -1222,8 +1341,15 @@ def _build(value: Any, max_size: int, depth: int, path: str, state: _State) -> _
     view = _mro_view(value, mro, state)
     if view is not None:
         return _build_view(view, value, max_size, depth, path, state)
-    entries = _plain_entries(value, mro, state)
-    if entries is not None:
+    if limits.fallback == "repr" and _defines_repr(mro, state):
+        # A deliberate ``__repr__`` beats the attribute reader in model-facing
+        # previews (``<Response [200]>``); traces never run it.
+        built = _repr_object(value, max_size, depth, path, state)
+        if built is not None:
+            return built
+    plain = _plain_entries(value, mro, state)
+    if plain is not None:
+        entries, count = plain
         type_name = _bounded_type_name(value, _MAX_TYPE_NAME)
         return _enter(
             value,
@@ -1232,7 +1358,9 @@ def _build(value: Any, max_size: int, depth: int, path: str, state: _State) -> _
             depth,
             path,
             state,
-            lambda: _object_fields(type_name, iter(entries), max_size, depth, path, state),
+            lambda: _object_fields(
+                type_name, iter(entries), max_size, depth, path, state, length=count
+            ),
         )
     return _opaque(value, max_size, depth, path, state)
 
@@ -1258,16 +1386,16 @@ def _build_view(
                 state,
                 lambda: _container(
                     collection.forward(),
-                    collection.length,
-                    collection.type_name,
-                    collection.keyed,
-                    max_size,
-                    depth,
-                    path,
-                    state,
-                    head_n,
-                    tail_n,
-                    collection.backward,
+                    length=collection.length,
+                    type_name=collection.type_name,
+                    keyed=collection.keyed,
+                    max_size=max_size,
+                    depth=depth,
+                    path=path,
+                    state=state,
+                    head_n=head_n,
+                    tail_n=tail_n,
+                    backwards=collection.backward,
                 ),
             )
         case _ObjectView():

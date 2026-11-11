@@ -4,13 +4,16 @@
 
 from __future__ import annotations
 
+import array
 import collections
 import datetime
 import decimal
 import enum
 import json
+import logging
 import pathlib
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from typing import Annotated, Any
@@ -287,3 +290,195 @@ def test_empty_containers_at_max_depth_are_whole() -> None:
     snapshot = capture([[], {}, [1]], Limits(max_depth=1))
 
     assert render_python(snapshot) == "[[], {}, [list: 1 items]]"
+
+
+_PREFILL = Limits(max_items=25, max_string=2000, max_depth=4, tail_share=0.5, fallback="repr")
+
+
+@pytest.mark.parametrize(
+    ("value", "python"),
+    [
+        (collections.deque([1, "a"]), "deque([1, 'a'])"),
+        (collections.deque(), "deque([])"),
+        (array.array("d", [1.5, 2.0]), "array([1.5, 2.0])"),
+        (array.array("b"), "array([])"),
+    ],
+)
+def test_deque_and_array_are_native_sequences(value: Any, python: str) -> None:
+    for limits in (Limits(), _PREFILL):  # traces and prefill alike: no repr
+        assert render_python(capture(value, limits)) == python
+
+
+@pytest.mark.parametrize(
+    "value",
+    [collections.deque(range(10_000_000)), array.array("i", range(10_000_000))],
+    ids=["deque", "array"],
+)
+def test_huge_deque_and_array_are_read_from_both_ends_quickly(value: Any) -> None:
+    start = time.perf_counter()
+    text = render_python(capture(value, _PREFILL))
+    assert time.perf_counter() - start < 0.1  # the repr fallback took ~1 s
+    name = type(value).__name__
+    assert text.startswith(f"{name}(len=10000000, [:13]=[0, 1, 2,")
+    assert text.endswith("9999998, 9999999])")
+
+
+def test_deque_and_array_subclasses_that_override_iteration_are_not_read() -> None:
+    class Sneaky(collections.deque):  # type: ignore[type-arg]
+        def __iter__(self):  # noqa: ANN204
+            raise AssertionError("user iteration must not run")
+
+    class Plain(array.array):
+        pass
+
+    assert render_python(capture(Sneaky([1]))).startswith("<opaque: ")
+    assert render_python(capture(Plain("i", [1, 2]))) == "Plain([1, 2])"
+
+
+def test_a_million_attributes_list_the_first_and_say_how_many() -> None:
+    class Wide:
+        pass
+
+    wide = Wide()
+    for i in range(1_000_000):
+        setattr(wide, f"a{i}", i)
+    for limits in (_PREFILL, Limits()):
+        start = time.perf_counter()
+        node = capture(wide, limits)
+        assert time.perf_counter() - start < 0.05
+        assert isinstance(node, Object) and node.length == 1_000_000
+        assert node.reason == "max_items"
+        assert node.fields[:3] == capture(wide, Limits(max_items=3)).fields
+    text = render_python(capture(wide, _PREFILL))
+    assert text.startswith("Wide(a0=0, a1=1, a2=2,")
+    assert text.endswith(", a24=24, ... of 1,000,000 attributes)")
+
+
+def test_a_cut_plain_object_says_how_many_attributes_it_has() -> None:
+    class Some:
+        def __init__(self) -> None:
+            self._private = 0
+            self.a, self.b, self.c = 1, 2, 3
+
+    assert render_python(capture(Some(), Limits(max_items=2))) == (
+        "Some(a=1, b=2, ... of 4 attributes)"
+    )
+    whole = capture(Some())
+    assert isinstance(whole, Object) and whole.length is None
+    assert render_python(whole) == "Some(a=1, b=2, c=3)"
+
+
+@pytest.mark.parametrize(
+    ("value", "python"),
+    [
+        (10**200_000, "int(200,001 digits)"),
+        (-(10**5000), "int(5,001 digits, negative)"),
+        (1 << 1_000_000, "int(301,030 digits)"),
+    ],
+    ids=["10**200000", "-10**5000", "2**1000000"],
+)
+def test_a_huge_int_says_how_many_digits_it_has(value: int, python: str) -> None:
+    for limits in (_PREFILL, Limits()):
+        start = time.perf_counter()
+        node = capture(value, limits)
+        assert time.perf_counter() - start < 0.01  # never converted to decimal
+        assert isinstance(node, Object) and node.kind == "python.int"
+        assert node.reason == "max_length"
+        assert render_python(node) == python
+    assert json.loads(render_json(capture(value), max_chars=50_000))["digits"] > 4000
+    assert render_python(capture(10**30)) == str(10**30)  # a small one stays a number
+
+
+def test_a_slow_or_large_repr_fallback_warns_the_developer(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nooa.snapshot import _walk
+
+    class Slow:
+        __slots__ = ()
+
+        def __repr__(self) -> str:
+            time.sleep(0.02)
+            return "Slow()"
+
+    class Large:
+        __slots__ = ()
+
+        def __repr__(self) -> str:
+            return "x" * 2_000
+
+    monkeypatch.setattr(_walk, "SLOW_REPR_SECONDS", 0.01)
+    monkeypatch.setattr(_walk, "LARGE_REPR_CHARS", 1_000)
+    with caplog.at_level(logging.WARNING, logger="nooa.snapshot._walk"):
+        assert render_python(capture(Slow(), _PREFILL)) == "Slow()"
+        capture(Large(), _PREFILL)
+        capture(Slow())  # traces never run repr: no warning
+    messages = [r.getMessage() for r in caplog.records]
+    assert len(messages) == 2
+    assert "repr() of tests.snapshot.test_standard_types." in messages[0]
+    assert "Slow took 0.0" in messages[0] and "returned 6 characters" in messages[0]
+    assert "Large took" in messages[1] and "returned 2,000 characters" in messages[1]
+    assert all(r.levelno == logging.WARNING for r in caplog.records)
+
+
+def test_repr_warning_thresholds_are_module_constants() -> None:
+    from nooa.snapshot import _walk
+
+    assert _walk.SLOW_REPR_SECONDS == 0.1 and _walk.LARGE_REPR_CHARS == 1_000_000
+
+
+class _Response:
+    def __init__(self) -> None:
+        self.status_code = 200
+        self.headers = {"a": "b"}
+
+    def __repr__(self) -> str:
+        return f"<Response [{self.status_code}]>"
+
+
+def test_own_repr_wins_in_previews_and_attributes_in_traces() -> None:
+    assert render_python(capture(_Response(), _PREFILL)) == "<Response [200]>"
+    assert render_python(capture(_Response())) == "_Response(status_code=200, headers={'a': 'b'})"
+
+
+def test_model_facing_precedence() -> None:
+    @dataclass
+    class Declared:  # a generated repr is not the class's own
+        x: int = 1
+
+        def __repr__(self) -> str:
+            return "custom"
+
+    class Point(collections.namedtuple("Point", "x y")):
+        def __repr__(self) -> str:
+            return "custom"
+
+    class Raising:
+        def __init__(self) -> None:
+            self.a = 1
+
+        def __repr__(self) -> str:
+            raise RuntimeError
+
+    class NoRepr:
+        def __init__(self) -> None:
+            self.a = 1
+
+    # declared structure beats an own __repr__; so do the standard types
+    assert render_python(capture(Declared(), _PREFILL)) == "Declared(x=1)"
+    assert render_python(capture(Point(1, 2), _PREFILL)) == "Point(x=1, y=2)"
+    # an own __repr__ that raises falls back to the public attributes
+    assert render_python(capture(Raising(), _PREFILL)) == "Raising(a=1)"
+    # no __repr__ of its own: public attributes, not object.__repr__
+    assert render_python(capture(NoRepr(), _PREFILL)) == "NoRepr(a=1)"
+
+
+def test_traces_never_run_an_own_repr() -> None:
+    class Loud:
+        def __init__(self) -> None:
+            self.a = 1
+
+        def __repr__(self) -> str:
+            raise AssertionError("repr must not run in traces")
+
+    assert render_python(capture(Loud())) == "Loud(a=1)"

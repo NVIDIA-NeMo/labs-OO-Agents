@@ -365,7 +365,7 @@ class PythonRenderer:
     def _object(self, node: Object) -> str:
         parts = [f"{name}={self.render(value)}" for name, value in node.fields]
         if not node.complete:
-            parts.append("...")
+            parts.append("..." if node.length is None else f"... of {node.length:,} attributes")
         return f"{node.type_name}(" + ", ".join(parts) + ")"
 
 
@@ -442,6 +442,14 @@ def _range_hook(node: Object, r: PythonRenderer) -> str:
     return repr(range(start, stop, step))
 
 
+def _int_hook(node: Object, r: PythonRenderer) -> str:
+    digits = _scalar(node.field("digits"))
+    if type(digits) is not int:
+        raise TypeError("no digit count")
+    sign = ", negative" if node.field("negative") is not None else ""
+    return f"int({digits:,} digits{sign})"
+
+
 def _complex_hook(node: Object, r: PythonRenderer) -> str:
     return repr(complex(_scalar(node.field("real")), _scalar(node.field("imag"))))
 
@@ -494,6 +502,7 @@ _STANDARD_HOOKS: dict[str, TextHook] = {
     "python.pattern": _pattern_hook,
     "python.range": _range_hook,
     "python.complex": _complex_hook,
+    "python.int": _int_hook,
     "python.function": _function_hook("function"),
     "python.method": _function_hook("bound method"),
     "python.builtin": _function_hook("built-in function"),

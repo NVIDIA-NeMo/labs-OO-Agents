@@ -1378,10 +1378,8 @@ async def test_direct_runs_share_one_spill_folder_that_keeps_the_newest(tmp_path
         big = "head -c 1100000 /dev/zero | tr '\\0' a; head -c 1100000 /dev/zero | tr '\\0' b >&2"
         first = await sh.run(big)
         spills = sh._spills
-        assert spills is not None and (spills.max_files, spills.max_bytes) == (20, 20 * 64 * 2**20)
-        assert (
-            spills.max_bytes // spills.max_files == 64 * 2**20
-        )  # each file keeps today's 64 MiB cap
+        # Each file keeps today's 64 MiB cap.
+        assert spills is not None and (spills.max_files, spills.file_bytes) == (20, 64 * 2**20)
         assert Path(first.stdout_path).parent == Path(first.stderr_path).parent
         paths = [first.stdout_path, first.stderr_path]
         for _ in range(10):  # 20 more cut streams: the oldest closed files go first

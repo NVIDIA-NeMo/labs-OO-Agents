@@ -27,6 +27,7 @@ from nooa.snapshot import (
     TextStream,
     capture,
     capture_fields,
+    cut,
     render_output,
     render_trace,
 )
@@ -148,9 +149,8 @@ def _error_message(exception: BaseException) -> str:
     of a large object.  Span attributes with MB-sized values blow up OTLP
     payloads and trace storage.
     """
-    stream = _error_stream()
-    stream.write(str(exception))
-    return render_output(stream.close())
+    half = _ERROR_MESSAGE_LIMIT // 2
+    return render_output(cut(str(exception), head=_ERROR_MESSAGE_LIMIT - half, tail=half))
 
 
 def _exception_stacktrace(exception: BaseException) -> str:
