@@ -129,14 +129,15 @@ def test_atom_counters_live_in_the_atom_namespace():
 
 
 async def test_an_awaited_shell_command_over_the_limit_counts_as_a_long_await(monkeypatch):
+    """Only an inline run longer than the limit counts; bash startup and quick runs don't."""
     from nooa_atom.agent import work_shell
 
-    monkeypatch.setattr(work_shell, "_LONG_AWAIT_SECONDS", 1.0)
     async with work_shell.Shell() as sh:
         await sh.run("true")  # starts bash outside the session: startup is not timed
         with harness_metrics_session() as metrics:
-            await sh.run("true")  # well under the limit once bash runs
-            await sh.run("sleep 1.5")
+            await sh.run("true")  # under the default 60 s limit, however slow the runner
+            monkeypatch.setattr(work_shell, "_LONG_AWAIT_SECONDS", 1.0)
+            await sh.run("sleep 1.5")  # at least 1.5 s on any machine
     assert metrics.atom.shell_long_awaits == 1
 
 

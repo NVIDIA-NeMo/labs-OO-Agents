@@ -550,6 +550,7 @@ class Shell:
         return True
 
     async def _run(self, command: str, stdin: str | None, timeout: float) -> CommandResult:
+        """Run ``command`` under the Shell's lock (queued FIFO behind a running one)."""
         await self._closed()
         generation = self._generation
         note = ""

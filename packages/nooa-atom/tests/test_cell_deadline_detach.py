@@ -252,6 +252,7 @@ SHELL_DETACHED = "`sleep 2; echo done` is still running as job sh"
 async def test_a_shell_command_awaited_at_the_deadline_runs_on_as_a_job(
     registry, options, models, root_metrics
 ):
+    """At the cell deadline an inline run becomes job sh; its result arrives later."""
     models.scripts[None] = [
         cell("sh = Shell()\nr = await sh.run('sleep 2; echo done')"),
         cell(
@@ -289,6 +290,7 @@ async def test_a_shell_command_awaited_at_the_deadline_runs_on_as_a_job(
 async def test_a_queued_shell_command_handed_over_keeps_its_job_name(
     registry, options, models, root_metrics
 ):
+    """A run still queued at the deadline becomes sh_2 and is named busy once it runs."""
     # Two runs on one Shell, gathered: at the deadline the running one becomes
     # job sh and the queued one sh_2; when sh_2 gets the Shell, it is named busy.
     models.scripts[None] = [
@@ -320,6 +322,7 @@ async def test_a_queued_shell_command_handed_over_keeps_its_job_name(
 
 
 async def test_a_user_cancel_still_stops_an_awaited_shell_command(registry, options, models):
+    """A user cancel stops the command; nothing is handed over."""
     models.scripts[None] = [
         cell("await Shell().run('(echo $BASHPID > pid; exec sleep 30)')"),
     ]
@@ -340,6 +343,7 @@ async def test_a_user_cancel_still_stops_an_awaited_shell_command(registry, opti
 
 
 def _alive(pid):
+    """Whether process ``pid`` still exists."""
     try:
         with open(f"/proc/{pid}/stat") as stat:
             return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
