@@ -10,6 +10,8 @@ captured snapshot keeps exactly what capture kept.
 
 from __future__ import annotations
 
+import datetime
+import re
 from collections.abc import Callable
 from typing import Any, cast
 
@@ -117,7 +119,17 @@ def _python_key(key: Any) -> str:
 
 
 def _brackets(type_name: str) -> tuple[str, str]:
-    return ("(", ")") if type_name == "tuple" else ("[", "]")
+    if type_name == "tuple":
+        return "(", ")"
+    if type_name == "set":
+        return "{", "}"
+    if type_name == "frozenset":
+        return "frozenset({", "})"
+    return "[", "]"
+
+
+_UNORDERED = ("set", "frozenset")
+_SEQUENCE_TYPES = ("list", "tuple", "set", "frozenset")
 
 
 TextHook = Callable[[Object, "PythonRenderer"], str]
@@ -144,9 +156,11 @@ class PythonRenderer:
     ``capture``, and the string a hook returns is not checked for length.
     """
 
-    def __init__(self, hooks: dict[str, TextHook]) -> None:
+    def __init__(self, hooks: dict[str, TextHook], width: int | None = None) -> None:
         self._hooks = hooks
         self._depth = 0  # hooks running
+        self._width = width  # None: one line
+        self._level = 0  # indentation of the container being expanded
 
     def render(self, node: Snapshot) -> str:
         """``node`` in this renderer's notation, through its kind's hook when one is registered.
@@ -156,7 +170,9 @@ class PythonRenderer:
         Raises ``TypeError`` when ``node`` is not a snapshot node.
         """
         kind = node.kind if type(node) is Object else None
-        hook = self._hooks.get(kind) if kind is not None else None
+        hook = None
+        if kind is not None:
+            hook = self._hooks.get(kind) or _STANDARD_HOOKS.get(kind)
         if hook is not None and self._depth < _MAX_HOOK_NESTING:
             self._depth += 1
             try:
@@ -196,6 +212,34 @@ class PythonRenderer:
         """A ``Text`` node: a literal when complete, else the slice-keys marker."""
         return _python_text(text)
 
+    def _layout(self, flat: Callable[[], str], expanded: Callable[[str, str], str]) -> str:
+        """``flat()`` when it is shorter than the width (or no width is set), else ``expanded(ind, inner)``.
+
+        ``expanded`` gets this level's indentation and the next one's; the
+        children it renders are one level deeper. This is agentdoc's layout:
+        a container goes on several lines when its one-line form is not
+        shorter than the width.
+        """
+        width = self._width
+        if width is None:
+            return flat()
+        self._width = None
+        try:
+            one_line = flat()
+        finally:
+            self._width = width
+        if len(one_line) < width:
+            return one_line
+        indent = "    " * self._level
+        self._level += 1
+        try:
+            return expanded(indent, indent + "    ")
+        finally:
+            self._level -= 1
+
+    def _lines(self, inner: str, rendered: list[str]) -> str:
+        return "".join(f"{inner}{item},\n" for item in rendered)
+
     def _items(self, type_name: str, items: tuple[Snapshot, ...]) -> str:
         left, right = _brackets(type_name)
         inner = ", ".join(self.render(item) for item in items)
@@ -203,37 +247,248 @@ class PythonRenderer:
             inner += ","
         return f"{left}{inner}{right}"
 
+    def _whole_sequence(self, node: Sequence) -> str:
+        """A complete sequence: a literal, prefixed with its type unless it is a built-in one."""
+        if not node.head:
+            if node.type_name in _UNORDERED:
+                return f"{node.type_name}()"
+            left, right = _brackets(node.type_name)
+            empty = left + right
+            return empty if node.type_name in _SEQUENCE_TYPES else f"{node.type_name}({empty})"
+        prefix, suffix = (
+            ("", "") if node.type_name in _SEQUENCE_TYPES else (f"{node.type_name}(", ")")
+        )
+        left, right = _brackets(node.type_name)
+
+        def expanded(indent: str, inner: str) -> str:
+            rendered = [self.render(item) for item in node.head]
+            return f"{prefix}{left}\n{self._lines(inner, rendered)}{indent}{right}{suffix}"
+
+        return self._layout(
+            lambda: prefix + self._items(node.type_name, node.head) + suffix, expanded
+        )
+
     def _sequence(self, node: Sequence) -> str:
         left, right = _brackets(node.type_name)
+        unordered = node.type_name in _UNORDERED
         if node.complete:
-            return self._items(node.type_name, node.head)
+            return self._whole_sequence(node)
         if node.reason == "max_depth" and not node.head:
             return f"{left}{node.type_name}: {node.length} items{right}"
-        parts = [f"{node.type_name}(len={node.length}"]
-        parts.append(f"[:{len(node.head)}]={self._items(node.type_name, node.head)}")
-        if node.tail:
-            parts.append(f"[-{len(node.tail)}:]={self._items(node.type_name, node.tail)}")
-        return ", ".join(parts) + ")"
+        start = f"{node.type_name}(len={node.length}"
+        if unordered:
+
+            def flat_set() -> str:
+                inner = ", ".join([*(self.render(item) for item in node.head), "..."])
+                return f"{start}, items={left}{inner}{right})"
+
+            def expanded_set(indent: str, inner: str) -> str:
+                rendered = [self.render(item) for item in node.head]
+                body = self._lines(inner, rendered) + f"{inner}...\n"
+                return f"{start}, items={left}\n{body}{indent}{right})"
+
+            return self._layout(flat_set, expanded_set)
+
+        def flat() -> str:
+            parts = [start, f"[:{len(node.head)}]={self._items(node.type_name, node.head)}"]
+            if node.tail:
+                parts.append(f"[-{len(node.tail)}:]={self._items(node.type_name, node.tail)}")
+            return ", ".join(parts) + ")"
+
+        def expanded(indent: str, inner: str) -> str:
+            self._level += 1
+            try:
+                head = [self.render(item) for item in node.head]
+                tail = [self.render(item) for item in node.tail]
+            finally:
+                self._level -= 1
+            deeper = inner + "    "
+            text = f"{start},\n{inner}[:{len(head)}]={left}\n{self._lines(deeper, head)}{inner}{right},\n"
+            if tail:
+                text += (
+                    f"{inner}[-{len(tail)}:]={left}\n{self._lines(deeper, tail)}{inner}{right},\n"
+                )
+            return text + f"{indent})"
+
+        return self._layout(flat, expanded)
 
     def _entries(self, items: tuple[tuple[Any, Snapshot], ...]) -> list[str]:
         return [f"{_python_key(key)}: {self.render(value)}" for key, value in items]
 
     def _mapping(self, node: Mapping) -> str:
         if node.complete:
-            return "{" + ", ".join(self._entries(node.head)) + "}"
+            if not node.head:
+                return "{}" if node.type_name == "dict" else f"{node.type_name}({{}})"
+            prefix, suffix = ("", "") if node.type_name == "dict" else (f"{node.type_name}(", ")")
+
+            def expanded(indent: str, inner: str) -> str:
+                body = self._lines(inner, self._entries(node.head))
+                return f"{prefix}{{\n{body}{indent}}}{suffix}"
+
+            return self._layout(
+                lambda: prefix + "{" + ", ".join(self._entries(node.head)) + "}" + suffix,
+                expanded,
+            )
         if node.reason == "max_depth" and not node.head:
             return f"{{{node.type_name}: {node.length} items}}"
-        parts = self._entries(node.head)
-        if node.tail:
-            parts.append("...")
-            parts.extend(self._entries(node.tail))
-        return f"{node.type_name}(len={node.length}, items={{" + ", ".join(parts) + "})"
+        start = f"{node.type_name}(len={node.length}, items={{"
+
+        def flat_cut() -> str:
+            parts = self._entries(node.head)
+            if node.tail:
+                parts.append("...")
+                parts.extend(self._entries(node.tail))
+            return start + ", ".join(parts) + "})"
+
+        def expanded_cut(indent: str, inner: str) -> str:
+            body = self._lines(inner, self._entries(node.head))
+            if node.tail:
+                body += f"{inner}...\n" + self._lines(inner, self._entries(node.tail))
+            return f"{start}\n{body}{indent}}})"
+
+        return self._layout(flat_cut, expanded_cut)
 
     def _object(self, node: Object) -> str:
         parts = [f"{name}={self.render(value)}" for name, value in node.fields]
         if not node.complete:
             parts.append("...")
         return f"{node.type_name}(" + ", ".join(parts) + ")"
+
+
+# --- the standard types' notation (``_std``) ----------------------------------------
+
+
+def _whole(node: Snapshot | None) -> str | bytes:
+    """A complete ``Text`` / bytes ``Scalar``'s content; a hook that meets anything else falls back."""
+    if type(node) is Text and node.complete:
+        return node.head
+    if type(node) is Scalar and type(node.value) is bytes:
+        return node.value
+    raise TypeError("not a complete text")
+
+
+def _scalar(node: Snapshot | None) -> Any:
+    if type(node) is not Scalar:
+        raise TypeError("not a scalar")
+    return node.value
+
+
+def _repr_hook(node: Object, r: PythonRenderer) -> str:
+    text = node.field("repr")
+    if type(text) is not Text:
+        raise TypeError("no repr")
+    if text.complete:
+        return cast(str, text.head)
+    parts = [f"{node.type_name}(repr_len={text.length}", f"[:{len(text.head)}]={text.head!r}"]
+    if text.tail:
+        parts.append(f"[-{len(text.tail)}:]={text.tail!r}")
+    return ", ".join(parts) + ")"
+
+
+def _iso_hook(parse: Callable[[str], Any]) -> TextHook:
+    def hook(node: Object, r: PythonRenderer) -> str:
+        return repr(parse(cast(str, _whole(node.field("iso")))))
+
+    return hook
+
+
+def _timedelta_hook(node: Object, r: PythonRenderer) -> str:
+    days, seconds, micros = (
+        _scalar(node.field(name)) for name in ("days", "seconds", "microseconds")
+    )
+    return repr(datetime.timedelta(days=days, seconds=seconds, microseconds=micros))
+
+
+def _decimal_hook(node: Object, r: PythonRenderer) -> str:
+    return f"Decimal({_whole(node.field('value'))!r})"
+
+
+def _uuid_hook(node: Object, r: PythonRenderer) -> str:
+    return f"UUID({_whole(node.field('hex'))!r})"
+
+
+def _path_hook(node: Object, r: PythonRenderer) -> str:
+    return f"{node.type_name}({_whole(node.field('path'))!r})"
+
+
+def _pattern_hook(node: Object, r: PythonRenderer) -> str:
+    pattern = _whole(node.field("pattern"))
+    flags = _scalar(node.field("flags"))
+    if type(flags) is not int:
+        raise TypeError("flags")
+    if isinstance(pattern, str):
+        flags &= ~re.UNICODE
+    if not flags:
+        return f"re.compile({pattern!r})"
+    return f"re.compile({pattern!r}, {re.RegexFlag(flags)!r})"
+
+
+def _range_hook(node: Object, r: PythonRenderer) -> str:
+    start, stop, step = (_scalar(node.field(name)) for name in ("start", "stop", "step"))
+    return repr(range(start, stop, step))
+
+
+def _complex_hook(node: Object, r: PythonRenderer) -> str:
+    return repr(complex(_scalar(node.field("real")), _scalar(node.field("imag"))))
+
+
+def _function_hook(prefix: str) -> TextHook:
+    def hook(node: Object, r: PythonRenderer) -> str:
+        name = _whole(node.field("name"))
+        signature = node.field("signature")
+        tail = "" if signature is None else _whole(signature)
+        return f"<{prefix} {name}{tail}>"
+
+    return hook
+
+
+def _named_hook(prefix: str) -> TextHook:
+    def hook(node: Object, r: PythonRenderer) -> str:
+        return f"<{prefix} {_whole(node.field('name'))!r}>"
+
+    return hook
+
+
+def _enum_hook(node: Object, r: PythonRenderer) -> str:
+    value = node.field("value")
+    if value is None:
+        raise TypeError("no value")
+    name_node = node.field("name")
+    if type(name_node) is Scalar and name_node.value is None:
+        return f"<{node.type_name}: {r.render(value)}>"
+    return f"<{node.type_name}.{_whole(name_node)}: {r.render(value)}>"
+
+
+def _exception_hook(node: Object, r: PythonRenderer) -> str:
+    args = node.field("args")
+    if type(args) is Sequence and args.complete:
+        return f"{node.type_name}(" + ", ".join(r.render(item) for item in args.head) + ")"
+    if args is None:
+        raise TypeError("no args")
+    return f"{node.type_name}(args={r.render(args)})"
+
+
+_STANDARD_HOOKS: dict[str, TextHook] = {
+    "python.repr": _repr_hook,
+    "python.datetime": _iso_hook(datetime.datetime.fromisoformat),
+    "python.date": _iso_hook(datetime.date.fromisoformat),
+    "python.time": _iso_hook(datetime.time.fromisoformat),
+    "python.timedelta": _timedelta_hook,
+    "python.decimal": _decimal_hook,
+    "python.uuid": _uuid_hook,
+    "python.path": _path_hook,
+    "python.pattern": _pattern_hook,
+    "python.range": _range_hook,
+    "python.complex": _complex_hook,
+    "python.function": _function_hook("function"),
+    "python.method": _function_hook("bound method"),
+    "python.builtin": _function_hook("built-in function"),
+    "python.module": _named_hook("module"),
+    "python.class": _named_hook("class"),
+    "python.enum": _enum_hook,
+    "python.exception": _exception_hook,
+}
+"""The notation of the standard types capture reads natively; a registered hook of the same kind wins."""
 
 
 class _OutputNotation(PythonRenderer):
@@ -258,9 +513,20 @@ class _RenderPython:
     - ``<cycle>`` for a ``Ref``, ``<opaque: Type>`` for an uninspected
       value, ``<unavailable: reason>`` for another ``Unavailable``.
 
+    The standard types capture reads natively render in their familiar
+    notation: ``{1, 2}``, ``range(0, 10)``, ``(1+2j)``,
+    ``datetime.datetime(2026, 11, 11, 9, 30)``, ``Decimal('1.50')``,
+    ``UUID('...')``, ``PosixPath('/tmp/x')``, ``re.compile('a+b')``,
+    ``ValueError('boom')``, ``<Color.RED: 1>``, ``Pt(x=1, y=2)``,
+    ``Counter({'a': 2})``, ``<function mod.f(a, b=2)>``, ``<class 'mod.C'>``,
+    ``<module 'json'>``; a ``repr`` fallback (``Limits.fallback="repr"``)
+    as the repr itself, or ``T(repr_len=N, [:h]='...', [-t:]='...')`` when
+    cut. A registered hook for one of their kinds (``"python.datetime"``...)
+    replaces the standard one.
+
     String keys longer than 50 characters are cut the same way. The output
-    is not column-wrapped and has no length limit: it formats what
-    ``capture`` bounded.
+    has no length limit: it formats what ``capture`` bounded. With
+    ``width=`` it is laid out on several lines as agentdoc does.
 
     Hooks (the one extension point for rendering): an ``Object`` whose
     ``kind`` has a hook renders as ``hook(node, r)``, with ``r`` a
@@ -286,9 +552,17 @@ class _RenderPython:
     def __init__(self) -> None:
         self._hooks: dict[str, TextHook] = {}
 
-    def __call__(self, snapshot: Snapshot) -> str:
-        """``snapshot`` in agentdoc's ``pformat`` / prefill notation; see ``render_python``."""
-        return PythonRenderer(self._hooks).render(snapshot)
+    def __call__(self, snapshot: Snapshot, *, width: int | None = None) -> str:
+        """``snapshot`` in agentdoc's ``pformat`` / prefill notation; see ``render_python``.
+
+        ``width`` (keyword-only, default ``None``: one line): agentdoc's
+        layout. A container whose one-line form is not shorter than
+        ``width`` characters goes on several lines, one item per line,
+        indented by four spaces per level (``0`` expands every non-empty
+        container). Objects stay on one line; their fields' containers
+        follow the same rule.
+        """
+        return PythonRenderer(self._hooks, width).render(snapshot)
 
     def register(self, kind: str, function: TextHook | None = None) -> Any:
         """Register ``hook(node: Object, r: PythonRenderer) -> str`` for objects of ``kind``.

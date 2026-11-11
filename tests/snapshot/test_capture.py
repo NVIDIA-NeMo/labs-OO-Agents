@@ -232,12 +232,14 @@ def test_unknown_types_run_no_user_code() -> None:
     snapshot = capture({"x": value, "y": [value]})
 
     assert isinstance(snapshot, Mapping)
-    assert snapshot.head[0][1] == Unavailable("opaque", "Recorder")
+    assert snapshot.head[0][1] == Unavailable("opaque", "tests.snapshot.test_capture.Recorder")
     assert Recorder.calls == []
-    assert render_python(snapshot) == "{'x': <opaque: Recorder>, 'y': [<opaque: Recorder>]}"
+    assert render_python(snapshot) == (
+        "{'x': <opaque: tests.snapshot.test_capture.Recorder>, 'y': [<opaque: tests.snapshot.test_capture.Recorder>]}"
+    )
     assert json.loads(render_json(snapshot, max_chars=1000)) == {
-        "x": "<opaque: Recorder>",
-        "y": ["<opaque: Recorder>"],
+        "x": "<opaque: tests.snapshot.test_capture.Recorder>",
+        "y": ["<opaque: tests.snapshot.test_capture.Recorder>"],
     }
 
 
@@ -252,8 +254,15 @@ def test_container_and_scalar_subclasses_are_opaque() -> None:
     class MyInt(int):
         pass
 
-    for value in (MyStr("x"), MyDict(a=1), MyInt(3)):
+    class PlainDict(dict):
+        pass
+
+    # A container subclass that overrides iteration, and a scalar subclass, stay opaque.
+    for value in (MyDict(a=1), MyInt(3)):
         assert _opaque(capture(value))
+    # A str or container subclass that overrides nothing is read through its built-in base.
+    assert capture(MyStr("x")) == Text(head="x", length=1, unit="chars")
+    assert render_python(capture(PlainDict(a=1))) == "PlainDict({'a': 1})"
 
 
 def test_dataclass_properties_and_hooks_are_not_called() -> None:
@@ -752,12 +761,16 @@ def test_slotted_and_frozen_dataclasses() -> None:
     assert render_python(capture(Frozen(1, "x"))) == "Frozen(a=1, b='x')"
 
 
-def test_dataclass_class_object_is_opaque() -> None:
+def test_dataclass_class_object_is_a_class() -> None:
     @dataclass
     class Thing:
         a: int = 1
 
-    assert _opaque(capture(Thing))  # the class, not an instance
+    snapshot = capture(Thing)  # the class, not an instance
+    assert isinstance(snapshot, Object) and snapshot.kind == "python.class"
+    assert render_python(snapshot).endswith(
+        ".test_dataclass_class_object_is_a_class.<locals>.Thing'>"
+    )
 
 
 def test_dataclass_fields_obey_the_budget() -> None:
@@ -891,7 +904,7 @@ def test_mapping_like_and_nested_values(registry) -> None:
         mapping_like(lambda value: 2, lambda value: [("name", value.name), ("tags", ["a"])]),
     )
 
-    assert render_python(capture(Animal("rex"))) == "{'name': 'rex', 'tags': ['a']}"
+    assert render_python(capture(Animal("rex"))) == "Animal({'name': 'rex', 'tags': ['a']})"
 
 
 def test_registered_self_reference_is_a_cycle(registry) -> None:
@@ -998,7 +1011,7 @@ def test_unknown_field_type_metaclass_eq_never_runs() -> None:
 
     assert calls == []
     assert isinstance(snapshot, Object)
-    assert _opaque(snapshot.field("value"))
+    assert snapshot.field("value") == Object("Unknown", ())  # a plain object with no attributes
 
 
 class _CollidingKey:
