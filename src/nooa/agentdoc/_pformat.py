@@ -1634,13 +1634,9 @@ def _format_string(s: str, max_string: int | None, *, reason: str = "max_string"
 
 def _render_cut_string(s: str, max_string: int) -> str:
     """``s`` cut to ``max_string`` characters in ``render_python``'s ``str(len=N, ...)`` marker."""
-    from nooa.snapshot import Limits, capture, render_python
+    from nooa.snapshot import cut, render_python
 
-    # max_chars only needs to hold the kept text as JSON (at most 6 chars per char).
-    limits = Limits(
-        max_string=max_string, tail_share=0.5, max_chars=max(50_000, 6 * max_string + 64)
-    )
-    return render_python(capture(s, limits))
+    return render_python(cut(s, head=max_string - max_string // 2, tail=max_string // 2))
 
 
 def _format_multiline_string(s: str) -> str:

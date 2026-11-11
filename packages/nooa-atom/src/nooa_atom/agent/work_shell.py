@@ -29,7 +29,7 @@ limit. A ``CommandResult`` carries each stream in ``render_output``'s notation
 that names the file, ``TAIL``) and the file path when the text was cut (short
 output keeps no file).
 
-Retention of those files: one ``SpillDir`` (at most 20 files, 64 MiB) per
+Retention of those files: one ``SpillDir`` (at most 20 files of 64 MiB each) per
 bash session holds a direct run's files; it keeps the newest and deletes the
 oldest closed files when it needs room, so a path in an earlier result may no
 longer exist (opening it raises ``FileNotFoundError``). A launched command's
@@ -66,7 +66,13 @@ from nooa.runtime.cell_deadline import deadline_cancel
 from nooa.snapshot import SpillDir, SpillTarget, Text, TextStream, render_output
 from nooa.tools import BashSession
 from nooa_atom.agent.metrics import atom_metrics
-from nooa_atom.agent.work_manager import _progress_sink, current_name, describe, job_dir
+from nooa_atom.agent.work_manager import (
+    _current,
+    _progress_sink,
+    current_name,
+    describe,
+    job_dir,
+)
 from nooa_atom.agent.work_progress import _ShellProgress
 
 __all__ = ["CommandResult", "Shell", "ShellOwner", "default_cwd", "shell_owner"]
@@ -198,17 +204,32 @@ _SPILL_FILES = 20
 
 def _spill_folder(path: str, per_file: int) -> SpillDir:
     """A spill folder of ``_SPILL_FILES`` files, each up to ``per_file`` bytes (today's per-capture cap)."""
-    return SpillDir(path, max_files=_SPILL_FILES, max_bytes=_SPILL_FILES * max(per_file, 1))
+    return SpillDir(path, max_files=_SPILL_FILES, file_bytes=per_file)
+
+
+_kept_spills: weakref.WeakKeyDictionary[object, list[SpillDir]] = weakref.WeakKeyDictionary()
+"""Spill folders kept alive by whatever owns their directory.
+
+A ``SpillDir`` deletes the files it created when it is collected, but its
+files must last as long as their directory: a job's scratch directory (until
+the job is pruned), a Shell's own output directory (while a result names it)
+or its owner's (until the owner closes). The key is that directory's owner.
+"""
+
+
+def _keep(owner: object, spills: SpillDir) -> SpillDir:
+    """``spills``, kept alive as long as ``owner`` is (see ``_kept_spills``)."""
+    _kept_spills.setdefault(owner, []).append(spills)
+    return spills
 
 
 def _captures(spills: SpillDir | None, limit: int) -> tuple[_Capture, _Capture]:
-    """stdout's and stderr's captures, each spilling into ``spills`` up to ``limit`` bytes."""
+    """stdout's and stderr's captures, each spilling into ``spills`` (files of ``limit`` bytes)."""
 
     def target() -> SpillTarget | None:
         if spills is None or limit <= 0:
             return None
-        share = spills.max_bytes // spills.max_files if spills.max_files else 0
-        return spills.target(max_bytes=min(limit, share))
+        return spills.target()
 
     return _Capture(target()), _Capture(target())
 
@@ -714,9 +735,14 @@ class Shell:
         output directory (see ``_output``), until the Shell or its owner closes.
         """
         if job_directory is not None:
-            return _spill_folder(str(job_directory), self._max_output)
+            spills = _spill_folder(str(job_directory), self._max_output)
+            job = _current.get()
+            return spills if job is None else _keep(job, spills)
         if self._spills is None:
-            self._spills = _spill_folder(str(self._output_path()), self._max_output)
+            spills = _spill_folder(str(self._output_path()), self._max_output)
+            output = self._output
+            owner = output if isinstance(output, tempfile.TemporaryDirectory) else self._owner
+            self._spills = spills if owner is None else _keep(owner, spills)
         return self._spills
 
     def _retain(self, result: CommandResult) -> None:
