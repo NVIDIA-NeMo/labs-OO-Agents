@@ -577,6 +577,8 @@ Inspect in REPL: print(doc(self.events))
         """
         import string
 
+        from nooa.runtime.placeholders import render_placeholder
+
         # Walk MRO to find nearest docstring (Python doesn't inherit __doc__).
         # cleandoc: Python 3.13+ strips docstring indentation at compile time
         # and 3.12 keeps it, so the raw ``__doc__`` would make the prompt
@@ -596,13 +598,8 @@ Inspect in REPL: print(doc(self.events))
             if field is not None:
                 try:
                     value = eval(field, {"self": self, "type": type})  # noqa: S307
-                    if conversion == "r":
-                        value = repr(value)
-                    elif conversion == "s":
-                        value = str(value)
-                    if fmt_spec:
-                        value = format(value, fmt_spec)
-                    parts.append(str(value))
+                    # Bounded, through the snapshot (nooa.runtime.placeholders).
+                    parts.append(render_placeholder(value, conversion, fmt_spec or ""))
                 except Exception:
                     logger.debug("Prompt template eval failed for %r", field, exc_info=True)
                     placeholder = field

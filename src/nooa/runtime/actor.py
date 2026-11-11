@@ -2505,7 +2505,9 @@ class ActorRuntime:
             if error_mode == "raise":
                 raise
             elif error_mode == "show":
-                return f"{{ERROR: {e}}}"
+                from nooa.runtime.placeholders import bound_placeholder_text
+
+                return f"{{ERROR: {bound_placeholder_text(str(e))}}}"
             else:  # silent
                 return None
 
@@ -2533,6 +2535,8 @@ class ActorRuntime:
             "Result: output text"
         """
         import string
+
+        from nooa.runtime.placeholders import render_placeholder
 
         if not text or "{" not in text:
             return text
@@ -2563,18 +2567,12 @@ class ActorRuntime:
                     result_parts.append(placeholder)
                     continue
 
-                # Apply conversion (!r, !s, !a)
-                if conversion == "r":
-                    value = repr(value)
-                elif conversion == "s":
-                    value = str(value)
-                elif conversion == "a":
-                    value = ascii(value)
-
-                # Apply format spec
+                # The value as bounded text (nooa.runtime.placeholders): a
+                # str whole up to the cut, any other value through the
+                # snapshot; a conversion or format spec as written, then cut.
                 if format_spec:
                     try:
-                        result_parts.append(format(value, format_spec))
+                        result_parts.append(render_placeholder(value, conversion, format_spec))
                     except Exception:
                         if error_mode == "silent":
                             # Keep original placeholder on format error
@@ -2586,7 +2584,7 @@ class ActorRuntime:
                         else:
                             result_parts.append(f"{{{field_name}:{format_spec} | FORMAT ERROR}}")
                 else:
-                    result_parts.append(str(value))
+                    result_parts.append(render_placeholder(value, conversion))
 
         return "".join(result_parts)
 
