@@ -26,9 +26,11 @@ __all__ = ["SpillDir", "SpillTarget"]
 
 _log = logging.getLogger(__name__)
 
-DEFAULT_SPILL_BYTES = 64 * 1024 * 1024
-DEFAULT_SPILL_FILES = 20
-_PREFIX, _SUFFIX = "nooa-output-", ".txt"
+DEFAULT_SPILL_BYTES = 64 * 1024 * 1024  # SpillTarget.max_bytes and SpillDir.file_bytes default
+DEFAULT_SPILL_FILES = 20  # SpillDir.max_files default
+_PREFIX, _SUFFIX = "nooa-output-", ".txt"  # spill file names: nooa-output-*.txt
+# A SpillDir file's state: "new" (handed out by target()), "open" (a stream
+# writes it) or "closed" (its stream closed; it may be evicted).
 _State = Literal["new", "open", "closed"]
 
 
@@ -72,7 +74,15 @@ class SpillTarget:
 
 
 class _SpillFile:
-    """One stream's open spill file: its path, its byte cap, and who removes it."""
+    """One stream's open spill file: its path, its byte cap, and who removes it.
+
+    Args:
+        file: the open binary file (``None`` once finished).
+        path: its path.
+        max_bytes: the most bytes the stream writes to it.
+        folder: the ``SpillDir`` that owns the file, or ``None`` for a
+            standalone target (the stream then removes the file itself).
+    """
 
     def __init__(self, file: IO[bytes], path: str, max_bytes: int, folder: SpillDir | None) -> None:
         self.file: IO[bytes] | None = file
@@ -82,9 +92,20 @@ class _SpillFile:
 
     @classmethod
     def open(cls, target: SpillTarget) -> _SpillFile | None:
-        """Create (or, in a ``SpillDir``, claim) the target's file; ``None``: memory only, logged.
+        """Open the file of ``target`` for one stream.
 
-        Raises ``FileExistsError`` when a standalone ``target.path`` exists.
+        A standalone target's file is created: exclusively at ``target.path``
+        (mode 0600), or as a new temporary file. A ``SpillDir`` target's file
+        already exists; it is claimed from its folder (once only) and opened
+        without following a symlink.
+
+        Returns:
+            The open ``_SpillFile``, or ``None`` (logged; the stream keeps
+            memory only) when the file cannot be created or opened, or a
+            folder's target was already used.
+
+        Raises:
+            FileExistsError: a standalone ``target.path`` already exists.
         """
         folder = target._dir
         try:
@@ -120,7 +141,10 @@ class _SpillFile:
             return None
 
     def finish(self, *, delete: bool) -> None:
-        """Close the file and, with ``delete``, remove it (or tell its folder); idempotent."""
+        """Close the file and, with ``delete``, remove it; a folder's file is handed back to its folder.
+
+        Idempotent; never raises (file errors are logged or ignored).
+        """
         file, self.file = self.file, None
         if file is not None:
             with contextlib.suppress(OSError):
@@ -143,7 +167,15 @@ def _unlink(path: str) -> None:
 
 
 def _remove(path: str, owns_dir: bool, names: dict[str, _State]) -> None:
-    """A folder's cleanup: the whole private directory, or only the names it created."""
+    """Clean up a ``SpillDir``: remove the whole private directory, or only the names it created.
+
+    Args:
+        path: the folder's directory.
+        owns_dir: whether the folder made the directory (``tempfile.mkdtemp``).
+        names: the files it created; emptied.
+
+    Never raises.
+    """
     if owns_dir:
         shutil.rmtree(path, ignore_errors=True)
     else:
@@ -178,8 +210,8 @@ class SpillDir:
     A full copy in a ``SpillDir`` is not permanent: ``Text.full`` (a
     ``Spill``) of an earlier stream can name a file deleted since, because
     the folder needed room or closed ("keep the newest"). Opening that path
-    then raises ``FileNotFoundError``: that is how a reader tells the output
-    is no longer kept.
+    then raises ``FileNotFoundError``: that is how a reader tells the full
+    output is gone.
 
     ``close()`` (also on leaving a ``with`` block, and at interpreter exit
     through ``weakref.finalize``) removes the private directory with
@@ -234,7 +266,9 @@ class SpillDir:
         """A ``SpillTarget`` for one new stream, within the budget; ``None``: keep memory only.
 
         Deletes the oldest closed files to make room (see ``SpillDir``),
-        never an open stream's file. Raises ``ValueError`` after ``close()``.
+        never an open stream's file. Returns ``None`` when ``max_files``
+        files are still in use, ``file_bytes`` is 0, or the file cannot be
+        created (logged). Raises ``ValueError`` after ``close()``.
         """
         with self._lock:
             if not self._cleanup.alive:
@@ -256,7 +290,11 @@ class SpillDir:
         return SpillTarget(path=path, max_bytes=self.file_bytes, _dir=self)
 
     def _claim(self, path: str) -> bool:
-        """Let one stream write ``path``: ``False`` when it is not an unused target of this folder."""
+        """Mark ``path`` open for one stream.
+
+        Returns ``False`` when ``path`` is not a target of this folder that no
+        stream has opened yet (already used, evicted, or the folder closed).
+        """
         with self._lock:
             if self._files.get(path) != "new":
                 return False
@@ -264,7 +302,10 @@ class SpillDir:
             return True
 
     def _finished(self, path: str, *, delete: bool) -> None:
-        """A stream closed ``path``: delete it, or let it be evicted from now on."""
+        """Record that the stream writing ``path`` closed: delete the file, or mark it evictable.
+
+        A no-op when ``path`` is not open in this folder (the folder closed).
+        """
         with self._lock:
             if self._files.get(path) != "open":
                 return  # the folder closed
@@ -275,12 +316,17 @@ class SpillDir:
                 self._files[path] = "closed"
 
     def close(self) -> None:
-        """Remove every file this folder created (the whole private directory); idempotent."""
+        """Remove every file this folder created (the whole private directory).
+
+        Idempotent; never raises (file errors are logged or ignored).
+        """
         with self._lock:
             self._cleanup()
 
     def __enter__(self) -> SpillDir:
+        """Return the folder itself, for ``with SpillDir() as spills:``."""
         return self
 
     def __exit__(self, *exc: object) -> None:
+        """``close()`` the folder on leaving the ``with`` block."""
         self.close()

@@ -10,11 +10,14 @@ left out and where the whole content is (``Spill``).
 
 Producers:
 
-- ``capture(value, limits=Limits())``: a finished Python value, without
-  running code on it. ``capture.register(T, shape)`` describes another type
-  with one of the shapes ``array_like``, ``ndarray_like``,
-  ``mapping_like``, ``object_like`` or ``text_like``.
-  ``capture_fields(**fields)`` captures a framework wrapper.
+- ``capture(value, limits=Limits())``: a finished Python value. Capture
+  reads values natively and runs none of their methods; the code that does
+  run is class metadata (annotations), the accessors of a shape you
+  registered, and, only with ``Limits(fallback="repr")``, the value's
+  ``repr``. ``capture.register(T, shape)`` describes another type with one
+  of the shapes ``array_like``, ``ndarray_like``, ``mapping_like``,
+  ``object_like`` or ``text_like``. ``capture_fields(**fields)`` captures
+  named parts (a call's arguments) so that every part survives.
 - ``TextStream``: output that arrives over time, with an optional
   ``SpillTarget`` file; ``SpillDir`` bounds the files of many streams;
   ``merge`` joins two ``Text``s (progress batches).
@@ -22,7 +25,8 @@ Producers:
 
 Renderers: ``render_output`` (command output), ``render_python``
 (agentdoc's prefill notation; its hooks receive a ``PythonRenderer``),
-``render_json`` and ``render_trace`` (trace previews).
+``render_json`` (plain JSON within a size) and ``render_trace`` (that JSON
+plus the trace span attributes saying what was cut).
 
 Every public name's docstring is its documentation; ``docs/snapshot-model.md``
 is the short contract.
