@@ -214,3 +214,80 @@ def test_request_reply_cap_fills_in_when_options_have_none(calls, make):
     [body] = [json.loads(call) for call in calls]
     assert 256 in (body.get("max_tokens"), body.get("max_output_tokens"))
     client.close()
+
+
+class ProtocolOnlyAdapter:
+    """Only what ``Adapter`` declares: capabilities, send and send_sync."""
+
+    def __init__(self, replies):
+        self.replies = list(replies)
+        self.seen = []
+
+    @property
+    def capabilities(self) -> Capabilities:
+        return Capabilities()
+
+    def _next(self, request, options):
+        self.seen.append((request, options))
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    def send_sync(self, request, **options):
+        return self._next(request, options)
+
+    async def send(self, request, **options):
+        return self._next(request, options)
+
+
+def _turn(text="", reasoning=None):
+    from nooa.llm_types import AssistantReasoning, AssistantText, LLMResponse, LLMUsage
+
+    parts = []
+    if reasoning:
+        parts.append(AssistantReasoning(text=reasoning))
+    if text:
+        parts.append(AssistantText(text=text))
+    return LLMResponse(
+        parts=tuple(parts),
+        finish_reason="stop",
+        usage=LLMUsage(input_tokens=3, output_tokens=1),
+    )
+
+
+@pytest.mark.parametrize("make", [chat_client, responses_client])
+@pytest.mark.asyncio
+async def test_client_dispatches_through_a_protocol_only_adapter(make):
+    """Clients use only the declared protocol; retries stay in the client."""
+    client = make(
+        retry_config=RetryConfig(max_retries=2, base_delay=0, max_delay=0, jitter_factor=0)
+    )
+    boom = litellm.InternalServerError("boom", llm_provider="openai", model="m")
+    adapter = ProtocolOnlyAdapter([boom, _turn("one"), boom, _turn("two")])
+    assert isinstance(adapter, Adapter)
+    client._adapter = adapter
+    assert client.call(MESSAGES, [TOOL], tool_choice="required", temperature=0).content == "one"
+    assert (await client.acall(MESSAGES)).content == "two"
+    assert len(adapter.seen) == 4
+    request, options = adapter.seen[1]
+    assert request.messages is MESSAGES and request.tools == [TOOL]
+    assert request.tool_choice == "required"
+    assert options == {"tool_choice": "required", "temperature": 0}
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_empty_content_retry_checks_the_returned_response():
+    client = chat_client(
+        retry_config=RetryConfig(
+            max_retries=2, base_delay=0, max_delay=0, jitter_factor=0, retry_on_empty_content=True
+        )
+    )
+    client._adapter = ProtocolOnlyAdapter(
+        [_turn(reasoning="thinking"), _turn("done"), _turn(reasoning="again"), _turn("ok")]
+    )
+    assert client.call(MESSAGES).content == "done"
+    assert (await client.acall(MESSAGES)).content == "ok"
+    assert len(client._adapter.seen) == 4
+    await client.aclose()

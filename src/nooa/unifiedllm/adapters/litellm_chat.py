@@ -3,9 +3,9 @@
 """LiteLLM Chat Completions adapter: request building, the call and reply parsing.
 
 The code here was moved out of ``CompletionClient`` without changing the wire
-body. The client still owns retries, metrics and debug tracking; it calls
-``prepare``, ``transmit`` and ``parse`` so retries wrap only the network call,
-exactly as before. ``send`` and ``send_sync`` run one attempt of all three.
+body. The client owns retries, metrics and debug tracking and calls only
+``send`` / ``send_sync``, one attempt each. ``prepare``, ``transmit`` and
+``parse`` are this adapter's own steps; no client calls them.
 """
 
 import copy
@@ -41,6 +41,7 @@ from nooa.unifiedllm.unifiedllm import (
     _needs_dummy_tool,
     _record_llm_metric,
     _run_async_provider_call,
+    _update_token_calibration,
     _with_sdk_retries,
     extract_and_parse_json,
 )
@@ -512,14 +513,34 @@ class LiteLLMChatAdapter:
         native_output = self._client._native_output_for_call(options, call_config)
         return call_config, native_output
 
+    @staticmethod
+    def _calibrate(prepared: PreparedChatCall, raw_response: Any) -> None:
+        """Feed the reply's input-token count to the token-estimate calibration.
+
+        Done here because the estimate must count the projected wire messages
+        and tool schemas, which only this adapter has.
+        """
+        _, usage = _extract_reasoning_and_usage(raw_response)
+        if usage:
+            _update_token_calibration(
+                prepared.effective_model,
+                prepared.prepared_messages,
+                usage,
+                tools=prepared.api_params.get("tools"),
+            )
+
     def send_sync(self, request: LLMRequest, **options: Any) -> LLMResponse:
         """One attempt, sync. ``options`` are LiteLLM call settings (temporary)."""
         call_config, native_output = self._settings(request, options)
         prepared = self.prepare(request, call_config, native_output=native_output, is_async=False)
-        return self.parse(prepared, self.transmit_sync(prepared))
+        raw_response = self.transmit_sync(prepared)
+        self._calibrate(prepared, raw_response)
+        return self.parse(prepared, raw_response)
 
     async def send(self, request: LLMRequest, **options: Any) -> LLMResponse:
         """One attempt, async. ``options`` are LiteLLM call settings (temporary)."""
         call_config, native_output = self._settings(request, options)
         prepared = self.prepare(request, call_config, native_output=native_output, is_async=True)
-        return self.parse(prepared, await self.transmit(prepared))
+        raw_response = await self.transmit(prepared)
+        self._calibrate(prepared, raw_response)
+        return self.parse(prepared, raw_response)

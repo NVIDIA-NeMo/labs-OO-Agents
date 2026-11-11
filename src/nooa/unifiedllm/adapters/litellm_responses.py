@@ -3,9 +3,9 @@
 """LiteLLM Responses adapter: request building, the call and reply parsing.
 
 The code here was moved out of ``ResponsesClient`` without changing the wire
-body. The client still owns retries, metrics and debug tracking; it calls
-``prepare``, ``transmit`` and ``parse`` so retries wrap only the network call,
-exactly as before. ``send`` and ``send_sync`` run one attempt of all three.
+body. The client owns retries, metrics and debug tracking and calls only
+``send`` / ``send_sync``, one attempt each. ``prepare``, ``transmit`` and
+``parse`` are this adapter's own steps; no client calls them.
 """
 
 import copy
@@ -437,14 +437,32 @@ class LiteLLMResponsesAdapter:
         self._client._validate_request_config("input", call_config)
         return call_config
 
+    @staticmethod
+    def _finish(prepared: PreparedResponsesCall, raw_response: Any):
+        """Read usage, feed the token-estimate calibration and return the usage.
+
+        Calibration happens here because the estimate must count the projected
+        input, tool schemas and instructions, which only this adapter has.
+        """
+        usage = _core._extract_usage(raw_response)
+        if usage:
+            _core._update_token_calibration(
+                prepared.effective_model,
+                prepared.input_messages,
+                usage,
+                tools=prepared.api_params.get("tools"),
+                instructions=prepared.api_params.get("instructions"),
+            )
+        return usage
+
     def send_sync(self, request: LLMRequest, **options: Any) -> LLMResponse:
         """One attempt, sync. ``options`` are LiteLLM call settings (temporary)."""
         prepared = self.prepare(request, self._call_config(request, options), is_async=False)
         raw_response = self.transmit_sync(prepared)
-        return self.parse(prepared, raw_response, _core._extract_usage(raw_response))
+        return self.parse(prepared, raw_response, self._finish(prepared, raw_response))
 
     async def send(self, request: LLMRequest, **options: Any) -> LLMResponse:
         """One attempt, async. ``options`` are LiteLLM call settings (temporary)."""
         prepared = self.prepare(request, self._call_config(request, options), is_async=True)
         raw_response = await self.transmit(prepared)
-        return self.parse(prepared, raw_response, _core._extract_usage(raw_response))
+        return self.parse(prepared, raw_response, self._finish(prepared, raw_response))

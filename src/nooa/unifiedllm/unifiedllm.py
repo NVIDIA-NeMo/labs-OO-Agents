@@ -1428,16 +1428,27 @@ class UnifiedLLM(ABC):
             raise ValueError("model must be a non-empty string")
         return model
 
-    def _llm_request(self, messages, tools, output_model, kwargs, call_config):
-        """The LLMRequest for one call. The wire values still come from kwargs."""
+    def _llm_request(self, messages, tools, output_model, kwargs):
+        """The LLMRequest for one call. The wire values still come from kwargs.
+
+        The reply cap is the one ``kwargs`` set (top level, then ``extra_body``),
+        so the adapter's fill-in of request fields never adds a second cap.
+        """
         from nooa.unifiedllm.request import LLMRequest
 
         tool_choice = kwargs.get("tool_choice", "auto")
         if not isinstance(tool_choice, (str, dict)):
             tool_choice = "auto"
         level = kwargs.get("reasoning_level", self.reasoning_level)
+        extra = kwargs.get("extra_body")
+        layers = [kwargs, extra if isinstance(extra, Mapping) else {}]
         cap = next(
-            (call_config[k] for k in sorted(REPLY_CAP_KEYS) if type(call_config.get(k)) is int),
+            (
+                layer[k]
+                for layer in layers
+                for k in sorted(REPLY_CAP_KEYS)
+                if type(layer.get(k)) is int
+            ),
             None,
         )
         return LLMRequest(
@@ -1448,6 +1459,17 @@ class UnifiedLLM(ABC):
             reasoning_level=level if isinstance(level, str) else None,
             max_output_tokens=cap,
         )
+
+    def _dispatch_request(self, messages, tools, output_model, kwargs, managed):
+        """Check one call's settings and return its LLMRequest and effective model.
+
+        The adapter resolves the settings again per attempt; doing it once here
+        keeps invalid calls failing before tracking and retries start.
+        """
+        call_config = self._prepare_call_config(kwargs)
+        self._validate_request_config(managed, call_config)
+        model = self._effective_model(call_config)
+        return self._llm_request(messages, tools, output_model, kwargs), model
 
     def _validate_cache_breakpoint_model(self, effective_model: str) -> None:
         """Reject applying a model-declared cache mapping to a call override."""
@@ -1913,6 +1935,12 @@ def _extract_reasoning_and_usage(raw_response: Any) -> tuple[str | None, LLMUsag
     return reasoning, _extract_usage(raw_response)
 
 
+def _raise_if_empty_content(response: LLMResponse, enabled: bool) -> None:
+    """Raise EmptyContentError for a reply with reasoning but no text, if enabled."""
+    if enabled and not response.content and response.reasoning:
+        raise EmptyContentError(response.reasoning)
+
+
 def _item_field(item: Any, name: str) -> Any:
     return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
 
@@ -2280,48 +2308,30 @@ class CompletionClient(UnifiedLLM):
         Sync version: Completion API uses standard message format, so no transformation needed.
         Messages are passed directly to the API.
 
+        Each attempt is one ``adapter.send_sync``; retries, the empty-content
+        check, debug tracking and the usage metric stay here.
+
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
-        call_config = self._prepare_call_config(kwargs)
-        self._validate_request_config("messages", call_config)
-        native_output = self._native_output_for_call(kwargs, call_config)
-        request = self._llm_request(messages, tools, output_model, kwargs, call_config)
-        prepared = self._adapter.prepare(
-            request, call_config, native_output=native_output, is_async=False
-        )
-
+        request, model = self._dispatch_request(messages, tools, output_model, kwargs, "messages")
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
         def _make_call():
-            raw_response = self._adapter.transmit_sync(prepared)
-            reasoning, _ = _extract_reasoning_and_usage(raw_response)
-            text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
-
-            # Raise EmptyContentError to trigger retry if configured
-            if not text_content and reasoning and retry_on_empty:
-                raise EmptyContentError(reasoning)
-
-            return raw_response
+            response = self._adapter.send_sync(request, **kwargs)
+            _raise_if_empty_content(response, retry_on_empty)
+            return response
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
-        with _track_llm_call(model=prepared.effective_model, endpoint=self.config.get("api_base")):
-            raw_response = (
+        with _track_llm_call(model=model, endpoint=self.config.get("api_base")):
+            response = (
                 sync_retry(_make_call, config=self.retry_config)
                 if self.retry_config
                 else _make_call()
             )
-
-        reasoning, usage = _extract_reasoning_and_usage(raw_response)
-        if usage:
-            _record_llm_metric("token_usage", usage)
-            _update_token_calibration(
-                prepared.effective_model,
-                prepared.prepared_messages,
-                usage,
-                tools=prepared.api_params.get("tools"),
-            )
-        return self._adapter.parse(prepared, raw_response)
+        if response.usage:
+            _record_llm_metric("token_usage", response.usage)
+        return response
 
     async def acall(
         self,
@@ -2334,48 +2344,30 @@ class CompletionClient(UnifiedLLM):
         Async version: Completion API uses standard message format, so no transformation needed.
         Messages are passed directly to the API.
 
+        Each attempt is one ``await adapter.send``; retries, the empty-content
+        check, debug tracking and the usage metric stay here.
+
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
-        call_config = self._prepare_call_config(kwargs)
-        self._validate_request_config("messages", call_config)
-        native_output = self._native_output_for_call(kwargs, call_config)
-        request = self._llm_request(messages, tools, output_model, kwargs, call_config)
-        prepared = self._adapter.prepare(
-            request, call_config, native_output=native_output, is_async=True
-        )
-
+        request, model = self._dispatch_request(messages, tools, output_model, kwargs, "messages")
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
         async def _make_call():
-            raw_response = await self._adapter.transmit(prepared)
-            reasoning, _ = _extract_reasoning_and_usage(raw_response)
-            text_content = raw_response.choices[0].message.content or ""  # type: ignore[union-attr]
-
-            # Raise EmptyContentError to trigger retry if configured
-            if not text_content and reasoning and retry_on_empty:
-                raise EmptyContentError(reasoning)
-
-            return raw_response
+            response = await self._adapter.send(request, **kwargs)
+            _raise_if_empty_content(response, retry_on_empty)
+            return response
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
-        with _track_llm_call(model=prepared.effective_model, endpoint=self.config.get("api_base")):
-            raw_response = (
+        with _track_llm_call(model=model, endpoint=self.config.get("api_base")):
+            response = (
                 await with_retry(_make_call, config=self.retry_config)
                 if self.retry_config
                 else await _make_call()
             )
-
-        reasoning, usage = _extract_reasoning_and_usage(raw_response)
-        if usage:
-            _record_llm_metric("token_usage", usage)
-            _update_token_calibration(
-                prepared.effective_model,
-                prepared.prepared_messages,
-                usage,
-                tools=prepared.api_params.get("tools"),
-            )
-        return self._adapter.parse(prepared, raw_response)
+        if response.usage:
+            _record_llm_metric("token_usage", response.usage)
+        return response
 
 
 class ReasoningCompletionClient(CompletionClient):
@@ -2563,34 +2555,20 @@ class ResponsesClient(UnifiedLLM):
 
         Accepts public message dictionaries and LLMResponse objects. Stored turns
         are projected here; only leading system messages become `instructions`.
+        Each attempt is one ``adapter.send_sync``; retries and tracking stay here.
         """
-        call_config = self._prepare_call_config(kwargs)
-        self._validate_request_config("input", call_config)
-        request = self._llm_request(messages, tools, output_model, kwargs, call_config)
-        prepared = self._adapter.prepare(request, call_config, is_async=False)
+        request, model = self._dispatch_request(messages, tools, output_model, kwargs, "input")
 
         def _make_call():
-            return self._adapter.transmit_sync(prepared)
+            return self._adapter.send_sync(request, **kwargs)
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
-        with _track_llm_call(model=prepared.effective_model, endpoint=self.config.get("api_base")):
-            raw_response = (
+        with _track_llm_call(model=model, endpoint=self.config.get("api_base")):
+            return (
                 sync_retry(_make_call, config=self.retry_config)
                 if self.retry_config
                 else _make_call()
             )
-
-        usage = _extract_usage(raw_response)
-        if usage:
-            _update_token_calibration(
-                prepared.effective_model,
-                prepared.input_messages,
-                usage,
-                tools=prepared.api_params.get("tools"),
-                instructions=prepared.api_params.get("instructions"),
-            )
-
-        return self._adapter.parse(prepared, raw_response, usage)
 
     async def acall(
         self,
@@ -2604,34 +2582,20 @@ class ResponsesClient(UnifiedLLM):
 
         Accepts public message dictionaries and LLMResponse objects. Stored turns
         are projected here; only leading system messages become `instructions`.
+        Each attempt is one ``await adapter.send``; retries and tracking stay here.
         """
-        call_config = self._prepare_call_config(kwargs)
-        self._validate_request_config("input", call_config)
-        request = self._llm_request(messages, tools, output_model, kwargs, call_config)
-        prepared = self._adapter.prepare(request, call_config, is_async=True)
+        request, model = self._dispatch_request(messages, tools, output_model, kwargs, "input")
 
         async def _make_call():
-            return await self._adapter.transmit(prepared)
+            return await self._adapter.send(request, **kwargs)
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
-        with _track_llm_call(model=prepared.effective_model, endpoint=self.config.get("api_base")):
-            raw_response = (
+        with _track_llm_call(model=model, endpoint=self.config.get("api_base")):
+            return (
                 await with_retry(_make_call, config=self.retry_config)
                 if self.retry_config
                 else await _make_call()
             )
-
-        usage = _extract_usage(raw_response)
-        if usage:
-            _update_token_calibration(
-                prepared.effective_model,
-                prepared.input_messages,
-                usage,
-                tools=prepared.api_params.get("tools"),
-                instructions=prepared.api_params.get("instructions"),
-            )
-
-        return self._adapter.parse(prepared, raw_response, usage)
 
     def _prepare_input(
         self, messages, state_scope, model, native_encrypted_reasoning=False, *, media_inputs=None
