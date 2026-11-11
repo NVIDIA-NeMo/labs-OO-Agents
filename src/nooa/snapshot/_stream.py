@@ -201,14 +201,10 @@ class TextStream:
             return None
         return Spill(self._path, self._kept, self._produced)
 
-    def _text(self, start: int, end: int) -> Text:
-        """What memory holds of units ``[start, end)``, as a ``Text`` (reads only)."""
-        window = self._window
-        tail_from = self._total - window.tail_len
-        length = max(0, end - start)
-        first = max(start, tail_from)
-        head = window.head()[min(start, window.head_len) : min(end, window.head_len)]
-        tail = window.tail()[first - tail_from : max(first, end) - tail_from]
+    def _text(self) -> Text:
+        """What memory holds of the whole stream, as a ``Text`` (reads only)."""
+        length = self._total
+        head, tail = self._window.head(), self._window.tail()
         if length <= len(head) + len(tail):
             whole = head + tail  # type: ignore[operator]
             return Text(head=whole, length=length, unit=self.unit, full=self._full(False))
@@ -233,7 +229,7 @@ class TextStream:
         if self._closed is not None:
             return self._closed
         self._flush()
-        return self._text(0, self._total)
+        return self._text()
 
     def close(self) -> Text:
         """Finish the stream and return the final ``Text``; later calls return the same one.
@@ -250,7 +246,7 @@ class TextStream:
                 spill.file.close()
             except OSError:
                 self._fail()
-        text = self._text(0, self._total)
+        text = self._text()
         spill, self._file = self._file, None
         if spill is not None:
             spill.finish(delete=text.complete)

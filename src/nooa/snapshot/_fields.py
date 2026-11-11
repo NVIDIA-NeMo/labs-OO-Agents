@@ -96,11 +96,6 @@ def _spec_flags(raw: Any, state: _State) -> dict[str, Any]:
     return found
 
 
-def _hidden_flag(raw: Any, state: _State) -> bool | None:
-    """The ``hidden`` entry of raw metadata keywords: a ``bool``, ``None`` when absent."""
-    return _spec_flags(raw, state).get("hidden")
-
-
 def _visibility_overrides(
     obj_dict: dict[str, Any], mro: tuple[type[Any], ...], state: _State
 ) -> dict[str, dict[str, Any]]:
@@ -158,11 +153,6 @@ def _metadata_spec(metadata: Any, state: _State) -> dict[str, Any]:
             found.update(flags)
         # Foreign constraint metadata is deliberately ignored.
     return found
-
-
-def _metadata_hidden(metadata: Any, state: _State) -> bool:
-    """Whether recognized marker metadata hides a field (``_FailClosed``: malformed)."""
-    return bool(_metadata_spec(metadata, state).get("hidden"))
 
 
 def _field_spec(field_info: FieldInfo, state: _State) -> dict[str, Any]:
