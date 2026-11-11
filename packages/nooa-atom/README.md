@@ -347,83 +347,33 @@ Reflection may summarize only captured completed evidence, preserve archival
 originals, update its own notes block, and conservatively propose obsolete primitive
 bindings for deletion. It is not an automatic background expiry service.
 
-## Reflection turns
+## Reflection
 
-From time to time a root session sends its agent a housekeeping message, a
-*reflection*: rename the session to what it works on now, compact history it no
-longer needs in full, delete stale Python names, and tidy `self.todo` and
-`self.v`. This is an ordinary message the session sends, unlike
-`experimental_done_reflection` above (one bounded prediction after a `Done`);
-the two are independent.
-
-Only root sessions reflect, each through one `Reflection`
-(`nooa_atom.session.reflection`) that the session creates: the mechanics.
-The blocks the message is made of belong to the agent (below). When a root
-session's turn ends with `Done` or `Waiting` and reflection is on, it counts
-the turn. A reflection is due when at least `min_gap_turns` turns passed since
-the last one, and `every_turns` turns or `every_minutes` minutes passed or the
-context window is at least `context_fraction` full (the share the agent's
-`context_usage` line shows). The counters then reset, and right after the turn
-settles the session builds the message and puts it on the agent's
-`system_messages` queue as an ordinary item (source `reflection`); the agent
-handles it in a normal, visible turn. The counters are in memory: they start
-when the session is created or loaded, and stay at zero while reflection is
-off. An agent without a `system_messages` queue does not reflect, and an error
-in the check is logged and ignored.
-
-The message is a fixed header line, then the switched-on blocks numbered in
-registration order, then "Then finish with a short Done." Every Atom agent
-owns its blocks from construction as `agent.reflection`, a `ReflectionBlocks`
-registry. A block is a name and either text or a snippet: a Python expression,
-like a dynamic context block's `expr`, checked to parse when it is registered.
-The Atom factory (`create_session_agent()`) registers the five core blocks,
-`rename`, `compact`, `variables`, `todo` and `vars`
-(`nooa_atom.session.reflection.CORE_BLOCKS`), through
-`agent.reflection.register(..., on=True)`, so they are on by default; they
-point at the context blocks the agent already sees (`context_usage`,
-`python_cell_state`, `todo_status`).
-
-Snippets are evaluated when the message is built, with the evaluator dynamic
-context blocks use (`agent.runtime.evaluate_expression`: `self` is the agent,
-`await` works). The agent gets plain text: a string as it is, another value
-pretty-printed, an exception inline as `ExceptionType: message`; `None` or
-`""` leaves the block out of that message, and a message with no blocks is
-not sent.
-
-A block registered with `on=True`, like the core blocks, starts switched on;
-every other block starts off until the user switches it on. The user controls
-it with `/reflection`:
-
-- `/reflection`: on or off, the blocks that are on, the triggers, and when
-  the next reflection is due;
-- `/reflection on` / `/reflection off`: set `atom.reflection.enabled`;
-- `/reflection config`: every registered block with its state;
-- `/reflection config BLOCK on|off`: switch one block
-  (`atom.reflection.blocks.BLOCK`).
-
-Changes apply to the running session at once and are saved in the
-workspace's `.nooa/settings.yaml`. Over ACP the list is plain text: the
-server's only form today is the verbosity picker.
-
-Settings, in `atom.reflection` (defaults shown; a partial section overrides
-only the keys it sets; the triggers are YAML-only):
+Now and then a root session asks its agent to tidy up: an ordinary message on
+the agent's `system_messages` queue (source `reflection`) that the agent
+handles in a normal turn. It is independent of `experimental_done_reflection`.
+The `nemo.reflection` skill (`nooa_atom.skills.reflection`) owns it. After a
+turn ends with `Done` or `Waiting`, a reflection is due when `min_gap_turns`
+turns passed since the last one and `every_turns` turns or `every_minutes`
+minutes passed or the context window is `context_fraction` full. The turn
+that answers a reflection does not count, and a due reflection waits while a
+prompt is still waiting on work. The message reports the agent's state: the
+context fill, the retained Python variables, the open todos and `self.v`.
+`/reflection` shows the state, `/reflection on|off` turns it on or off (and
+clears a `SessionOptions(reflection=...)` override), `/reflection config
+[BLOCK on|off]` lists or switches the blocks (`rename`, `compact`,
+`variables`, `todo`, `vars`). Changes are saved in `.nooa/settings.yaml`:
 
 ```yaml
 atom:
   reflection:
-    enabled: null          # null: on for ACP hosts, off elsewhere
+    enabled: null          # null: on for ACP hosts, off elsewhere (Gym, nooa-bench)
     every_turns: 20        # null turns a trigger off
     every_minutes: 60
     min_gap_turns: 5
     context_fraction: 0.5
-    blocks: {}             # name: true/false; unnamed core blocks are on, others off
+    blocks: {}             # name: false switches a block off
 ```
-
-The default follows `SessionOptions.host`: only `"acp"` (Pool, Zed and other
-ACP clients) reflects. `"headless"`, the default for `run_task`, the Gym
-adapter and `nooa-bench`, does not. `enabled: true`/`false` decides for every
-host, and `SessionOptions(reflection=True)` (or `False`) overrides both for one
-run, e.g. a benchmark arm.
 
 ### Native Gym benchmark policy (separate prerequisite)
 

@@ -7,23 +7,12 @@ based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-- `nooa-atom`: reflection. When a root session's turn ends with `Done` or
-  `Waiting` and a reflection is due (20 turns or 60 minutes since the last,
-  or the context half full; at least 5 turns apart), the session's
-  `Reflection` puts a housekeeping message on the agent's `system_messages`
-  queue as an ordinary item. The agent handles it in a normal turn. The
-  message is made of blocks registered by name on `agent.reflection` (a
-  `ReflectionBlocks` registry): each is text or a snippet, a Python
-  expression evaluated like a dynamic context block's right before the
-  message is posted. The Atom factory registers the core blocks (rename the
-  session, compact history, delete stale names, tidy todos and tidy
-  `self.v`), switched on by default. `/reflection on|off`
-  turns it on or off, `/reflection config [BLOCK on|off]` lists and switches
-  blocks, saved in `atom.reflection.enabled` and `atom.reflection.blocks`.
-  The triggers keep their defaults and are set in YAML. On by default for
-  ACP hosts, off elsewhere (benchmarks, Gym, `nooa-bench`); configure it in
-  `atom.reflection`, or override with `SessionOptions(reflection=...)`. Child
-  sessions never reflect.
+- `nooa-atom`: reflection. The `nemo.reflection` skill posts a housekeeping
+  message on a root session's `system_messages` queue when one is due (20
+  turns or 60 minutes since the last, or the context half full; at least 5
+  turns apart), reporting the context fill, Python variables, open todos and
+  `self.v`. `/reflection [on|off|config [BLOCK on|off]]`; settings in
+  `atom.reflection`. On for ACP hosts, off elsewhere.
 - `nooa-atom`: AtomAgent drops the core `<events_api>` guidance block (added on
   main for agents that expose `self.events`). `self.events` stays exposed, and
   Atom's `context_usage` block already names `self.events.collapse(...)` and
