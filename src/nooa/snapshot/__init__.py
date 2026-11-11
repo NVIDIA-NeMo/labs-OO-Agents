@@ -60,7 +60,8 @@ from nooa.snapshot._render import (
     render_python,
     render_trace,
 )
-from nooa.snapshot._stream import SpillDir, SpillTarget, TextStream, merge
+from nooa.snapshot._spill import SpillDir, SpillTarget
+from nooa.snapshot._stream import TextStream, merge
 
 __all__ = [
     "Limits",

@@ -227,16 +227,18 @@ def test_existing_symlink_spill_path_is_refused(tmp_path: Path) -> None:
     assert target.read_text() == "kept" and link.is_symlink()
 
 
-def test_stream_deletes_only_the_spill_file_it_created(tmp_path: Path) -> None:
-    path = tmp_path / "out.txt"
-    stream = _stream("bytes", 10, 10, spill=SpillTarget(path=str(path)))
-    stream.write(b"small")
-    path.unlink()
-    path.write_text("someone else's")  # replaced while the stream ran
+@pytest.mark.parametrize("named", [True, False])
+def test_standalone_spill_file_is_private(tmp_path: Path, named: bool) -> None:
+    spill = SpillTarget(path=str(tmp_path / "out.txt")) if named else SpillTarget()
+    stream = _stream("bytes", 1, 1, spill=spill)
+    stream.write(b"abc")
 
-    assert stream.close().complete
-
-    assert path.read_text() == "someone else's"  # not the stream's file: left alone
+    full = stream.close().full
+    assert full is not None
+    try:
+        assert os.stat(full.path).st_mode & 0o777 == 0o600
+    finally:
+        os.unlink(full.path)
 
 
 def test_uncut_stream_deletes_its_spill_file(tmp_path: Path) -> None:
@@ -286,7 +288,9 @@ def test_spill_write_failure_falls_back_to_memory(tmp_path: Path) -> None:
         def close(self) -> None:
             pass
 
-    stream._file = Broken()  # type: ignore[assignment]
+    assert stream._file is not None
+    stream._file.file.close()  # type: ignore[union-attr]
+    stream._file.file = Broken()  # type: ignore[assignment]
     stream.write(b"abcdefgh")
 
     text = stream.close()
@@ -336,7 +340,8 @@ def test_spill_flush_failure_falls_back_to_memory(tmp_path: Path) -> None:
     path = tmp_path / "out.log"
     stream = TextStream(unit="bytes", head=2, tail=2, spill=SpillTarget(path=str(path)))
     stream.write(b"abcdefgh")
-    real = stream._file
+    assert stream._file is not None
+    real = stream._file.file
     assert real is not None
 
     class Broken:
@@ -349,7 +354,7 @@ def test_spill_flush_failure_falls_back_to_memory(tmp_path: Path) -> None:
         def close(self) -> None:
             real.close()
 
-    stream._file = Broken()  # type: ignore[assignment]
+    stream._file.file = Broken()  # type: ignore[assignment]
 
     text = stream.snapshot()
     assert text.full is None and text.reason == "max_length"
