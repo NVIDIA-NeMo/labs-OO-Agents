@@ -61,6 +61,7 @@ from nooa.tools import BashSession
 from nooa_atom.agent.metrics import atom_metrics
 from nooa_atom.agent.work_manager import _progress_sink, current_name, describe, job_dir
 from nooa_atom.agent.work_progress import _ShellProgress
+from nooa_atom.agent.work_subagent import hand_over, still_running_note
 
 __all__ = ["CommandResult", "Shell", "ShellOwner", "default_cwd", "shell_owner"]
 
@@ -104,6 +105,8 @@ case "$(trap -p USR1)" in *__nooa_stop=1*) trap - USR1; __nooa_t=0 ;; '') __nooa
 printf '%s %s %s\\n' "$__nooa_rc" "-$__nooa_f$__nooa_p" "$__nooa_t" >STATUSFILE
 eval "unset __nooa_rc __nooa_f __nooa_was __nooa_stop __nooa_p __nooa_t __nooa_e __nooa_ud __nooa_xd; (exit $__nooa_rc)"
 """
+# An awaited command that took longer counts as a long await (harness metrics).
+_LONG_AWAIT_SECONDS = 60.0
 # Seconds to wait for output still in the pipes.
 _DRAIN_SECONDS = 0.5
 # How a command ends when its Shell is closed (``aclose``) before or while it runs.
@@ -332,6 +335,18 @@ def _busy_message(blocker: str) -> str:
     )
 
 
+async def _handed(body: asyncio.Future[CommandResult]) -> CommandResult:
+    """A command handed over at the cell deadline, as a job: its result, or stopped when cancelled."""
+    describe("$ shell command: handed over at the cell deadline")
+    try:
+        return await asyncio.shield(body)
+    except asyncio.CancelledError:
+        body.cancel()
+        with contextlib.suppress(BaseException):
+            await body
+        raise
+
+
 def _check_timeout(value: Any) -> float:
     """``value`` as a command deadline: a non-bool int or float, finite and positive."""
     if isinstance(value, bool) or not isinstance(value, int | float):
@@ -452,6 +467,9 @@ class Shell:
         self._confirmed_cwd: str | None = None
         self._busy: str | None = None  # the command running now
         self._busy_job: str | None = None  # the job it runs in (None: a direct run)
+        self._busy_task: asyncio.Task | None = None  # the task running it
+        # Runs handed over at the cell deadline while still queued: their job names.
+        self._handed_jobs: dict[asyncio.Future, str] = {}
         self._queued = 0  # commands waiting for their turn behind it
         self._lost = False  # restarted since the last command: state was lost
         # The user's shell options (of "euxvp", p: pipefail) and whether a user
@@ -495,6 +513,44 @@ class Shell:
         """
         timeout = _check_timeout(timeout)
         describe(f"$ {command}")
+        if current_name() is not None:  # in a job: no cell deadline to outlive
+            return await self._run(command, stdin, timeout)
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        body = asyncio.ensure_future(self._run(command, stdin, timeout))
+        try:
+            await asyncio.wait({body})  # a cancel leaves it running: the deadline may hand it over
+        except asyncio.CancelledError:
+            if body.done() or deadline_cancel() is None or not self._hand_over(body, command):
+                body.cancel()  # it stops the command; its CancelledError ends this await
+                with contextlib.suppress(Exception):
+                    await body
+            raise
+        result = body.result()
+        if loop.time() - started > _LONG_AWAIT_SECONDS:
+            atom_metrics().shell_long_await()
+        return result
+
+    def _hand_over(self, body: asyncio.Future[CommandResult], command: str) -> bool:
+        """At the cell deadline: ``body`` runs on as a job (the Shell stays busy); False if not."""
+        job = hand_over("sh", lambda: _handed(body))
+        if job is None:
+            return False
+        if job._task is not None:  # cancelled before it ran: stop the command all the same
+            job._task.add_done_callback(lambda _: body.cancel())
+        if self._busy_task is body:
+            self._busy_job = job.name  # a later inline run is refused, naming the job
+        else:  # still queued: it takes the name when it gets the lock
+            self._handed_jobs[body] = job.name
+            body.add_done_callback(lambda done: self._handed_jobs.pop(done, None))
+        atom_metrics().shell_detached()
+        deadline = deadline_cancel()
+        if deadline is not None:
+            deadline.note(still_running_note(job.name, _blocker(command, None)))
+        return True
+
+    async def _run(self, command: str, stdin: str | None, timeout: float) -> CommandResult:
+        """Run ``command`` under the Shell's lock (queued FIFO behind a running one)."""
         await self._closed()
         generation = self._generation
         note = ""
@@ -523,13 +579,15 @@ class Shell:
             if self._generation != generation:
                 raise RuntimeError(_CLOSED_BEFORE)
             # Busy from first use on: a cell's run behind a job starting bash fails too.
-            self._busy, self._busy_job = command, current_name()
+            task = asyncio.current_task()
+            self._busy, self._busy_task = command, task
+            self._busy_job = current_name() or self._handed_jobs.pop(task, None)
             try:
                 if self._session is None:
                     await self._start(generation)
                 result = await self._send_locked(command, stdin, timeout, generation)
             finally:
-                self._busy = self._busy_job = None
+                self._busy = self._busy_job = self._busy_task = None
                 session = self._session
                 if session is not None:
                     self._confirmed_cwd = str(session.cwd)  # bash reports it after each command
