@@ -51,11 +51,14 @@ from pydantic import BaseModel
 from nooa.snapshot._limits import _State
 from nooa.snapshot._model import Reason
 
-_MAX_TYPE_NAME = 200
+_MAX_TYPE_NAME = 200  # the most characters of a type name kept in a node
+# ``type``'s own descriptors: reading a class's namespace, MRO and name through
+# them skips any metaclass attribute of the same name.
 _TYPE_DICT = type.__dict__["__dict__"]
 _TYPE_MRO = type.__dict__["__mro__"]
 _TYPE_NAME = type.__dict__["__name__"]
-_BASE_MODEL_DICT = BaseModel.__dict__["__dict__"]
+_BASE_MODEL_DICT = BaseModel.__dict__["__dict__"]  # a Pydantic model's raw instance ``__dict__``
+# The exact built-in types and their names, matched by identity.
 _BUILTIN_PAIRS: tuple[tuple[type[Any], str], ...] = (
     (str, "str"),
     (bytes, "bytes"),
@@ -73,7 +76,13 @@ _BUILTIN_PAIRS: tuple[tuple[type[Any], str], ...] = (
 
 
 def _builtin_name(value: Any) -> str:
-    """The name of an exact built-in type, else "" (identity checks: no metaclass hooks)."""
+    """The name of ``value``'s type when it is exactly one of ``_BUILTIN_PAIRS``, else ``""``.
+
+    Identity checks only, so no metaclass hook runs.
+
+    >>> _builtin_name([]), _builtin_name(True), _builtin_name(object())
+    ('list', 'bool', '')
+    """
     value_type = type(value)
     for builtin, name in _BUILTIN_PAIRS:
         if value_type is builtin:
@@ -82,7 +91,12 @@ def _builtin_name(value: Any) -> str:
 
 
 def _bounded_type_name(value: Any, max_chars: int) -> str:
-    """Read a bounded native type name without invoking instance/metaclass hooks."""
+    """The ``__name__`` of ``value``'s class, at most ``max_chars`` characters.
+
+    Read through ``type``'s own descriptor, so no instance or metaclass hook
+    runs. ``"object"`` (cut to ``max_chars``) when the name cannot be read or
+    is not an exact ``str``; ``""`` when ``max_chars`` is 0 or less.
+    """
     if max_chars <= 0:
         return ""
     cls = type(value)
@@ -98,7 +112,8 @@ def _bounded_type_name(value: Any, max_chars: int) -> str:
 def _safe_dict(owner: Any, raw: Any, state: _State) -> dict[str, Any] | None:
     """A copy of the native namespace ``raw`` of ``owner`` if every key is an exact ``str``.
 
-    A dict lookup compares a stored key with ``==`` when the hashes match, so
+    ``raw`` is a class's ``mappingproxy`` or an instance or module ``dict``;
+    anything else gives ``None``. A dict lookup compares a stored key with ``==`` when the hashes match, so
     a fixed-name lookup in a namespace holding a foreign key object (a class
     built with ``type(name, bases, {key: ...})``, a module ``__dict__`` written
     directly) would run that key's ``__eq__``. The keys are checked by type
@@ -130,7 +145,11 @@ def _safe_dict(owner: Any, raw: Any, state: _State) -> dict[str, Any] | None:
 
 
 def _raw_namespace(cls: type[Any], state: _State) -> dict[str, Any] | None:
-    """A class's own namespace (no metaclass lookup), checked by ``_safe_dict``."""
+    """``cls``'s own namespace, read through ``type``'s descriptor and checked by ``_safe_dict``.
+
+    ``None`` when it cannot be read, is not a ``mappingproxy``, or holds a key
+    that is not an exact ``str``.
+    """
     try:
         namespace = _TYPE_DICT.__get__(cls, type(cls))
     except Exception:
@@ -141,7 +160,13 @@ def _raw_namespace(cls: type[Any], state: _State) -> dict[str, Any] | None:
 
 
 def _safe_mro(value: Any, state: _State) -> tuple[type[Any], ...] | None:
-    """The value's MRO, each entry inspection-budgeted and with a raw namespace."""
+    """The MRO of ``value``'s class, read through ``type``'s own descriptor.
+
+    Each entry costs one unit of work and must have a readable namespace
+    (``_raw_namespace``; ``object`` is not checked). ``None`` when the MRO
+    cannot be read, is not a tuple, the work runs out, or an entry's
+    namespace is unreadable: the caller then treats the value as opaque.
+    """
     cls = type(value)
     try:
         mro = _TYPE_MRO.__get__(cls, type(cls))
@@ -169,7 +194,7 @@ class _FailClosed(Exception):
 
 
 def _namespace(cls: type[Any], state: _State) -> dict[str, Any]:
-    """``_raw_namespace``, or ``_FailClosed`` when it can't be read."""
+    """``_raw_namespace(cls)``; raises ``_FailClosed`` when it is ``None``."""
     namespace = _raw_namespace(cls, state)
     if namespace is None:
         raise _FailClosed
@@ -177,11 +202,19 @@ def _namespace(cls: type[Any], state: _State) -> dict[str, Any]:
 
 
 def _copy_storage(obj_dict: Any, state: _State, limit: int | None = None) -> dict[str, Any]:
-    """A copy of raw instance storage after checking every key (``_FailClosed``).
+    """A copy of raw instance storage ``obj_dict``, every key checked to be an exact ``str``.
 
-    ``limit``: copy only the first ``limit`` entries (insertion order), and
-    stop quietly there; ``None``: all of them, failing closed when the node
-    budget runs out first.
+    Each entry copied costs one unit of work.
+
+    Args:
+        obj_dict: the instance's raw ``__dict__``.
+        state: the capture's state, charged per entry.
+        limit: copy only the first ``limit`` entries (insertion order) and
+            stop quietly there; ``None``: all of them.
+
+    Raises:
+        _FailClosed: ``obj_dict`` is not an exact ``dict``, a key is not an
+            exact ``str``, or the work runs out before the copy is done.
     """
     if type(obj_dict) is not dict:
         raise _FailClosed
@@ -198,9 +231,15 @@ def _copy_storage(obj_dict: Any, state: _State, limit: int | None = None) -> dic
 
 
 def _instance_storage(value: Any, mro: tuple[type[Any], ...], state: _State) -> Any:
-    """Raw ``__dict__`` through the native getset descriptor; ``{}`` for slotted classes.
+    """``value``'s raw ``__dict__``, read through the native getset descriptor.
 
-    ``_FailClosed`` when it can't be read safely (a custom ``__dict__``: refuse).
+    The nearest ``__dict__`` entry in ``mro`` (by raw namespaces) is used;
+    ``{}`` when no class has one (a slotted class). The result is not copied
+    or checked: pass it to ``_copy_storage``.
+
+    Raises:
+        _FailClosed: the ``__dict__`` entry is not the native descriptor (a
+            custom ``__dict__``), or reading it raised.
     """
     for base in mro:
         namespace = _raw_namespace(base, state) if base is not object else None
@@ -219,10 +258,16 @@ def _instance_storage(value: Any, mro: tuple[type[Any], ...], state: _State) -> 
 
 
 _NO_SLOT = object()
+"""What ``_slot_value`` returns for a slot it cannot read (a sentinel, never a field value)."""
 
 
 def _slot_value(name: str, mro: tuple[type[Any], ...], value: Any, state: _State) -> Any:
-    """A slotted field's value through its native member descriptor, else ``_NO_SLOT``."""
+    """The value of slot ``name`` of ``value``, read through its native member descriptor.
+
+    The nearest class in ``mro`` whose raw namespace holds ``name`` decides.
+    ``_NO_SLOT`` when no class does, the entry is not a member descriptor,
+    or the slot is unset (reading it raised).
+    """
     for base in mro:
         namespace = _raw_namespace(base, state) if base is not object else None
         if namespace is None:
@@ -240,11 +285,14 @@ def _slot_value(name: str, mro: tuple[type[Any], ...], value: Any, state: _State
 
 
 class _Omitted:
-    """An entry stream's note that something was left out here, and why.
+    """A note in an entry stream that something was left out at this point, and why.
 
-    The one way a field reader or a shape's items say "incomplete because":
-    the builder keeps reading, and the first such reason is the node's when
-    the builder's own limits left it complete.
+    Field readers and shape builders yield one instead of an entry. The
+    builder skips it and keeps reading; the first note's ``reason`` becomes
+    the node's reason when the builder's own limits left the node complete.
+
+    Args:
+        reason: why the entry was left out.
     """
 
     __slots__ = ("reason",)

@@ -10,7 +10,8 @@ share it without depending on each other.
 
 A snapshot holds no live objects: only built-in values and other nodes.
 Every node has ``complete`` and ``reason``; ``complete`` is
-``reason is None``.
+``reason is None``. Both describe the node itself, not its descendants: a
+complete ``Sequence`` keeps every item, but an item may itself be cut.
 """
 
 from __future__ import annotations
@@ -62,7 +63,7 @@ Reason = Literal[
   cannot use.
 
 Whether a spill file holds the whole content is not a reason: ``Text.full``
-says it.
+says it. A reason is local to its node: a parent of a cut node may have none.
 """
 
 
@@ -81,9 +82,9 @@ class Spill:
     bytes for a bytes stream.
     """
 
-    path: str
-    kept: int  # bytes written to the file
-    total: int  # bytes produced
+    path: str  # the spill file
+    kept: int  # bytes written to the file, from the start
+    total: int  # bytes the stream produced
 
     @property
     def cut(self) -> bool:
@@ -135,15 +136,17 @@ class Text:
       written). ``full.cut``: the file holds only the first ``full.kept``
       bytes.
 
-    Derived: ``complete`` is ``reason is None``; ``omitted`` is
+    Derived: ``complete`` is ``reason is None`` (whether this text was
+    cut; it says nothing of the node that holds it); ``omitted`` is
     ``length - len(head) - len(tail)``, the units left out between ``head``
     and ``tail``. Counts are exact in the text's own unit. A bytes cut made
     by this package ends and starts on UTF-8 code point boundaries.
     Renderers decode bytes (UTF-8, with replacement) only when they print.
 
-    Raises ``ValueError`` when the parts are inconsistent: a part of the
-    wrong type for ``unit``, more kept units than ``length``, or a complete
-    text with a ``tail`` or omitted units.
+    Raises ``ValueError`` when ``unit`` is neither ``"chars"`` nor
+    ``"bytes"``, or when the parts are inconsistent: a part of the wrong type
+    for ``unit``, more kept units than ``length``, or a complete text with a
+    ``tail`` or omitted units.
 
     >>> t = Text(head="ab", tail="yz", length=10, unit="chars", reason="max_length")
     >>> t.omitted, t.complete
@@ -158,6 +161,9 @@ class Text:
     full: Spill | None = None
 
     def __post_init__(self) -> None:
+        """Check the fields (see the class docstring) and default ``tail`` to an empty part of ``head``'s type."""
+        if self.unit != "chars" and self.unit != "bytes":
+            raise ValueError(f'unit must be "chars" or "bytes", not {self.unit!r}')
         kept = str if self.unit == "chars" else bytes
         if not self.tail:
             object.__setattr__(self, "tail", self.head[:0])
@@ -194,12 +200,17 @@ class Sequence:
     - ``head``: the items kept from the start, as nodes.
     - ``reason``: ``None`` when every item is kept, else ``"max_items"``,
       ``"max_length"``, ``"max_nodes"``, ``"max_depth"`` (no items kept) or
-      ``"error"`` (a shape's ``items`` raised while being read).
+      ``"error"`` (a shape's ``items`` raised while being read). A kept item
+      may itself be cut: look at its own ``reason``.
     - ``tail``: the items kept from the end, when ``Limits.tail_share``
       keeps both ends (empty otherwise).
 
     As in ``Text``: ``head`` is the kept start, ``tail`` the kept end and
     ``length`` the original count. ``complete`` is ``reason is None``.
+
+    >>> s = Sequence("list", 5, (Scalar(1),), "max_items", (Scalar(5),))
+    >>> s.complete, s.length - len(s.head) - len(s.tail)
+    (False, 3)
     """
 
     type_name: str
@@ -232,7 +243,8 @@ class Mapping:
       ``"max_length"``, ``"max_nodes"``, ``"max_depth"`` (no entries kept),
       ``"key"`` (it stopped at a key with no JSON form, or one whose JSON
       form an earlier kept key has, like ``1`` after ``"1"``) or ``"error"`` (a
-      shape's ``items`` raised, or yielded something other than a pair).
+      shape's ``items`` raised, or yielded something other than a pair). A
+      kept entry's value may itself be cut: look at its own ``reason``.
     - ``tail``: the entries kept from the end, when ``Limits.tail_share``
       keeps both ends (empty otherwise).
     - ``wrapper``: true for the root of ``capture_fields``; ``render_json``
@@ -270,7 +282,8 @@ class Object:
     - ``fields``: the ``(name, node)`` fields kept, in declaration order.
       Hidden, excluded, ``repr=False``, private (``_name``) and
       ``ClassVar`` / ``InitVar`` fields are never present.
-    - ``reason``: ``None`` when every visible field is kept whole, else
+    - ``reason``: ``None`` when every visible field is present (a field's
+      value may itself be cut: look at its own ``reason``), else
       ``"max_items"``, ``"max_length"``, ``"max_nodes"``, ``"max_depth"``
       (no fields kept) or ``"unreadable"`` (fields left out because they
       could not be read safely; no fields at all when the field list itself
@@ -324,7 +337,7 @@ class Unavailable:
       (``""``, ``0``, ``[]``, ...).
     - ``builtin``: true when the opaque value's type is an exact built-in
       one (a non-finite ``float``); where the ``"<opaque: float>"`` label
-      does not fit, the JSON fallback is ``0.0``, as in #342.
+      does not fit, ``render_json`` falls back to ``0.0``.
 
     ``complete`` is always false.
     """

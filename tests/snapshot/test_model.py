@@ -42,9 +42,9 @@ def test_reason_names() -> None:
     )
 
 
-def test_removed_names_are_gone() -> None:
-    # P3b: no consumer used them (principle 3). Spill state is read from
-    # ``Text.full``; an uninspected value is ``Unavailable("opaque")``.
+def test_public_api_has_no_opaque_node_or_spill_reasons() -> None:
+    # Spill state is read from ``Text.full``, not from a reason or a field; an
+    # uninspected value is ``Unavailable("opaque")``, not a node type of its own.
     assert not hasattr(nooa.snapshot, "Opaque")
     assert "Opaque" not in nooa.snapshot.__all__
     assert "replaced" not in {field.name for field in dataclasses.fields(Text)}
@@ -101,7 +101,7 @@ def test_nodes_are_frozen_and_hashable() -> None:
 
 
 def test_containers_read_like_text_head_tail_length() -> None:
-    # Paul and Severin (#515): all three node types say ``head``, ``tail`` and ``length``.
+    # All three node types say ``head``, ``tail`` and ``length`` for the same things.
     assert [f.name for f in dataclasses.fields(Sequence)] == [
         "type_name",
         "length",
@@ -142,6 +142,8 @@ def test_text_derives_complete_and_omitted() -> None:
         {"head": "abc", "length": 2, "unit": "chars", "reason": "max_length"},  # keeps > length
         {"head": "ab", "tail": "z", "length": 3, "unit": "chars"},  # complete with a tail
         {"head": "ab", "length": 9, "unit": "chars"},  # complete with omitted units
+        {"head": b"a", "length": 3, "unit": "octets", "reason": "max_length"},  # unknown unit
+        {"head": "a", "length": 1, "unit": "lines"},  # unknown unit
     ],
 )
 def test_an_inconsistent_text_cannot_be_built(fields: dict[str, Any]) -> None:

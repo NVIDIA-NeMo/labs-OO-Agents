@@ -44,8 +44,12 @@ class TextStream:
 
     Guarantees:
 
-    - Bounded memory: at most ``head + tail`` units plus the chunk being
-      written; ``write`` is O(len(data)).
+    - Bounded memory: the stream retains at most ``head + tail`` units
+      between writes, whatever was written. During one ``write`` it may
+      also need memory proportional to that chunk (a ``bytearray`` or
+      ``memoryview`` is copied to ``bytes``, a ``str`` written to a bytes
+      stream or to a spilling chars stream is encoded), released when the
+      call returns. ``write`` is O(len(data)).
     - Exact accounting: ``Text.length`` counts every unit written, and
       ``Text.omitted`` every unit not kept.
     - UTF-8-safe cuts: a bytes stream keeps the raw bytes, and a cut
@@ -117,12 +121,19 @@ class TextStream:
     # --- spilling ---------------------------------------------------------
 
     def _fail(self) -> None:
+        """Give up the spill file after a file error: remove it and keep memory only (``Text.full`` is ``None``)."""
         self._spill_failed = True
         file, self._file = self._file, None
         if file is not None:
             file.finish(delete=True)
 
     def _spill(self, data: bytes) -> None:
+        """Count ``data`` as produced and write what fits of it to the spill file.
+
+        The file keeps a prefix of the output, at most ``max_bytes``; a chars
+        stream's prefix ends on a code point boundary. A write error is
+        logged and ends spilling (``_fail``); it never raises.
+        """
         self._produced += len(data)
         spill = self._file
         if spill is None or spill.file is None:
@@ -159,17 +170,22 @@ class TextStream:
     # --- writing ----------------------------------------------------------
 
     def write(self, data: str | bytes | bytearray | memoryview) -> None:
-        """Append ``data`` to the stream: O(len(data)), memory bounded by ``head + tail``.
+        """Append ``data`` to the stream, in O(len(data)) time.
 
-        A chars stream takes ``str`` only and raises ``TypeError`` for
-        anything else (write raw output to a bytes stream, which keeps it as
-        written). A bytes stream takes ``bytes``, ``bytearray`` or
-        ``memoryview`` (its raw bytes) and raises ``TypeError`` for anything
-        else but ``str``; a ``str`` is encoded as UTF-8 (surrogate escapes as
-        their raw bytes, a lone surrogate as ``\\udXXXX`` text). While a spill file is active,
-        ``data`` is also written to it, up to ``SpillTarget.max_bytes``
-        (a chars stream encodes it as a bytes stream would). Raises
-        ``ValueError`` after ``close()``.
+        Afterwards the stream retains at most ``head + tail`` units. While it
+        runs, the call may hold one more copy of ``data`` (a ``bytes`` copy of a
+        ``bytearray`` / ``memoryview``, or the UTF-8 encoding of a ``str`` for a
+        bytes stream or a spill file).
+
+            A chars stream takes ``str`` only and raises ``TypeError`` for
+            anything else (write raw output to a bytes stream, which keeps it as
+            written). A bytes stream takes ``bytes``, ``bytearray`` or
+            ``memoryview`` (its raw bytes) and raises ``TypeError`` for anything
+            else but ``str``; a ``str`` is encoded as UTF-8 (surrogate escapes as
+            their raw bytes, a lone surrogate as ``\\udXXXX`` text). While a spill file is active,
+            ``data`` is also written to it, up to ``SpillTarget.max_bytes``
+            (a chars stream encodes it as a bytes stream would). Raises
+            ``ValueError`` after ``close()``.
         """
         if self._closed is not None:
             raise ValueError("write to a closed TextStream")
@@ -197,18 +213,15 @@ class TextStream:
     # --- describing -------------------------------------------------------
 
     def _full(self, cut: bool) -> Spill | None:
+        """The ``Spill`` for ``Text.full``: only for a ``cut`` text whose spill file is still good."""
         if not cut or self._path is None or self._spill_failed:
             return None
         return Spill(self._path, self._kept, self._produced)
 
-    def _text(self, start: int, end: int) -> Text:
-        """What memory holds of units ``[start, end)``, as a ``Text`` (reads only)."""
-        window = self._window
-        tail_from = self._total - window.tail_len
-        length = max(0, end - start)
-        first = max(start, tail_from)
-        head = window.head()[min(start, window.head_len) : min(end, window.head_len)]
-        tail = window.tail()[first - tail_from : max(first, end) - tail_from]
+    def _text(self) -> Text:
+        """What memory holds of the whole stream, as a ``Text`` (reads only)."""
+        length = self._total
+        head, tail = self._window.head(), self._window.tail()
         if length <= len(head) + len(tail):
             whole = head + tail  # type: ignore[operator]
             return Text(head=whole, length=length, unit=self.unit, full=self._full(False))
@@ -233,7 +246,7 @@ class TextStream:
         if self._closed is not None:
             return self._closed
         self._flush()
-        return self._text(0, self._total)
+        return self._text()
 
     def close(self) -> Text:
         """Finish the stream and return the final ``Text``; later calls return the same one.
@@ -250,7 +263,7 @@ class TextStream:
                 spill.file.close()
             except OSError:
                 self._fail()
-        text = self._text(0, self._total)
+        text = self._text()
         spill, self._file = self._file, None
         if spill is not None:
             spill.finish(delete=text.complete)
@@ -258,9 +271,11 @@ class TextStream:
         return text
 
     def __enter__(self) -> TextStream:
+        """Return the stream itself, for ``with TextStream(...) as stream:``."""
         return self
 
     def __exit__(self, *exc: object) -> None:
+        """``close()`` the stream on leaving the ``with`` block."""
         self.close()
 
 
@@ -269,7 +284,13 @@ class _Window:
 
     The same for both units: a part is ``bytes`` in a bytes stream and
     ``str`` in a chars stream. Memory stays at ``head + tail`` units; a read
-    joins the parts without storing the result back.
+    joins the parts without storing the result back, so reads and writes
+    can interleave.
+
+    Args:
+        head: the units kept from the start.
+        tail: the units kept from the end.
+        empty: ``""`` or ``b""``, the empty part of the stream's unit.
     """
 
     def __init__(self, head: int, tail: int, empty: str | bytes) -> None:
@@ -282,6 +303,11 @@ class _Window:
         self.tail_len = 0  # units kept in the tail
 
     def write(self, data: str | bytes) -> None:
+        """Keep what ``data`` adds to the head, and its last units in the tail.
+
+        Copies at most ``head + tail`` units of ``data``; the oldest tail
+        units are dropped to keep the tail at ``tail`` units.
+        """
         room = self._head_room - self.head_len
         if room > 0 and data:
             part = data[:room]
@@ -307,7 +333,9 @@ class _Window:
                 self.tail_len -= excess
 
     def head(self) -> str | bytes:
+        """The kept head, joined (at most ``head`` units)."""
         return self._empty.join(self._head)  # type: ignore[arg-type]
 
     def tail(self) -> str | bytes:
+        """The kept tail, joined (at most ``tail`` units, the last ones written after the head)."""
         return self._empty.join(self._tail)  # type: ignore[arg-type]

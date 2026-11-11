@@ -14,7 +14,8 @@ What lives here:
   for the current capture only: the next one tries the whole class again;
 - ``_pydantic_entries`` and ``_dataclass_entries``, the readers that yield
   the visible declared fields of a Pydantic v2 model or a dataclass from
-  raw instance storage.
+  raw instance storage, and ``_plain_entries``, the public instance
+  attributes of a plain object.
 
 Live classes and instances are read through ``_raw``; the only other
 reads are ``object.__getattribute__`` on metadata objects of an exact,
@@ -54,9 +55,9 @@ from nooa.snapshot._raw import (
     _slot_value,
 )
 
-_FIELD_METADATA_ATTR = "_agentdoc_fields_docs"
-_CLASS_METADATA_ATTR = "_agentdoc_docs"
-_DATACLASS_FIELD_TYPE = cast(Any, dataclasses)._FIELD
+_FIELD_METADATA_ATTR = "_agentdoc_fields_docs"  # agentdoc's per-field ``spec(cls, name, ...)`` map
+_CLASS_METADATA_ATTR = "_agentdoc_docs"  # agentdoc's class-level ``@spec(...)`` keywords
+_DATACLASS_FIELD_TYPE = cast(Any, dataclasses)._FIELD  # a real field (not ClassVar / InitVar)
 _ANNOTATED_ALIAS = type(typing.Annotated[int, "x"])
 """The type of an ``Annotated[...]`` hint, compared by identity (``type(hint) is ...``)."""
 
@@ -69,9 +70,9 @@ _SPEC_KEYS = ("hidden", "max_string", "max_length", "hide_empty")
 
 
 def _spec_flags(raw: Any, state: _State) -> dict[str, Any]:
-    """The ``spec()`` keywords capture honours, from raw metadata keywords.
+    """The ``spec()`` keywords capture honours (``_SPEC_KEYS``), from raw metadata keywords ``raw``.
 
-    ``_FailClosed`` unless ``raw`` is an exact ``dict`` with exact ``str``
+    Each key read costs one unit of work. Raises ``_FailClosed`` unless ``raw`` is an exact ``dict`` with exact ``str``
     keys, each charged one node, whose ``hidden`` is absent or a ``bool``.
     ``hide_empty`` must be a ``bool`` and ``max_string`` / ``max_length``
     ``None`` or a non-negative exact ``int``; another value is ignored.
@@ -96,18 +97,24 @@ def _spec_flags(raw: Any, state: _State) -> dict[str, Any]:
     return found
 
 
-def _hidden_flag(raw: Any, state: _State) -> bool | None:
-    """The ``hidden`` entry of raw metadata keywords: a ``bool``, ``None`` when absent."""
-    return _spec_flags(raw, state).get("hidden")
-
-
 def _visibility_overrides(
     obj_dict: dict[str, Any], mro: tuple[type[Any], ...], state: _State
 ) -> dict[str, dict[str, Any]]:
-    """Read the complete raw ``spec(cls, name, ...)`` overrides before exposing fields (``_FailClosed``).
+    """The ``spec(cls, name, ...)`` overrides that apply to an object, read in full before any field.
 
-    Field name -> the ``spec()`` keywords capture honours (``_SPEC_KEYS``);
-    the instance's own overrides win, then the nearest class's.
+    Args:
+        obj_dict: the instance's checked storage (its own overrides, if any).
+        mro: the raw MRO, nearest class first.
+        state: the capture's state, charged per class and per entry.
+
+    Returns:
+        Field name -> the ``spec()`` keywords capture honours
+        (``_SPEC_KEYS``). For each keyword the instance's own override wins,
+        then the nearest class's.
+
+    Raises:
+        _FailClosed: an override map is malformed or the work runs out, so
+            visibility is unknown.
     """
     overrides: dict[str, dict[str, Any]] = {}
 
@@ -134,10 +141,16 @@ def _visibility_overrides(
 
 
 def _metadata_spec(metadata: Any, state: _State) -> dict[str, Any]:
-    """The ``spec()`` keywords of recognized marker metadata (``_FailClosed``: malformed).
+    """The ``spec()`` keywords of the agentdoc markers in annotation metadata ``metadata``.
 
-    ``hidden`` is the agentdoc marker; a ``SpecAnnotation`` gives its
-    keywords (a later one wins).
+    ``metadata`` is a list or tuple (``Annotated`` metadata or a Pydantic
+    field's ``metadata``); each item costs one unit of work. The ``hidden``
+    marker sets ``hidden``; a ``SpecAnnotation`` gives its keywords (a later
+    one wins, but ``hidden=False`` does not undo an earlier ``hidden``).
+    Other metadata is ignored.
+
+    Raises ``_FailClosed`` when ``metadata`` or a ``SpecAnnotation`` is
+    malformed, or the work runs out.
     """
     if type(metadata) is not list and type(metadata) is not tuple:
         raise _FailClosed
@@ -160,13 +173,11 @@ def _metadata_spec(metadata: Any, state: _State) -> dict[str, Any]:
     return found
 
 
-def _metadata_hidden(metadata: Any, state: _State) -> bool:
-    """Whether recognized marker metadata hides a field (``_FailClosed``: malformed)."""
-    return bool(_metadata_spec(metadata, state).get("hidden"))
-
-
 def _field_spec(field_info: FieldInfo, state: _State) -> dict[str, Any]:
-    """Read only the recognized resolved ``spec()`` metadata of a Pydantic field."""
+    """The ``spec()`` keywords in a Pydantic field's resolved ``metadata`` list.
+
+    Raises ``_FailClosed`` when the list cannot be read or is malformed.
+    """
     try:
         metadata = object.__getattribute__(field_info, "metadata")
     except Exception:
@@ -182,11 +193,22 @@ def _annotation_spec(
     hints: Callable[[], dict[str, tuple[Any, ...]]],
     state: _State,
 ) -> dict[str, Any]:
-    """The ``spec()`` keywords a field's annotation carries (``_FailClosed``: unreadable).
+    """The ``spec()`` keywords a field's annotation carries.
 
-    A string annotation reads the class's resolved hint metadata, ``hints()``.
-    Otherwise only an exact ``typing`` ``Annotated`` alias (type identity) is
-    inspected, through its raw ``__metadata__``; anything else is visible.
+    Args:
+        name: the field's name.
+        annotation: its raw annotation.
+        hints: returns the class's resolved hint metadata by field name;
+            called only for a string annotation.
+        state: the capture's state.
+
+    Returns:
+        The keywords; ``{}`` for an annotation that is neither a string nor
+        an exact ``typing.Annotated`` alias (compared by type identity).
+
+    Raises:
+        _FailClosed: a string annotation that did not resolve, or metadata
+            that cannot be read.
     """
     if type(annotation) is str:
         metadata = dict.get(hints(), name)
@@ -203,11 +225,18 @@ def _annotation_spec(
 
 
 _HINTS: dict[int, tuple[weakref.ref[type[Any]], dict[str, tuple[Any, ...]]]] = {}
-"""Per dataclass, keyed by ``id`` and re-checked by identity: its resolved hint metadata."""
+"""The resolved hint metadata of each dataclass, by ``id(cls)``, re-checked by identity.
+
+The class is held by a weak reference, and the entry is dropped when the
+class is collected.
+"""
 
 
 def _hint_metadata(hint: Any) -> tuple[Any, ...]:
-    """The outermost ``Annotated`` metadata of one resolved hint (``()``: none); raises if malformed."""
+    """The outermost ``Annotated`` metadata of one resolved hint; ``()`` for another hint.
+
+    Raises ``TypeError`` when the metadata is not a tuple.
+    """
     if type(hint) is not _ANNOTATED_ALIAS:
         return ()
     found = object.__getattribute__(hint, "__metadata__")
@@ -296,7 +325,9 @@ def _single_hints(cls: type[Any], state: _State) -> dict[str, tuple[Any, ...]]:
                 return metadata
             if type(name) is not str:
                 continue
-            metadata.pop(name, None)  # this class declares it: an inherited hint no longer applies
+            metadata.pop(
+                name, None
+            )  # this class declares it: its own hint overrides an inherited one
             try:
                 probe = type("_Probe", (), {"__annotations__": {name: raw}})
                 if type(type_params) is tuple and type_params:
@@ -317,15 +348,19 @@ def _single_hints(cls: type[Any], state: _State) -> dict[str, tuple[Any, ...]]:
 
 
 def _pydantic_fields(mro: tuple[type[Any], ...], state: _State) -> dict[str, FieldInfo]:
-    """Find an already-built exact Pydantic field dictionary in raw namespaces (``_FailClosed``)."""
+    """The field map Pydantic built for the model, from the nearest raw class namespace that has it.
+
+    Each class looked at costs one unit of work. Raises ``_FailClosed``
+    when no class has a map, a map is not an exact ``dict``, a namespace is
+    unreadable, or the work runs out.
+    """
     for base in mro:
         if not state.take_node():
             raise _FailClosed
         namespace = _namespace(base, state)
-        # Pydantic stored the completed map directly as ``model_fields`` before
-        # 2.10, then moved it to ``__pydantic_fields__``. Read raw namespaces so
-        # neither layout invokes the metaclass descriptor exposed by newer
-        # releases.
+        # Pydantic 2.10 and later store the map as ``__pydantic_fields__``,
+        # earlier 2.x releases as ``model_fields``. Reading the raw namespace
+        # avoids the metaclass descriptor named ``model_fields``.
         for key in ("__pydantic_fields__", "model_fields"):
             fields = dict.get(namespace, key)
             if fields is not None:
@@ -336,11 +371,18 @@ def _pydantic_fields(mro: tuple[type[Any], ...], state: _State) -> dict[str, Fie
 
 
 class _Scoped:
-    """A field value with its own ``spec(max_string=..., max_length=...)`` limits.
+    """A field with its own ``spec(max_string=..., max_length=...)`` limits.
 
-    A field reader yields ``(name, _Scoped(value, limits))``; ``_walk`` builds
-    ``value`` under ``limits`` (``max_string`` / ``max_items`` replaced) for
-    its whole subtree. Private: only the readers here make it.
+    ``value`` is a live field value (from a field reader here) or a shape
+    accessor's lazy part (from ``_walk``). ``_walk`` builds it under
+    ``limits`` (``max_string`` replaced, ``max_length`` as ``max_items``) for
+    its whole subtree, then restores the outer limits. Private: only this
+    package makes one.
+
+    Args:
+        value: the field's live value, or a ``_walk._Part``.
+        limits: the field's ``max_string`` and/or ``max_length`` (``None``:
+            no cap); never empty.
     """
 
     __slots__ = ("limits", "value")
@@ -351,7 +393,10 @@ class _Scoped:
 
 
 def _is_empty(value: Any) -> bool:
-    """``None`` or an empty exact ``str``, ``bytes``, ``list``, ``tuple``, ``dict``, ``set``, ``frozenset``."""
+    """Whether ``value`` is ``None`` or an empty exact ``str``, ``bytes``, ``list``, ``tuple``, ``dict``, ``set`` or ``frozenset``.
+
+    What ``spec(hide_empty=True)`` leaves out; no user code runs.
+    """
     if value is None:
         return True
     value_type = type(value)
@@ -361,10 +406,14 @@ def _is_empty(value: Any) -> bool:
 
 
 _EMPTY_TYPES = (str, bytes, list, tuple, dict, set, frozenset)
+"""The exact built-in types ``_is_empty`` measures with their own ``len``."""
 
 
 def _class_hide_empty(mro: tuple[type[Any], ...], state: _State) -> bool:
-    """A class-level ``@spec(hide_empty=True)``: the nearest ``_agentdoc_docs`` in the MRO that sets it."""
+    """The class-level ``@spec(hide_empty=...)`` of the nearest class in ``mro`` that sets it; ``False`` when none does.
+
+    Raises ``_FailClosed`` when a namespace or its metadata is unreadable.
+    """
     for base in mro:
         if base is object:
             continue
@@ -380,7 +429,20 @@ def _class_hide_empty(mro: tuple[type[Any], ...], state: _State) -> bool:
 def _field_entry(
     name: str, value: Any, flags: dict[str, Any], hide_empty: bool
 ) -> tuple[str, Any] | None:
-    """A visible field as its reader yields it: ``None`` when ``hide_empty`` leaves it out."""
+    """A visible field as its reader yields it.
+
+    Args:
+        name: the field's name.
+        value: its live value.
+        flags: its ``spec()`` keywords (``hide_empty``, ``max_string``,
+            ``max_length``).
+        hide_empty: the class-level default for ``hide_empty``.
+
+    Returns:
+        ``(name, value)``, with ``value`` wrapped in ``_Scoped`` when the
+        field has its own limits; ``None`` when ``hide_empty`` leaves out an
+        empty value.
+    """
     if flags.get("hide_empty", hide_empty) and _is_empty(value):
         return None
     limits = {key: flags[key] for key in ("max_string", "max_length") if key in flags}
@@ -388,6 +450,7 @@ def _field_entry(
 
 
 def _merged(base: dict[str, Any], override: dict[str, Any] | None) -> dict[str, Any]:
+    """``base`` updated with ``override`` (a new dict; ``base`` itself when there is no override)."""
     if not override:
         return base
     merged = dict(base)
@@ -398,7 +461,18 @@ def _merged(base: dict[str, Any], override: dict[str, Any] | None) -> dict[str, 
 def _pydantic_entries(
     value: BaseModel, mro: tuple[type[Any], ...], carrier: type[Any], state: _State
 ) -> _Fields:
-    """The privileged field reader of a Pydantic v2 model: declared fields, raw stored values."""
+    """The field reader of a Pydantic v2 model: its visible declared fields, from raw storage.
+
+    Yields ``(name, value)`` for each field of the model's field map, in
+    order, that is stored on the instance and not hidden: ``exclude=True``,
+    ``repr=False``, an agentdoc ``hidden`` / ``spec(hidden=True)`` marker or
+    override. Each field costs one unit of work; when the work runs out it
+    yields ``_Omitted("max_nodes")`` and stops. No model method or property
+    runs. ``carrier`` is unused (the field map is the model's own).
+
+    Raises ``_FailClosed`` (the object keeps no field) when the storage, the
+    field map, a ``FieldInfo`` or the overrides cannot be read safely.
+    """
     try:
         obj_dict = _BASE_MODEL_DICT.__get__(value, type(value))
     except Exception:
@@ -437,7 +511,20 @@ def _pydantic_entries(
 def _dataclass_entries(
     value: Any, mro: tuple[type[Any], ...], carrier: type[Any], state: _State
 ) -> _Fields:
-    """The privileged field reader of a dataclass: declared fields of ``carrier``, raw values."""
+    """The field reader of a dataclass: the visible declared fields of ``carrier``, from raw storage.
+
+    Yields ``(name, value)`` for each field in ``carrier.__dataclass_fields__``
+    order whose value is stored (``__dict__`` or a filled slot) and that is
+    not hidden: ``ClassVar`` / ``InitVar``, ``repr=False``, a ``_private``
+    name, an agentdoc ``hidden`` / ``spec(hidden=True)`` marker in its
+    annotation or an override. A field whose string annotation does not
+    resolve yields ``_Omitted("unreadable")`` and is left out alone. Each
+    field costs one unit of work; when the work runs out it yields
+    ``_Omitted("max_nodes")`` and stops.
+
+    Raises ``_FailClosed`` (the object keeps no field) when the storage,
+    the field map or the overrides cannot be read safely.
+    """
     storage = _copy_storage(_instance_storage(value, mro, state), state)
     fields = dict.get(_namespace(carrier, state), "__dataclass_fields__")
     if type(fields) is not dict:
@@ -488,7 +575,11 @@ def _dataclass_entries(
 
 
 def _slot_names(mro: tuple[type[Any], ...], state: _State) -> list[str]:
-    """The ``__slots__`` names the classes of ``mro`` declare, in MRO order (``_FailClosed``)."""
+    """The ``__slots__`` names the classes of ``mro`` declare, nearest class first, without duplicates.
+
+    Raises ``_FailClosed`` when a ``__slots__`` is not a ``str``, tuple or
+    list of ``str``, or a namespace is unreadable.
+    """
     names: list[str] = []
     for base in mro:
         if base is object:
@@ -509,7 +600,10 @@ def _slot_names(mro: tuple[type[Any], ...], state: _State) -> list[str]:
 
 
 def _plain_annotation_spec(name: str, mro: tuple[type[Any], ...], state: _State) -> dict[str, Any]:
-    """The ``spec()`` keywords of the nearest class annotation of ``name`` in the MRO."""
+    """The ``spec()`` keywords of the nearest class annotation of ``name`` in ``mro``; ``{}`` when none.
+
+    Raises ``_FailClosed`` as ``_annotation_spec`` does.
+    """
     for base in mro:
         if base is object:
             continue
@@ -530,6 +624,10 @@ def _class_defaults(mro: tuple[type[Any], ...], state: _State) -> list[tuple[str
     until they set their own. A value whose type defines ``__get__`` (a
     function, a property) is not a field: reading it through the instance
     would run it.
+
+    Returns ``(name, default)`` pairs, each name once, at its most derived
+    declaration. Raises ``_FailClosed`` when a namespace is unreadable or
+    the work runs out.
     """
     found: dict[str, Any] = {}
     for base in reversed(mro):
@@ -584,7 +682,11 @@ def _plain_entries(
 ) -> tuple[list[tuple[str, Any] | _Omitted], int] | None:
     """The public instance attributes of a plain object, read raw, and its attribute count.
 
-    ``None``: not a plain object.
+    Returns ``(entries, count)``: the entries a field reader yields
+    (``(name, value)`` pairs and ``_Omitted`` notes) and the number of
+    instance attributes, private ones included. ``None`` when ``value`` is
+    not a plain object or cannot be read safely (the caller then uses the
+    fallback).
 
     A plain object is an instance of a class whose MRO defines no
     ``__getattribute__`` (no proxies), with the standard ``__dict__`` slot
@@ -674,14 +776,16 @@ def _plain_entries(
 
 @dataclass(frozen=True)
 class _FieldReader:
-    """The internal shape of Pydantic models and dataclasses: a privileged field reader.
+    """The built-in shape of Pydantic models and dataclasses: a field reader.
 
     ``read(value, mro, carrier, state)`` yields the fields of the class
-    ``carrier`` (the MRO entry that matched). Never registered by users.
+    ``carrier`` (the MRO entry that matched) as ``(name, value)`` pairs and
+    ``_Omitted`` notes, and raises ``_FailClosed`` when the fields cannot be
+    read safely. Only this module makes one; users register shapes.
     """
 
     read: Callable[[Any, tuple[type[Any], ...], type[Any], _State], _Fields]
 
 
-_PYDANTIC = _FieldReader(_pydantic_entries)
-_DATACLASS = _FieldReader(_dataclass_entries)
+_PYDANTIC = _FieldReader(_pydantic_entries)  # the reader of ``BaseModel`` subclasses
+_DATACLASS = _FieldReader(_dataclass_entries)  # the reader of dataclasses

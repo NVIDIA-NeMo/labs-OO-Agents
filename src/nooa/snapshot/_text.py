@@ -32,13 +32,16 @@ def cut(
       ``"bytes"`` on a ``str`` counts and keeps its UTF-8 encoding (as a
       bytes ``TextStream`` would); ``"chars"`` on bytes raises ``TypeError``.
 
-    The same ``Text`` a ``TextStream(unit=unit, head=head, tail=tail)``
-    returns after one ``write(data)`` and ``close()``, without the stream:
-    complete when ``data`` fits in ``head + tail``; else cut with reason
-    ``"max_length"``, a bytes cut on whole code points. Nothing is spilled
-    (``full`` is ``None``). Render it with ``render_output`` (or
-    ``render_python``). Raises ``ValueError`` for a negative ``head`` or
-    ``tail`` or an unknown ``unit``.
+    Returns the same ``Text`` a ``TextStream(unit=unit, head=head,
+    tail=tail)`` returns after one ``write(data)`` and ``close()``: complete
+    when ``data`` fits in ``head + tail``; else cut with reason
+    ``"max_length"``, a bytes cut on whole code points (so it may keep
+    fewer than ``head`` / ``tail`` bytes). Nothing is spilled (``full`` is
+    ``None``). Render it with ``render_output`` (or ``render_python``).
+
+    Raises ``ValueError`` for a negative ``head`` or ``tail`` or an unknown
+    ``unit``, and ``TypeError`` for ``data`` that is not text or bytes, or
+    bytes with ``unit="chars"``.
 
     >>> from nooa.snapshot import cut, render_output
     >>> print(render_output(cut("0123456789", head=3, tail=2)))
@@ -64,6 +67,12 @@ def cut(
 
 
 def _cut(data: str | bytes, head: int, tail: int, unit: Literal["chars", "bytes"]) -> Text:
+    """``cut`` on checked arguments: ``data`` is a ``str`` for ``"chars"``, ``bytes`` for ``"bytes"``.
+
+    Returns a complete ``Text`` when ``data`` fits in ``head + tail``, else
+    its first ``head`` and last ``tail`` units (bytes trimmed inwards to
+    whole code points) with reason ``"max_length"``.
+    """
     if len(data) <= head + tail:
         return Text(head=data, length=len(data), unit=unit)
     kept_head, kept_tail = data[:head], data[len(data) - tail :] if tail else data[:0]
@@ -133,14 +142,25 @@ def merge(a: Text, b: Text, head: int, tail: int) -> Text:
 
 
 def _head_end(text: str | bytes, end: int, joints: tuple[int, ...]) -> int:
-    """Where a head of at most ``end`` units of ``text`` stops (bytes: on a code point, not before a joint)."""
+    """Where a head of at most ``end`` units of ``text`` stops.
+
+    A ``str`` stops at ``end`` (or its length). Bytes stop at the last
+    position at or before ``end`` that is a code point boundary or one of
+    ``joints``, the offsets where one input's part ends and the next begins
+    (a code point is never assembled across a joint).
+    """
     if isinstance(text, str):
         return min(end, len(text))
     return max([safe_end(text, end), *(joint for joint in joints if joint <= end)])
 
 
 def _tail_start(text: str | bytes, start: int, joints: tuple[int, ...]) -> int:
-    """Where a tail from ``start`` begins (bytes: on a code point, not past a joint)."""
+    """Where a tail that should begin at ``start`` of ``text`` begins.
+
+    A ``str`` begins at ``start``. Bytes begin at the first position at or
+    after ``start`` that is a code point boundary or one of ``joints`` (see
+    ``_head_end``).
+    """
     if isinstance(text, str):
         return start
     return min([safe_start(text, start), *(joint for joint in joints if joint >= start)])

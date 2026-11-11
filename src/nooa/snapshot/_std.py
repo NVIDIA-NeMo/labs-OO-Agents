@@ -53,6 +53,8 @@ from nooa.snapshot._raw import (
     _safe_dict,
 )
 
+# C-level descriptors of the standard types, taken once from their own
+# ``__dict__``; each is called only on a value whose type was checked first.
 _TYPE_QUALNAME = type.__dict__["__qualname__"]
 _FUNCTION_CODE = types.FunctionType.__dict__["__code__"]
 _FUNCTION_DEFAULTS = types.FunctionType.__dict__["__defaults__"]
@@ -68,22 +70,28 @@ _PATTERN_FLAGS = re.Pattern.__dict__["flags"]
 _UUID_INT = uuid.UUID.__dict__["int"]
 _DATETIME_TZINFO = datetime.datetime.__dict__["tzinfo"]
 _TIME_TZINFO = datetime.time.__dict__["tzinfo"]
+# The concrete ``pathlib`` classes read with ``PurePath.__str__``.
 _PATH_TYPES = (
     pathlib.PurePosixPath,
     pathlib.PureWindowsPath,
     pathlib.PosixPath,
     pathlib.WindowsPath,
 )
-_VARARGS = 0x04
-_VARKEYWORDS = 0x08
+_VARARGS = 0x04  # ``CO_VARARGS``: the code object takes ``*args``
+_VARKEYWORDS = 0x08  # ``CO_VARKEYWORDS``: the code object takes ``**kwargs``
 
 
 @dataclass(frozen=True)
 class _ObjectView:
-    """An ``Object`` of ``entries`` (name -> value to capture), with ``kind``.
+    """How to build a standard type as an ``Object``.
 
-    ``enter``: the entries hold user values, so the object counts as a
-    container for ``max_depth`` and cycles.
+    - ``type_name``: the node's ``type_name``.
+    - ``kind``: the node's ``kind`` (``"python.datetime"``...), which selects
+      its ``render_python`` notation; ``None`` for a namedtuple.
+    - ``entries``: the ``(name, value)`` fields to capture, in order.
+    - ``enter``: the entries hold user values (an enum's value, an
+      exception's ``args``, a namedtuple's items), so the object counts as a
+      container for ``max_depth`` and cycles.
     """
 
     type_name: str
@@ -94,10 +102,16 @@ class _ObjectView:
 
 @dataclass(frozen=True)
 class _CollectionView:
-    """A ``Sequence`` (or, ``keyed``, a ``Mapping``) read natively.
+    """How to build a container as a ``Sequence`` (or, ``keyed``, a ``Mapping``) read natively.
 
-    ``forward()`` yields the items (pairs when keyed) from the start;
-    ``backward()`` from the end, or ``None`` for an unordered source.
+    - ``type_name``: the node's ``type_name``.
+    - ``length``: the number of entries.
+    - ``keyed``: entries are ``(key, value)`` pairs.
+    - ``forward()``: a new iterator over the entries from the start.
+    - ``backward()``: a new iterator from the end, or ``None`` for an
+      unordered source (a set keeps a head only).
+
+    Both iterators are lazy: the builder pulls only the entries it keeps.
     """
 
     type_name: str
@@ -109,17 +123,26 @@ class _CollectionView:
 
 @dataclass(frozen=True)
 class _TextView:
-    """The characters of a ``str`` subclass, read by native slices."""
+    """How to build a ``str`` subclass as a chars ``Text``: its ``length`` and ``read(start, stop)``.
+
+    ``read`` slices with ``str.__getitem__``, so no method of the subclass runs.
+    """
 
     length: int
     read: Callable[[int, int], str]
 
 
 _View = _ObjectView | _CollectionView | _TextView
+"""What ``_exact_view`` and ``_mro_view`` return for a standard type."""
 
 
 def _guard(iterator: Iterator[Any]) -> Iterator[Any]:
-    """Native iteration that stops quietly when the container changes size under it."""
+    """Yield from ``iterator``, ending quietly when it raises ``RuntimeError``.
+
+    A native set, dict or deque iterator raises ``RuntimeError`` when the
+    container changes size during iteration; the entries read so far are
+    kept and the container is then cut.
+    """
     try:
         yield from iterator
     except RuntimeError:
@@ -130,7 +153,12 @@ def _guard(iterator: Iterator[Any]) -> Iterator[Any]:
 
 
 def _class_name(cls: Any, state: _State) -> str:
-    """``module.QualName`` of a class from raw reads (``builtins`` is left out)."""
+    """``module.QualName`` of class ``cls``, at most ``_MAX_TYPE_NAME`` characters.
+
+    Read through ``type``'s descriptors and the raw namespace (``__module__``),
+    so no metaclass code runs; ``builtins`` is left out. Falls back to
+    ``__name__``, then ``"object"``, when a name cannot be read.
+    """
     try:
         qualname = _TYPE_QUALNAME.__get__(cls, type(cls))
     except Exception:
@@ -150,7 +178,7 @@ def _class_name(cls: Any, state: _State) -> str:
 
 
 def _qualified_type_name(value: Any, state: _State) -> str:
-    """The module-qualified name of ``type(value)``: the opaque label's name."""
+    """``module.QualName`` of ``type(value)`` (see ``_class_name``), the name an opaque label shows."""
     return _class_name(type(value), state)
 
 
@@ -158,7 +186,11 @@ def _qualified_type_name(value: Any, state: _State) -> str:
 
 
 def _default_text(value: Any, state: _State) -> str:
-    """A parameter default, captured small and rendered (no user code)."""
+    """A parameter default as short ``render_python`` text.
+
+    The default is captured with small fixed limits and the default
+    ``"opaque"`` fallback, so no user code runs and the text stays short.
+    """
     from nooa.snapshot._capture import capture
     from nooa.snapshot._limits import Limits
     from nooa.snapshot._render import render_python
@@ -168,7 +200,21 @@ def _default_text(value: Any, state: _State) -> str:
 
 
 def _signature(function: types.FunctionType, state: _State, skip_first: bool) -> str:
-    """``(a, b=2, *args, c, **kw)`` from the code object and the defaults: no ``inspect``."""
+    """The signature text of ``function``, such as ``(a, b=2, /, *args, c, **kw)``.
+
+    Built from the code object and the defaults read through their
+    descriptors, without ``inspect`` (which could run user code).
+
+    Args:
+        function: an exact ``types.FunctionType``.
+        state: the capture's state.
+        skip_first: leave out the first positional parameter (``self`` of a
+            bound method).
+
+    Returns:
+        The parameter list in parentheses; ``"(...)"`` when the code object
+        or the defaults are not of the expected types.
+    """
     code = _FUNCTION_CODE.__get__(function, types.FunctionType)
     if type(code) is not types.CodeType:
         return "(...)"
@@ -211,6 +257,7 @@ def _signature(function: types.FunctionType, state: _State, skip_first: bool) ->
 
 
 def _function_name(function: types.FunctionType) -> str:
+    """``module.QualName`` of ``function``, ``builtins`` and ``__main__`` left out, at most 200 characters."""
     qualname = _FUNCTION_QUALNAME.__get__(function, types.FunctionType)
     module = _FUNCTION_MODULE.__get__(function, types.FunctionType)
     if type(qualname) is not str:
@@ -221,12 +268,17 @@ def _function_name(function: types.FunctionType) -> str:
 
 
 def _function_view(value: Any, state: _State) -> _ObjectView:
+    """A function as ``Object("function", kind="python.function")`` with ``name`` and ``signature``."""
     signature = _signature(value, state, skip_first=False)
     entries = [("name", _function_name(value)), ("signature", signature)]
     return _ObjectView("function", "python.function", entries)
 
 
 def _method_view(value: Any, state: _State) -> _ObjectView | None:
+    """A bound method of a Python function, as ``python.method`` (``self`` left out of the signature).
+
+    ``None`` when the method wraps something other than a Python function.
+    """
     function = _METHOD_FUNC.__get__(value, types.MethodType)
     if type(function) is not types.FunctionType:
         return None
@@ -236,6 +288,7 @@ def _method_view(value: Any, state: _State) -> _ObjectView | None:
 
 
 def _builtin_view(value: Any, state: _State) -> _ObjectView:
+    """A built-in function or method, as ``python.builtin`` with its qualified ``name``."""
     name = _BUILTIN_QUALNAME.__get__(value, types.BuiltinFunctionType)
     if type(name) is not str:
         name = "<built-in>"
@@ -243,6 +296,7 @@ def _builtin_view(value: Any, state: _State) -> _ObjectView:
 
 
 def _module_view(value: Any, state: _State) -> _ObjectView | None:
+    """A module, as ``python.module`` with its ``__name__`` (raw namespace); ``None`` when unreadable."""
     try:
         raw = _MODULE_DICT.__get__(value, type(value))
     except Exception:
@@ -258,6 +312,11 @@ def _module_view(value: Any, state: _State) -> _ObjectView | None:
 
 
 def _datetime_view(value: Any, state: _State) -> _ObjectView | None:
+    """A ``datetime``, as ``python.datetime`` with its ``iso`` text.
+
+    ``None`` for a tzinfo other than ``None`` or a ``datetime.timezone``: any
+    other tzinfo's ``utcoffset()`` is user code.
+    """
     tzinfo = _DATETIME_TZINFO.__get__(value, datetime.datetime)
     if tzinfo is not None and type(tzinfo) is not datetime.timezone:
         return None  # another tzinfo's utcoffset() is its own code
@@ -265,6 +324,7 @@ def _datetime_view(value: Any, state: _State) -> _ObjectView | None:
 
 
 def _time_view(value: Any, state: _State) -> _ObjectView | None:
+    """A ``time``, as ``python.time`` with its ``iso`` text; ``None`` for another tzinfo (see ``_datetime_view``)."""
     tzinfo = _TIME_TZINFO.__get__(value, datetime.time)
     if tzinfo is not None and type(tzinfo) is not datetime.timezone:
         return None
@@ -272,10 +332,12 @@ def _time_view(value: Any, state: _State) -> _ObjectView | None:
 
 
 def _date_view(value: Any, state: _State) -> _ObjectView:
+    """A ``date``, as ``python.date`` with its ``iso`` text."""
     return _ObjectView("date", "python.date", [("iso", datetime.date.isoformat(value))])
 
 
 def _timedelta_view(value: Any, state: _State) -> _ObjectView:
+    """A ``timedelta``, as ``python.timedelta`` with ``days``, ``seconds`` and ``microseconds``."""
     entries = [
         ("days", datetime.timedelta.__dict__["days"].__get__(value)),
         ("seconds", datetime.timedelta.__dict__["seconds"].__get__(value)),
@@ -285,10 +347,12 @@ def _timedelta_view(value: Any, state: _State) -> _ObjectView:
 
 
 def _decimal_view(value: Any, state: _State) -> _ObjectView:
+    """A ``Decimal``, as ``python.decimal`` with its ``value`` text (``Decimal.__str__``)."""
     return _ObjectView("Decimal", "python.decimal", [("value", decimal.Decimal.__str__(value))])
 
 
 def _uuid_view(value: Any, state: _State) -> _ObjectView | None:
+    """A ``UUID``, as ``python.uuid`` with its ``hex`` text, from its raw ``int``; ``None`` when out of range."""
     number = _UUID_INT.__get__(value, uuid.UUID)
     if type(number) is not int or not 0 <= number < 1 << 128:
         return None
@@ -298,6 +362,7 @@ def _uuid_view(value: Any, state: _State) -> _ObjectView | None:
 
 
 def _path_view(value: Any, state: _State) -> _ObjectView | None:
+    """An exact ``pathlib`` path, as ``python.path`` with its ``path`` text (``PurePath.__str__``)."""
     text = pathlib.PurePath.__str__(value)
     if type(text) is not str:
         return None
@@ -305,6 +370,7 @@ def _path_view(value: Any, state: _State) -> _ObjectView | None:
 
 
 def _pattern_view(value: Any, state: _State) -> _ObjectView:
+    """A compiled ``re.Pattern``, as ``python.pattern`` with ``pattern`` and ``flags``."""
     entries = [
         ("pattern", _PATTERN_PATTERN.__get__(value, re.Pattern)),
         ("flags", _PATTERN_FLAGS.__get__(value, re.Pattern)),
@@ -313,11 +379,13 @@ def _pattern_view(value: Any, state: _State) -> _ObjectView:
 
 
 def _range_view(value: Any, state: _State) -> _ObjectView:
+    """A ``range``, as ``python.range`` with ``start``, ``stop`` and ``step`` (native attributes)."""
     entries = [("start", value.start), ("stop", value.stop), ("step", value.step)]
     return _ObjectView("range", "python.range", entries)
 
 
 def _complex_view(value: Any, state: _State) -> _ObjectView:
+    """A ``complex``, as ``python.complex`` with ``real`` and ``imag``."""
     entries = [
         ("real", complex.__dict__["real"].__get__(value)),
         ("imag", complex.__dict__["imag"].__get__(value)),
@@ -326,11 +394,13 @@ def _complex_view(value: Any, state: _State) -> _ObjectView:
 
 
 def _set_view(value: Any, state: _State) -> _CollectionView:
+    """An exact ``set`` or ``frozenset``: an unordered collection (head only), iterated natively."""
     cls = type(value)
     length = cls.__len__(value)
     return _CollectionView(cls.__name__, length, False, lambda: _guard(cls.__iter__(value)), None)
 
 
+# The exact standard types and their readers, matched by ``type(value) is``.
 _EXACT: tuple[tuple[type[Any], Callable[[Any, _State], _View | None]], ...] = (
     (set, _set_view),
     (frozenset, _set_view),
@@ -352,7 +422,11 @@ _EXACT: tuple[tuple[type[Any], Callable[[Any, _State], _View | None]], ...] = (
 
 
 def _exact_view(value: Any, state: _State) -> _View | None:
-    """The view of a value whose exact type is a standard type in the table, else ``None``."""
+    """The view of ``value`` when its exact type is in ``_EXACT``, else ``None``.
+
+    A reader that raises, or refuses the value, gives ``None`` too; the
+    caller then tries the next reader.
+    """
     value_type = type(value)
     for known, read in _EXACT:
         if value_type is known:
@@ -365,23 +439,42 @@ def _exact_view(value: Any, state: _State) -> _View | None:
 
 # --- standard bases in the MRO -------------------------------------------------------
 
+# A container subclass that defines any of these is not read natively: its
+# own code would decide what it holds.
 _ITERATION_NAMES = frozenset(
     ("__iter__", "__reversed__", "__getitem__", "__len__", "items", "keys", "values")
 )
 
 
 def _ordered_dict_items(value: Any) -> Iterator[Any]:
+    """The items of an ``OrderedDict`` (or subclass) from the start, guarded (``_guard``)."""
     return _guard(iter(collections.OrderedDict.items(value)))
 
 
 def _ordered_dict_backward(value: Any) -> Iterator[Any]:
+    """The items of an ``OrderedDict`` (or subclass) from the end, guarded (``_guard``)."""
     return _guard(reversed(collections.OrderedDict.items(value)))
 
 
 def _container_view(
     value: Any, mro: tuple[type[Any], ...], native: type[Any], index: int, state: _State
 ) -> _View | None:
-    """A container subclass read through its built-in base, when nothing above overrides it."""
+    """A container subclass read through its built-in base ``native``.
+
+    Args:
+        value: the value.
+        mro: its raw MRO.
+        native: the built-in base found at ``mro[index]`` (one of
+            ``_CONTAINER_BASES``).
+        index: where ``native`` is in ``mro``.
+        state: the capture's state.
+
+    Returns:
+        A ``_CollectionView`` (a ``_TextView`` for a ``str`` subclass) named
+        after the value's class, or ``None`` when a class before ``native``
+        in the MRO has an unreadable namespace or defines one of
+        ``_ITERATION_NAMES``.
+    """
     for base in mro[:index]:
         namespace = _raw_namespace(base, state)
         if namespace is None:
@@ -448,6 +541,8 @@ def _container_view(
     return None
 
 
+# The built-in containers whose subclasses are read natively; ``OrderedDict``
+# comes before ``dict`` so that its own order methods are used.
 _CONTAINER_BASES = (
     collections.OrderedDict,
     dict,
@@ -464,6 +559,11 @@ _CONTAINER_BASES = (
 def _namedtuple_fields(
     mro: tuple[type[Any], ...], index: int, state: _State
 ) -> tuple[str, ...] | None:
+    """The ``_fields`` a class before ``mro[index]`` (``tuple``) declares, if it is a namedtuple.
+
+    ``None`` when no class declares ``_fields``, the nearest declaration is
+    not a tuple of exact ``str``, or a namespace is unreadable.
+    """
     for base in mro[:index]:
         namespace = _raw_namespace(base, state)
         if namespace is None:
@@ -477,6 +577,11 @@ def _namedtuple_fields(
 
 
 def _enum_view(value: Any, mro: tuple[type[Any], ...], state: _State) -> _View | None:
+    """An enum member, as ``python.enum`` with ``name`` and ``value``, from its raw storage.
+
+    ``None`` when the storage is unreadable, ``_name_`` is not a ``str`` or
+    ``None``, or ``_value_`` is missing.
+    """
     try:
         storage = _copy_storage(_instance_storage(value, mro, state), state)
     except _FailClosed:
