@@ -75,12 +75,13 @@ def test_copied_context_expires_and_releases_cached_types(fail):
         pformat([Mutable(), Capture()])
 
     Mutable.__annotations__["value"] = typing.Annotated[int, hidden]
-    assert "value=1" not in pformat(Mutable())
+    # agentdoc reads the new annotation (pformat now reads a dataclass's own
+    # Field.type through nooa.snapshot, so it is not the probe here).
+    assert is_hidden_field(Mutable, "value")
     # Direct inspection must not revive an expired cache either.
     assert saved[0].run(is_hidden_field, Mutable, "value")
-    assert "value=1" not in saved[0].run(pformat, Mutable())
     Mutable.__annotations__["value"] = int
-    assert "value=1" in saved[0].run(pformat, Mutable())
+    assert not saved[0].run(is_hidden_field, Mutable, "value")
 
     reference = weakref.ref(Mutable)
     del Mutable

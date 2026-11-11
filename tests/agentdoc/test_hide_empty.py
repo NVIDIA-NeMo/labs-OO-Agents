@@ -44,9 +44,9 @@ def test_hidden_fields_take_no_nested_max_length_slot():
     # Nested (inside a container), the field list is cut to max_length: a hidden
     # empty field must not take a slot nor be counted in "... +N".
     assert pformat([_EmptyFirst()], max_length=2) == "[_EmptyFirst(label='x', done=False)]"
-    assert pformat([_EmptyFirst()], max_length=1) == "[_EmptyFirst(label='x', ... +1)]"
+    assert pformat([_EmptyFirst()], max_length=1) == "[_EmptyFirst(label='x', ...)]"
     shown = pformat([_EmptyFirst(error="boom")], max_length=2)
-    assert shown == "[_EmptyFirst(error='boom', label='x', ... +1)]"  # non-empty: not hidden
+    assert shown == "[_EmptyFirst(error='boom', label='x', ...)]"  # non-empty: not hidden
 
 
 def test_a_field_spec_alone_hides_only_that_field():

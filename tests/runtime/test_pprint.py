@@ -106,7 +106,7 @@ class TestPformat:
         assert _pformat([]) == "[]"
         assert _pformat({}) == "{}"
         assert _pformat(()) == "()"
-        assert _pformat(set()) == "{}"
+        assert _pformat(set()) == "set()"  # was "{}", a dict literal (nooa.snapshot, PR 2c)
 
     def test_tuple_formatting(self):
         """Tuples should use parentheses."""

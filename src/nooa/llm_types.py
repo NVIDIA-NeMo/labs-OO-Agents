@@ -514,6 +514,8 @@ Mapping.register(CacheBoundary)
 # Snapshots (trace previews) show the readable response, as ``pformat`` does
 # through ``__instance_values__``: ``parts`` and the metadata are ``repr=False``,
 # which ``capture`` reads as hidden.
+# ``content`` is shown whole, as its ``spec(max_string=None)`` property says.
+spec(LLMResponse, "content", max_string=None)
 capture.register(
     LLMResponse,
     object_like(

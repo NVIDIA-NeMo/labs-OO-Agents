@@ -19,14 +19,17 @@ import importlib
 import inspect
 import io
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from nooa.agentdoc._format_observation import record_truncation
 from nooa.agentdoc._info import REQUIRED, CallableInfo, ModuleInfo, TypeInfo
 from nooa.agentdoc._metadata import is_expand_false
 from nooa.agentdoc._structured import _ClassRef, _InstanceRef
-from nooa.agentdoc._visibility import _resolve_type_hints, _type_hint_scope
+from nooa.agentdoc._visibility import _type_hint_scope
 from nooa.agentdoc.protocols import SupportsInstanceValues
+
+if TYPE_CHECKING:
+    from nooa.snapshot import Limits
 
 
 def _truncate_docstring_lines(docstring: str | None, max_lines: int = 1) -> str:
@@ -240,84 +243,34 @@ def _pformat(
                     context_obj=_object,  # Pass the function/method for type discovery
                 )
             )
-        case _ if _is_structured_instance(_object, respect_custom_repr=instance_mode != "type"):
-            # Instance of a structured type. doc() deliberately ignores a custom
-            # __repr__: documentation must retain the type's API contract.
-            if instance_mode == "type":
-                # Show type structure with runtime values (for doc())
-                from nooa.agentdoc._structured import extract_type_info
-                from nooa.agentdoc._visibility import is_hidden_field
-                from nooa.agentdoc.registry import get_type_info_extractor
+        case _ if instance_mode == "type" and _is_structured_instance(
+            _object, respect_custom_repr=False
+        ):
+            # Instance of a structured type, for doc(): its type structure with
+            # runtime values. doc() deliberately ignores a custom __repr__:
+            # documentation must retain the type's API contract.
+            from nooa.agentdoc._structured import extract_type_info
+            from nooa.agentdoc._visibility import is_hidden_field
+            from nooa.agentdoc.registry import get_type_info_extractor
 
-                obj_type = type(_object)
-                # Check if instance has spec() overrides that could unhide class-hidden fields.
-                # spec(self, "field", hidden=False) in __init__ → per-instance opt-in.
-                _instance_fields_meta = (_instance_dict(_object) or {}).get(
-                    "_agentdoc_fields_docs"
-                ) or {}
-                _has_instance_overrides = any(
-                    meta.get("hidden") is False for meta in _instance_fields_meta.values()
-                )
-                extractor = get_type_info_extractor(obj_type)
-                if extractor:
-                    result = extractor(_object)
-                    if isinstance(result, tuple):
-                        type_info, values = result
-                    else:
-                        type_info = result
-                        values = _extract_instance_values(_object, result)
-                    # Filter with instance (supports instance-level spec() overrides)
-                    type_info = TypeInfo(
-                        name=type_info.name,
-                        base=type_info.base,
-                        fields=[
-                            f for f in type_info.fields if not is_hidden_field(_object, f.name)
-                        ],
-                        methods=type_info.methods,
-                        docstring=type_info.docstring,
-                    )
-                elif isinstance(_object, SupportsInstanceValues):
-                    if _has_instance_overrides:
-                        # Get all fields (including class-hidden) then re-filter by instance.
-                        # Use _skip_protocol to get raw fields; take methods from protocol path.
-                        raw_info = extract_type_info(
-                            obj_type, _skip_protocol=True, _include_hidden=True
-                        )
-                        protocol_info = extract_type_info(obj_type)
-                        type_info = TypeInfo(
-                            name=protocol_info.name,
-                            base=protocol_info.base,
-                            fields=[
-                                f for f in raw_info.fields if not is_hidden_field(_object, f.name)
-                            ],
-                            methods=protocol_info.methods,
-                            docstring=protocol_info.docstring,
-                        )
-                    else:
-                        type_info = extract_type_info(obj_type)
-                    values = _object.__instance_values__()
+            obj_type = type(_object)
+            # Check if instance has spec() overrides that could unhide class-hidden fields.
+            # spec(self, "field", hidden=False) in __init__ → per-instance opt-in.
+            _instance_fields_meta = (_instance_dict(_object) or {}).get(
+                "_agentdoc_fields_docs"
+            ) or {}
+            _has_instance_overrides = any(
+                meta.get("hidden") is False for meta in _instance_fields_meta.values()
+            )
+            extractor = get_type_info_extractor(obj_type)
+            if extractor:
+                result = extractor(_object)
+                if isinstance(result, tuple):
+                    type_info, values = result
                 else:
-                    if _has_instance_overrides:
-                        raw_info = extract_type_info(
-                            obj_type, _skip_protocol=True, _include_hidden=True
-                        )
-                        protocol_info = extract_type_info(obj_type)
-                        type_info = TypeInfo(
-                            name=protocol_info.name,
-                            base=protocol_info.base,
-                            fields=[
-                                f for f in raw_info.fields if not is_hidden_field(_object, f.name)
-                            ],
-                            methods=protocol_info.methods,
-                            docstring=protocol_info.docstring,
-                        )
-                    else:
-                        type_info = extract_type_info(obj_type)
-                    values = _extract_instance_values(_object, type_info)
-
-                # Apply per-instance visibility in every extraction branch.
-                # This handles both hidden=False opt-ins and hidden=True overrides
-                # on fields already present in the type-level contract.
+                    type_info = result
+                    values = _extract_instance_values(_object, result)
+                # Filter with instance (supports instance-level spec() overrides)
                 type_info = TypeInfo(
                     name=type_info.name,
                     base=type_info.base,
@@ -325,41 +278,74 @@ def _pformat(
                     methods=type_info.methods,
                     docstring=type_info.docstring,
                 )
-
-                _stream.write(
-                    _format_type_info(
-                        type_info,
-                        concise=concise,
-                        type_depth=inline_depth,
-                        max_length=max_length,
-                        indent=_indent,
-                        context_obj=obj_type,
-                        instance_values=values,
-                        visibility_obj=_object,
+            elif isinstance(_object, SupportsInstanceValues):
+                if _has_instance_overrides:
+                    # Get all fields (including class-hidden) then re-filter by instance.
+                    # Use _skip_protocol to get raw fields; take methods from protocol path.
+                    raw_info = extract_type_info(
+                        obj_type, _skip_protocol=True, _include_hidden=True
                     )
-                )
+                    protocol_info = extract_type_info(obj_type)
+                    type_info = TypeInfo(
+                        name=protocol_info.name,
+                        base=protocol_info.base,
+                        fields=[f for f in raw_info.fields if not is_hidden_field(_object, f.name)],
+                        methods=protocol_info.methods,
+                        docstring=protocol_info.docstring,
+                    )
+                else:
+                    type_info = extract_type_info(obj_type)
+                values = _object.__instance_values__()
             else:
-                # Show repr-style (for pprint())
-                _stream.write(
-                    _format_instance_repr(
-                        _object,
-                        max_length=max_length,
-                        max_string=max_string,
-                        max_depth=max_depth,
-                        indent=_indent,
+                if _has_instance_overrides:
+                    raw_info = extract_type_info(
+                        obj_type, _skip_protocol=True, _include_hidden=True
                     )
+                    protocol_info = extract_type_info(obj_type)
+                    type_info = TypeInfo(
+                        name=protocol_info.name,
+                        base=protocol_info.base,
+                        fields=[f for f in raw_info.fields if not is_hidden_field(_object, f.name)],
+                        methods=protocol_info.methods,
+                        docstring=protocol_info.docstring,
+                    )
+                else:
+                    type_info = extract_type_info(obj_type)
+                values = _extract_instance_values(_object, type_info)
+
+            # Apply per-instance visibility in every extraction branch.
+            # This handles both hidden=False opt-ins and hidden=True overrides
+            # on fields already present in the type-level contract.
+            type_info = TypeInfo(
+                name=type_info.name,
+                base=type_info.base,
+                fields=[f for f in type_info.fields if not is_hidden_field(_object, f.name)],
+                methods=type_info.methods,
+                docstring=type_info.docstring,
+            )
+
+            _stream.write(
+                _format_type_info(
+                    type_info,
+                    concise=concise,
+                    type_depth=inline_depth,
+                    max_length=max_length,
+                    indent=_indent,
+                    context_obj=obj_type,
+                    instance_values=values,
+                    visibility_obj=_object,
                 )
+            )
         case _:
-            # Regular value - use truncation formatting
-            _format_value(
-                _object,
-                _stream,
-                max_length=max_length,
-                max_string=max_string,
-                max_depth=max_depth,
-                expand_all=expand_all,
-                depth=_depth,
-                indent=_indent,
+            # A value: nooa.snapshot's capture + render_python.
+            _stream.write(
+                _value_text(
+                    _object,
+                    max_length=max_length,
+                    max_string=max_string,
+                    max_depth=max_depth,
+                    expand_all=expand_all,
+                )
             )
 
 
@@ -959,279 +945,6 @@ def _format_module_info(
 _MISSING = object()
 
 
-def _get_type_hints(obj_type: type) -> dict[str, Any]:
-    """Resolve formatting metadata using the current formatting call's cache."""
-    try:
-        return _resolve_type_hints(obj_type)
-    except Exception:
-        return {}
-
-
-def _is_empty(value: Any) -> bool:
-    """``None`` or an empty str/bytes/list/tuple/dict/set: what ``hide_empty`` leaves out."""
-    if value is None:
-        return True
-    return isinstance(value, str | bytes | list | tuple | dict | set | frozenset) and not value
-
-
-def _hides_empty(obj_type: type, field_name: str) -> bool:
-    """Whether ``spec(hide_empty=True)`` applies to this field: its own spec, else its class's."""
-    own = _field_spec_override(obj_type, field_name, "hide_empty")
-    if own is not _MISSING:
-        return bool(own)
-    from nooa.agentdoc._metadata import get_docs_metadata
-
-    return bool(get_docs_metadata(obj_type).get("hide_empty"))
-
-
-def _field_spec_override(obj_type: type, field_name: str, key: str) -> Any:
-    """Read a per-field ``spec()`` override from ``Annotated`` type hints.
-
-    Returns the value of *key* (e.g. ``"max_string"``) from the first
-    ``SpecAnnotation`` found in ``Annotated[T, spec(...)]``, or ``_MISSING``
-    if absent.
-    """
-    import typing
-
-    from nooa.agentdoc._docs import SpecAnnotation
-
-    hints = _get_type_hints(obj_type)
-    hint = hints.get(field_name)
-    if hint is None:
-        field = inspect.getattr_static(obj_type, field_name, None)
-        if isinstance(field, property) and field.fget is not None:
-            hint = _get_type_hints(field.fget).get("return")
-    if hint is None or typing.get_origin(hint) is not typing.Annotated:
-        return _MISSING
-    for metadata in typing.get_args(hint)[1:]:
-        if isinstance(metadata, SpecAnnotation):
-            val = metadata.kwargs.get(key, _MISSING)
-            if val is not _MISSING:
-                return val
-    return _MISSING
-
-
-def _format_instance_repr(
-    obj: Any,
-    *,
-    max_length: int | None,
-    max_string: int | None,
-    max_depth: int | None,
-    indent: int,
-) -> str:
-    """Format an instance in repr-style.
-
-    Shows: ClassName(field1=value1, field2=value2, ...)
-
-    Args:
-        obj: Instance to format
-        max_length: Max fields to show
-        max_string: Max string chars
-        max_depth: Max nesting depth
-        indent: Indentation level
-
-    Returns:
-        Repr-style string
-    """
-    from enum import Enum
-
-    from nooa.agentdoc._structured import extract_type_info
-    from nooa.agentdoc.registry import get_type_info_extractor
-
-    obj_type = type(obj)
-    type_name = obj_type.__name__
-
-    # Special handling for Enums
-    if isinstance(obj, Enum):
-        return f"{type_name}.{obj.name}"
-
-    # Special handling for NamedTuples - show constructor style
-    if (
-        hasattr(obj_type, "_fields")
-        and isinstance(getattr(obj_type, "_fields", None), tuple)
-        and isinstance(obj, tuple)
-    ):
-        fields = obj_type._fields
-        values = []
-        for i, (field_name, value) in enumerate(zip(fields, obj, strict=True)):
-            if max_length and i >= max_length:
-                record_truncation("max_length")
-                values.append("...")
-                break
-            value_str = _format_value_to_str(
-                value,
-                max_length=max_length,
-                max_string=max_string,
-                max_depth=(max_depth - 1) if max_depth else None,
-                expand_all=False,
-                depth=0,
-                indent=0,
-            )
-            values.append(f"{field_name}={value_str}")
-        return f"{type_name}({', '.join(values)})"
-
-    # Get field values
-    extractor = get_type_info_extractor(obj)
-    if extractor:
-        result = extractor(obj)
-        if isinstance(result, tuple):
-            type_info, values = result
-        else:
-            type_info = result
-            values = _extract_instance_values(obj, type_info)
-        # Registry extractors may return unfiltered fields; apply hidden rules.
-        # Local import avoids a circular dependency: _pformat ← _visibility ← _metadata ← _pformat.
-        from nooa.agentdoc._visibility import is_hidden_field  # noqa: PLC0415
-
-        type_info = TypeInfo(
-            name=type_info.name,
-            base=type_info.base,
-            fields=[f for f in type_info.fields if not is_hidden_field(obj_type, f.name)],
-            methods=type_info.methods,
-            docstring=type_info.docstring,
-        )
-    else:
-        type_info = extract_type_info(obj_type)
-        if isinstance(obj, SupportsInstanceValues):
-            values = obj.__instance_values__()
-        else:
-            values = _extract_instance_values(obj, type_info)
-
-    # Determine if __instance_values__ was used (gives full control over what's shown)
-    uses_instance_values_protocol = isinstance(obj, SupportsInstanceValues)
-
-    # Build repr-style output
-    parts = []
-    field_count = 0
-    # Respect Pydantic exclude=True — excluded fields should never be formatted
-    # (they often contain large internal state like captured_locals).
-    _repr_excluded: set[str] = set()
-    if hasattr(obj_type, "model_fields"):
-        _repr_excluded = {
-            name
-            for name, field_info in obj_type.model_fields.items()
-            if getattr(field_info, "exclude", False)
-        }
-    eligible_fields = [f for f in type_info.fields if f.repr and f.name not in _repr_excluded]
-    for field in eligible_fields:
-        # If __instance_values__ is implemented, only show fields it returned
-        # (the protocol allows hiding fields by omitting them)
-        if uses_instance_values_protocol and field.name not in values:
-            continue
-
-        # Get value from values dict or __dict__. Never use getattr as fallback —
-        # it triggers descriptors that can block indefinitely.
-        if field.name in values:
-            value = values[field.name]
-        else:
-            _obj_dict = _instance_dict(obj)
-            if _obj_dict is not None and field.name in _obj_dict:
-                value = _obj_dict[field.name]
-            else:
-                # Class-level plain values (non-descriptors) are safe.
-                class_val = inspect.getattr_static(obj_type, field.name, _MISSING)
-                if (
-                    class_val is not _MISSING
-                    and inspect.getattr_static(type(class_val), "__get__", None) is None
-                ):
-                    value = class_val
-                else:
-                    continue
-        # Skip callable instance attributes (e.g. assigned lambdas/functions);
-        # only keep types (classes), since those are intentional class-level tools.
-        if callable(value) and not isinstance(value, type):
-            continue
-        if _is_empty(value) and _hides_empty(obj_type, field.name):
-            continue
-        # The limit applies to fields that would be shown: a skipped field
-        # (hidden, callable, or empty with hide_empty) omits nothing.
-        if max_length and field_count >= max_length:
-            record_truncation("max_length")
-            # Truncation 3.0: bare ``...`` matches the inner-marker convention
-            # used everywhere else (dict items, set items, expanded multi-line).
-            # The legacy ``... +N`` form was the last holdout of the old shape.
-            parts.append("...")
-            break
-        # Per-field spec(max_string=..., max_length=...) overrides the caller's default.
-        field_max_string = _field_spec_override(obj_type, field.name, "max_string")
-        if field_max_string is _MISSING:
-            field_max_string = max_string
-        field_max_length = _field_spec_override(obj_type, field.name, "max_length")
-        if field_max_length is _MISSING:
-            field_max_length = max_length
-        value_str = _format_value_to_str(
-            value,
-            max_length=field_max_length,
-            max_string=field_max_string,
-            max_depth=(max_depth - 1) if max_depth else None,
-            expand_all=False,
-            depth=0,
-            indent=0,
-        )
-        parts.append(f"{field.name}={value_str}")
-        field_count += 1
-
-    # Add non-field attributes from __dict__ (skip hidden so they are not re-added)
-    if _instance_dict(obj) is not None:
-        from nooa.agentdoc._visibility import is_hidden_field as _is_hidden_field
-
-        for name, value in sorted(values.items()):
-            if any(f.name == name for f in type_info.fields):
-                continue
-            if name.startswith("_"):
-                continue
-            if _is_hidden_field(obj_type, name):
-                continue
-            if _is_empty(value) and _hides_empty(obj_type, name):
-                continue
-            if max_length and field_count >= max_length:
-                record_truncation("max_length")
-                break
-            field_max_string = _field_spec_override(obj_type, name, "max_string")
-            if field_max_string is _MISSING:
-                field_max_string = max_string
-            field_max_length = _field_spec_override(obj_type, name, "max_length")
-            if field_max_length is _MISSING:
-                field_max_length = max_length
-            value_str = _format_value_to_str(
-                value,
-                max_length=field_max_length,
-                max_string=field_max_string,
-                max_depth=(max_depth - 1) if max_depth else None,
-                expand_all=False,
-                depth=0,
-                indent=0,
-            )
-            parts.append(f"{name}={value_str}")
-            field_count += 1
-
-    # If no fields were extracted but the class defines a custom __repr__,
-    # fall back to repr — the library author likely provides a richer view
-    # (e.g. pandas DataFrame, matplotlib objects).
-    if not parts:
-        for klass in obj_type.__mro__:
-            if klass is object:
-                break
-            if "__repr__" in klass.__dict__:
-                try:
-                    r = repr(obj)
-                except Exception:
-                    break
-                if max_string is not None and len(r) > max_string:
-                    record_truncation("max_string")
-                    n = len(r)
-                    n_head = (max_string + 1) // 2
-                    n_tail = max_string - n_head
-                    head_repr = repr(r[:n_head])
-                    if n_tail > 0:
-                        tail_repr = repr(r[-n_tail:])
-                        return f"{type_name}(repr_len={n}, [:{n_head}]={head_repr}, [-{n_tail}:]={tail_repr})"
-                    return f"{type_name}(repr_len={n}, [:{n_head}]={head_repr})"
-                return r
-
-    return f"{type_name}({', '.join(parts)})"
-
-
 def _extract_instance_values(obj: Any, type_info: TypeInfo) -> dict[str, Any]:
     """Extract current field values from an instance.
 
@@ -1332,252 +1045,99 @@ def _extract_instance_values(obj: Any, type_info: TypeInfo) -> dict[str, Any]:
     return values
 
 
-def _format_nested_instance(
-    obj: Any,
-    *,
-    max_length: int | None,
-    max_string: int | None,
-    max_depth: int | None,
-    depth: int,
-    indent: int,
-) -> str:
-    """Format a structured instance in compact one-line form for nested display.
+# ============================================================================
+# Value rendering: nooa.snapshot's capture + render_python
+# ============================================================================
 
-    Used when a structured instance (dataclass, Pydantic, etc.) appears inside
-    a container (list, dict). Shows: ClassName(field1=val1, field2=val2, ... +N)
+_LAYOUT_WIDTH = 120
+"""agentdoc's layout: a container whose one-line form is this long or longer goes on several lines."""
+_UNLIMITED_DEPTH = 64
+"""``max_depth=None``: nesting this deep is still shown (capture is recursive)."""
+_MAX_NODES = 200_000
+"""The inspection work of one value preview: a bound even when every limit is ``None``."""
+_MAX_CHARS = 100_000_000
+"""capture's JSON budget, out of the way: pformat bounds items, strings and depth, not JSON size."""
 
-    Args:
-        obj: Structured instance to format
-        max_length: Max fields to show (default 3 for compact display)
-        max_string: Max string chars per field value
-        max_depth: Max nesting depth
-        depth: Current nesting depth
-        indent: Indentation level (unused for compact format)
+_CUT_REASONS = {
+    "max_items": "max_length",
+    "max_length": "max_length",
+    "max_nodes": "max_length",
+    "key": "max_length",
+    "max_depth": "max_depth",
+}
 
-    Returns:
-        Compact one-line representation
-    """
-    from nooa.agentdoc._structured import extract_type_info
-    from nooa.agentdoc.registry import get_type_info_extractor
 
-    obj_type = type(obj)
-    type_name = obj_type.__name__
+def _value_limits(
+    max_length: int | None, max_string: int | None, max_depth: int | None
+) -> "Limits":
+    """pformat's limits as one ``nooa.snapshot.Limits``: both ends kept, a bounded repr fallback."""
+    from nooa.snapshot import Limits
 
-    # Propagate caller's bounds straight through. None = unlimited; explicit
-    # value = bound to that count/length. No hidden tighter defaults.
-    nested_max_length = max_length
-    nested_max_string = max_string
-
-    # Get type info and values
-    extractor = get_type_info_extractor(obj)
-    if extractor:
-        result = extractor(obj)
-        if isinstance(result, tuple):
-            type_info, values = result
-        else:
-            type_info = result
-            values = _extract_instance_values(obj, type_info)
-    else:
-        type_info = extract_type_info(obj_type)
-        if isinstance(obj, SupportsInstanceValues):
-            values = obj.__instance_values__()
-        else:
-            values = _extract_instance_values(obj, type_info)
-
-    # Collect field names in order (type fields first, then extra __dict__ attrs)
-    # Only include fields that exist in values — fields absent from values are skipped
-    # in the render loop below, so excluding them keeps truncated_count accurate.
-    from nooa.agentdoc._visibility import is_hidden_field
-
-    excluded = {f.name for f in type_info.fields if not f.repr}
-    excluded.update(
-        name for name, field in getattr(obj_type, "model_fields", {}).items() if field.exclude
+    return Limits(
+        max_chars=_MAX_CHARS,
+        max_nodes=_MAX_NODES,
+        max_depth=_UNLIMITED_DEPTH if max_depth is None else max_depth,
+        max_items=max_length,
+        max_string=max_string,
+        tail_share=0.5,
+        fallback="repr",
     )
-    field_names = [
-        f.name
-        for f in type_info.fields
-        if f.name in values and f.name not in excluded and not is_hidden_field(obj, f.name)
-    ]
-    for name in values:
-        if (
-            name not in field_names
-            and name not in excluded
-            and not name.startswith("_")
-            and not is_hidden_field(obj, name)
-        ):
-            field_names.append(name)
-
-    # spec(hide_empty=True) fields are left out before truncation, so a hidden
-    # field takes no max_length slot and is not counted in "... +N".
-    field_names = [
-        name
-        for name in field_names
-        if not (_is_empty(values[name]) and _hides_empty(obj_type, name))
-    ]
-
-    # Truncate fields if needed
-    truncated_count = 0
-    if nested_max_length is not None and len(field_names) > nested_max_length:
-        record_truncation("max_length")
-        truncated_count = len(field_names) - nested_max_length
-        field_names = field_names[:nested_max_length]
-
-    # Format each field=value pair
-    parts = []
-    for name in field_names:
-        if name in values:
-            value = values[name]
-            # Per-field spec(max_string=..., max_length=...) overrides the caller's default.
-            field_max_string = _field_spec_override(obj_type, name, "max_string")
-            if field_max_string is _MISSING:
-                field_max_string = nested_max_string
-            field_max_length = _field_spec_override(obj_type, name, "max_length")
-            if field_max_length is _MISSING:
-                field_max_length = nested_max_length
-            value_str = _format_value_to_str(
-                value,
-                max_length=field_max_length,
-                max_string=field_max_string,
-                max_depth=(max_depth - 1) if max_depth else None,
-                expand_all=False,
-                depth=depth + 1,
-                indent=0,
-            )
-            parts.append(f"{name}={value_str}")
-
-    result = f"{type_name}({', '.join(parts)}"
-    if truncated_count:
-        result += f", ... +{truncated_count}"
-    result += ")"
-
-    return result
 
 
-# ============================================================================
-# Value formatting (for regular Python values)
-# ============================================================================
+def _record_cuts(snapshot: Any) -> None:
+    """Report what the snapshot left out to ``observe_truncation`` (the prefill warning)."""
+    from nooa.snapshot import Mapping, Object, Sequence, Text, Unavailable
+
+    stack = [snapshot]
+    while stack:
+        node = stack.pop()
+        node_type = type(node)
+        if node_type is Text:
+            if not node.complete:
+                record_truncation("max_string")
+            continue
+        if node_type is Unavailable:
+            if node.reason in _CUT_REASONS:
+                record_truncation(_CUT_REASONS[node.reason])
+            continue
+        if node_type is Sequence:
+            stack.extend(node.head + node.tail)
+        elif node_type is Mapping:
+            for key, child in node.head + node.tail:
+                if type(key) is str and len(key) > 50:
+                    record_truncation("dictionary_key")
+                stack.append(child)
+        elif node_type is Object:
+            stack.extend(child for _name, child in node.fields)
+        else:
+            continue
+        if node.reason in _CUT_REASONS:
+            record_truncation(_CUT_REASONS[node.reason])
 
 
-def _format_value(
+def _value_text(
     _object: Any,
-    _stream: Any,
     *,
     max_length: int | None,
     max_string: int | None,
     max_depth: int | None,
-    expand_all: bool,
-    depth: int,
-    indent: int,
-    _seen: set[int] | None = None,
-) -> None:
-    """Write a regular Python value to *_stream* with truncation.
+    expand_all: bool = False,
+) -> str:
+    """A value in pformat's notation: ``render_python(capture(value, limits))``.
 
-    Args:
-        _object: Value to format.
-        _stream: Writer with a ``write(str)`` method.
-        max_length: Max elements per container.
-        max_string: Max string chars.
-        max_depth: Max nesting depth.
-        expand_all: Always expand containers.
-        depth: Current nesting depth.
-        indent: Current indentation level.
-        _seen: ``id()`` of containers currently being rendered (cycle guard).
-            Top-level callers leave this ``None``; recursive calls thread the
-            same set through so nested containers can detect re-entry.
+    Values are read by ``nooa.snapshot.capture`` without running their code;
+    what it cannot read falls back to a ``repr`` cut to ``max_string``
+    (``Limits(fallback="repr")``). agentdoc's own default markers keep their
+    ``repr``. The layout is agentdoc's (``render_python(width=120)``;
+    ``expand_all`` puts every container on several lines).
     """
-    if _seen is None:
-        _seen = set()
+    from nooa.snapshot import capture, render_python
 
-    # Check depth limit
-    if max_depth is not None and depth >= max_depth:
-        _stream.write(_format_shallow(_object, max_string))
-        return
-
-    # Handle by type
-    if isinstance(_object, str):
-        _stream.write(_format_string(_object, max_string))
-        return
-
-    if isinstance(_object, dict):
-        _format_dict(
-            _object,
-            _stream,
-            max_length=max_length,
-            max_string=max_string,
-            max_depth=max_depth,
-            expand_all=expand_all,
-            depth=depth,
-            indent=indent,
-            _seen=_seen,
-        )
-        return
-
-    if isinstance(_object, (list, tuple, set, frozenset)):
-        _format_sequence(
-            _object,
-            _stream,
-            max_length=max_length,
-            max_string=max_string,
-            max_depth=max_depth,
-            expand_all=expand_all,
-            depth=depth,
-            indent=indent,
-            _seen=_seen,
-        )
-        return
-
-    # Handle marker classes from _structured.py (they have clean __repr__)
-    from nooa.agentdoc._structured import _ClassRef, _InstanceRef
-
-    if isinstance(_object, (_ClassRef, _InstanceRef)):
-        _stream.write(repr(_object))
-        return
-
-    # Handle class objects (like child agent classes) - show just the name
-    if isinstance(_object, type):
-        _stream.write(_object.__name__)
-        return
-
-    # Structured instances (dataclass, Pydantic, etc.) - format recursively
-    if _is_structured_instance(_object):
-        _stream.write(
-            _format_nested_instance(
-                _object,
-                max_length=max_length,
-                max_string=max_string,
-                max_depth=max_depth,
-                depth=depth,
-                indent=indent,
-            )
-        )
-        return
-
-    # Fallback to repr for other types (numpy arrays, pandas frames, custom classes, …).
-    # When the repr is over budget, emit the truncation 3.0 marker family —
-    # same shape as the rest of the renderer, prefixed with the actual type
-    # name so the LLM can tell what was truncated:
-    #     ndarray(repr_len=2773, [:H]='array([0, 1, 2, ...', [-T:]='...]')
-    try:
-        result = repr(_object)
-    except Exception:
-        _stream.write(f"<{type(_object).__name__}>")
-        return
-    if max_string is not None and len(result) > max_string:
-        record_truncation("max_string")
-        n = len(result)
-        n_head = (max_string + 1) // 2
-        n_tail = max_string - n_head
-        type_name = type(_object).__name__
-        head_repr = repr(result[:n_head])
-        if n_tail > 0:
-            tail_repr = repr(result[-n_tail:])
-            _stream.write(
-                f"{type_name}(repr_len={n}, [:{n_head}]={head_repr}, [-{n_tail}:]={tail_repr})"
-            )
-        else:
-            _stream.write(f"{type_name}(repr_len={n}, [:{n_head}]={head_repr})")
-        return
-    _stream.write(result)
+    if type(_object) is _ClassRef or type(_object) is _InstanceRef:
+        return repr(_object)
+    snapshot = capture(_object, _value_limits(max_length, max_string, max_depth))
+    _record_cuts(snapshot)
+    return render_python(snapshot, width=0 if expand_all else _LAYOUT_WIDTH)
 
 
 def _format_value_to_str(
@@ -1590,558 +1150,14 @@ def _format_value_to_str(
     depth: int = 0,
     indent: int = 0,
 ) -> str:
-    """Convenience wrapper: call ``_format_value`` into an ``io.StringIO`` and return the string."""
-    tmp = io.StringIO()
-    _format_value(
+    """A field default or instance value in ``doc()``: a class by its name, else ``_value_text``."""
+    del depth, indent
+    if isinstance(_object, type):
+        return _object.__name__
+    return _value_text(
         _object,
-        tmp,
         max_length=max_length,
         max_string=max_string,
         max_depth=max_depth,
         expand_all=expand_all,
-        depth=depth,
-        indent=indent,
     )
-    return tmp.getvalue()
-
-
-def _format_string(s: str, max_string: int | None, *, reason: str = "max_string") -> str:
-    """Format a string, potentially truncating.
-
-    Untruncated strings render with the usual repr (or triple-quote multiline
-    form when the content has newlines or mixed quote types).
-
-    Truncated strings use the slice-keys marker — same shape as ordered
-    containers — so the count is upfront and head/tail chunks are explicitly
-    anchored to their character positions::
-
-        str(len=789516, [:250]='Lorem ipsum...', [-250:]='...end of string')
-
-    This is the same marker family the rest of the renderer uses.
-    """
-    needs_multiline = "\n" in s or ("'" in s and '"' in s)
-
-    # Untruncated → plain repr or triple-quote multiline.
-    if max_string is None or len(s) <= max_string:
-        return _format_multiline_string(s) if needs_multiline else repr(s)
-
-    # Truncated → slice-keys marker, from nooa.snapshot: capture keeps
-    # max_string characters split evenly (ceiling head, floor tail; head-only
-    # when max_string < 2) and render_python prints them.
-    record_truncation(reason)
-    return _render_cut_string(s, max_string)
-
-
-def _render_cut_string(s: str, max_string: int) -> str:
-    """``s`` cut to ``max_string`` characters in ``render_python``'s ``str(len=N, ...)`` marker."""
-    from nooa.snapshot import Limits, capture, render_python
-
-    # max_chars only needs to hold the kept text as JSON (at most 6 chars per char).
-    limits = Limits(
-        max_string=max_string, tail_share=0.5, max_chars=max(50_000, 6 * max_string + 64)
-    )
-    return render_python(capture(s, limits))
-
-
-def _format_multiline_string(s: str) -> str:
-    """Format a string using triple quotes for better readability.
-
-    Chooses quote style to avoid escaping:
-    - Use ''' if string doesn't contain '''
-    - Use \"\"\" if string doesn't contain \"\"\"
-    - Fall back to repr() if string contains both
-    """
-    has_triple_single = "'''" in s
-    has_triple_double = '"""' in s
-
-    if has_triple_single and has_triple_double:
-        # Both triple quote styles present - fall back to repr
-        return repr(s)
-
-    # Choose quote style that doesn't need escaping
-    quote = '"""' if has_triple_single else "'''"
-
-    # Format with actual newlines preserved
-    return f"{quote}{s}{quote}"
-
-
-def _format_shallow(_object: Any, max_string: int | None) -> str:
-    """Format object shallowly (at max depth)."""
-    type_name = type(_object).__name__
-
-    if isinstance(_object, dict):
-        if not _object:  # Empty dict - just show {}
-            return "{}"
-        record_truncation("max_depth")
-        return f"{{{type_name}: {len(_object)} items}}"
-    if isinstance(_object, (list, tuple, set, frozenset)):
-        brackets = _get_brackets(type(_object))
-        if not _object:  # Empty container - just show [], (), etc.
-            return brackets[0] + brackets[1]
-        record_truncation("max_depth")
-        return f"{brackets[0]}{type_name}: {len(_object)} items{brackets[1]}"
-    if isinstance(_object, str):
-        return _format_string(_object, max_string)
-
-    try:
-        return repr(_object)
-    except Exception:
-        return f"<{type(_object).__name__}>"
-
-
-def _format_dict(
-    d: dict,
-    _stream: Any,
-    *,
-    max_length: int | None,
-    max_string: int | None,
-    max_depth: int | None,
-    expand_all: bool,
-    depth: int,
-    indent: int,
-    _seen: set[int] | None = None,
-) -> None:
-    """Write a dictionary to *_stream*.
-
-    Untruncated dicts render as plain Python literals (``{1: 2, 3: 4}``).
-
-    Truncated dicts use the truncation 3.0 ``items`` marker — the same outer
-    wrapper as truncated sets, since dict keys aren't positional anchors::
-
-        dict(len=100, items={0: 42, 1: 17, ..., 98: 45, 99: 28})
-
-    Cycles: if ``_seen`` already contains ``id(d)``, emit ``<cycle>`` and
-    return. Same mechanism as ``_format_sequence`` — Python's built-in
-    ``Py_ReprEnter`` handles this for ``dict.__repr__``; our recursive
-    renderer needs to replicate it explicitly.
-    """
-    if _seen is None:
-        _seen = set()
-    if id(d) in _seen:
-        _stream.write("<cycle>")
-        return
-
-    type_name = _get_type_name(type(d)) if type(d) is not dict else "dict"
-
-    if not d:
-        _stream.write("{}")
-        return
-
-    _seen.add(id(d))
-    try:
-        _format_dict_body(
-            d,
-            _stream,
-            type_name,
-            max_length=max_length,
-            max_string=max_string,
-            max_depth=max_depth,
-            expand_all=expand_all,
-            depth=depth,
-            indent=indent,
-            _seen=_seen,
-        )
-    finally:
-        _seen.discard(id(d))
-
-
-def _format_dict_body(
-    d,
-    _stream,
-    type_name,
-    *,
-    max_length,
-    max_string,
-    max_depth,
-    expand_all,
-    depth,
-    indent,
-    _seen,
-):
-    """Inner rendering body — split out so the cycle-guard try/finally above stays compact."""
-    all_items = list(d.items())
-    n_total = len(all_items)
-    truncated = max_length is not None and n_total > max_length
-
-    if truncated:
-        assert max_length is not None  # narrowed by `truncated`; pyright can't see it
-        record_truncation("max_length")
-        n_head = (max_length + 1) // 2
-        n_tail = max_length - n_head
-        head_items = all_items[:n_head]
-        tail_items = all_items[-n_tail:] if n_tail > 0 else []
-    else:
-        head_items = all_items
-        tail_items = []
-
-    def _fmt_item_to_str(k: object, v: object, current_indent: int) -> tuple[str, str]:
-        k_str = (
-            _format_string(str(k), 50, reason="dictionary_key") if isinstance(k, str) else repr(k)
-        )
-        tmp = io.StringIO()
-        _format_value(
-            v,
-            tmp,
-            max_length=max_length,
-            max_string=max_string,
-            max_depth=max_depth,
-            expand_all=expand_all,
-            depth=depth + 1,
-            indent=current_indent,
-            _seen=_seen,
-        )
-        return k_str, tmp.getvalue()
-
-    # Untruncated → plain Python literal.
-    if not truncated:
-        if not expand_all:
-            parts = []
-            for k, v in head_items:
-                k_str, v_str = _fmt_item_to_str(k, v, 0)
-                parts.append(f"{k_str}: {v_str}")
-            trial = "{" + ", ".join(parts) + "}"
-            if len(trial) < 120:
-                _stream.write(trial)
-                return
-
-        inner_indent = "    " * (indent + 1)
-        _stream.write("{\n")
-        for k, v in head_items:
-            k_str = (
-                _format_string(str(k), 50, reason="dictionary_key")
-                if isinstance(k, str)
-                else repr(k)
-            )
-            _stream.write(f"{inner_indent}{k_str}: ")
-            _format_value(
-                v,
-                _stream,
-                max_length=max_length,
-                max_string=max_string,
-                max_depth=max_depth,
-                expand_all=expand_all,
-                depth=depth + 1,
-                indent=indent + 1,
-                _seen=_seen,
-            )
-            _stream.write(",\n")
-        _stream.write("    " * indent + "}")
-        return
-
-    # Truncated → marker form.
-    visible = head_items + tail_items
-    if not expand_all:
-        parts = []
-        for k, v in visible:
-            k_str, v_str = _fmt_item_to_str(k, v, 0)
-            parts.append(f"{k_str}: {v_str}")
-        # Insert a "..." separator between head and tail for readability.
-        if tail_items:
-            sep_idx = len(head_items)
-            parts.insert(sep_idx, "...")
-        trial = type_name + "(len=" + str(n_total) + ", items={" + ", ".join(parts) + "})"
-        if len(trial) < 120:
-            _stream.write(trial)
-            return
-
-    # Expanded multi-line marker form.
-    inner_indent = "    " * (indent + 1)
-    _stream.write(f"{type_name}(len={n_total}, items={{\n")
-    for k, v in head_items:
-        k_str = (
-            _format_string(str(k), 50, reason="dictionary_key") if isinstance(k, str) else repr(k)
-        )
-        _stream.write(f"{inner_indent}{k_str}: ")
-        _format_value(
-            v,
-            _stream,
-            max_length=max_length,
-            max_string=max_string,
-            max_depth=max_depth,
-            expand_all=expand_all,
-            depth=depth + 1,
-            indent=indent + 1,
-            _seen=_seen,
-        )
-        _stream.write(",\n")
-    if tail_items:
-        _stream.write(f"{inner_indent}...\n")
-        for k, v in tail_items:
-            k_str = (
-                _format_string(str(k), 50, reason="dictionary_key")
-                if isinstance(k, str)
-                else repr(k)
-            )
-            _stream.write(f"{inner_indent}{k_str}: ")
-            _format_value(
-                v,
-                _stream,
-                max_length=max_length,
-                max_string=max_string,
-                max_depth=max_depth,
-                expand_all=expand_all,
-                depth=depth + 1,
-                indent=indent + 1,
-                _seen=_seen,
-            )
-            _stream.write(",\n")
-    _stream.write("    " * indent + "})")
-
-
-def _format_sequence(
-    seq,
-    _stream: Any,
-    *,
-    max_length: int | None,
-    max_string: int | None,
-    max_depth: int | None,
-    expand_all: bool,
-    depth: int,
-    indent: int,
-    _seen: set[int] | None = None,
-) -> None:
-    """Write a sequence (list, tuple, set, frozenset) to *_stream*.
-
-    Untruncated sequences render as plain Python literals (``[1, 2, 3]``).
-
-    Truncated sequences use the truncation 3.0 marker family:
-
-    * **Ordered** (``list``, ``tuple``) — slice-keys notation that explicitly
-      anchors the visible items to their positions::
-
-          list(len=100, [:5]=[42, 17, 89, 33, 8], [-5:]=[56, 71, 12, 45, 28])
-
-    * **Unordered** (``set``, ``frozenset``) — items-style wrapper, since
-      positional slices aren't meaningful::
-
-          set(len=100, items={42, 17, 89, ...})
-
-    The marker's *presence* signals truncation — a bare ``[1, 2, 3]`` is
-    always a complete value.
-
-    Cycles: if ``_seen`` already contains ``id(seq)``, emit ``<cycle>`` and
-    return. This matches Python's built-in ``Py_ReprEnter`` behaviour for
-    ``list.__repr__``/``dict.__repr__``, which our recursive renderer
-    otherwise wouldn't replicate (would RecursionError on
-    ``x = []; x.append(x)``).
-    """
-    if _seen is None:
-        _seen = set()
-    if id(seq) in _seen:
-        _stream.write("<cycle>")
-        return
-
-    brackets = _get_brackets(type(seq))
-    type_name = _get_type_name(type(seq))
-    is_ordered = isinstance(seq, (list, tuple))
-
-    if not seq:
-        _stream.write(brackets[0] + brackets[1])
-        return
-
-    # Register this container as currently being rendered. All recursive calls
-    # below pass _seen, so any cycle back to this container emits ``<cycle>``.
-    _seen.add(id(seq))
-    try:
-        _format_sequence_body(
-            seq,
-            _stream,
-            brackets,
-            type_name,
-            is_ordered,
-            max_length=max_length,
-            max_string=max_string,
-            max_depth=max_depth,
-            expand_all=expand_all,
-            depth=depth,
-            indent=indent,
-            _seen=_seen,
-        )
-    finally:
-        _seen.discard(id(seq))
-
-
-def _format_sequence_body(
-    seq,
-    _stream,
-    brackets,
-    type_name,
-    is_ordered,
-    *,
-    max_length,
-    max_string,
-    max_depth,
-    expand_all,
-    depth,
-    indent,
-    _seen,
-):
-    """Inner rendering body — split out so the cycle-guard try/finally above stays compact."""
-    all_items = list(seq)
-    n_total = len(all_items)
-    truncated = max_length is not None and n_total > max_length
-
-    if truncated:
-        # narrowed by `truncated`; pyright can't see it
-        assert max_length is not None
-        record_truncation("max_length")
-        # Compute head/tail split. Ordered → balanced head + tail; unordered
-        # → all visible items go in the head (no positional anchor).
-        if is_ordered:
-            n_head = (max_length + 1) // 2  # ceiling half
-            n_tail = max_length - n_head  # floor half
-            head_items = all_items[:n_head]
-            tail_items = all_items[-n_tail:] if n_tail > 0 else []
-        else:
-            n_head = max_length
-            n_tail = 0
-            head_items = all_items[:max_length]
-            tail_items = []
-    else:
-        head_items = all_items
-        tail_items = []
-        n_head = len(all_items)
-        n_tail = 0
-
-    def _fmt_to_str(x: object, current_indent: int) -> str:
-        tmp = io.StringIO()
-        _format_value(
-            x,
-            tmp,
-            max_length=max_length,
-            max_string=max_string,
-            max_depth=max_depth,
-            expand_all=expand_all,
-            depth=depth + 1,
-            indent=current_indent,
-            _seen=_seen,
-        )
-        return tmp.getvalue()
-
-    # Untruncated → plain Python literal.
-    if not truncated:
-        if not expand_all:
-            trial_parts = [_fmt_to_str(x, 0) for x in head_items]
-            trial = brackets[0] + ", ".join(trial_parts) + brackets[1]
-            if len(trial) < 120:
-                _stream.write(trial)
-                return
-
-        inner_indent = "    " * (indent + 1)
-        _stream.write(brackets[0] + "\n")
-        for item in head_items:
-            _stream.write(inner_indent)
-            _format_value(
-                item,
-                _stream,
-                max_length=max_length,
-                max_string=max_string,
-                max_depth=max_depth,
-                expand_all=expand_all,
-                depth=depth + 1,
-                indent=indent + 1,
-                _seen=_seen,
-            )
-            _stream.write(",\n")
-        _stream.write("    " * indent + brackets[1])
-        return
-
-    # Truncated → marker form.
-    if not expand_all:
-        if is_ordered:
-            head_str = brackets[0] + ", ".join(_fmt_to_str(x, 0) for x in head_items) + brackets[1]
-            if tail_items:
-                tail_str = (
-                    brackets[0] + ", ".join(_fmt_to_str(x, 0) for x in tail_items) + brackets[1]
-                )
-                trial = (
-                    f"{type_name}(len={n_total}, [:{n_head}]={head_str}, [-{n_tail}:]={tail_str})"
-                )
-            else:
-                trial = f"{type_name}(len={n_total}, [:{n_head}]={head_str})"
-        else:
-            # Unordered: include an internal "..." after the visible items so
-            # the partial-ness is obvious from inside the braces. The exact
-            # count is already in len=N; a bare "..." is the visual cue.
-            inner = ", ".join(_fmt_to_str(x, 0) for x in head_items) + ", ..."
-            items_str = brackets[0] + inner + brackets[1]
-            trial = f"{type_name}(len={n_total}, items={items_str})"
-        if len(trial) < 120:
-            _stream.write(trial)
-            return
-
-    # Expanded multi-line marker form.
-    inner_indent = "    " * (indent + 1)
-    if is_ordered:
-        _stream.write(f"{type_name}(len={n_total},\n")
-        _stream.write(f"{inner_indent}[:{n_head}]={brackets[0]}\n")
-        for item in head_items:
-            _stream.write("    " + inner_indent)
-            _format_value(
-                item,
-                _stream,
-                max_length=max_length,
-                max_string=max_string,
-                max_depth=max_depth,
-                expand_all=expand_all,
-                depth=depth + 1,
-                indent=indent + 2,
-                _seen=_seen,
-            )
-            _stream.write(",\n")
-        _stream.write(f"{inner_indent}{brackets[1]},\n")
-        if tail_items:
-            _stream.write(f"{inner_indent}[-{n_tail}:]={brackets[0]}\n")
-            for item in tail_items:
-                _stream.write("    " + inner_indent)
-                _format_value(
-                    item,
-                    _stream,
-                    max_length=max_length,
-                    max_string=max_string,
-                    max_depth=max_depth,
-                    expand_all=expand_all,
-                    depth=depth + 1,
-                    indent=indent + 2,
-                    _seen=_seen,
-                )
-                _stream.write(",\n")
-            _stream.write(f"{inner_indent}{brackets[1]},\n")
-        _stream.write("    " * indent + ")")
-    else:
-        _stream.write(f"{type_name}(len={n_total}, items={brackets[0]}\n")
-        for item in head_items:
-            _stream.write(inner_indent)
-            _format_value(
-                item,
-                _stream,
-                max_length=max_length,
-                max_string=max_string,
-                max_depth=max_depth,
-                expand_all=expand_all,
-                depth=depth + 1,
-                indent=indent + 1,
-                _seen=_seen,
-            )
-            _stream.write(",\n")
-        # Internal "..." marker — partial-ness obvious from inside the braces too.
-        _stream.write(f"{inner_indent}...\n")
-        _stream.write("    " * indent + brackets[1] + ")")
-
-
-def _get_brackets(seq_type: type) -> tuple[str, str]:
-    """Get opening and closing brackets for sequence type."""
-    if seq_type is list:
-        return "[", "]"
-    if seq_type is tuple:
-        return "(", ")"
-    if seq_type is set:
-        return "{", "}"
-    if seq_type is frozenset:
-        return "frozenset({", "})"
-    return "[", "]"
-
-
-def _get_type_name(seq_type: type) -> str:
-    """Type name to use as the truncation marker prefix (``list(len=N, ...)``)."""
-    return seq_type.__name__
