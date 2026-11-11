@@ -6,6 +6,8 @@ This reproduces a bug where errors show wrong line numbers.
 Example: error on user line 30 was showing as line 17.
 """
 
+import re
+
 import pytest
 
 from nooa import Agent
@@ -132,16 +134,16 @@ e = c.get("foo")
         assert "line 5" in formatted, f"Expected 'line 5' in error, got:\n{formatted}"
 
     @pytest.mark.asyncio
-    async def test_wrapper_line_offset_is_calculated(self, test_agent):
-        """Verify wrapper_line_offset is set in ExecutionResult."""
+    async def test_wrapper_line_offset_is_zero(self, test_agent):
+        """Cells compile from their own AST, so no wrapper line offset applies."""
         code = "x = 1 / 0"  # Line 1
         result = await test_agent.runtime.execute_code(
             code, execution_count=1, wrap_in_function=True
         )
 
         assert result.error is not None
-        assert result.wrapper_line_offset > 0, "wrapper_line_offset should be > 0"
-        print(f"wrapper_line_offset = {result.wrapper_line_offset}")
+        # The owned cell compiler keeps user line numbers: no wrapper header.
+        assert result.wrapper_line_offset == 0
 
     @pytest.mark.asyncio
     async def test_unvalidated_syntax_error_uses_cell_filename(self, test_agent):
@@ -156,9 +158,9 @@ e = c.get("foo")
         )
 
         assert isinstance(result.error, SyntaxError)
-        assert result.error.filename == "Cell In[17]"
+        assert result.error.filename.startswith("Cell In[17] [ns:")
         formatted = format_error_for_llm(result.error, code)
-        assert "Cell In[17], line 1" in formatted
+        assert "Cell In[17] [ns:" in formatted and "], line 1" in formatted
         assert "<unknown>" not in formatted
 
     @pytest.mark.asyncio
@@ -317,27 +319,6 @@ class TestOffsetClearing:
             assert offset <= 3, f"Execution {i} has offset {offset} - should be <= 3"
 
     @pytest.mark.asyncio
-    async def test_offset_matches_actual_wrapper_structure(self, test_agent):
-        """wrapper_line_offset should match the actual number of header lines."""
-        # First execution - no globals, offset should be 2
-        code1 = "x = 1"
-        result1 = await test_agent.runtime.execute_code(
-            code1, execution_count=1, wrap_in_function=True
-        )
-        assert result1.wrapper_line_offset == 2, (
-            f"Expected offset 2 with no globals, got {result1.wrapper_line_offset}"
-        )
-
-        # Second execution - 1 global, offset should be 3
-        code2 = "y = x + 1"
-        result2 = await test_agent.runtime.execute_code(
-            code2, execution_count=2, wrap_in_function=True, builtins=result1.captured_locals
-        )
-        assert result2.wrapper_line_offset == 3, (
-            f"Expected offset 3 with globals, got {result2.wrapper_line_offset}"
-        )
-
-    @pytest.mark.asyncio
     async def test_error_line_correct_across_many_executions(self, test_agent):
         """Error line numbers should be correct even after many prior executions."""
         builtins = {}
@@ -395,18 +376,14 @@ line_6 = "sixth"
         code2 = "a = 10\nb = 20\nc = 30"
         await test_agent.runtime.execute_code(code2, execution_count=2, wrap_in_function=True)
 
-        # Verify each has its own entry
-        assert "Cell In[1]" in linecache.cache, "Cell In[1] should be in linecache"
-        assert "Cell In[2]" in linecache.cache, "Cell In[2] should be in linecache"
+        # Verify each has its own entry (keyed by cell and owning namespace)
+        def entry(prefix):
+            keys = [key for key in linecache.cache if key.startswith(prefix)]
+            assert len(keys) == 1, f"{prefix} should be in linecache once: {keys}"
+            return linecache.cache[keys[0]][2]
 
-        # Verify contents are different
-        lines1 = linecache.cache["Cell In[1]"][2]
-        lines2 = linecache.cache["Cell In[2]"][2]
-
-        print(f"Cell In[1] has {len(lines1)} lines")
-        print(f"Cell In[2] has {len(lines2)} lines")
-
-        assert lines1 != lines2, "Each cell should have different content"
+        assert entry("Cell In[1] [ns:") == ["x = 1\n", "y = 2"]
+        assert entry("Cell In[2] [ns:") == ["a = 10\n", "b = 20\n", "c = 30"]
 
 
 class TestExactTraceScenario:
@@ -490,10 +467,8 @@ for variant_id, variant in get_product_details("123")["variants"].items():
         assert "line 3" in formatted, f"Expected 'line 3', got:\n{formatted}"
 
     @pytest.mark.asyncio
-    async def test_wrapper_line_vs_user_line_mapping(self, test_agent):
-        """Verify the exact mapping between wrapper lines and user lines."""
-        import linecache
-
+    async def test_error_traceback_line_is_user_line(self, test_agent):
+        """The raw traceback line is the user's line: the cell keeps its own AST."""
         code = """line_1 = "first"
 line_2 = "second"
 line_3 = "third"
@@ -504,34 +479,10 @@ line_5 = "fifth" """
             code, execution_count=1, wrap_in_function=True
         )
 
-        # Get wrapper from linecache
-        wrapper_lines = linecache.cache["Cell In[1]"][2]
-
-        print("=== Wrapper structure ===")
-        for i, line in enumerate(wrapper_lines, 1):
-            content = line.rstrip()
-            if "line_" in content or "error" in content:
-                user_line_match = None
-                for j, user_line in enumerate(code.split("\n"), 1):
-                    if user_line.strip() in content:
-                        user_line_match = j
-                        break
-                print(f"  wrapper {i} -> user {user_line_match}: {content}")
-            else:
-                print(f"  wrapper {i}: {content[:60]}")
-
-        print(f"\nOffset: {result.wrapper_line_offset}")
-
-        # The error (None.strip()) is on user line 4
-        # With offset 2, it should be wrapper line 6
-        # Let's verify
-        if result.error:
-            tb = result.error.__traceback__
-            while tb.tb_next:
-                tb = tb.tb_next
-            print(f"\nRaw error line in wrapper: {tb.tb_lineno}")
-            print(f"Expected user line: {tb.tb_lineno - result.wrapper_line_offset}")
-            assert tb.tb_lineno - result.wrapper_line_offset == 4, "Error should be on user line 4"
+        tb = result.error.__traceback__
+        while tb.tb_next:
+            tb = tb.tb_next
+        assert tb.tb_lineno == 4, "Error should be on user line 4"
 
 
 class TestCodeActStrategyErrorFormatting:
@@ -578,7 +529,6 @@ e = "never reached" """
 
         # Error should be on line 4
         assert "line 4" in formatted, f"Expected 'line 4' in:\n{formatted}"
-        assert "<module>" in formatted, f"Expected '<module>' in:\n{formatted}"
 
 
 class TestCommentPreservation:
@@ -688,7 +638,7 @@ class TestWrappedBaseExceptionTraceback:
             source,
             line_offset=result.wrapper_line_offset,
         )
-        assert "Cell In[70], line 3" in formatted
+        assert "Cell In[70] [ns:" in formatted and "], line 3" in formatted
         assert "raise exit_type('bye')" in formatted
         assert "SystemExit: bye" in formatted
         assert "direct cause" in formatted
@@ -718,8 +668,7 @@ class TestPersistedHelperTraceback:
         namespace.update(defined.captured_locals)
         namespace.update(defined.defined_methods)
 
-        # A persisted global changes this cell's wrapper offset. That offset must
-        # apply only to Cell In[73], never to the direct-compiled helper in Cell In[71].
+        # The helper keeps its own cell's source and line numbers in a later cell.
         namespace["persisted"] = 1
         failed = await test_agent.runtime.execute_code(
             "boom()",
@@ -734,10 +683,9 @@ class TestPersistedHelperTraceback:
             "boom()",
             line_offset=failed.wrapper_line_offset,
         )
-        assert "Cell In[73], line 1" in formatted
-        assert "Cell In[71], line 3, in boom" in formatted
+        assert re.search(r"Cell In\[73\] \[ns:\w+:1\], line 1", formatted)
+        assert re.search(r"Cell In\[71\] \[ns:\w+:1\], line 3, in boom", formatted)
         assert 'raise ValueError("x")' in formatted
-        assert "Cell In[71], line 1, in boom" not in formatted
 
 
 class TestFormatterDirectly:

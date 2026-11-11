@@ -6,6 +6,16 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- In-process cells have one execution path: `PurePythonStrategy` now runs its
+  cells in the call's owned `ExecutionNamespace` like CodeAct
+  (`call_execution_namespace(agent, call)`), and `ActorRuntime.execute_code`
+  no longer has the copy path (locals wrapper, `session_locals` copy-in/out,
+  helper pre-compilation). A direct `execute_code` call without a namespace
+  runs in a fresh one; `ExecutionResult.captured_locals` is the names the cell
+  bound and `wrapper_line_offset` is 0. Method arguments are runtime names a
+  PurePython cell reads but cannot reassign (as in CodeAct). The sandbox
+  backend is unchanged: its worker keeps one owned namespace per session.
+
 - `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
   publishes a runtime event when a job finishes (the job's handle state and
   result say it ended).

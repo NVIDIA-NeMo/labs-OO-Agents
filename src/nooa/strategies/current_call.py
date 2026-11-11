@@ -153,8 +153,9 @@ class CurrentCall:
     execution namespace during setup. Do not change ``id`` while using the call
     as a set member or dictionary key; equality and hashing use that ID.
     ``session_locals`` is the optional caller-owned seed/writeback dictionary for
-    carrying names between invocations. CodeAct copies it into a fresh execution
-    namespace and writes filtered names back when the call completes.
+    carrying names between invocations (the ``_session_locals`` call argument).
+    CodeAct and PurePython seed it into the call's execution namespace as user
+    globals and write the names cells bound back when the call completes.
     ``execution_locals`` refers to that live per-invocation namespace, including
     names created by earlier cells and session internals such as ``Out``. Dynamic
     context blocks use it while the call is running; it exists even when the caller

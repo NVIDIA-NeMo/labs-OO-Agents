@@ -2,13 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """The cell engine: one owned globals dictionary per call or session.
 
-CodeAct's in-process backend runs every cell in an :class:`ExecutionNamespace`
-(see ``CodeActStrategy.execute``). ``Agent.execution_namespace_for(call)``
-supplies it: the default is a fresh namespace per call
-(:func:`default_execution_namespace`); an agent overrides the hook to share
-one across calls (Atom's ``handle`` keeps one per live session). Caller
-``_session_locals`` seed the namespace as user globals and are written back
-when the call ends. The sandbox backend keeps its worker's namespace.
+Every in-process cell runs in an :class:`ExecutionNamespace`: it is the only
+in-process execution path of ``ActorRuntime.execute_code`` (a call without a
+namespace gets a fresh one for that cell). CodeAct and PurePython take theirs
+from :func:`call_execution_namespace`, i.e. ``Agent.execution_namespace_for(call)``:
+the default is a fresh namespace per call (:func:`default_execution_namespace`);
+an agent overrides the hook to share one across calls (Atom's ``handle`` keeps
+one per live session). Caller ``_session_locals`` seed the namespace as user
+globals and are written back when the call ends. The sandbox backend follows
+the same contract (one owned globals dictionary per session) in its worker.
 
 The async wrapper preserves Python's return/await/finally semantics. Only its
 bindings are lifted into one authoritative globals dictionary. Runtime names
@@ -429,6 +431,23 @@ def default_execution_namespace(call: Any) -> ExecutionNamespace:
     return ExecutionNamespace(reserved=RUNTIME_NAMES | frozenset(call.kwargs))
 
 
+def call_execution_namespace(agent: Any, call: Any) -> ExecutionNamespace:
+    """The namespace a call's in-process cells run in, seeded with its ``session_locals``.
+
+    ``agent.execution_namespace_for(call)`` picks it (an object that is not an
+    Agent, or a hook returning None, gets :func:`default_execution_namespace`).
+    """
+    selector = getattr(agent, "execution_namespace_for", None)
+    namespace = selector(call) if selector is not None else None
+    if namespace is None:
+        namespace = default_execution_namespace(call)
+    for name, value in (call.session_locals or {}).items():
+        if name not in namespace.reserved:
+            namespace.globals[name] = value
+            namespace.user_names.add(name)
+    return namespace
+
+
 class ExecutionNamespace:
     """Experimental per-owner namespace. Values are never snapshot state.
 
@@ -606,6 +625,16 @@ class ExecutionNamespace:
         if name != "self" and callable(value):
             return _in_context(context, value)
         return value
+
+    def user_values(self) -> dict[str, Any]:
+        """The names cells (or a caller's seed) bound, not the seeded runtime."""
+        return {name: self.globals[name] for name in self.user_names if name in self.globals}
+
+    def bound_since(self, epoch: int) -> dict[str, Any]:
+        """The current values of names a cell after ``epoch`` bound (and still binds)."""
+        return {
+            n: self.globals[n] for n, e in self._bound_in.items() if e > epoch and n in self.globals
+        }
 
     def inventory(self) -> dict[str, Any]:
         """Bounded names/types only, newest binding first; no repr, deep walks or callbacks."""

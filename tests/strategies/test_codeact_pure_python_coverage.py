@@ -2764,8 +2764,8 @@ class TestCodeActExecutePrefillStep:
     """Tests for _execute_prefill_step."""
 
     @pytest.mark.asyncio
-    async def test_execute_prefill_step_merges_captured_locals(self):
-        """Captured locals from prefill should be merged into session (lines 1773-1774)."""
+    async def test_execute_prefill_step_labels_events(self):
+        """Prefill events carry the actual prefill kind (the cell's names live in its namespace)."""
         from nooa.events import ExecutionResult, PythonOutput
 
         strat = CodeActStrategy()
@@ -2797,10 +2797,8 @@ class TestCodeActExecutePrefillStep:
             "pre_ellipsis",
         )
 
-        # Captured locals should be in session, and both synthetic events retain
-        # the actual prefill kind rather than being mislabeled as input inspection.
-        assert "x" in session.session_locals
-        assert session.session_locals["x"] == 42
+        # Both synthetic events retain the actual prefill kind rather than
+        # being mislabeled as input inspection.
         emitted = [call.args[0] for call in em.add.call_args_list]
         assert emitted
         assert all(event.metadata["prefill_type"] == "pre_ellipsis" for event in emitted)
@@ -2940,49 +2938,6 @@ class TestCodeActExecuteCodeValidationErrors:
 
 
 # ---------------------------------------------------------------------------
-# CodeActStrategy._execute_code - helper method binding error (lines 1871-1875)
-# "rejected on name collision" path no longer exists — helpers are
-# never attached to the agent, so same-name helper defs can't conflict.
-# ---------------------------------------------------------------------------
-
-
-class TestCodeActExecuteCodeHelperBindingError:
-    """Tests for _execute_code when helper method compilation reports errors."""
-
-    @pytest.mark.asyncio
-    async def test_execute_code_returns_error_on_helper_binding_error(self):
-        """_execute_code should return error result when helper fails to compile (lines 1871-1875)."""
-        from nooa.strategies.generated_code import (
-            HelperApplyResult,
-            HelperFunctionManager,
-        )
-
-        strat = CodeActStrategy()
-        em = MagicMock()
-        em.add = MagicMock(return_value="evt1")
-        session = CodeActSession(
-            max_iterations=5, max_retries=3, target_method_name="compute", event_manager=em
-        )
-
-        rt = MagicMock()
-        rt.agent = MagicMock()
-        rt.event_manager = em
-
-        error_result = HelperApplyResult(installed=[], errors=["Failed to bind method"])
-        with patch.object(HelperFunctionManager, "apply", return_value=error_result):
-            result = await strat._execute_code(
-                rt,
-                "x = 1",
-                {},
-                session,
-                "compute",
-                tool_call_id="t1",
-            )
-
-        assert result.error is not None
-
-
-# ---------------------------------------------------------------------------
 # Pure Python - line 366-371 (captured locals in execute main loop)
 # ---------------------------------------------------------------------------
 
@@ -3057,7 +3012,7 @@ class TestPurePythonExecutionError:
         assert failed.execution_count == 1
         assert failed.stdout == "before failure\n"
         assert failed.stderr == "warning\n"
-        assert "Cell In[1], line 5" in failed.error
+        assert "Cell In[1] [ns:" in failed.error and "], line 5" in failed.error
         assert "text.index('missing')" in failed.error
         assert failed.error.endswith("ValueError: substring not found")
         assert succeeded.execution_count == 2
