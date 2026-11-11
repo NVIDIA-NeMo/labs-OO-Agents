@@ -3,11 +3,12 @@
 """Dict-like context manager for agent context blocks.
 
 Provides a simple dict-like API for LLM-generated code to manage
-what information appears in the system prompt.
+what information appears in the model's context.
 
 Usage:
-    self.context["notes"] = "Here are my notes..."              # static
-    self.context.set_dynamic("status", "self.format_status()")  # dynamic
+    self.context["notes"] = "Here are my notes..."              # fixed, volatile suffix
+    self.context["rules"] = Context("...", prefix=True)          # fixed, cacheable prefix
+    self.context["status"] = Context(expr="self.format_status()")  # expression
     value = self.context["notes"]                                # read
     del self.context["notes"]                                    # remove
     "notes" in self.context                                      # check

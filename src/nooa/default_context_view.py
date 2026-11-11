@@ -3,7 +3,6 @@
 """Default context policy implemented against public framework interfaces."""
 
 import ast
-import inspect
 import logging
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
@@ -162,13 +161,17 @@ def _source_error(key: str, exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+_EVENTS_API_PROMPT = """self.events: Query past events by type, tag, text, or call ID. Like a database, not an array.
+BEFORE starting any task, check if this skill applies.
+You MUST call doc(self.events) before using it — do not assume you know the API.
+Inspect in REPL: print(doc(self.events))
+"""
+
+
 async def system_prompt_block(agent: "Agent", call: "CurrentCall") -> Block | None:
     """Build the default system prompt directly from the agent."""
     try:
-        value = agent._resolve_system_prompt()
-        if inspect.isawaitable(value):
-            value = await value
-        content = context_text(value, call=call)
+        content = context_text(resolve_agent_system_prompt(agent), call=call)
     except Exception as exc:
         content = _source_error("system_prompt", exc)
     return _block("system_prompt", content, BlockMetadata(static=True))
@@ -191,10 +194,11 @@ async def agent_interface_block(agent: "Agent", call: "CurrentCall") -> Block | 
 
 async def events_api_block(agent: "Agent", call: "CurrentCall") -> Block | None:
     """Describe the events API only when it is exposed to the model."""
-    content = agent._events_api_prompt()
-    if not content:
+    from nooa.agentdoc.visibility import is_hidden_field
+
+    if is_hidden_field(agent, "events"):
         return None
-    return _block("events_api", content, BlockMetadata(static=True))
+    return _block("events_api", _EVENTS_API_PROMPT, BlockMetadata(static=True))
 
 
 async def agent_state_block(agent: "Agent", call: "CurrentCall") -> Block | None:

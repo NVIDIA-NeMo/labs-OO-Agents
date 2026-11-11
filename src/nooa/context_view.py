@@ -47,7 +47,7 @@ class ContextView[Owner](Protocol):
 
 def is_model_visible(event: EventBase) -> bool:
     """Whether an event carries model-facing content, without selecting history."""
-    return event._role not in (Role.RUNTIME_EVENT, Role.METADATA) and not event.is_empty
+    return event.event_role not in (Role.RUNTIME_EVENT, Role.METADATA) and not event.is_empty
 
 
 def replayable(events: Iterable[EventBase]) -> tuple[EventBase, ...]:

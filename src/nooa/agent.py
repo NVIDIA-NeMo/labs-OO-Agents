@@ -475,28 +475,6 @@ class Agent(metaclass=AgentMeta):
         """Return the decision model configured for this agent, if any."""
         return self._decision_model
 
-    @no_trace
-    @hidden
-    def _events_api_prompt(self) -> str:
-        """Expose event guidance only when the instance exposes its events API."""
-        from nooa.agentdoc.visibility import is_hidden_field
-
-        if is_hidden_field(self, "events"):
-            return ""
-        return """self.events: Query past events by type, tag, text, or call ID. Like a database, not an array.
-BEFORE starting any task, check if this skill applies.
-You MUST call doc(self.events) before using it — do not assume you know the API.
-Inspect in REPL: print(doc(self.events))
-"""
-
-    @no_trace
-    @hidden
-    def _resolve_system_prompt(self) -> str:
-        """Compatibility wrapper for the default view's prompt helper."""
-        from nooa.default_context_view import resolve_agent_system_prompt
-
-        return resolve_agent_system_prompt(self)
-
     def __setattr__(self, name: str, value: Any) -> None:
         from nooa.runtime.method_guard import guard_dynamic_method
 

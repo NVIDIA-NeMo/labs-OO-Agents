@@ -44,7 +44,8 @@ def strategy(
         context: Context block overrides. Accepts either:
             - A plain dict ``{key: str | Context | DynamicContext | None}`` for context-only overrides.
             - A ``ScopedContext`` instance with context-block overrides.
-            Applied in _prepare_context() between strategy overrides and scoped blocks.
+            The default context views add these blocks after ``self.context`` and skill
+            blocks; scoped context applied at call time takes precedence.
         llm: Optional LLM override for this method. One of:
             - a client compatible with the selected strategy (fixed at import
               time and shared by every instance of the class)
@@ -63,7 +64,8 @@ def strategy(
         truncation: Optional TruncationConfig override for this method. Fields set
             here take precedence over the agent-level truncation config. Unset fields
             inherit from the agent-level config.
-        context_view: Complete context view for this method. Replaces the agent view.
+        context_view: Complete context view for this method. Replaces the strategy's
+            default view; a call-level ``context_view=`` takes precedence.
 
     Examples:
         from nooa import Context

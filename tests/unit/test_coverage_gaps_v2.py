@@ -1171,7 +1171,6 @@ class TestReflexionNoResult:
         mock_base = AsyncMock()
         mock_base.name = "MOCK"
         mock_base.requires_lock = False
-        mock_base.get_block_overrides.return_value = {}
 
         config = ReflexionConfig(max_iterations=1)
         strategy_inst = ReflexionStrategy(base=mock_base, config=config)

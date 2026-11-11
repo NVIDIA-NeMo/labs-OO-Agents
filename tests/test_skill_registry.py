@@ -326,8 +326,7 @@ class TestContextBlockSelection:
         registry_ctx.activate(["nemo.mocked"])
 
         cm = agent_ctx.context_manager
-        non_protected = [k for k in cm if k not in cm.protected_keys]
-        assert non_protected == []
+        assert list(cm) == []
 
     @pytest.mark.asyncio
     async def test_aclose_does_not_mutate_context_manager(self, registry_ctx, agent_ctx):

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nooa import Agent, Context, DynamicContext, collect_context_items
+from nooa import Agent, Block, Context, DynamicContext, collect_context_items
 from nooa.context_blocks import Role
 from nooa.default_context_view import (
     ManagedContextView,
@@ -166,26 +166,20 @@ async def test_malformed_system_prompt_is_materialized_as_an_error():
     assert prompt.content.startswith("ValueError:")
 
 
-async def test_system_prompt_uses_agent_override():
-    class CustomPromptAgent(ExampleAgent):
-        def _resolve_system_prompt(self):
-            return "custom prompt"
+async def test_custom_view_replaces_the_system_prompt():
+    class CustomPromptView(ManagedContextView):
+        async def view_blocks(self, owner, call):
+            return [
+                Block(key="system_prompt", content="custom prompt")
+                if block.key == "system_prompt"
+                else block
+                for block in await super().view_blocks(owner, call)
+            ]
 
-    agent = CustomPromptAgent()
-    prompt = await system_prompt_block(agent, _call(agent))
-    assert prompt is not None
-    assert prompt.content == "custom prompt"
-
-
-async def test_system_prompt_awaits_async_agent_override():
-    class AsyncPromptAgent(ExampleAgent):
-        async def _resolve_system_prompt(self):
-            return "custom async prompt"
-
-    agent = AsyncPromptAgent()
-    prompt = await system_prompt_block(agent, _call(agent))
-    assert prompt is not None
-    assert prompt.content == "custom async prompt"
+    agent = ExampleAgent()
+    items = await collect_context_items(CustomPromptView(), agent, _call(agent))
+    prompts = [item for item in items if getattr(item, "key", None) == "system_prompt"]
+    assert [prompt.content for prompt in prompts] == ["custom prompt"]
 
 
 async def test_interface_and_state_failures_are_materialized_as_errors():
