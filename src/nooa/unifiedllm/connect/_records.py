@@ -20,14 +20,15 @@ class ProbeRecord(TypedDict, total=False):
     timeout_kind: str
     request_shape: dict[str, Any]
     status_code: int
+    include_rejected: bool
     reasoning_observed: bool
     reasoning_encrypted: bool
     reasoning_encrypted_bytes: int | None
     reasoning_text_chars: int | None
     answer_correct: bool
     tool_observed: bool
-    state_retained: bool
-    settings_retained: bool
+    state_retained: bool | None
+    settings_retained: bool | None
     settings_sent: bool | None
     configured_reply_tokens: int
     tested_reply_tokens: int
