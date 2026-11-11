@@ -175,7 +175,7 @@ resolve view
 - Provider-managed automatic caching and transport-routing hints such as `prompt_cache_key` are independent of explicit cache breakpoints.
 - Bounded serialization is formatting; recovery for missing data or other invented content belongs to event production or view policy.
 - Downstream stages preserve view order, except for declared atomic replay groups, or raise `UnsupportedContextLayout`; they do not resolve, evict, repair, or invent content.
-- Assembly is deterministic local code. Any failure while collecting or rendering the selected view surfaces as `ContextAssemblyError` (`UnsupportedContextLayout` is a subclass); strategies propagate it without retrying or recording model-visible feedback.
+- Assembly is deterministic local code. An exception that escapes the view's `assemble()` or rendering surfaces as `ContextAssemblyError` (`UnsupportedContextLayout` is a subclass); strategies propagate it without retrying or recording model-visible feedback. How a view handles a failing source is its own policy: `CodeActView` and `PredictView` render the error (`ExcType: message`) as that block's content and log a warning, while `DecisionContextView` raises, so a decision is never made on context that failed to resolve.
 - A view omission is prompt policy, not an access-control boundary; tools and generated code may expose data available through other APIs.
 
 ## Migration
