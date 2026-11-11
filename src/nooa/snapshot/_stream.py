@@ -172,20 +172,20 @@ class TextStream:
     def write(self, data: str | bytes | bytearray | memoryview) -> None:
         """Append ``data`` to the stream, in O(len(data)) time.
 
-    Afterwards the stream retains at most ``head + tail`` units. While it
-    runs, the call may hold one more copy of ``data`` (a ``bytes`` copy of a
-    ``bytearray`` / ``memoryview``, or the UTF-8 encoding of a ``str`` for a
-    bytes stream or a spill file).
+        Afterwards the stream retains at most ``head + tail`` units. While it
+        runs, the call may hold one more copy of ``data`` (a ``bytes`` copy of a
+        ``bytearray`` / ``memoryview``, or the UTF-8 encoding of a ``str`` for a
+        bytes stream or a spill file).
 
-        A chars stream takes ``str`` only and raises ``TypeError`` for
-        anything else (write raw output to a bytes stream, which keeps it as
-        written). A bytes stream takes ``bytes``, ``bytearray`` or
-        ``memoryview`` (its raw bytes) and raises ``TypeError`` for anything
-        else but ``str``; a ``str`` is encoded as UTF-8 (surrogate escapes as
-        their raw bytes, a lone surrogate as ``\\udXXXX`` text). While a spill file is active,
-        ``data`` is also written to it, up to ``SpillTarget.max_bytes``
-        (a chars stream encodes it as a bytes stream would). Raises
-        ``ValueError`` after ``close()``.
+            A chars stream takes ``str`` only and raises ``TypeError`` for
+            anything else (write raw output to a bytes stream, which keeps it as
+            written). A bytes stream takes ``bytes``, ``bytearray`` or
+            ``memoryview`` (its raw bytes) and raises ``TypeError`` for anything
+            else but ``str``; a ``str`` is encoded as UTF-8 (surrogate escapes as
+            their raw bytes, a lone surrogate as ``\\udXXXX`` text). While a spill file is active,
+            ``data`` is also written to it, up to ``SpillTarget.max_bytes``
+            (a chars stream encodes it as a bytes stream would). Raises
+            ``ValueError`` after ``close()``.
         """
         if self._closed is not None:
             raise ValueError("write to a closed TextStream")

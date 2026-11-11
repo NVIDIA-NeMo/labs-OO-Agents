@@ -161,6 +161,7 @@ class Text:
     full: Spill | None = None
 
     def __post_init__(self) -> None:
+        """Check the fields (see the class docstring) and default ``tail`` to an empty part of ``head``'s type."""
         if self.unit != "chars" and self.unit != "bytes":
             raise ValueError(f'unit must be "chars" or "bytes", not {self.unit!r}')
         kept = str if self.unit == "chars" else bytes
