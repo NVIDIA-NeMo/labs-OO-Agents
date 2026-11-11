@@ -120,6 +120,15 @@ class Container:
         self.size += (2 if self.count else 0) + overhead + size
         self.count += 1
 
+    def pop(self, cost: int) -> None:
+        """Give back the last entry, which cost ``cost`` characters (its separator included)."""
+        self.size -= cost
+        self.count -= 1
+
+    def resume(self) -> None:
+        """Forget the stop reason: entries that were given back made room again."""
+        self.reason = None
+
 
 def fallback_candidates(type_name: str) -> tuple[Any, ...]:
     """#342's type-oriented smallest JSON fallbacks, by built-in type name."""
