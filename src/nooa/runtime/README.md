@@ -182,7 +182,11 @@ call without a namespace runs in a fresh one for that cell, and its
 `ExecutionResult.captured_locals` lists the names the cell bound. Runtime names
 (`self`, `print`, `return_result`...) resolve through the builtin fallback;
 framework names come from the namespace providers
-(`nooa.runtime.namespace_providers`). Caller `_session_locals` seed the
+(`nooa.runtime.namespace_providers`). A helper that outlives its cell (used in
+another call's cell, a late thread, or with no cell running) keeps `print`,
+`pprint`, `show` and `self`: its output goes to the cell running in the
+caller's context, else to the process's stdout. Names that belong to a call
+(`return_result`, call arguments...) raise a clear error there. Caller `_session_locals` seed the
 namespace as user globals and are written back when the call ends. The
 sandbox backend follows the same contract (one owned globals dictionary per
 session) in its worker process; the parent passes no namespace there.

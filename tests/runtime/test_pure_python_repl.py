@@ -177,7 +177,7 @@ def my_method(self, x):
         assert "my_method" in result.defined_methods
 
     @pytest.mark.asyncio
-    async def test_method_with_print_inside(self, test_agent):
+    async def test_method_with_print_inside(self, test_agent, capfd):
         """Print inside method only outputs when method is called."""
         code = """
 
@@ -193,11 +193,10 @@ def my_method(self, x):
         assert result.stdout == ""
         assert "my_method" in result.defined_methods
 
-        # ``print`` is a runtime name bound per cell: called after its cell ended
-        # (output would be lost), the helper raises a clear error.
+        # Called after its cell ended (no cell running), ``print`` goes to stdout.
         method = result.defined_methods["my_method"]
-        with pytest.raises(RuntimeError, match="after its cell ended"):
-            method(test_agent, 5)
+        assert method(test_agent, 5) == 10
+        assert "Processing: 5" in capfd.readouterr().out
 
 
 if __name__ == "__main__":
