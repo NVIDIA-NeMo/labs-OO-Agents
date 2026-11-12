@@ -89,3 +89,37 @@ async def test_write_back_keeps_what_others_changed_while_the_call_waited():
         "made": 1,
         "fresh": "added by someone else",
     }
+
+
+@pytest.mark.asyncio
+async def test_write_back_skips_names_an_earlier_call_bound_in_a_shared_namespace():
+    """A reused namespace's older bindings never reach a later call's caller (round 3)."""
+    shared = ExecutionNamespace(reserved=RUNTIME_NAMES)
+    first: dict[str, Any] = {}
+    assert (
+        await _agent([lambda: "stale = 'first call'\nreturn x"], namespace=shared).go(
+            x=1, _session_locals=first
+        )
+        == 1
+    )
+    assert first == {"stale": "first call"}
+    stack: dict[str, Any] = {}
+
+    def meanwhile():
+        stack["stale"] = "set by someone else"
+        return "made = 2\nreturn x"
+
+    assert await _agent([meanwhile], namespace=shared).go(x=3, _session_locals=stack) == 3
+    assert stack == {"stale": "set by someone else", "made": 2}
+
+
+@pytest.mark.asyncio
+async def test_deleting_a_none_seed_the_caller_already_removed_does_not_raise():
+    stack: dict[str, Any] = {"empty": None}
+
+    def meanwhile():
+        del stack["empty"]
+        return "del empty\nreturn x"
+
+    assert await _agent([meanwhile]).go(x=4, _session_locals=stack) == 4
+    assert stack == {}
