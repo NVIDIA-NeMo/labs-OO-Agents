@@ -35,6 +35,7 @@ from nooa.unifiedllm.fake import (
     FakeLLMToolSnapshot,
 )
 from nooa.unifiedllm.http_config import HttpConfig
+from nooa.unifiedllm.llm import LLM
 from nooa.unifiedllm.registry import (
     MODELS,
     ensure_loaded,
@@ -63,6 +64,7 @@ from nooa.unifiedllm.unifiedllm import (
 
 __all__ = [
     # Core classes
+    "LLM",
     "UnifiedLLM",
     "CompletionClient",
     "ReasoningCompletionClient",

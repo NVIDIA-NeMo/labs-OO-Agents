@@ -125,7 +125,14 @@ async def test_send_matches_the_client_wire_body(calls, make, adapter_type):
     await client.acall(MESSAGES, [TOOL], tool_choice="required")
     result = await adapter.send(request)
     assert result.content == "ok"
-    assert len(calls) == 4 and len(set(calls)) == 1
+    # Strict sends now force the SDK/library retry controls off; these are
+    # transport settings, not serialized request-body fields. Legacy golden
+    # kwargs remain unchanged in test_wire_snapshots.
+    bodies = [json.loads(call) for call in calls]
+    for body in bodies:
+        body.pop("max_retries", None)
+        body.pop("num_retries", None)
+    assert len(calls) == 4 and all(body == bodies[0] for body in bodies)
     # Equal bodies alone would hide a choice both paths drop.
     assert json.loads(calls[0])["tool_choice"] == "required"
     await client.aclose()
@@ -554,3 +561,32 @@ async def test_legacy_sync_async_preserve_constructor_and_call_options(calls, ma
         assert body["prompt_cache_key"] == "session" and body["tool_choice"] == "none"
         assert body.get("max_tokens", body.get("max_output_tokens")) == 20
     await client.aclose()
+
+
+@pytest.mark.parametrize("make", [chat_client, responses_client])
+@pytest.mark.asyncio
+async def test_public_media_does_not_borrow_legacy_sticky_exclusions(calls, make):
+    from nooa.unifiedllm import LLM
+    from nooa.unifiedllm.media_inputs import media_occurrences
+
+    messages = [
+        {
+            "role": "user",
+            "content": [{"type": "image_url", "image_url": {"url": "https://image.test/i.png"}}],
+        }
+    ]
+    client = make(media_inputs=["image"])
+    try:
+        rejected = client._rejected_media(client._prepare_call_config({}))
+        rejected.add(media_occurrences(messages, ("image",))[0][1])
+        client.call(messages)
+        assert "could not read" in calls[-1]
+        llm = LLM(client._adapter)
+        llm.call(LLMRequest(messages=messages))
+        await llm.acall(LLMRequest(messages=messages))
+        assert "https://image.test/i.png" in calls[-1]
+        assert "could not read" not in calls[-1]
+        assert len(rejected) == 1
+        assert messages[0]["content"][0]["type"] == "image_url"
+    finally:
+        await client.aclose()

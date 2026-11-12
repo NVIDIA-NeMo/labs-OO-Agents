@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Shared attempt execution, independent of provider and instrumentation code.
 
-This is the retry owner, not yet the outer logical-call facade. Legacy clients
-still prepare requests and recover media outside it. Policies are call-local;
-no execution state is stored on an adapter or client.
+This is the attempt retry owner; logical.py supplies outer media recovery and
+rollback through invocation-local policies. Neither executor stores execution
+state on an adapter or client. Instrumentation remains injectable.
 """
 
 from collections.abc import Awaitable, Callable
@@ -14,7 +14,7 @@ from typing import Protocol
 from nooa.llm_types import LLMResponse, LLMUsage
 
 from .adapters.base import Adapter
-from .errors import _aunwrap_parse_errors, _unwrap_parse_errors
+from .errors import EmptyContentError, _aunwrap_parse_errors, _unwrap_parse_errors
 from .request import LLMRequest
 from .retry import sync_retry, with_retry
 from .retry_config import RetryConfig
@@ -32,6 +32,12 @@ class AsyncRetry(Protocol):
     def __call__(
         self, call: Callable[[], Awaitable[LLMResponse]], *, config: RetryConfig
     ) -> Awaitable[LLMResponse]: ...
+
+
+def check_empty_response(response: LLMResponse, enabled: bool) -> None:
+    """Honor the opt-in reasoning-only retry policy without provider knowledge."""
+    if enabled and not response.content and response.reasoning:
+        raise EmptyContentError(response.reasoning)
 
 
 def _check_response(

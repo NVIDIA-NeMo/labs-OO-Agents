@@ -54,6 +54,7 @@ from .errors import EmptyContentError
 from .execution import execute_async, execute_sync
 from .http_config import HttpConfig
 from .limits import REPLY_CAP_KEYS, ContextLimits
+from .logical import logical_async, logical_sync
 from .reasoning import ReasoningConfig, apply_reasoning_level
 from .retry import sync_retry, with_retry
 from .retry_config import RetryConfig
@@ -1602,17 +1603,13 @@ class UnifiedLLM(ABC):
         - Other exceptions for API errors
         """
         staged: list[tuple[set, Any]] = []
-        try:
-            for _ in range(self._media_recovery_attempts()):
-                try:
-                    return self._call_once(messages, tools, output_model, **kwargs)
-                except Exception as exc:
-                    if not self._exclude_rejected_media(messages, kwargs, exc, staged):
-                        raise
-            return self._call_once(messages, tools, output_model, **kwargs)
-        except BaseException:
-            self._unstage_media(staged)
-            raise
+        return logical_sync(
+            lambda: None,
+            lambda _: self._call_once(messages, tools, output_model, **kwargs),
+            recovery_attempts=self._media_recovery_attempts(),
+            recover=lambda exc: self._exclude_rejected_media(messages, kwargs, exc, staged),
+            rollback=lambda: self._unstage_media(staged),
+        )
 
     async def acall(
         self,
@@ -1623,17 +1620,13 @@ class UnifiedLLM(ABC):
     ) -> LLMResponse:
         """Async version of call"""
         staged: list[tuple[set, Any]] = []
-        try:
-            for _ in range(self._media_recovery_attempts()):
-                try:
-                    return await self._acall_once(messages, tools, output_model, **kwargs)
-                except Exception as exc:
-                    if not self._exclude_rejected_media(messages, kwargs, exc, staged):
-                        raise
-            return await self._acall_once(messages, tools, output_model, **kwargs)
-        except BaseException:
-            self._unstage_media(staged)
-            raise
+        return await logical_async(
+            lambda: None,
+            lambda _: self._acall_once(messages, tools, output_model, **kwargs),
+            recovery_attempts=self._media_recovery_attempts(),
+            recover=lambda exc: self._exclude_rejected_media(messages, kwargs, exc, staged),
+            rollback=lambda: self._unstage_media(staged),
+        )
 
     @abstractmethod
     def _call_once(

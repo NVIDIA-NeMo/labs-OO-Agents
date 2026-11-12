@@ -4,6 +4,7 @@
 
 import ast
 import asyncio
+import importlib
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -175,6 +176,10 @@ async def test_cancellation_while_send_is_pending_balances_tracking():
 async def test_legacy_retry_tracking_empty_and_metric_hooks(
     monkeypatch, is_async, client_type, empty_enabled
 ):
+    # Adapters bind legacy helpers on first import. Load them before patching,
+    # so this test cannot leak its temporary metric callback into later suites.
+    importlib.import_module("nooa.unifiedllm.adapters.litellm_chat")
+    importlib.import_module("nooa.unifiedllm.adapters.litellm_responses")
     events = []
     response = turn()
     config = RETRY.model_copy(update={"retry_on_empty_content": empty_enabled})

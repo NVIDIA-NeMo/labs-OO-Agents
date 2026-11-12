@@ -16,12 +16,14 @@ class Capabilities:
     """Read-only facts about one model on one route.
 
     ``reasoning_levels`` is None when unknown and empty when unsupported.
+    ``tools`` is None when unknown, False when unsupported. The True default
+    preserves the historical optimistic declaration, not Connect verification.
     ``context_window`` and ``max_output_tokens`` are None when unknown.
     """
 
     media_kinds: frozenset[str] = frozenset()
     reasoning_levels: tuple[str, ...] | None = None
-    tools: bool = True
+    tools: bool | None = True
     context_window: int | None = None
     max_output_tokens: int | None = None
 

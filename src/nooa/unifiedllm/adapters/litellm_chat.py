@@ -22,6 +22,7 @@ from nooa.unifiedllm.adapters.base import Capabilities
 from nooa.unifiedllm.cache_policy import add_session_affinity_header
 from nooa.unifiedllm.errors import _parse_reply
 from nooa.unifiedllm.limits import REPLY_CAP_KEYS
+from nooa.unifiedllm.media_inputs import filter_media_messages
 from nooa.unifiedllm.request import LLMRequest
 from nooa.unifiedllm.structured_output import anthropic_output_format
 from nooa.unifiedllm.unifiedllm import (
@@ -427,8 +428,15 @@ class LiteLLMChatAdapter:
         # can disagree for gateway-routed models; the latter -- not scope --
         # decides whether Anthropic-style cache_control marking is applied.
         cache_mapping = client._resolve_cache_mapping(effective_model, responses=False)
+        # Legacy hooks keep sticky connection exclusions; strict/public sends
+        # use only a request-local permission view and never touch that state.
+        media_messages = (
+            client._prepare_media_messages(messages, call_config)
+            if self._legacy_options is not None
+            else filter_media_messages(messages, client._request_media_inputs(call_config))
+        )
         prepared_messages = replay_state.prepare_chat_messages(
-            client._prepare_media_messages(messages, call_config),
+            media_messages,
             state_scope,
             anthropic_cache_marking=cache_mapping == "anthropic",
             media_inputs=client._request_media_inputs(call_config),
@@ -543,6 +551,11 @@ class LiteLLMChatAdapter:
         options = self._legacy_options
         if options is None:
             options = request_options(request, {})
+            # Strict/public sends own one wire attempt, even if the backing
+            # legacy client's constructor opted into SDK retries. Legacy views
+            # retain those overrides. This does not create a new HTTP pool.
+            options["max_retries"] = 0
+            options["num_retries"] = 0
             if "tool_choice" in self._client.config:
                 options["tool_choice"] = request.tool_choice
         call_config = self._client._prepare_call_config(options)

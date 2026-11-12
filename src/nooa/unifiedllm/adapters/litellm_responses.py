@@ -32,7 +32,7 @@ from nooa.unifiedllm.cache_policy import (
     wrap_responses_text,
 )
 from nooa.unifiedllm.errors import _parse_reply
-from nooa.unifiedllm.media_inputs import attachment_kind
+from nooa.unifiedllm.media_inputs import attachment_kind, filter_media_messages
 from nooa.unifiedllm.request import LLMRequest
 from nooa.unifiedllm.unifiedllm import (
     Tool,
@@ -360,8 +360,15 @@ class LiteLLMResponsesAdapter:
         native_encrypted_reasoning = replay_state.native_encrypted_reasoning_expected(
             call_config, state_scope
         )
+        # Do not import a legacy client's sticky media exclusions into strict
+        # sends. Opaque native replay still goes through the adapter's checks.
+        media_messages = (
+            client._prepare_media_messages(request.messages, call_config)
+            if self._legacy_options is not None
+            else filter_media_messages(request.messages, client._request_media_inputs(call_config))
+        )
         input_messages, instructions, openai_explicit = client._prepare_input(
-            client._prepare_media_messages(request.messages, call_config),
+            media_messages,
             state_scope,
             effective_model,
             native_encrypted_reasoning,
@@ -406,6 +413,12 @@ class LiteLLMResponsesAdapter:
         sdk_client = http_client.async_client if is_async else http_client.sync_client
         if sdk_client is not None:
             api_params.setdefault("client", sdk_client)
+        if self._legacy_options is None:
+            # Bind the SDK copy to the strict attempt budget, sharing its pool.
+            api_params["max_retries"] = 0
+            api_params["num_retries"] = 0
+            if api_params.get("client") is not None:
+                api_params["client"] = _core._with_sdk_retries(api_params["client"], 0)
 
         return PreparedResponsesCall(
             api_params=api_params,
@@ -449,6 +462,11 @@ class LiteLLMResponsesAdapter:
         options = self._legacy_options
         if options is None:
             options = request_options(request, {})
+            # Strict/public sends own one wire attempt, even if the backing
+            # legacy client's constructor opted into SDK retries. Legacy views
+            # retain those overrides. This does not create a new HTTP pool.
+            options["max_retries"] = 0
+            options["num_retries"] = 0
             if "tool_choice" in self._client.config:
                 options["tool_choice"] = request.tool_choice
         call_config = self._client._prepare_call_config(options)
