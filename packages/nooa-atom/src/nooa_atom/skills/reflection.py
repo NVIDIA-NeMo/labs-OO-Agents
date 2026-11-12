@@ -284,22 +284,28 @@ class Reflection(Skill):
     def _status(self) -> str:
         c = self.config
         on = [name for name in self.blocks if c.blocks.get(name, True)]
-        triggers = [
+        times = [
             f"every {c.every_turns} turns" if c.every_turns else "",
             f"every {c.every_minutes:g} minutes" if c.every_minutes else "",
-            f"at {c.context_fraction:.0%} context" if c.context_fraction else "",
+            f"when the context is {c.context_fraction:.0%} full" if c.context_fraction else "",
         ]
-        when = ", ".join(t for t in triggers if t) or "never"
+        times = [t for t in times if t]
+        when = (
+            (", ".join(times[:-1]) + " or " + times[-1])
+            if len(times) > 1
+            else (times or ["never"])[0]
+        )
         return "\n".join(
             [
                 f"**Reflection is {'on' if self.enabled() else 'off'}**",
                 "",
                 f"- **Blocks on:** {', '.join(on) or 'none'}",
-                f"- **Triggers:** {when} (at least {c.min_gap_turns} turns apart)",
-                f"- **Since the last:** {self.turns} turns, {self._minutes():.0f} minutes",
+                f"- **Runs:** {when} (at most once every {c.min_gap_turns} turns)",
+                f"- **Since the last one:** {self.turns} turns, {self._minutes():.0f} minutes",
                 "",
-                "Switch blocks with `/reflection config BLOCK on|off`; "
-                "change triggers under `atom.reflection` in `.nooa/settings.yaml`.",
+                "To switch a block on or off: `/reflection config BLOCK on|off`. "
+                "To change how often it runs, edit the `reflection` section under `atom:` "
+                "in your workspace's `.nooa/settings.yaml`.",
             ]
         )
 

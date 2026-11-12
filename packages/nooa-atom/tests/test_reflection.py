@@ -205,8 +205,8 @@ async def test_reflection_command_and_persistence(tmp_path):
     status = await command()
     assert status.startswith("**Reflection is off**\n\n- **Blocks on:** say\n")
     assert (
-        "- **Triggers:** every 20 turns, every 60 minutes, at 50% context (at least 5 turns apart)"
-        in status
+        "- **Runs:** every 20 turns, every 60 minutes or when the context is 50% full"
+        " (at most once every 5 turns)" in status
     )
     assert "Reflection is on (saved to" in await command("on")
     assert reflection.enabled()
