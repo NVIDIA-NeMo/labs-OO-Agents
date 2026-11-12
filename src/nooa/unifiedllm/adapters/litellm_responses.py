@@ -345,7 +345,7 @@ class LiteLLMResponsesAdapter:
     @property
     def capabilities(self) -> Capabilities:
         """The capabilities the client declares."""
-        return client_capabilities(self._client)
+        return getattr(self, "_bound_capabilities", None) or client_capabilities(self._client)
 
     def prepare(
         self, request: LLMRequest, call_config: dict[str, Any], *, is_async: bool
@@ -469,7 +469,12 @@ class LiteLLMResponsesAdapter:
             options["num_retries"] = 0
             if "tool_choice" in self._client.config:
                 options["tool_choice"] = request.tool_choice
-        call_config = self._client._prepare_call_config(options)
+        if hasattr(self, "_bound_settings"):
+            from ._binding import _bound_call_config
+
+            call_config = _bound_call_config(self, request, options)
+        else:
+            call_config = self._client._prepare_call_config(options)
         self._client._validate_request_config("input", call_config)
         return call_config
 

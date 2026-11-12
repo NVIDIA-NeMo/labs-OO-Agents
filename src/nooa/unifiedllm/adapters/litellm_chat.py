@@ -379,7 +379,7 @@ class LiteLLMChatAdapter:
     @property
     def capabilities(self) -> Capabilities:
         """The capabilities the client declares."""
-        return client_capabilities(self._client)
+        return getattr(self, "_bound_capabilities", None) or client_capabilities(self._client)
 
     def http_client(self, call_config: dict[str, Any], *, is_async: bool, max_retries: int) -> Any:
         """Reuse the owned transport only while its constructor routing still applies.
@@ -558,9 +558,16 @@ class LiteLLMChatAdapter:
             options["num_retries"] = 0
             if "tool_choice" in self._client.config:
                 options["tool_choice"] = request.tool_choice
-        call_config = self._client._prepare_call_config(options)
-        self._client._validate_request_config("messages", call_config)
-        native_output = self._client._native_output_for_call(options, call_config)
+        if hasattr(self, "_bound_settings"):
+            from ._binding import _bound_call_config, _settings_client
+
+            call_config = _bound_call_config(self, request, options)
+            settings_client = _settings_client(self)
+        else:
+            settings_client = self._client
+            call_config = settings_client._prepare_call_config(options)
+        settings_client._validate_request_config("messages", call_config)
+        native_output = settings_client._native_output_for_call(options, call_config)
         return call_config, native_output
 
     @staticmethod
