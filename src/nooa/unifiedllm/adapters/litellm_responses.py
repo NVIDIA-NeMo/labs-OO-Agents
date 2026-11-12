@@ -340,6 +340,7 @@ class LiteLLMResponsesAdapter:
     def __init__(self, client: "ResponsesClient"):
         """Wrap ``client``, whose settings and hooks every call reads."""
         self._client = client
+        self._legacy_options: dict[str, Any] | None = None
 
     @property
     def capabilities(self) -> Capabilities:
@@ -443,9 +444,14 @@ class LiteLLMResponsesAdapter:
             prepared.native_encrypted_reasoning,
         )
 
-    def _call_config(self, request: LLMRequest, options: Mapping[str, Any]) -> dict[str, Any]:
-        """Resolve and check the call config for one attempt."""
-        call_config = self._client._prepare_call_config(request_options(request, options))
+    def _call_config(self, request: LLMRequest) -> dict[str, Any]:
+        """Resolve exact legacy options or the fields of a strict request."""
+        options = self._legacy_options
+        if options is None:
+            options = request_options(request, {})
+            if "tool_choice" in self._client.config:
+                options["tool_choice"] = request.tool_choice
+        call_config = self._client._prepare_call_config(options)
         self._client._validate_request_config("input", call_config)
         return call_config
 
@@ -467,17 +473,17 @@ class LiteLLMResponsesAdapter:
             )
         return usage
 
-    def send_sync(self, request: LLMRequest, **options: Any) -> LLMResponse:
-        """One attempt, sync. ``options`` are LiteLLM call settings (temporary)."""
-        prepared = self.prepare(request, self._call_config(request, options), is_async=False)
+    def send_sync(self, request: LLMRequest) -> LLMResponse:
+        """One sync attempt for a strict request; no retries."""
+        prepared = self.prepare(request, self._call_config(request), is_async=False)
         raw_response = self.transmit_sync(prepared)
         return _parse_reply(
             lambda: self.parse(prepared, raw_response, self._finish(prepared, raw_response))
         )
 
-    async def send(self, request: LLMRequest, **options: Any) -> LLMResponse:
-        """One attempt, async. ``options`` are LiteLLM call settings (temporary)."""
-        prepared = self.prepare(request, self._call_config(request, options), is_async=True)
+    async def send(self, request: LLMRequest) -> LLMResponse:
+        """One async attempt for a strict request; no retries."""
+        prepared = self.prepare(request, self._call_config(request), is_async=True)
         raw_response = await self.transmit(prepared)
         return _parse_reply(
             lambda: self.parse(prepared, raw_response, self._finish(prepared, raw_response))

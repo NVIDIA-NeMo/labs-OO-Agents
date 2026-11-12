@@ -19,7 +19,7 @@ class LLMRequest(BaseModel):
 
     While the clients still accept LiteLLM keyword arguments, ``tool_choice``,
     ``reasoning_level`` and ``max_output_tokens`` record what the call asked
-    for; the wire values still come from those keyword arguments.
+    for; wire-only settings live on a call-local configured legacy adapter.
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)

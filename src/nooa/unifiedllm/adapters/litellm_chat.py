@@ -63,7 +63,7 @@ def client_capabilities(client: "UnifiedLLM") -> Capabilities:
 
 
 def request_options(request: LLMRequest, options: Mapping[str, Any]) -> dict[str, Any]:
-    """Call options for ``send``: request fields fill in what options leave out.
+    """Translate neutral request fields into adapter-local call settings.
 
     The request's reply cap is added only when no reply-cap spelling is in the
     options or their ``extra_body``; a second spelling would be rejected.
@@ -373,6 +373,7 @@ class LiteLLMChatAdapter:
     def __init__(self, client: "CompletionClient"):
         """Wrap ``client``, whose settings and hooks every call reads."""
         self._client = client
+        self._legacy_options: dict[str, Any] | None = None
 
     @property
     def capabilities(self) -> Capabilities:
@@ -533,9 +534,17 @@ class LiteLLMChatAdapter:
             native_output=prepared.native_output,
         )
 
-    def _settings(self, request: LLMRequest, options: Mapping[str, Any]):
-        """Resolve and check the call config and native-output mode for one attempt."""
-        options = request_options(request, options)
+    def _settings(self, request: LLMRequest):
+        """Legacy views keep exact option precedence, including explicit None.
+
+        Do not fill from the recorded request in a legacy view: an inherited
+        reasoning level may define its own cap, or recovery may disable it.
+        """
+        options = self._legacy_options
+        if options is None:
+            options = request_options(request, {})
+            if "tool_choice" in self._client.config:
+                options["tool_choice"] = request.tool_choice
         call_config = self._client._prepare_call_config(options)
         self._client._validate_request_config("messages", call_config)
         native_output = self._client._native_output_for_call(options, call_config)
@@ -562,16 +571,16 @@ class LiteLLMChatAdapter:
         self._calibrate(prepared, raw_response)
         return self.parse(prepared, raw_response)
 
-    def send_sync(self, request: LLMRequest, **options: Any) -> LLMResponse:
-        """One attempt, sync. ``options`` are LiteLLM call settings (temporary)."""
-        call_config, native_output = self._settings(request, options)
+    def send_sync(self, request: LLMRequest) -> LLMResponse:
+        """One sync attempt for a strict request; no retries."""
+        call_config, native_output = self._settings(request)
         prepared = self.prepare(request, call_config, native_output=native_output, is_async=False)
         raw_response = self.transmit_sync(prepared)
         return _parse_reply(lambda: self._finish(prepared, raw_response))
 
-    async def send(self, request: LLMRequest, **options: Any) -> LLMResponse:
-        """One attempt, async. ``options`` are LiteLLM call settings (temporary)."""
-        call_config, native_output = self._settings(request, options)
+    async def send(self, request: LLMRequest) -> LLMResponse:
+        """One async attempt for a strict request; no retries."""
+        call_config, native_output = self._settings(request)
         prepared = self.prepare(request, call_config, native_output=native_output, is_async=True)
         raw_response = await self.transmit(prepared)
         return _parse_reply(lambda: self._finish(prepared, raw_response))

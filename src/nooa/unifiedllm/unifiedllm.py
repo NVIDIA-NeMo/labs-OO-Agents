@@ -1507,10 +1507,10 @@ class UnifiedLLM(ABC):
         return model
 
     def _llm_request(self, messages, tools, output_model, kwargs):
-        """The LLMRequest for one call. The wire values still come from kwargs.
+        """Record neutral fields, without copying history or provider settings.
 
-        The reply cap is the one ``kwargs`` set (top level, then ``extra_body``),
-        so the adapter's fill-in of request fields never adds a second cap.
+        Legacy adapters use a separate call-local settings view to preserve
+        exact wire precedence. Strict adapters pass resolved neutral values.
         """
         from nooa.unifiedllm.request import LLMRequest
 
@@ -1539,7 +1539,7 @@ class UnifiedLLM(ABC):
         )
 
     def _dispatch_request(self, messages, tools, output_model, kwargs, managed):
-        """Check one call's settings and return its LLMRequest and effective model.
+        """Check settings and return the request, model and call-local adapter.
 
         The adapter resolves the settings again per attempt; doing it once here
         keeps invalid calls failing before tracking and retries start.
@@ -1547,7 +1547,53 @@ class UnifiedLLM(ABC):
         call_config = self._prepare_call_config(kwargs)
         self._validate_request_config(managed, call_config)
         model = self._effective_model(call_config)
-        return self._llm_request(messages, tools, output_model, kwargs), model
+        from .adapters.legacy import configure_legacy_adapter
+
+        adapter = configure_legacy_adapter(self._adapter, kwargs)
+        if adapter is not None:
+            request = self._llm_request(messages, tools, output_model, kwargs)
+        else:
+            # No provider methods are required of a third-party Adapter. Only
+            # settings representable by the approved neutral request can cross.
+            request = self._strict_adapter_request(
+                messages, tools, output_model, kwargs, call_config
+            )
+            adapter = self._adapter
+        return request, model, adapter
+
+    def _strict_adapter_request(self, messages, tools, output_model, overrides, call_config):
+        """Translate legacy neutral defaults/overrides, rejecting wire-only knobs.
+
+        Constructor routing belongs to the loaded adapter; per-call routing,
+        sampling, affinity, timeout and native controls need a newly configured
+        adapter and cannot be silently discarded here.
+        """
+        neutral = REPLY_CAP_KEYS | {"tool_choice", "reasoning_level"}
+        unsupported = set(overrides) - neutral - {"extra_body"}
+        extra = overrides.get("extra_body") or {}
+        unsupported.update(set(extra) - REPLY_CAP_KEYS)
+        level = overrides.get("reasoning_level", self.reasoning_level)
+        patch = self._reasoning_config.settings(level) if level is not None else {}
+        # Selected reasoning settings are represented by the level, not a
+        # second native side channel. A reduced recovery with raw settings is
+        # intentionally unsupported for a third-party adapter.
+        route = {"model", "api_key", "api_base", "base_url", "custom_llm_provider", "client"}
+        unsupported.update(set(call_config) - neutral - route - set(patch) - {"extra_body"})
+        unsupported.update(set(call_config.get("extra_body") or {}) - REPLY_CAP_KEYS)
+        if unsupported:
+            raise ValueError(
+                "Legacy setting(s) unsupported by a request-only adapter: "
+                + ", ".join(sorted(unsupported))
+                + "; configure the adapter instead"
+            )
+        caps = [call_config[key] for key in REPLY_CAP_KEYS if call_config.get(key) is not None]
+        if len(caps) > 1 or any(type(cap) is not int or cap <= 0 for cap in caps):
+            raise ValueError("Request-only adapters require one positive integer reply token limit")
+        choice = call_config.get("tool_choice", "auto")
+        if not isinstance(choice, str):
+            raise ValueError("Request-only adapters require a neutral string tool_choice")
+        request = self._llm_request(messages, tools, output_model, call_config)
+        return request.model_copy(update={"tool_choice": choice, "reasoning_level": level})
 
     def _validate_cache_breakpoint_model(self, effective_model: str) -> None:
         """Reject applying a model-declared cache mapping to a call override."""
@@ -2435,12 +2481,14 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
-        request, model = self._dispatch_request(messages, tools, output_model, kwargs, "messages")
+        request, model, adapter = self._dispatch_request(
+            messages, tools, output_model, kwargs, "messages"
+        )
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
         def _make_call():
             """One attempt; an empty reply with reasoning may raise for a retry."""
-            response = self._adapter.send_sync(request, **kwargs)
+            response = adapter.send_sync(request)
             _raise_if_empty_content(response, retry_on_empty)
             return response
 
@@ -2474,12 +2522,14 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
-        request, model = self._dispatch_request(messages, tools, output_model, kwargs, "messages")
+        request, model, adapter = self._dispatch_request(
+            messages, tools, output_model, kwargs, "messages"
+        )
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
         async def _make_call():
             """One attempt; an empty reply with reasoning may raise for a retry."""
-            response = await self._adapter.send(request, **kwargs)
+            response = await adapter.send(request)
             _raise_if_empty_content(response, retry_on_empty)
             return response
 
@@ -2685,11 +2735,13 @@ class ResponsesClient(UnifiedLLM):
         are projected here; only leading system messages become `instructions`.
         Each attempt is one ``adapter.send_sync``; retries and tracking stay here.
         """
-        request, model = self._dispatch_request(messages, tools, output_model, kwargs, "input")
+        request, model, adapter = self._dispatch_request(
+            messages, tools, output_model, kwargs, "input"
+        )
 
         def _make_call():
             """One attempt."""
-            return self._adapter.send_sync(request, **kwargs)
+            return adapter.send_sync(request)
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
         with _track_llm_call(model=model, endpoint=self.config.get("api_base")):
@@ -2715,11 +2767,13 @@ class ResponsesClient(UnifiedLLM):
         are projected here; only leading system messages become `instructions`.
         Each attempt is one ``await adapter.send``; retries and tracking stay here.
         """
-        request, model = self._dispatch_request(messages, tools, output_model, kwargs, "input")
+        request, model, adapter = self._dispatch_request(
+            messages, tools, output_model, kwargs, "input"
+        )
 
         async def _make_call():
             """One attempt."""
-            return await self._adapter.send(request, **kwargs)
+            return await adapter.send(request)
 
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
         with _track_llm_call(model=model, endpoint=self.config.get("api_base")):

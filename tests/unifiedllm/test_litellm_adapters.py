@@ -2,13 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """The LiteLLM adapters: one attempt, the same wire body as the clients."""
 
+import asyncio
+import inspect
 import json
 
 import litellm
 import pytest
+from pydantic import BaseModel
 
 from nooa.unifiedllm import CompletionClient, LLMRequest, ResponsesClient, Tool
 from nooa.unifiedllm.adapters import Adapter, Capabilities
+from nooa.unifiedllm.adapters.legacy import configure_legacy_adapter
 from nooa.unifiedllm.adapters.litellm_chat import LiteLLMChatAdapter
 from nooa.unifiedllm.adapters.litellm_responses import LiteLLMResponsesAdapter
 from nooa.unifiedllm.retry_config import RetryConfig
@@ -197,7 +201,8 @@ def test_client_builds_request_from_call(monkeypatch, calls):
 def test_option_reply_cap_wins_over_the_request_cap(calls, make, options):
     """A cap in the options, under any spelling, keeps the request's cap off the wire."""
     client = make()
-    client._adapter.send_sync(LLMRequest(messages=MESSAGES, max_output_tokens=256), **options)
+    adapter = configure_legacy_adapter(client._adapter, options)
+    adapter.send_sync(LLMRequest(messages=MESSAGES, max_output_tokens=256))
     [body] = [json.loads(call) for call in calls]
     caps = {
         k: v
@@ -229,18 +234,18 @@ class ProtocolOnlyAdapter:
     def capabilities(self) -> Capabilities:
         return Capabilities()
 
-    def _next(self, request, options):
-        self.seen.append((request, options))
+    def _next(self, request):
+        self.seen.append(request)
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
         return reply
 
-    def send_sync(self, request, **options):
-        return self._next(request, options)
+    def send_sync(self, request):
+        return self._next(request)
 
-    async def send(self, request, **options):
-        return self._next(request, options)
+    async def send(self, request):
+        return self._next(request)
 
 
 def _turn(text="", reasoning=None):
@@ -263,19 +268,32 @@ def _turn(text="", reasoning=None):
 async def test_client_dispatches_through_a_protocol_only_adapter(make):
     """Clients use only the declared protocol; retries stay in the client."""
     client = make(
-        retry_config=RetryConfig(max_retries=2, base_delay=0, max_delay=0, jitter_factor=0)
+        retry_config=RetryConfig(max_retries=2, base_delay=0, max_delay=0, jitter_factor=0),
+        reasoning_levels={"low": {"reasoning_effort": "low"}},
     )
     boom = litellm.InternalServerError("boom", llm_provider="openai", model="m")
     adapter = ProtocolOnlyAdapter([boom, _turn("one"), boom, _turn("two")])
     assert isinstance(adapter, Adapter)
     client._adapter = adapter
-    assert client.call(MESSAGES, [TOOL], tool_choice="required", temperature=0).content == "one"
-    assert (await client.acall(MESSAGES)).content == "two"
+
+    class Output(BaseModel):
+        answer: str
+
+    options = {"tool_choice": "required", "reasoning_level": "low", "max_tokens": 50}
+    with pytest.raises(ValueError, match="unsupported.*temperature"):
+        client.call(MESSAGES, [TOOL], temperature=0)
+    with pytest.raises(ValueError, match="unsupported.*temperature"):
+        await client.acall(MESSAGES, temperature=0)
+    assert adapter.seen == []
+    assert client.call(MESSAGES, [TOOL], output_model=Output, **options).content == "one"
+    assert (await client.acall(MESSAGES, [TOOL], output_model=Output, **options)).content == "two"
     assert len(adapter.seen) == 4
-    request, options = adapter.seen[1]
-    assert request.messages is MESSAGES and request.tools == [TOOL]
-    assert request.tool_choice == "required"
-    assert options == {"tool_choice": "required", "temperature": 0}
+    for request in adapter.seen:
+        assert request.messages is MESSAGES and request.tools == [TOOL]
+        assert request.tool_choice == "required"
+        assert request.reasoning_level == "low"
+        assert request.max_output_tokens == 50
+        assert request.output_type is Output
     await client.aclose()
 
 
@@ -336,4 +354,203 @@ async def test_named_tool_choice_must_name_a_request_tool(calls, make, tools):
     with pytest.raises(ValueError, match="tool_choice 'search' names no tool"):
         await client._adapter.send(request)
     assert calls == []
+    await client.aclose()
+
+
+@pytest.mark.parametrize("make", [chat_client, responses_client])
+def test_send_signatures_are_genuinely_request_only(make):
+    client = make()
+    for name in ("send", "send_sync"):
+        assert list(inspect.signature(getattr(client._adapter, name)).parameters) == ["request"]
+    client.close()
+
+
+@pytest.mark.parametrize("make", [chat_client, responses_client])
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"temperature": 0},
+        {"top_p": 0.9},
+        {"prompt_cache_key": "session"},
+        {"timeout": 4},
+        {"model": "openai/other"},
+        {"extra_body": {"reasoning_effort": "low"}},
+    ],
+)
+@pytest.mark.asyncio
+async def test_strict_adapter_rejects_wire_settings_before_dispatch(make, override):
+    client = make()
+    client._adapter = ProtocolOnlyAdapter([])
+    with pytest.raises(ValueError, match="unsupported by a request-only adapter"):
+        client.call(MESSAGES, **override)
+    with pytest.raises(ValueError, match="unsupported by a request-only adapter"):
+        await client.acall(MESSAGES, **override)
+    assert client._adapter.seen == []
+    await client.aclose()
+
+
+@pytest.mark.parametrize("make", [chat_client, responses_client])
+@pytest.mark.asyncio
+async def test_strict_adapter_inherits_neutral_defaults_and_cap_precedence(make):
+    client = make(
+        tool_choice="required",
+        extra_body={"max_tokens": 80},
+        reasoning_levels={"low": {"reasoning_effort": "low", "max_tokens": 40}},
+        reasoning_level="low",
+    )
+    adapter = ProtocolOnlyAdapter([_turn("ok")] * 4)
+    client._adapter = adapter
+    client.call(MESSAGES, [TOOL])
+    await client.acall(MESSAGES, [TOOL])
+    client.call(MESSAGES, [TOOL], reasoning_level=None, tool_choice="auto", max_output_tokens=20)
+    await client.acall(
+        MESSAGES, [TOOL], reasoning_level=None, tool_choice="none", extra_body={"max_tokens": 30}
+    )
+    assert [(r.tool_choice, r.reasoning_level, r.max_output_tokens) for r in adapter.seen] == [
+        ("required", "low", 40),
+        ("required", "low", 40),
+        ("auto", None, 20),
+        ("none", None, 30),
+    ]
+    await client.aclose()
+
+
+@pytest.mark.parametrize("make", [chat_client, responses_client])
+def test_strict_adapter_rejects_inherited_sampling(make):
+    client = make(temperature=0.5)
+    client._adapter = ProtocolOnlyAdapter([])
+    with pytest.raises(ValueError, match="unsupported.*temperature"):
+        client.call(MESSAGES)
+    assert client._adapter.seen == []
+    client.close()
+
+
+@pytest.mark.parametrize("make", [chat_client, responses_client])
+@pytest.mark.asyncio
+async def test_litellm_call_local_options_are_isolated(monkeypatch, make):
+    """Concurrent calls retain real production knobs and the original transport."""
+    seen = []
+    arrived = asyncio.Event()
+    release = asyncio.Event()
+
+    async def provider(**kwargs):
+        seen.append(kwargs)
+        if len(seen) == 2:
+            arrived.set()
+        await release.wait()
+        return chat_reply() if make is chat_client else responses_reply()
+
+    monkeypatch.setattr(litellm, "acompletion" if make is chat_client else "aresponses", provider)
+    client = make(temperature=0.7, top_p=0.95)
+    adapter = client._adapter
+    owned_http = client._http
+    config = dict(client.config)
+    one = {
+        "temperature": 0.1,
+        "top_p": 0.2,
+        "prompt_cache_key": "one",
+        "timeout": 3,
+        "extra_body": {"custom": {"value": "one"}},
+    }
+    two = {
+        "temperature": 0.8,
+        "top_p": 0.9,
+        "prompt_cache_key": "two",
+        "timeout": 7,
+        "api_base": "https://replacement.test/v1",
+        "extra_body": {"custom": {"value": "two"}},
+    }
+    tasks = [asyncio.create_task(client.acall(MESSAGES, **options)) for options in (one, two)]
+    try:
+        await asyncio.wait_for(arrived.wait(), timeout=5)
+        one["extra_body"]["custom"]["value"] = "mutated"
+        assert client.config == config
+        assert client._adapter is adapter and adapter._legacy_options is None
+        assert client._http is owned_http
+        by_key = {body["prompt_cache_key"]: body for body in seen}
+        assert [
+            (by_key[k]["temperature"], by_key[k]["top_p"], by_key[k]["timeout"])
+            for k in ("one", "two")
+        ] == [
+            (0.1, 0.2, 3),
+            (0.8, 0.9, 7),
+        ]
+        assert by_key["one"]["extra_body"]["custom"]["value"] == "one"
+        assert by_key["two"]["extra_body"]["custom"]["value"] == "two"
+        assert by_key["one"]["client"] is not None
+        if make is chat_client:
+            # Chat SDK clients bind URL/key; replacement routes bypass them.
+            assert by_key["two"].get("client") is None
+        else:
+            # Responses uses an unbound HTTP handler, safe across route changes.
+            assert by_key["two"]["client"] is by_key["one"]["client"]
+        assert by_key["two"]["api_base"] == "https://replacement.test/v1"
+    finally:
+        release.set()
+        await asyncio.gather(*tasks)
+        await client.aclose()
+
+
+@pytest.mark.parametrize("make", [chat_client, responses_client])
+@pytest.mark.asyncio
+async def test_legacy_reasoning_cap_and_recovery_preserve_exact_settings(calls, make):
+    client = make(
+        extra_body={"max_tokens": 80},
+        reasoning_levels={"low": {"reasoning_effort": "low", "max_completion_tokens": 40}},
+        reasoning_level="low",
+    )
+    client.call(MESSAGES)
+    await client.acall(MESSAGES)
+    reduced = client._with_reduced_reply_limit({}, 20)
+    assert reduced["reasoning_level"] is None
+    client.call(MESSAGES, **reduced)
+    await client.acall(MESSAGES, **reduced)
+    bodies = [json.loads(body) for body in calls]
+    for body, cap in zip(bodies, (40, 40, 20, 20), strict=True):
+        assert body["reasoning_effort"] == "low"
+        assert [
+            body[k]
+            for k in ("max_tokens", "max_completion_tokens", "max_output_tokens")
+            if k in body
+        ] == [cap]
+        assert not any(k.startswith("max_") for k in body.get("extra_body", {}))
+    await client.aclose()
+
+
+@pytest.mark.parametrize("make", [chat_client, responses_client])
+@pytest.mark.parametrize("cap", ["50", True, 0, -1])
+def test_strict_adapter_does_not_silently_drop_invalid_caps(make, cap):
+    client = make()
+    client._adapter = ProtocolOnlyAdapter([])
+    with pytest.raises(ValueError, match="positive integer reply token limit"):
+        client.call(MESSAGES, max_tokens=cap)
+    assert client._adapter.seen == []
+    client.close()
+
+
+@pytest.mark.parametrize("make", [chat_client, responses_client])
+@pytest.mark.asyncio
+async def test_legacy_sync_async_preserve_constructor_and_call_options(calls, make):
+    client = make(temperature=0.7, top_p=0.95, max_completion_tokens=80, timeout=9)
+    options = {
+        "temperature": 0.1,
+        "top_p": 0.2,
+        "prompt_cache_key": "session",
+        "timeout": 3,
+        "extra_body": {"max_tokens": 20},
+        "tool_choice": "none",
+    }
+    client.call(MESSAGES, [TOOL])
+    await client.acall(MESSAGES, [TOOL])
+    client.call(MESSAGES, [TOOL], **options)
+    await client.acall(MESSAGES, [TOOL], **options)
+    bodies = [json.loads(body) for body in calls]
+    assert bodies[0] == bodies[1] and bodies[2] == bodies[3]
+    for body in bodies[:2]:
+        assert (body["temperature"], body["top_p"], body["timeout"]) == (0.7, 0.95, 9)
+        assert body.get("max_completion_tokens", body.get("max_output_tokens")) == 80
+    for body in bodies[2:]:
+        assert (body["temperature"], body["top_p"], body["timeout"]) == (0.1, 0.2, 3)
+        assert body["prompt_cache_key"] == "session" and body["tool_choice"] == "none"
+        assert body.get("max_tokens", body.get("max_output_tokens")) == 20
     await client.aclose()
