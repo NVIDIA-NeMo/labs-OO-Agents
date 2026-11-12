@@ -217,19 +217,20 @@ class AtomAgentBase(InteractiveAgent):
         self.system_messages = self._system_messages_in.reader
         self.cwd = Path(cwd).resolve()
         self._base_shell = ShellTools(cwd=str(self.cwd))
-        self.shell = ActivityShellTools(self._base_shell, self.event_manager)
-        self.repo = RepoTools(root=self.cwd, session=self.shell.session)
         # The Session port finds this channel and does not declare its own.
         self._delegates_in = self.queue_manager.queue("delegates")
         self.delegates = self._delegates_in.reader
         self._jobs_in = self.queue_manager.queue("jobs")
         self._jobs_running = {}
         self.jobs = JobsApi(self)
-        self.todo = TodoManager()
         self.skills = SkillManager(self)
-        self.skills.register("nemo.shell", self.shell)
-        self.skills.register("nemo.repo", self.repo)
-        self.skills.register("nemo.todo", self.todo)
+        # Built-in tools are installed only through the registry, which sets
+        # self.shell, self.repo, self.todo and self.skill_writing. Assigning
+        # them here as well would make register() report an overwrite.
+        shell = ActivityShellTools(self._base_shell, self.event_manager)
+        self.skills.register("nemo.shell", shell)
+        self.skills.register("nemo.repo", RepoTools(root=self.cwd, session=shell.session))
+        self.skills.register("nemo.todo", TodoManager())
         # Skills the agent writes live at <project>/.nooa/skills (an older
         # <project>/.nooa/libs is not loaded). get_project_dir() resolves that
         # per process, which is what a one-workspace host like the TUI wants.
@@ -239,8 +240,7 @@ class AtomAgentBase(InteractiveAgent):
         # workspace's agent-authored code to another. Built after the
         # SkillManager so its skills are in the registry (self.skills.search).
         skills_dir = libs_dir or get_project_dir("skills")
-        self.skill_writing = SkillWriting(self, path=skills_dir)
-        self.skills.register("nemo.skill_writing", self.skill_writing)
+        self.skills.register("nemo.skill_writing", SkillWriting(self, path=skills_dir))
         self.skills.register("nemo.methodwriting", MethodWriting())
         self.skills.registry.activate(
             ["nemo.shell", "nemo.repo", "nemo.todo", "nemo.skill_writing", "nemo.methodwriting"]
