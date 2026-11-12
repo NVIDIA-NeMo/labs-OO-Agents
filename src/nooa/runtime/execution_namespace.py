@@ -460,8 +460,9 @@ def enter_call_namespace(
     user names a cell can rebind or delete; an argument wins over a same-named
     seed. Protected names (reserved runtime names, ``__builtins__``, the
     engine's internals) are never seeded. ``call.seeded_locals`` records the
-    caller's seeds and ``call.namespace_epoch`` the epoch its cells start after,
-    for :func:`write_back_session_locals`.
+    caller's seeds and ``call.namespace_before`` the user values the call starts
+    from (:meth:`ExecutionNamespace.user_globals`), for
+    :func:`write_back_session_locals`.
     """
     selector = getattr(agent, "execution_namespace_for", None)
     namespace = selector(call) if selector is not None else None
@@ -479,8 +480,9 @@ def enter_call_namespace(
                 if framework_name_allowed(name, namespace.reserved):
                     namespace.globals[name] = value
                     namespace.user_names.add(name)
-        # Cells bind names in later epochs: write-back takes only those.
-        call.namespace_epoch = namespace.epoch
+        # The call's changes are what differs from this at write-back (the
+        # namespace is the call's alone until it exits: entry refuses another).
+        call.namespace_before = namespace.user_globals()
         yield namespace
 
 
@@ -490,7 +492,7 @@ def write_back_session_locals(
     *,
     seeded: Mapping[str, Any],
     call_names: frozenset[str] = frozenset(),
-    since: int = 0,
+    before: Mapping[str, Any],
 ) -> None:
     """Write what the call's cells changed back to the caller's ``session_locals``.
 
@@ -500,11 +502,15 @@ def write_back_session_locals(
     call never seeded (e.g. added by someone else while the call ran), keep the
     caller's current value; so does a seed the caller changed meanwhile when
     the cells deleted it. ``call_names`` (e.g. the call's arguments) never reach
-    the caller, and a caller key named like one keeps its value. Only names a
-    cell bound after epoch ``since`` (``call.namespace_epoch``) are written: an
-    earlier call's bindings in a reused namespace never reach this caller.
+    the caller, and a caller key named like one keeps its value.
+
+    What the call changed is found by value, not by binding syntax: a user
+    global whose object differs from ``before`` (``call.namespace_before``) or
+    is new since. So a helper's ``global`` write counts, also from a helper an
+    earlier call defined, and so do writes no cell spells out; a reused
+    namespace's older bindings the call left alone never reach this caller.
     """
-    values = namespace.bound_since(since)
+    values = namespace.changed_since(before)
     for name, seed in seeded.items():
         if (
             name not in call_names
@@ -554,6 +560,8 @@ class ExecutionNamespace:
         self.user_names: set[str] = set()
         # The cell number that last bound each name: inventory lists newest first.
         self._bound_in: dict[str, int] = {}
+        # What :meth:`initialize` seeded: not a call's change while unchanged.
+        self._environment: dict[str, Any] = {}
         self.dependency_names: set[str] = set()
         self.epoch = 0
 
@@ -583,8 +591,10 @@ class ExecutionNamespace:
                     name not in self.reserved
                     and name != "__builtins__"
                     and (name not in self._framework_names or name in static_names)
+                    and name not in self.globals
                 ):
-                    self.globals.setdefault(name, value)
+                    self.globals[name] = value
+                    self._environment[name] = value
             self._initialized = True
 
     def delete_global(self, name: str) -> None:
@@ -725,14 +735,34 @@ class ExecutionNamespace:
         """The names cells (or a caller's seed) bound, not the seeded runtime."""
         return {name: self.globals[name] for name in self.user_names if name in self.globals}
 
-    def bound_since(self, epoch: int) -> dict[str, Any]:
-        """The user names a cell bound after ``epoch`` that still exist."""
-        bound_in = self._bound_in
+    def user_globals(self) -> dict[str, Any]:
+        """Every global a cell can own: not protected, not a dunder.
+
+        Unlike :meth:`user_values` this includes names no binding syntax recorded
+        (a helper's ``global`` write, a ``globals()``/exec write).
+        """
         return {
-            name: self.globals[name]
-            for name in self.user_names
-            if name in self.globals and bound_in.get(name, 0) > epoch
+            name: value
+            for name, value in self.globals.items()
+            if framework_name_allowed(name, self.reserved)
+            and not (name.startswith("__") and name.endswith("__"))
         }
+
+    def changed_since(self, before: Mapping[str, Any]) -> dict[str, Any]:
+        """The user globals whose object is not the one in ``before``, or new since.
+
+        The environment :meth:`initialize` seeded (modules, tools) is not a change
+        while it holds the seeded object.
+        """
+        environment = self._environment
+        changed = {}
+        for name, value in self.user_globals().items():
+            if name in before:
+                if before[name] is not value:
+                    changed[name] = value
+            elif name not in environment or environment[name] is not value:
+                changed[name] = value
+        return changed
 
     def inventory(self) -> dict[str, Any]:
         """Bounded names/types only, newest binding first; no repr, deep walks or callbacks."""
