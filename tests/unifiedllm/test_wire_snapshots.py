@@ -5,7 +5,9 @@
 Each case patches the LiteLLM entry points, records the exact keyword
 arguments the client passes on, and compares them with a JSON file under
 ``snapshots/wire``. The files were recorded on the code before the adapter
-split, so any change in what reaches LiteLLM fails here.
+split, so any change in what reaches LiteLLM fails here. Each file stores
+common calls/responses once plus explicit per-mode API and client types;
+only the expected snapshot is expanded before the exact comparison.
 
 To re-record after an intended wire change, run with
 ``NOOA_UPDATE_WIRE_SNAPSHOTS=1`` and review the JSON diff.
@@ -537,6 +539,151 @@ CASES: dict[str, dict[str, Any]] = {
 }
 
 
+def snapshot_text(value: Any) -> str:
+    return json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def pack_snapshot(observed: dict[str, Any]) -> dict[str, Any]:
+    """Deduplicate only API/client type; reject any other mode differences."""
+    assert set(observed) == {"sync", "async"}
+    common = {}
+    modes = {}
+    for mode, payload in copy.deepcopy(observed).items():
+        assert payload["calls"], "a snapshot must capture at least one call"
+        metadata = []
+        for call in payload["calls"]:
+            metadata.append(
+                {"api": call.pop("api"), "client_type": call["kwargs"]["client"].pop("__client__")}
+            )
+        assert all(item == metadata[0] for item in metadata), "API/client type varies within mode"
+        common[mode] = payload
+        modes[mode] = metadata[0]
+    assert snapshot_text(common["sync"]) == snapshot_text(common["async"]), (
+        "sync/async common wire payload differs"
+    )
+    packed = {"common": common["sync"], "modes": modes}
+    assert snapshot_text(unpack_snapshot(packed)) == snapshot_text(observed)
+    return packed
+
+
+def unpack_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Reconstruct independent full expectations, preserving all client metadata."""
+    assert set(snapshot) == {"common", "modes"}
+    assert set(snapshot["modes"]) == {"sync", "async"}
+    expected = {}
+    for mode, metadata in snapshot["modes"].items():
+        assert set(metadata) == {"api", "client_type"}
+        payload = copy.deepcopy(snapshot["common"])
+        for call in payload["calls"]:
+            assert "api" not in call
+            assert "__client__" not in call["kwargs"]["client"]
+            call["api"] = metadata["api"]
+            call["kwargs"]["client"]["__client__"] = metadata["client_type"]
+        expected[mode] = payload
+    return expected
+
+
+def check_snapshot(observed: dict[str, Any], path: Path) -> None:
+    if UPDATE:
+        # Pack before writing: unsupported differences must never overwrite a golden.
+        text = snapshot_text(pack_snapshot(observed))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    if not path.exists():
+        pytest.fail(f"missing wire snapshot {path}; record with NOOA_UPDATE_WIRE_SNAPSHOTS=1")
+    expected = unpack_snapshot(json.loads(path.read_text()))
+    assert snapshot_text(observed) == snapshot_text(expected), f"wire body changed for {path.stem}"
+
+
+@pytest.mark.parametrize("name", sorted(CASES))
+def test_snapshot_contract_round_trip(name):
+    packed = json.loads((SNAPSHOT_DIR / f"{name}.json").read_text())
+    original = copy.deepcopy(packed)
+    expanded = unpack_snapshot(packed)
+    assert pack_snapshot(expanded) == packed
+    assert expanded["sync"]["responses"] == packed["common"]["responses"]
+    for mode, payload in expanded.items():
+        for call, common in zip(payload["calls"], packed["common"]["calls"], strict=True):
+            assert call["api"] == packed["modes"][mode]["api"]
+            assert call["kwargs"]["client"] == {
+                **common["kwargs"]["client"],
+                "__client__": packed["modes"][mode]["client_type"],
+            }
+    expanded["sync"]["calls"][0]["kwargs"]["client"]["max_retries"] = 99
+    assert packed == original
+    assert expanded["async"]["calls"] == unpack_snapshot(original)["async"]["calls"]
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["kwargs", "client_retries", "client_extra", "response", "call_count", "retry_type"],
+)
+def test_snapshot_contract_rejects_common_difference(field, tmp_path, monkeypatch):
+    packed = json.loads((SNAPSHOT_DIR / "chat_plain.json").read_text())
+    observed = unpack_snapshot(packed)
+    payload = observed["async"]
+    kwargs = payload["calls"][0]["kwargs"]
+    if field == "kwargs":
+        kwargs["temperature"] = 0.9
+    elif field == "client_retries":
+        kwargs["client"]["max_retries"] = 7
+    elif field == "client_extra":
+        kwargs["client"]["extra_metadata"] = "must not disappear"
+    elif field == "response":
+        payload["responses"][0]["content"] = "different"
+    elif field == "call_count":
+        payload["calls"].append(copy.deepcopy(payload["calls"][0]))
+    else:
+        kwargs["max_retries"] = False  # JSON false is not JSON 0.
+    unchanged = copy.deepcopy(observed)
+    with pytest.raises(AssertionError, match="common wire payload differs"):
+        pack_snapshot(observed)
+    path = tmp_path / "snapshot.json"
+    path.write_text(snapshot_text(packed))
+    monkeypatch.setattr(f"{__name__}.UPDATE", True)
+    with pytest.raises(AssertionError, match="common wire payload differs"):
+        check_snapshot(observed, path)
+    assert path.read_text() == snapshot_text(packed)
+    assert observed == unchanged
+
+
+def test_snapshot_contract_explicit_update(tmp_path, monkeypatch):
+    packed = json.loads((SNAPSHOT_DIR / "chat_plain.json").read_text())
+    observed = unpack_snapshot(packed)
+    for payload in observed.values():
+        payload["calls"][0]["kwargs"]["client"]["extra_metadata"] = "retained"
+    path = tmp_path / "new.json"
+    monkeypatch.setattr(f"{__name__}.UPDATE", False)
+    with pytest.raises(pytest.fail.Exception, match="missing wire snapshot"):
+        check_snapshot(observed, path)
+    assert not path.exists()
+    monkeypatch.setattr(f"{__name__}.UPDATE", True)
+    check_snapshot(observed, path)
+    assert unpack_snapshot(json.loads(path.read_text())) == observed
+    monkeypatch.setattr(f"{__name__}.UPDATE", False)
+    check_snapshot(observed, path)
+
+
+@pytest.mark.parametrize("field", ["api", "client_type"])
+def test_snapshot_contract_preserves_mode_difference(field, tmp_path, monkeypatch):
+    packed = json.loads((SNAPSHOT_DIR / "chat_tools.json").read_text())
+    observed = unpack_snapshot(packed)
+    for call in observed["async"]["calls"]:
+        if field == "api":
+            call["api"] = "completion"
+        else:
+            call["kwargs"]["client"]["__client__"] = "OpenAI"
+    assert unpack_snapshot(pack_snapshot(observed)) == observed
+    path = tmp_path / "snapshot.json"
+    path.write_text(snapshot_text(packed))
+    monkeypatch.setattr(f"{__name__}.UPDATE", False)
+    with pytest.raises(AssertionError, match="wire body changed"):
+        check_snapshot(observed, path)
+    observed["async"]["calls"][0]["api"] = "different"
+    with pytest.raises(AssertionError, match="varies within mode"):
+        pack_snapshot(observed)
+
+
 @pytest.mark.parametrize("name", sorted(CASES))
 @pytest.mark.asyncio
 async def test_wire_snapshot(wire, name):
@@ -552,11 +699,4 @@ async def test_wire_snapshot(wire, name):
             "calls": copy.deepcopy(captured),
             "responses": [summarize(r) for r in results],
         }
-    text = json.dumps(observed, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
-    path = SNAPSHOT_DIR / f"{name}.json"
-    if UPDATE or not path.exists():
-        if not UPDATE:
-            pytest.fail(f"missing wire snapshot {path}; record with NOOA_UPDATE_WIRE_SNAPSHOTS=1")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text)
-    assert text == path.read_text(), f"wire body changed for {name}"
+    check_snapshot(observed, SNAPSHOT_DIR / f"{name}.json")
