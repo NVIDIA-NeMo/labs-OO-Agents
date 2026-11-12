@@ -1,0 +1,72 @@
+{
+  "Interstellar": {
+    "year": 2014,
+    "runtime_minutes": 169,
+    "genres": ["science fiction", "space", "drama"],
+    "tone": "serious, emotionally intense, expansive",
+    "synopsis": "As Earth becomes increasingly difficult to inhabit, Cooper joins an expedition seeking another world for humanity. The mission separates him from his children and turns distance, time, and survival into personal stakes. Space exploration and family relationships are central to the story.",
+    "screening_notes": "Editorial movie-night assessment: choose this for a substantial science-fiction drama, rather than a light comedy. Its 169-minute runtime is well over two hours. Relativistic time effects matter to the story, so it should not be dismissed as having no time-related premise. It is not a horror film, but that does not make its emotional intensity a good fit for a breezy evening.",
+    "sources": ["https://www.classificationoffice.govt.nz/find-a-rating/quick-takes/interstellar/"],
+    "runtime_note": "169 minutes as listed by New Zealand's Classification Office."
+  },
+  "Gravity": {
+    "year": 2013,
+    "runtime_minutes": 91,
+    "genres": ["science fiction", "space", "survival thriller"],
+    "tone": "tense, urgent, survival-focused",
+    "synopsis": "An accident leaves astronauts stranded in space. With their surroundings suddenly dangerous, they must find a way to survive and reach safety. The story focuses on immediate physical obstacles and the effort to keep going under pressure.",
+    "screening_notes": "Editorial movie-night assessment: short enough for a two-hour slot, but sustained danger makes it a tense choice. The BBFC describes sustained threat and disturbing images. It is a space-survival story rather than a time-travel comedy. Distinguish a short running time from a light tone when comparing it with the group's later preferences.",
+    "sources": ["https://www.bbfc.co.uk/release/gravity-q29sbgvjdglvbjpwwc00mzawndg"],
+    "runtime_note": "91 minutes rounded from the BBFC cinema listing of 90m 53s."
+  },
+  "Alien": {
+    "year": 1979,
+    "runtime_minutes": 117,
+    "genres": ["science fiction", "space", "horror"],
+    "tone": "claustrophobic, frightening, suspenseful",
+    "synopsis": "The crew of the commercial spacecraft Nostromo investigate a signal and encounter an alien organism. What begins as an investigation becomes a struggle to survive aboard their own ship. The enclosed setting turns familiar working spaces into places of danger.",
+    "screening_notes": "Editorial movie-night assessment: an influential science-fiction horror film, not a relaxed space adventure. It fits under two hours, but the horror genre directly conflicts with a no-horror preference. Do not recommend it simply because it is shorter than another candidate. Its suspense and creature threat are central to the viewing experience rather than an incidental subplot.",
+    "sources": ["https://www.bfi.org.uk/film/71399b2f-6846-5377-83c6-bf3c21e84965/alien"],
+    "runtime_note": "117 minutes as listed by the BFI."
+  },
+  "Back to the Future": {
+    "year": 1985,
+    "runtime_minutes": 116,
+    "genres": ["science fiction", "time travel", "comedy", "adventure"],
+    "tone": "playful, energetic, comic adventure",
+    "synopsis": "Teenager Marty McFly travels from 1985 to 1955 in Doc Brown's DeLorean time machine. His presence in the past threatens his own future. He must deal with the consequences and find a way to return home.",
+    "screening_notes": "Editorial movie-night assessment: the best fit among these three time-travel candidates for a light comic adventure under two hours. Universal lists it as comedy, family, and science fiction, with a runtime of 116 minutes. It has peril and dated material; calling it a comedy does not mean promising that every scene is gentle. It is not a horror film.",
+    "sources": ["https://www.universalpicturesathome.com/movies/back-to-the-future"],
+    "runtime_note": "116 minutes from Universal's listing of 1hr 56min."
+  },
+  "About Time": {
+    "year": 2013,
+    "runtime_minutes": 124,
+    "genres": ["time travel", "romantic comedy", "drama"],
+    "tone": "warm, romantic, sometimes bittersweet",
+    "synopsis": "Tim discovers that he can revisit moments in his own life. He first uses the ability to improve his romantic prospects, but finds that changing events cannot remove all the difficulties of family life. Romance and everyday relationships shape the story.",
+    "screening_notes": "Editorial movie-night assessment: a plausible time-travel comedy choice, but it fails a strict under-two-hours rule. Universal's linked home-entertainment listing gives 124 minutes. The story also includes family sorrows, so its warmth should not be mistaken for uninterrupted silliness. Other editions and listings may report a slightly different duration; use the catalog's linked edition for this comparison.",
+    "sources": ["https://www.universalpicturesathome.com/movies/about-time"],
+    "runtime_note": "124 minutes from Universal's listing of 2hr 4min; other listings may differ."
+  },
+  "Edge of Tomorrow": {
+    "year": 2014,
+    "runtime_minutes": 113,
+    "genres": ["science fiction", "time loop", "action"],
+    "tone": "combat-heavy, intense, with comic moments",
+    "synopsis": "A soldier fighting an alien invasion becomes caught in a repeating day. Repeated attempts let him learn from earlier failures and work with an experienced fighter. The time loop shapes a military science-fiction action story.",
+    "screening_notes": "Editorial movie-night assessment: it meets the runtime limit and has a time loop, but action and repeated combat make it a weaker fit for a relaxed comedy request. Comic moments do not turn the overall movie into a light comedy. The Australian Classification listing notes science-fiction violence. Compare the group's requested mood as well as the time-travel mechanism.",
+    "sources": ["https://www.classification.gov.au/titles/edge-tomorrow-3d", "https://www.bfi.org.uk/film/1904a098-bba2-50ef-8cc2-6ef5ec317dc6/edge-of-tomorrow"],
+    "runtime_note": "113 minutes as listed by Australian Classification and the BFI."
+  },
+  "The Martian": {
+    "year": 2015,
+    "runtime_minutes": 141,
+    "genres": ["science fiction", "space", "adventure"],
+    "tone": "resourceful, hopeful, survival-focused",
+    "synopsis": "Mark Watney is left on Mars after his mission team believes he has died. Still alive, he must sustain himself and find a way to contact Earth. Scientists at home work on the problem of bringing him back.",
+    "screening_notes": "Editorial movie-night assessment: a resourceful survival adventure with humor, rather than a time-travel story. Problem-solving and a rescue effort shape the viewing experience. Its hopeful tone does not remove the danger of Watney's situation. The linked studio page lists 141 minutes, so check the available evening slot before choosing it.",
+    "sources": ["https://www.20thcenturystudios.com/movies/the-martian"],
+    "runtime_note": "141 minutes from the linked studio listing of 2h 21min; editions and other listings differ."
+  }
+}
