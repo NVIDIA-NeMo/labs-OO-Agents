@@ -15,6 +15,7 @@ from nooa.unifiedllm._observations import _collect_observations, _current_collec
 from nooa.unifiedllm.adapters import Capabilities
 from nooa.unifiedllm.adapters import _calibration as routes
 from nooa.unifiedllm.adapters._binding import _bind_adapter
+from nooa.unifiedllm.errors import FailureKind
 from tests.unifiedllm.test_private_wire_observations import (
     MESSAGES,
     Answer,
@@ -118,7 +119,8 @@ async def test_public_paid_attempt_count_parity(
     def provider(**kwargs):
         sent.append(kwargs)
         if outcome == "no_response" or (outcome == "transport_success" and len(sent) == 1):
-            raise ConnectionError("offline transient")
+            # Strict boundaries only retry recognized SDK/typed transport errors.
+            raise litellm.APIConnectionError("offline transient", "openai", "model")
         empty = outcome in {"empty", "exhausted"} or (
             outcome in {"empty_success", "unknown_success"} and len(sent) == 1
         )
@@ -147,13 +149,17 @@ async def test_public_paid_attempt_count_parity(
     try:
         with _collect_observations() as collector:
             if outcome in {"malformed", "exhausted", "no_response"}:
-                error = (
-                    json.JSONDecodeError
+                kind, cause_type = (
+                    (FailureKind.BAD_REQUEST, json.JSONDecodeError)
                     if outcome == "malformed"
-                    else (core.EmptyContentError if outcome == "exhausted" else ConnectionError)
+                    else (FailureKind.OUTPUT_LIMIT, core.EmptyContentError)
+                    if outcome == "exhausted"
+                    else (FailureKind.TRANSIENT, litellm.APIConnectionError)
                 )
-                with pytest.raises(error):
+                with pytest.raises(LLMFailure) as caught:
                     await call(llm, request, is_async)
+                assert caught.value.kind == kind
+                assert isinstance(caught.value.__cause__, cause_type)
             else:
                 response = await call(llm, request, is_async)
                 assert response.content == ("" if outcome == "empty" else "ok")
@@ -193,12 +199,14 @@ async def test_buffer_limit_does_not_limit_paid_calibration(
     stub_provider(monkeypatch, family, lambda **kwargs: raw_reply(family, empty=True))
     try:
         with _collect_observations(limit=1) as collector:
-            with pytest.raises(core.EmptyContentError):
+            with pytest.raises(LLMFailure) as caught:
                 await call(
                     LLM(client._adapter, retry_config=retry_config(260)),
                     LLMRequest(messages=MESSAGES),
                     is_async,
                 )
+            assert caught.value.kind == FailureKind.OUTPUT_LIMIT
+            assert isinstance(caught.value.__cause__, core.EmptyContentError)
             assert len(collector.records) == 1 and collector.dropped_attempts == 260
         assert len(updates) == len(estimates) == 261
         assert legacy.updates == []

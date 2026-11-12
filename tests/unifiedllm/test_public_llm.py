@@ -180,16 +180,17 @@ async def test_independent_route_ceilings_are_facts_not_request_fields(is_async,
 
 
 @MODE
-async def test_retry_owner_and_parse_unwrap(is_async):
-    adapter = StrictAdapter(replies=[RuntimeError("status 503"), REPLY])
+async def test_retry_owner_and_typed_terminal_parse(is_async):
+    adapter = StrictAdapter(replies=[LLMFailure("transient", "status 503"), REPLY])
     llm = LLM(adapter, retry_config=RetryConfig(max_retries=1, base_delay=0, jitter_factor=0))
     assert await run(llm, LLMRequest(), is_async) is REPLY
     assert len(adapter.seen) == 2
     error = ValueError("status 503 in malformed reply")
     adapter = StrictAdapter(replies=[_ReplyParseError(error)])
-    with pytest.raises(ValueError) as caught:
+    with pytest.raises(LLMFailure) as caught:
         await run(LLM(adapter, retry_config=llm._retry_config), LLMRequest(), is_async)
-    assert caught.value is error
+    assert caught.value.kind == "bad_request"
+    assert caught.value.__cause__ is error
     assert len(adapter.seen) == 1
 
 
@@ -213,9 +214,11 @@ async def test_public_reasoning_only_retry_exhaustion(is_async):
     empty = LLMResponse(parts=(AssistantReasoning(text="thinking"),), finish_reason="stop")
     adapter = StrictAdapter(replies=[empty, empty])
     config = RetryConfig(max_retries=1, retry_on_empty_content=True, base_delay=0, jitter_factor=0)
-    with pytest.raises(EmptyContentError) as caught:
+    with pytest.raises(LLMFailure) as caught:
         await run(LLM(adapter, retry_config=config), LLMRequest(), is_async)
-    assert caught.value.reasoning == "thinking"
+    assert caught.value.kind == "output_limit"
+    assert isinstance(caught.value.__cause__, EmptyContentError)
+    assert caught.value.__cause__.reasoning == "thinking"
     assert len(adapter.seen) == 2
 
 

@@ -14,7 +14,15 @@ from typing import Protocol
 from nooa.llm_types import LLMResponse, LLMUsage
 
 from .adapters.base import Adapter
-from .errors import EmptyContentError, _aunwrap_parse_errors, _unwrap_parse_errors
+from .admission import AdmissionError
+from .errors import (
+    EmptyContentError,
+    FailureKind,
+    LLMFailure,
+    _aunwrap_parse_errors,
+    _ReplyParseError,
+    _unwrap_parse_errors,
+)
 from .request import LLMRequest
 from .retry import sync_retry, with_retry
 from .retry_config import RetryConfig
@@ -60,6 +68,23 @@ def _record_usage(
     return response
 
 
+def _public_attempt_error(error: Exception) -> Exception:
+    if isinstance(error, (LLMFailure, AdmissionError, EmptyContentError)):
+        return error
+    if isinstance(error, _ReplyParseError):
+        return LLMFailure(FailureKind.BAD_REQUEST, str(error.error), cause=error.error)
+    kind = FailureKind.TIMEOUT if isinstance(error, TimeoutError) else FailureKind.CONFIG
+    return LLMFailure(kind, str(error), cause=error)
+
+
+def _public_terminal(error: Exception) -> Exception:
+    if isinstance(error, EmptyContentError):
+        return LLMFailure(FailureKind.OUTPUT_LIMIT, str(error), cause=error)
+    if isinstance(error, AdmissionError):
+        return LLMFailure(FailureKind.CONFIG, str(error), cause=error)
+    return _public_attempt_error(error)
+
+
 def execute_sync(
     adapter: Adapter,
     request: LLMRequest,
@@ -69,6 +94,7 @@ def execute_sync(
     check_empty: Callable[[LLMResponse, bool], None] | None = None,
     record_usage: Callable[[LLMUsage], None] | None = None,
     retry: SyncRetry = sync_retry,
+    _public_failures: bool = False,
 ) -> LLMResponse:
     """Send exactly once per attempt; unwrap terminal parse errors after retry.
 
@@ -77,12 +103,30 @@ def execute_sync(
     """
 
     def attempt() -> LLMResponse:
-        return _check_response(adapter.send_sync(request), retry_config, check_empty)
+        try:
+            return _check_response(adapter.send_sync(request), retry_config, check_empty)
+        except Exception as error:
+            if not _public_failures:
+                raise
+            normalized = _public_attempt_error(error)
+            if normalized is error:
+                raise
+            raise normalized from normalized.__cause__
 
     with tracking if tracking is not None else nullcontext():
-        response = _unwrap_parse_errors(
-            lambda: retry(attempt, config=retry_config) if retry_config else attempt()
-        )
+        try:
+
+            def call():
+                return retry(attempt, config=retry_config) if retry_config else attempt()
+
+            response = call() if _public_failures else _unwrap_parse_errors(call)
+        except Exception as error:
+            if not _public_failures:
+                raise
+            normalized = _public_terminal(error)
+            if normalized is error:
+                raise
+            raise normalized from normalized.__cause__
     return _record_usage(response, record_usage)
 
 
@@ -95,14 +139,33 @@ async def execute_async(
     check_empty: Callable[[LLMResponse, bool], None] | None = None,
     record_usage: Callable[[LLMUsage], None] | None = None,
     retry: AsyncRetry = with_retry,
+    _public_failures: bool = False,
 ) -> LLMResponse:
     """Async execute_sync; cancellation propagates through retry and tracking."""
 
     async def attempt() -> LLMResponse:
-        return _check_response(await adapter.send(request), retry_config, check_empty)
+        try:
+            return _check_response(await adapter.send(request), retry_config, check_empty)
+        except Exception as error:
+            if not _public_failures:
+                raise
+            normalized = _public_attempt_error(error)
+            if normalized is error:
+                raise
+            raise normalized from normalized.__cause__
 
     with tracking if tracking is not None else nullcontext():
-        response = await _aunwrap_parse_errors(
-            lambda: retry(attempt, config=retry_config) if retry_config else attempt()
-        )
+        try:
+
+            def call():
+                return retry(attempt, config=retry_config) if retry_config else attempt()
+
+            response = await call() if _public_failures else await _aunwrap_parse_errors(call)
+        except Exception as error:
+            if not _public_failures:
+                raise
+            normalized = _public_terminal(error)
+            if normalized is error:
+                raise
+            raise normalized from normalized.__cause__
     return _record_usage(response, record_usage)

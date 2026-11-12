@@ -4,7 +4,6 @@
 
 import hashlib
 import json
-import re
 from collections.abc import Mapping
 from typing import Any
 
@@ -12,7 +11,8 @@ from nooa.llm_types import CacheBoundary, LLMResponse
 from nooa.media_inputs import MediaInput, attachment_kind
 from nooa.media_inputs import MediaInputs as MediaInputs
 from nooa.media_inputs import validate_media_inputs as validate_media_inputs
-from nooa.unifiedllm.errors import ReasoningReplayError
+from nooa.unifiedllm.adapters import _legacy_error_text
+from nooa.unifiedllm.errors import FailureKind, LLMFailure, ReasoningReplayError
 
 _NOTICE_SUBJECT = {
     "image": ("An image", "images"),
@@ -36,129 +36,20 @@ def rejected_media_notice(kind: str) -> str:
     return f"[{subject} was removed here because the model provider could not read it.]"
 
 
-# "Too many images: 7 (max 5)" (GLM 5.3 hub) and generic phrasings of a
-# per-request image count limit. The number captured is the limit M.
-_IMAGE_LIMIT_RES = (
-    re.compile(r"too many images\b.{0,40}?\b(?:max(?:imum)?|limit)\D{0,12}(\d+)"),
-    re.compile(
-        r"\b(?:at most|maximum of|max(?:imum)?(?: number of)?|up to|no more than|limit of)"
-        r"\s*:?\s*(\d+)\s*(?:images?|image inputs?|image_url)\b"
-    ),
-    re.compile(
-        r"\b(?:images?|image inputs?) (?:per request |count |number )?"
-        r"(?:limit|maximum|max)\s*(?:is|of|=|:)?\s*(\d+)\b"
-    ),
-    re.compile(r"\bexceeds? the (?:maximum|max|limit) of (\d+) images?\b"),
-)
-
-
 def image_limit(exc: BaseException) -> int | None:
-    """The per-request image limit M a provider rejection names, else None.
-
-    Not a rejection of one image: the request carried more images than the
-    model takes (``Too many images: 7 (max 5)``). Looks through the
-    exception's body message and its cause chain.
-    """
-    seen: set[int] = set()
-    cur: BaseException | None = exc
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        body = getattr(cur, "body", None)
-        error = body.get("error", body) if isinstance(body, dict) else None
-        texts = [str(cur)]
-        if isinstance(error, dict) and error.get("message"):
-            texts.append(str(error["message"]))
-        for text in texts:
-            lowered = text.lower()
-            if "image" not in lowered:
-                continue
-            for pattern in _IMAGE_LIMIT_RES:
-                match = pattern.search(lowered)
-                if match:
-                    return int(match.group(1))
-        cur = cur.__cause__ or cur.__context__
-    return None
+    """Typed image-count facts first; raw fallback for unmigrated clients only."""
+    if isinstance(exc, LLMFailure):
+        if exc.kind == FailureKind.MEDIA_LIMIT and exc.media_kind == "image":
+            return exc.media_count_limit
+        return None
+    return _legacy_error_text.image_limit(exc)
 
 
 def explicitly_rejected(exc, kind):
-    """Return True if ``exc`` is the provider refusing this kind of media.
-
-    Requires HTTP 400/415/422 and an error message that is specifically about
-    the media (or the content part used to send it), for example "image input
-    is not supported" or "Unsupported content part type: 'file'". A generic
-    400, or an error about another parameter (model, max_tokens, ...), does
-    not count. A per-request image limit (``image_limit``) is not a rejection
-    of one image: the runtime collapses the oldest images instead.
-    """
-    status = getattr(exc, "_connect_http_status", getattr(exc, "status_code", None))
-    if status not in {400, 415, 422}:
-        return False
-    if image_limit(exc) is not None:
-        return False
-    body = getattr(exc, "body", None)
-    error = body.get("error", body) if isinstance(body, dict) else {}
-    param = error.get("param") if isinstance(error, dict) else None
-    text = (
-        str(error.get("message", str(exc))).lower() if isinstance(error, dict) else str(exc).lower()
-    )
-    if isinstance(param, str) and param.split(".")[0] in {
-        "model",
-        "include",
-        "store",
-        "max_tokens",
-        "max_output_tokens",
-        "api_key",
-    }:
-        return False
-    # Match a statement about the media/input itself. A media-looking model
-    # name plus an unrelated 'invalid' parameter is not explicit rejection.
-    names = {
-        "image": r"images?|vision inputs?",
-        "audio": r"audio|wav",
-        "video": r"videos?",
-        "pdf": r"pdfs?|documents?|files?",
-    }.get(kind, r"files?")
-    # "media" names whichever attachment the request carries (one gateway
-    # says "Media could not be processed ... Failed to load image").
-    noun = rf"(?:{names}|media)(?: (?:input|content|format|type|data|url|attachment|processing|file)s?)?"
-    # Text-only models: the whole request is refused because it has media.
-    if re.search(r"\bnot a multimodal model\b|\bdoes(?: not|n't) support multimodal", text):
-        return True
-    # "Unsupported content part type: 'file'" names the wire part for this format.
-    part = re.search(
-        r"unsupported (?:chat )?(?:content(?: part)?|media) type:?\s*[\\'\"]*([a-z_]+)", text
-    )
-    parts = {
-        "image": {"image_url", "input_image"},
-        "audio": {"input_audio", "audio_url"},
-        "video": {"video_url"},
-        "pdf": {"file", "input_file", "document"},
-    }.get(kind, set())
-    if part and part.group(1) in parts:
-        return True
-    # A strict server whose message schema has no variant for this media part.
-    if "did not match any variant of untagged enum" in text and "messagecontent" in text:
-        return True
-    return bool(
-        re.search(
-            rf"\b{noun}\b (?:is |are |was |were )?(?:not supported|unsupported|not allowed|rejected|invalid"
-            r"|corrupt(?:ed)?|truncated|malformed)\b",
-            text,
-        )
-        or re.search(rf"\b(?:unsupported|invalid|rejected) {noun}\b(?![-\w])", text)
-        or re.search(
-            r"\b(?:does not|doesn't|cannot|can't|could not|couldn't|unable to|failed to) "
-            rf"(?:support|accept|process|decode|load|read) {noun}\b",
-            text,
-        )
-        # OpenAI: "The image data you provided does not represent a valid image."
-        or re.search(rf"\bnot (?:\w+ ){{0,2}}an? valid {noun}\b", text)
-        # Bedrock: "Could not process image"; gateways: "Media could not be processed".
-        or re.search(
-            rf"\b{noun} (?:could not|couldn't|cannot|can't) be (?:processed|decoded|loaded|read)\b",
-            text,
-        )
-    )
+    """Typed kind is authoritative; never inspect a typed failure's cause."""
+    if isinstance(exc, LLMFailure):
+        return exc.kind == FailureKind.MEDIA_REJECTED and exc.media_kind == kind
+    return _legacy_error_text.explicitly_rejected(exc, kind)
 
 
 def _occurrences(messages):

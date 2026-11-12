@@ -51,6 +51,8 @@ from nooa.unifiedllm.unifiedllm import (
     extract_and_parse_json,
 )
 
+from ._failures import failure_boundary
+
 if TYPE_CHECKING:
     from nooa.unifiedllm.unifiedllm import CompletionClient, UnifiedLLM
 
@@ -608,39 +610,44 @@ class LiteLLMChatAdapter:
         self, request: LLMRequest, *, _owner: _ObservationOwner | None = None, _decision=None
     ) -> LLMResponse:
         """Explicit shell participation applies only to this exact send."""
+        strict = type(self) is LiteLLMChatAdapter and self._legacy_options is None
         with _observe_attempt(_owner) as observation:
-            call_config, native_output = self._settings(request)
-            prepared = self.prepare(
-                request, call_config, native_output=native_output, is_async=False
-            )
-            if observation is not None:
-                if _decision is not None:
-                    estimated, quality = _estimate_projected_input_tokens(
-                        prepared.effective_model,
-                        prepared.prepared_messages,
-                        tools=prepared.api_params.get("tools"),
-                    )
-                    observation.projected(estimated)
-                    from ._prepared_limits import _apply_decision
-
-                    _apply_decision(
-                        prepared.api_params, estimated, quality, _decision, responses=False
-                    )
-                else:
-                    observation.projected(
-                        _estimate_raw_input_tokens(
+            with failure_boundary(strict, "config"):
+                call_config, native_output = self._settings(request)
+            with failure_boundary(strict, "prepare"):
+                prepared = self.prepare(
+                    request, call_config, native_output=native_output, is_async=False
+                )
+                if observation is not None:
+                    if _decision is not None:
+                        estimated, quality = _estimate_projected_input_tokens(
                             prepared.effective_model,
                             prepared.prepared_messages,
                             tools=prepared.api_params.get("tools"),
                         )
-                    )
-                observation.transmitting()
-            raw_response = self.transmit_sync(prepared)
+                        observation.projected(estimated)
+                        from ._prepared_limits import _apply_decision
+
+                        _apply_decision(
+                            prepared.api_params, estimated, quality, _decision, responses=False
+                        )
+                    else:
+                        observation.projected(
+                            _estimate_raw_input_tokens(
+                                prepared.effective_model,
+                                prepared.prepared_messages,
+                                tools=prepared.api_params.get("tools"),
+                            )
+                        )
+                    observation.transmitting()
+            with failure_boundary(strict, "wire"):
+                raw_response = self.transmit_sync(prepared)
             if observation is not None:
                 observation.delivered(_numeric_usage(raw_response))
-            return _parse_reply(
-                lambda: self._finish(prepared, raw_response, legacy_calibration=_owner is None)
-            )
+            with failure_boundary(strict, "parse", reply=raw_response):
+                return _parse_reply(
+                    lambda: self._finish(prepared, raw_response, legacy_calibration=_owner is None)
+                )
 
     async def send(self, request: LLMRequest) -> LLMResponse:
         """One async attempt for a strict request; no retries."""
@@ -655,40 +662,45 @@ class LiteLLMChatAdapter:
         _wire_owner=None,
     ) -> LLMResponse:
         """Explicit shell participation applies only to this exact send."""
+        strict = type(self) is LiteLLMChatAdapter and self._legacy_options is None
         with _observe_attempt(_owner) as observation:
-            call_config, native_output = self._settings(request)
-            prepared = self.prepare(
-                request, call_config, native_output=native_output, is_async=True
-            )
-            if observation is not None:
-                if _decision is not None:
-                    estimated, quality = _estimate_projected_input_tokens(
-                        prepared.effective_model,
-                        prepared.prepared_messages,
-                        tools=prepared.api_params.get("tools"),
-                    )
-                    observation.projected(estimated)
-                    from ._prepared_limits import _apply_decision
-
-                    _apply_decision(
-                        prepared.api_params, estimated, quality, _decision, responses=False
-                    )
-                else:
-                    observation.projected(
-                        _estimate_raw_input_tokens(
+            with failure_boundary(strict, "config"):
+                call_config, native_output = self._settings(request)
+            with failure_boundary(strict, "prepare"):
+                prepared = self.prepare(
+                    request, call_config, native_output=native_output, is_async=True
+                )
+                if observation is not None:
+                    if _decision is not None:
+                        estimated, quality = _estimate_projected_input_tokens(
                             prepared.effective_model,
                             prepared.prepared_messages,
                             tools=prepared.api_params.get("tools"),
                         )
-                    )
-                observation.transmitting()
-            raw_response = await (
-                self.transmit(prepared)
-                if _wire_owner is None
-                else self.transmit(prepared, _wire_owner=_wire_owner)
-            )
+                        observation.projected(estimated)
+                        from ._prepared_limits import _apply_decision
+
+                        _apply_decision(
+                            prepared.api_params, estimated, quality, _decision, responses=False
+                        )
+                    else:
+                        observation.projected(
+                            _estimate_raw_input_tokens(
+                                prepared.effective_model,
+                                prepared.prepared_messages,
+                                tools=prepared.api_params.get("tools"),
+                            )
+                        )
+                    observation.transmitting()
+            with failure_boundary(strict, "wire"):
+                raw_response = await (
+                    self.transmit(prepared)
+                    if _wire_owner is None
+                    else self.transmit(prepared, _wire_owner=_wire_owner)
+                )
             if observation is not None:
                 observation.delivered(_numeric_usage(raw_response))
-            return _parse_reply(
-                lambda: self._finish(prepared, raw_response, legacy_calibration=_owner is None)
-            )
+            with failure_boundary(strict, "parse", reply=raw_response):
+                return _parse_reply(
+                    lambda: self._finish(prepared, raw_response, legacy_calibration=_owner is None)
+                )

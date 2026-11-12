@@ -14,103 +14,14 @@ import time
 from collections.abc import Callable
 from typing import Any, TypeVar
 
+from nooa.unifiedllm.adapters._legacy_error_text import legacy_retryable
 from nooa.unifiedllm.admission import AdmissionError
-from nooa.unifiedllm.errors import EmptyContentError, _ReplyParseError
+from nooa.unifiedllm.errors import EmptyContentError, FailureKind, LLMFailure, _ReplyParseError
 from nooa.unifiedllm.retry_config import RetryConfig
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
-
-# Provider/LiteLLM error substrings to fall back on when an error only carries a
-# stringified form (e.g. raw gateway HTML) without a usable ``.status_code`` or a
-# ``status {code}`` token. Keyed by HTTP status code so a phrase only triggers a
-# retry when that code is present in ``RetryConfig.retryable_status_codes``.
-# ``error_str`` is lowercased before matching, so class-name forms (e.g.
-# ``BadGatewayError``) match too.
-_RETRYABLE_STATUS_PHRASES: dict[int, tuple[str, ...]] = {
-    500: ("internal server error", "internalservererror"),
-    502: ("bad gateway", "badgatewayerror"),
-    503: ("service unavailable", "serviceunavailableerror", "server unavailable"),
-    504: ("gateway timeout", "gateway time-out"),
-}
-
-# Endpoint failures often arrive without a useful HTTP status. Match exception
-# class names through the MRO so optional provider/httpx/aiohttp exception types
-# do not become import-time dependencies; the names below cover transport,
-# timeout, disconnected-server, and provider APIConnectionError-style failures.
-_RETRYABLE_ENDPOINT_CLASS_NAMES = {
-    "apiconnectionerror",
-    "apitimeouterror",
-    "connecterror",
-    "connecttimeout",
-    "connectionerror",
-    "connectiontimeouterror",
-    "networkerror",
-    "readtimeout",
-    "remoteprotocolerror",
-    "serverdisconnectederror",
-    "timeout",
-    "timeouterror",
-    "transporterror",
-    "writeerror",
-    "writetimeout",
-}
-
-# When an exception is just a generic wrapper with text, fall back to phrases
-# that indicate the endpoint/transport failed before a usable model response was
-# produced. Structured non-retryable HTTP statuses return before this list is used.
-_RETRYABLE_ENDPOINT_PHRASES = (
-    "api connection error",
-    "cannot connect",
-    "can't connect",
-    "connection aborted",
-    "connection closed",
-    "connection reset",
-    "connection refused",
-    "connection terminated",
-    "connection timed out",
-    "endpoint not reachable",
-    "failed to connect",
-    "max retries exceeded",
-    "name resolution",
-    "network is unreachable",
-    "not reachable",
-    "nodename nor servname",
-    "remote disconnected",
-    "remote end closed",
-    "server disconnected",
-    "temporary failure in name resolution",
-    "timed out",
-    "timeout",
-    "transport error",
-)
-
-
-def _is_retryable_endpoint_error(error: Exception, error_str: str) -> bool:
-    """Return True for transient network/transport failures without HTTP status."""
-    for cls in type(error).__mro__:
-        if cls.__name__.lower() in _RETRYABLE_ENDPOINT_CLASS_NAMES:
-            return True
-
-    if any(phrase in error_str for phrase in _RETRYABLE_ENDPOINT_PHRASES):
-        return True
-
-    return "connection" in error_str and any(
-        phrase in error_str
-        for phrase in (
-            "abort",
-            "closed",
-            "disconnect",
-            "failed",
-            "lost",
-            "reset",
-            "refused",
-            "terminated",
-            "timed out",
-            "unreachable",
-        )
-    )
 
 
 def _calculate_delay(
@@ -146,6 +57,19 @@ def _is_retryable_error(error: Exception, config: RetryConfig) -> tuple[bool, bo
     Returns:
         Tuple of (is_retryable, is_rate_limit)
     """
+    # Typed kind is authoritative; settings may narrow, never expand it.
+    if isinstance(error, LLMFailure):
+        eligible = error.kind in {
+            FailureKind.RATE_LIMIT,
+            FailureKind.TRANSIENT,
+            FailureKind.TIMEOUT,
+        }
+        if not eligible:
+            return False, False
+        if error.status_code is not None and error.status_code not in config.retryable_status_codes:
+            return False, False
+        return True, error.kind == FailureKind.RATE_LIMIT
+
     # Admission failures happen before the provider. Retrying a timeout would
     # immediately rejoin the same queue, a call-cap rejection cannot succeed,
     # and a controller outage should not be mistaken for a provider outage.
@@ -162,48 +86,7 @@ def _is_retryable_error(error: Exception, config: RetryConfig) -> tuple[bool, bo
     if isinstance(error, EmptyContentError) and config.retry_on_empty_content:
         return True, False
 
-    # Inspect structured status data before falling back to message heuristics.
-    # LiteLLM and OpenAI APIStatusError subclasses expose ``.status_code``
-    # directly, while HTTPX stores it on ``HTTPStatusError.response.status_code``.
-    # A known non-retryable status must remain terminal: if broad text matching
-    # ran first, an endpoint or provider message could accidentally make a
-    # permanent 4xx authentication/model error look transient and retry it.
-    status_code = getattr(error, "status_code", None)
-    if not isinstance(status_code, int):
-        response = getattr(error, "response", None)
-        status_code = getattr(response, "status_code", None)
-    if isinstance(status_code, int):
-        if status_code == 429:
-            return (True, True) if 429 in config.retryable_status_codes else (False, False)
-        if status_code in config.retryable_status_codes:
-            return True, False
-        return False, False
-
-    error_str = str(error).lower()
-
-    # Check for rate limit (429) — only retryable if 429 is in the configured set.
-    if "status 429" in error_str or "rate limit" in error_str:
-        return (True, True) if 429 in config.retryable_status_codes else (False, False)
-
-    # Check for retryable status codes
-    for code in config.retryable_status_codes:
-        if f"status {code}" in error_str:
-            return True, False
-        # Fall back to provider/LiteLLM phrasing (e.g. "502 Bad Gateway",
-        # "BadGatewayError") when the "status {code}" token is absent.
-        if any(phrase in error_str for phrase in _RETRYABLE_STATUS_PHRASES.get(code, ())):
-            return True, False
-
-    # Check for timeout/connection exceptions configured by the caller.
-    if isinstance(error, config.retryable_exceptions):
-        return True, False
-
-    # Check for endpoint-level transient failures that may not expose a status
-    # code, including LiteLLM APIConnectionError and httpx transport errors.
-    if _is_retryable_endpoint_error(error, error_str):
-        return True, False
-
-    return False, False
+    return legacy_retryable(error, config)
 
 
 async def with_retry(
@@ -262,6 +145,8 @@ async def with_retry(
 
             # Calculate delay
             delay = _calculate_delay(attempt, config, is_rate_limit)
+            if isinstance(e, LLMFailure) and e.retry_after is not None:
+                delay = max(delay, e.retry_after)
 
             # Determine max retries for logging
             max_for_logging = (
@@ -340,6 +225,8 @@ def sync_retry(
 
             # Calculate delay
             delay = _calculate_delay(attempt, config, is_rate_limit)
+            if isinstance(e, LLMFailure) and e.retry_after is not None:
+                delay = max(delay, e.retry_after)
 
             # Determine max retries for logging
             max_for_logging = (
