@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig, PredictConfig
 from nooa.errors import GenerationError
+from nooa.events import Error
 from nooa.strategies.codeact import CodeActStrategy
 from nooa.strategies.predict import PredictStrategy
 from nooa.strategies.pure_python import PurePythonStrategy
@@ -632,69 +633,37 @@ class TestPurePythonCodeValidation:
 
 
 # ---------------------------------------------------------------------------
-# PurePythonStrategy — helper method binding errors (pure_python.py lines 720-728)
+# PurePythonStrategy — a cell function named like the target method
 # ---------------------------------------------------------------------------
 
 
-class TestPurePythonHelperMethodErrors:
-    """PurePythonStrategy: helper method binding hits rejected/errors path.
+class TestPurePythonHelperNamedLikeTheTarget:
+    """A cell function named like the target method is an ordinary cell name.
 
-    Exercises pure_python.py lines 710-728:
-        if helper_result.rejected:
-            session.record_error()
-            ...  # lines 710-719
-        if helper_result.errors:
-            session.record_error()
-            ...  # lines 721-728
-
-    The the cell compiler rejects helper methods that would overwrite the
-    target method. Since PurePythonStrategy calls _execute_code() which calls
-    the cell compiler, and rejected increments error_count, after
-    max_retries rejections, session is exhausted and GenerationError is raised.
-
-    Note: The function-body-extraction step runs BEFORE helper processing, so
-    code like `def target(self): return 42` is EXTRACTED (body runs). To hit
-    the `rejected` path, we need a code block where a NON-target method named
-    the same as the target is defined alongside other code. Alternatively, we
-    can trigger `helper_result.errors` with invalid helper code.
+    Nothing rejects it: the cell engine (``nooa.runtime.execution_namespace``)
+    binds ``process`` in the call's namespace only, never on the agent, so the
+    agent's method is untouched. The function-body extraction step skips this
+    cell because it has a plain statement too.
     """
 
     @pytest.mark.asyncio
-    async def test_helper_with_same_name_as_other_method_triggers_rejected(self):
-        """LLM defines helper named 'process' but 'process' is the target → rejected.
-
-        The LLM generates a code block that includes BOTH a helper function
-        named 'process' (= the target) AND some plain code. Since there are
-        non-function nodes in the body, _extract_function_body_if_wrapped()
-        returns the code unchanged. Then the cell compiler finds 'process' in
-        the rejected list, calls session.record_error(), and returns empty result.
-        After max_retries=2, GenerationError is raised.
-
-        This exercises pure_python.py lines 710-719.
-        """
-
+    async def test_a_cell_function_named_like_the_target_stays_in_the_namespace(self):
         class TestAgent(Agent, llm=_DUMMY_LLM):
             @strategy(PurePythonStrategy(max_iterations=10, max_retries=2))
             async def process(self, x: int) -> int:
                 """Process {x}."""
                 ...
 
-        # Define a helper named 'process' (same as target) WITH a plain statement
-        # so _extract_function_body_if_wrapped does NOT extract (other_nodes is non-empty)
-        # Note: the tree has both the function and a plain statement → other_nodes non-empty
-        # → extraction skipped → the cell compiler sees def process(self, ...) → rejected
+        # ``x = 1`` rebinds the argument (an ordinary name in PurePython).
         conflicting_code = "x = 1\ndef process(self, x: int) -> int:\n    return x * 3"
-
         fake_llm = FakeLLMClient(
-            scripted_responses=[
-                _resp(conflicting_code),
-                _resp(conflicting_code),
-                _resp(conflicting_code),  # Should not be reached
-            ]
+            scripted_responses=[_resp(conflicting_code), _resp("return process(self, x)")]
         )
         agent = TestAgent(llm=fake_llm)
-        with pytest.raises(GenerationError):
-            await agent.process(7)
+        assert await agent.process(7) == 3
+        assert "process" not in vars(agent)  # the agent's method is not replaced
+        errors = [event for event in agent.event_manager.values() if isinstance(event, Error)]
+        assert errors == []
 
 
 # ---------------------------------------------------------------------------

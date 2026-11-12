@@ -159,3 +159,95 @@ async def test_asyncio_to_thread_still_uses_the_inherited_context():
         assert result.stdout == "to_thread\n"
     finally:
         await agent.aclose()
+
+
+async def test_a_helper_called_from_another_namespaces_cell_prints_into_the_caller_cell():
+    """While the helper's own namespace runs a cell, a caller with its own call keeps the output."""
+    a1, a2 = CellAgent(), CellAgent()
+    ns1, ns2 = (
+        ExecutionNamespace(reserved=RUNTIME_NAMES),
+        ExecutionNamespace(reserved=RUNTIME_NAMES),
+    )
+    try:
+        with ns1.enter({}):
+            defined = await run(
+                a1, ns1, "def helper():\n    print('helper output')\n    return 1", self=a1
+            )
+        assert defined.error is None, defined.error
+        helper = ns1.globals["helper"]
+        started = asyncio.Event()
+        ns1.globals["started"] = started  # builtins seed a namespace only on its first cell
+
+        async def owner_cell():
+            with ns1.enter({}):
+                return await run(
+                    a1,
+                    ns1,
+                    "started.set()\nawait asyncio.sleep(0.2)\nreturn 'done'",
+                    self=a1,
+                )
+
+        async def caller_cell():
+            await asyncio.wait_for(started.wait(), 5)
+            with ns2.enter({}):
+                return await run(a2, ns2, "return h()", self=a2, h=helper)
+
+        owner, caller = await asyncio.gather(owner_cell(), caller_cell())
+        assert owner.error is None and caller.error is None, (owner.error, caller.error)
+        assert caller.stdout == "helper output\n"
+        assert owner.stdout == ""
+    finally:
+        await a1.aclose()
+        await a2.aclose()
+
+
+async def test_after_a_call_the_namespace_keeps_only_the_output_names_and_self():
+    """Arguments, ``_call`` and ``return_result`` are released when the call ends."""
+    import gc
+    import weakref
+
+    class Big:
+        pass
+
+    agent, ns = CellAgent(), ExecutionNamespace(reserved=RUNTIME_NAMES | {"data"})
+    data = Big()
+    alive = weakref.ref(data)
+    try:
+        with ns.enter({}):
+            # No deadline: its cancelled timer would keep the call's context
+            # (and so the call's bindings) until asyncio drops it.
+            result = await agent.runtime.execute_code(
+                "def helper():\n    print('x')\nreturn 1",
+                execution_namespace=ns,
+                wrap_in_function=True,
+                timeout=None,
+                builtins={
+                    "self": agent,
+                    "data": data,
+                    "return_result": lambda value: value,
+                    "_call": object(),
+                },
+            )
+        assert result.error is None, result.error
+        assert set(ns._last_values) <= {"print", "pprint", "show", "self"}
+        del data
+        gc.collect()
+        assert alive() is None
+        assert ns.globals["helper"]() is None  # print keeps working after the call
+    finally:
+        await agent.aclose()
+
+
+def test_session_locals_never_overwrite_the_namespace_internals():
+    from types import SimpleNamespace
+
+    from nooa.runtime.execution_namespace import call_execution_namespace
+
+    call = SimpleNamespace(
+        kwargs={},
+        session_locals={"__builtins__": None, "_nooa_ns_delete": "x", "kept": 1},
+    )
+    ns = call_execution_namespace(object(), call)
+    assert ns.globals["__builtins__"] is not None
+    assert ns.globals["_nooa_ns_delete"] == ns.delete_global
+    assert ns.user_values() == {"kept": 1}

@@ -178,15 +178,20 @@ one authoritative globals dictionary that the cell's bindings are written to.
 CodeAct and PurePython take it from `call_execution_namespace(agent, call)`,
 i.e. `Agent.execution_namespace_for(call)` (a fresh namespace per call by
 default; Atom's `handle` keeps one per live session). A direct `execute_code`
-call without a namespace runs in a fresh one for that cell, and its
-`ExecutionResult.captured_locals` lists the names the cell bound. Runtime names
+call without a namespace runs in a fresh one for that cell (pass a namespace
+to keep what the cell binds; in-process `ExecutionResult.captured_locals` stays
+empty). Runtime names
 (`self`, `print`, `return_result`...) resolve through the builtin fallback;
 framework names come from the namespace providers
 (`nooa.runtime.namespace_providers`). A helper that outlives its cell (used in
 another call's cell, a late thread, or with no cell running) keeps `print`,
 `pprint`, `show` and `self`: its output goes to the cell running in the
 caller's context, else to the process's stdout. Names that belong to a call
-(`return_result`, call arguments...) raise a clear error there. Caller `_session_locals` seed the
-namespace as user globals and are written back when the call ends. The
+(`return_result`, call arguments...) raise a clear error there; an asyncio
+task created in a cell inherits its context and keeps its originating call's
+names. CodeAct reserves the call's arguments; PurePython seeds them as ordinary names a cell can rebind (like a function's
+locals). Caller `_session_locals` seed the namespace as user globals and are
+written back when the call ends (never the arguments; a caller key named like
+an argument or a runtime name keeps its value). The
 sandbox backend follows the same contract (one owned globals dictionary per
 session) in its worker process; the parent passes no namespace there.

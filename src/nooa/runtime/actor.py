@@ -1451,7 +1451,9 @@ class ActorRuntime:
             code: Python code to execute.
             builtins: Strategy-provided functions (return_result, message, method args, etc.)
             validate: Run planning language validation first.
-            wrap_in_function: If True, wrap code in async function and capture return value.
+            wrap_in_function: If True, return the value of a final expression (REPL
+                style). A cell always runs as an async body: top-level ``await``
+                and ``return`` work either way.
             timeout: Maximum execution time in seconds (default 30s). None to disable.
             tool_call_id: LLM's tool call ID for trace correlation (OpenAI format).
             execution_count: Execution number for Jupyter-style "Cell In[N]" filename.
@@ -1471,7 +1473,7 @@ class ActorRuntime:
         """
         if execution_namespace is None and sandbox_executor is None:
             # One in-process engine: a direct call without a namespace runs in
-            # a fresh one; ``captured_locals`` reports what the cell bound.
+            # a fresh one (pass a namespace to keep the names a cell binds).
             execution_namespace = ExecutionNamespace(reserved=RUNTIME_NAMES)
             with execution_namespace.enter({}):
                 return await self.execute_code(
@@ -1582,7 +1584,7 @@ class ActorRuntime:
 
             # The names every cell sees (core, media, strategies...): one registry,
             # shared with the sandbox worker. NOTE: stdout/stderr capture is
-            # handled by ContextVarStream wrappers installed below.
+            # installed below by CaptureScope (runtime/capture_scope.py).
             from nooa.runtime.namespace_providers import cell_namespace_names
 
             core_globals = {"self": self.agent, "asyncio": asyncio, **cell_namespace_names()}
@@ -1792,7 +1794,6 @@ class ActorRuntime:
                         get_harness_metrics().implicit_return()
 
             returned_value = _NO_RETURN
-            cell_epoch = execution_namespace.epoch  # captured_locals: names bound after it
 
             def _frozen_output() -> dict[str, Any]:
                 """Freeze the capture scope, then read this cell's captured output.
@@ -1842,7 +1843,6 @@ class ActorRuntime:
                     defined_methods=defined_methods,
                     returned_value=returned_value,
                     explicit_return=has_explicit_return,
-                    captured_locals=execution_namespace.bound_since(cell_epoch),
                 )
                 return result
 
@@ -1854,7 +1854,6 @@ class ActorRuntime:
                     defined_methods={},
                     returned_value=_NO_RETURN,
                     explicit_return=False,
-                    captured_locals=execution_namespace.bound_since(cell_epoch),
                 )
                 return result
 
@@ -1882,7 +1881,6 @@ class ActorRuntime:
                     defined_methods={},
                     returned_value=_NO_RETURN,
                     explicit_return=False,
-                    captured_locals=execution_namespace.bound_since(cell_epoch),
                 )
                 return result
 
@@ -1893,7 +1891,6 @@ class ActorRuntime:
                     defined_methods={},
                     returned_value=_NO_RETURN,
                     explicit_return=False,
-                    captured_locals=execution_namespace.bound_since(cell_epoch),
                 )
                 return result
 
