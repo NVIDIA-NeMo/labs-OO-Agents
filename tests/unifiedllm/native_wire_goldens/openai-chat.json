@@ -1,0 +1,56 @@
+{
+  "model": "model",
+  "max_completion_tokens": 100,
+  "messages": [
+    {
+      "role": "system",
+      "content": "stable"
+    },
+    {
+      "role": "user",
+      "content": "question"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "lookup",
+        "description": "Look up a query.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "additionalProperties": false
+        },
+        "strict": true
+      }
+    }
+  ],
+  "tool_choice": "auto",
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "Answer",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "value": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "value"
+        ],
+        "additionalProperties": false
+      },
+      "strict": true
+    }
+  }
+}

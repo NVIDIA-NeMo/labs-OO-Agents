@@ -51,6 +51,8 @@ dependencies = [
     # (CVE-2026-97687, CVE-2026-97689).
     "anyio>=4.15.1",
     "urllib3>=2.8.0",
+    "openai>=2.54.0,<3",
+    "anthropic>=0.84.0,<1",
 ]
 
 [project.urls]

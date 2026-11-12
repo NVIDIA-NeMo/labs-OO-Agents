@@ -402,7 +402,7 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
 
 
 # Adapters a registry entry may name with ``adapter:``. Omitted means litellm.
-SUPPORTED_ADAPTERS = ("litellm",)
+SUPPORTED_ADAPTERS = ("litellm", "openai-chat", "openai-responses", "anthropic-messages")
 
 
 def load_llm(name: str, *, on_unsupported_media="note", **overrides):
@@ -414,23 +414,34 @@ def load_llm(name: str, *, on_unsupported_media="note", **overrides):
     get_llm_client/client_from_config remain the legacy compatibility factories.
     """
     from .adapters._loader import _load_public
-    from .adapters.legacy import snapshot_options
+    from .adapters._snapshots import snapshot_options
 
     ensure_loaded()
     with _registry_lock:
         config = snapshot_options(MODELS.get(name, {}))
-    adapter = overrides.pop("adapter", None) or config.get("adapter") or "litellm"
+    from .adapters._binding import _UNSET
+
+    overrides = {key: value for key, value in overrides.items() if value is not _UNSET}
+    explicit_adapter = overrides.pop("adapter", None)
+    adapter = explicit_adapter or config.get("adapter") or "litellm"
     if adapter not in SUPPORTED_ADAPTERS:
         raise ValueError(
             f"Model alias {name!r} has unsupported adapter {adapter!r}; "
             f"supported: {', '.join(SUPPORTED_ADAPTERS)}"
         )
-    from .adapters._binding import _UNSET
-
-    overrides = {key: value for key, value in overrides.items() if value is not _UNSET}
     client_type = overrides.pop("client_type", None)
     if (client_type or config.get("client_type", "completion")) == "decision":
         raise TypeError("Decision aliases cannot be used as an LLM; use get_decision_model")
+    if adapter != "litellm":
+        from .adapters._native_loader import _load_native
+
+        if client_type is not None:
+            overrides["client_type"] = client_type
+        if explicit_adapter:
+            # Keep the original declaration for changed-family fact invalidation,
+            # but preserve the genuine public selector in the effective layer.
+            overrides["adapter"] = explicit_adapter
+        return _load_native(name, config, adapter, on_unsupported_media, overrides)
     params, config, selected = _resolve_client_config(
         name, config, client_type=client_type, **overrides
     )
