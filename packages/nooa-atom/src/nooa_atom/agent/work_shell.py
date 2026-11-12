@@ -151,8 +151,7 @@ class CommandResult:
 
     ``stdout``/``stderr``: whole up to 1 MiB, else head+tail around a
     ``[... N bytes omitted; ...]`` line; ``*_path``: that file (to 64 MiB),
-    kept until the agent session closes (without one: while the job is
-    listed; a direct ``run``'s until its Shell closes), unless evicted.
+    kept until the session closes (outside one: its job or Shell) or evicted.
     """
 
     returncode: int
