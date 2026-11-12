@@ -18,7 +18,7 @@ import litellm
 
 from nooa.llm_types import AssistantReasoning, LLMResponse
 from nooa.unifiedllm import replay_state
-from nooa.unifiedllm._observations import _observe_attempt
+from nooa.unifiedllm._observations import _ObservationOwner, _observe_attempt
 from nooa.unifiedllm.adapters._numeric_usage import _numeric_usage
 from nooa.unifiedllm.adapters.base import Capabilities
 from nooa.unifiedllm.cache_policy import add_session_affinity_header
@@ -592,14 +592,23 @@ class LiteLLMChatAdapter:
                 tools=prepared.api_params.get("tools"),
             )
 
-    def _finish(self, prepared: PreparedChatCall, raw_response: Any) -> LLMResponse:
-        """Calibrate and parse a reply that arrived; ``send`` marks its errors."""
-        self._calibrate(prepared, raw_response)
+    def _finish(
+        self, prepared: PreparedChatCall, raw_response: Any, *, legacy_calibration: bool = True
+    ) -> LLMResponse:
+        """Keep normal parsing; an explicitly owned send skips the legacy hook."""
+        if legacy_calibration:
+            self._calibrate(prepared, raw_response)
         return self.parse(prepared, raw_response)
 
     def send_sync(self, request: LLMRequest) -> LLMResponse:
         """One sync attempt for a strict request; no retries."""
-        with _observe_attempt() as observation:
+        return self._send_sync(request)
+
+    def _send_sync(
+        self, request: LLMRequest, *, _owner: _ObservationOwner | None = None
+    ) -> LLMResponse:
+        """Explicit shell participation applies only to this exact send."""
+        with _observe_attempt(_owner) as observation:
             call_config, native_output = self._settings(request)
             prepared = self.prepare(
                 request, call_config, native_output=native_output, is_async=False
@@ -616,11 +625,19 @@ class LiteLLMChatAdapter:
             raw_response = self.transmit_sync(prepared)
             if observation is not None:
                 observation.delivered(_numeric_usage(raw_response))
-            return _parse_reply(lambda: self._finish(prepared, raw_response))
+            return _parse_reply(
+                lambda: self._finish(prepared, raw_response, legacy_calibration=_owner is None)
+            )
 
     async def send(self, request: LLMRequest) -> LLMResponse:
         """One async attempt for a strict request; no retries."""
-        with _observe_attempt() as observation:
+        return await self._send(request)
+
+    async def _send(
+        self, request: LLMRequest, *, _owner: _ObservationOwner | None = None
+    ) -> LLMResponse:
+        """Explicit shell participation applies only to this exact send."""
+        with _observe_attempt(_owner) as observation:
             call_config, native_output = self._settings(request)
             prepared = self.prepare(
                 request, call_config, native_output=native_output, is_async=True
@@ -637,4 +654,6 @@ class LiteLLMChatAdapter:
             raw_response = await self.transmit(prepared)
             if observation is not None:
                 observation.delivered(_numeric_usage(raw_response))
-            return _parse_reply(lambda: self._finish(prepared, raw_response))
+            return _parse_reply(
+                lambda: self._finish(prepared, raw_response, legacy_calibration=_owner is None)
+            )

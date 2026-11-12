@@ -59,23 +59,27 @@ class _ObservationCollector:
     def dropped_attempts(self) -> int:
         return self._dropped
 
-    def _start(self):
+    def _start(self, writer=None):
         if len(self._records) >= self._limit:
             self._dropped += 1
             return None
         index = len(self._records)
-        self._records.append(_AttemptObservation())
-        return _AttemptWriter(self, index)
+        writer = writer if writer is not None else _AttemptWriter()
+        self._records.append(writer.record)
+        writer._collector, writer._index = self, index
+        return writer
 
 
 class _AttemptWriter:
-    def __init__(self, collector: _ObservationCollector, index: int):
-        self._collector = collector
-        self._index = index
+    def __init__(self):
+        self._collector = None
+        self._index = None
+        self.record = _AttemptObservation()
 
     def _replace(self, **changes):
-        records = self._collector._records
-        records[self._index] = replace(records[self._index], **changes)
+        self.record = replace(self.record, **changes)
+        if self._collector is not None:
+            self._collector._records[self._index] = self.record
 
     def projected(self, estimate: int | None):
         self._replace(
@@ -90,6 +94,18 @@ class _AttemptWriter:
 
     def finish(self):
         self._replace(finished=True)
+
+
+@dataclass(frozen=True, slots=True)
+class _ObservationOwner:
+    """Explicit one-send ownership, never inherited through a ContextVar.
+
+    The shell consumes this one numeric slot after the send exits. An external
+    collector retains the SAME immutable records if it has room; its cap cannot
+    discard the owner's slot. No arbitrary callback or adapter protocol hook.
+    """
+
+    writer: _AttemptWriter
 
 
 _current_collector: ContextVar[_ObservationCollector | None] = ContextVar(
@@ -111,9 +127,13 @@ def _collect_observations(*, limit: int = 256):
 
 
 @contextmanager
-def _observe_attempt():
+def _observe_attempt(owner: _ObservationOwner | None = None):
     collector = _current_collector.get()
-    writer = collector._start() if collector is not None else None
+    writer = owner.writer if owner is not None else None
+    if collector is not None:
+        collected = collector._start(writer)
+        if owner is None:
+            writer = collected
     try:
         yield writer
     finally:

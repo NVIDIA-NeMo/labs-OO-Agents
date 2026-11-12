@@ -4,9 +4,9 @@
 
 Built-in public adapters and settings views acquire a record lazily. The initial
 ratio is a COPY of historical model-level calibration, not verified route data.
-No production estimate or response observation uses these records yet:
-TokenCalibration, count_tokens and adapter success hooks still use the legacy
-singleton exclusively. Shell observation/clamping is a separate migration.
+Public shell calls update these records from exact-wire numeric observations.
+Direct legacy sends and count_tokens still use the legacy singleton exclusively.
+Route-estimate consumption and shell clamping are a separate migration.
 
 Keys are process-private keyed digests, never route strings or plain secret
 hashes. No keys/credentials/endpoints are logged, traced or persisted here.
@@ -40,7 +40,7 @@ class _RouteCalibration:
         return int(estimated * self._ratio)
 
     def update(self, estimated: int, actual: int) -> None:
-        """Private future observation hook; never updates the legacy singleton."""
+        """Private shell observation hook; never updates the legacy singleton."""
         if estimated <= 0 or actual <= 0:
             return
         observed = actual / estimated

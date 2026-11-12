@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from nooa.llm_types import CacheBoundary, LLMResponse
 from nooa.media_inputs import attachment_kind
 
+from ._route_calibration import _calibration_adapter
 from .adapters.base import Adapter, Capabilities
 from .errors import FailureKind, LLMFailure
 from .execution import check_empty_response, execute_async, execute_sync
@@ -178,7 +179,10 @@ class LLM:
         return logical_sync(
             lambda: self._prepare(request),
             lambda prepared: execute_sync(
-                self.adapter, prepared, self._retry_config, check_empty=check_empty_response
+                _calibration_adapter(self.adapter),
+                prepared,
+                self._retry_config,
+                check_empty=check_empty_response,
             ),
         )
 
@@ -187,6 +191,9 @@ class LLM:
         return await logical_async(
             lambda: self._prepare(request),
             lambda prepared: execute_async(
-                self.adapter, prepared, self._retry_config, check_empty=check_empty_response
+                _calibration_adapter(self.adapter),
+                prepared,
+                self._retry_config,
+                check_empty=check_empty_response,
             ),
         )
