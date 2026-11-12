@@ -282,7 +282,7 @@ def resolve_behavior_settings(data: dict[str, Any]) -> dict[str, Any]:
                 if name == SETTINGS_SECTION and key != "agent_spec":
                     logger.warning("Ignoring unsupported Atom setting %r", key)
                 continue
-            if key == "summarization" and isinstance(value, dict):
+            if key in ("summarization", "reflection") and isinstance(value, dict):
                 values.setdefault(key, {}).update(value)
             else:
                 values[key] = deepcopy(value)

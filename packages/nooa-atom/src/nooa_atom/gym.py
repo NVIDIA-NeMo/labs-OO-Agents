@@ -73,6 +73,7 @@ class AtomHarness(Agent):
         experimental_reflection_min_turns: int = 50,
         experimental_reflection_min_seconds: float = 3600.0,
         session_name: str | None = None,
+        reflection: bool | None = None,
         **extra: Any,
     ) -> None:
         if turn_method not in TURN_METHODS:
@@ -134,6 +135,8 @@ class AtomHarness(Agent):
             turn_method=self.turn_method,
             sessions_dir=self.sessions_dir,
             name=session_name,
+            # Reflection is off headless; True turns it on for an A/B arm.
+            reflection=reflection,
             experimental_reflection_min_turns=experimental_reflection_min_turns,
             experimental_reflection_min_seconds=experimental_reflection_min_seconds,
             **config,
