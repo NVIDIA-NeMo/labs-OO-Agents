@@ -95,6 +95,52 @@ async def test_expand_variables_bounds_every_placeholder():
     assert error.startswith("{ERROR: xxx") and error.endswith("xxx}") and len(error) < BOUND
 
 
+class _BadConversion:
+    def __str__(self):
+        raise ValueError("bad-str")
+
+    def __repr__(self):
+        raise ValueError("bad-repr")
+
+    def __format__(self, spec):
+        raise ValueError("bad-format")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["show", "silent", "raise"])
+@pytest.mark.parametrize("template", ["{v!s}", "{v!s:>3}", "{v!r:>3}"])
+async def test_a_failing_conversion_raises_with_or_without_a_format_spec(mode, template):
+    """As before #580: a conversion runs outside the format-spec handling, so its error raises."""
+    agent = _holder()
+    with pytest.raises(ValueError, match="bad-(str|repr)"):
+        await agent.runtime.expand_variables(template, {"v": _BadConversion()}, mode)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "expected"),
+    [
+        ("show", "{v:.2f | FORMAT ERROR}"),
+        ("silent", "{v:.2f}"),
+        ("raise", "{v:.2f | FORMAT ERROR}"),
+    ],
+)
+async def test_a_failing_format_spec_is_handled_as_before(mode, expected):
+    agent = _holder()
+    assert (
+        await agent.runtime.expand_variables("{v:.2f}", {"v": _BadConversion()}, mode) == expected
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_conversion_then_a_format_spec_applies_both():
+    agent = _holder()
+    assert await agent.runtime.expand_variables("[{v!r:>6}]", {"v": "ab"}) == "[  'ab']"
+    assert await agent.runtime.expand_variables("[{v!s:.2f}]", {"v": 1.5}, "silent") == (
+        "[{v!s:.2f}]"  # str(1.5) rejects .2f: the format error is handled as before
+    )
+
+
 @pytest.mark.asyncio
 async def test_expand_variables_keeps_small_values_byte_identical():
     agent = _holder()
