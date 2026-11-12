@@ -41,6 +41,7 @@ from nooa_atom.tools.repo_tools import RepoTools
 from nooa_atom.tools.todo_list import Todo, TodoList  # noqa: F401
 
 with hidden:
+    import contextvars
     import inspect
     import re
     import sys
@@ -246,7 +247,24 @@ class AtomCodeAct(CodeActV2):
     """
 
     async def execute(self, runtime: Any, call: Any) -> Any:
-        result = await super().execute(runtime, call)
+        # The generation's cell context: the default cwd, the Shell owner and the
+        # cell-output folder. Set for this generation only and reset after it, so
+        # a nested generation (a child agent awaited inside a cell) cannot leave
+        # its own context installed for the parent's later cells.
+        tokens: list[tuple[contextvars.ContextVar[Any], contextvars.Token[Any]]] = []
+        cwd = getattr(runtime.agent, "cwd", None)
+        if cwd is not None:
+            tokens.append((work_shell.default_cwd, work_shell.default_cwd.set(str(cwd))))
+        owner = getattr(runtime.agent, "_shells", None)
+        if owner is not None:  # the session closes the Shells its cells start
+            tokens.append((work_shell.shell_owner, work_shell.shell_owner.set(owner)))
+            # Cell output goes to the session's folder: kept until it closes.
+            tokens.append((capture_overflow, capture_overflow.set(owner.overflow_dir())))
+        try:
+            result = await super().execute(runtime, call)
+        finally:
+            for var, token in reversed(tokens):
+                var.reset(token)
         if (
             call.method_name == "handle"
             and runtime.agent._done_reflection
@@ -349,17 +367,6 @@ class AtomCodeAct(CodeActV2):
         tool = super()._build_execute_python_tool()
         tool.description = tool.description.replace(_LEGACY_TOOL_HINT, _TOOL_HINT)
         return tool
-
-    def _build_builtins(self, runtime: Any, call: Any) -> dict[str, Any]:
-        cwd = getattr(runtime.agent, "cwd", None)
-        if cwd is not None:
-            work_shell.default_cwd.set(str(cwd))
-        owner = getattr(runtime.agent, "_shells", None)
-        if owner is not None:  # the session closes the Shells its cells start
-            work_shell.shell_owner.set(owner)
-            # Cell output goes to the session's folder: kept until it closes.
-            capture_overflow.set(owner.overflow_dir())
-        return super()._build_builtins(runtime, call)
 
 
 # ---- turn conditions ---------------------------------------------------------

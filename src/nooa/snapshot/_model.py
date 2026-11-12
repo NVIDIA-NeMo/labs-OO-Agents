@@ -78,8 +78,9 @@ class Overflow:
     - ``total``: the bytes the stream produced.
 
     ``cut`` (``kept < total``): the file is itself cut; it holds only the
-    first ``kept`` bytes. The file is UTF-8 for a chars stream and the raw
-    bytes for a bytes stream.
+    first ``kept`` bytes. The file is UTF-8 for a chars stream (except that
+    a ``surrogateescape`` character is written as its original byte, so it
+    need not be valid UTF-8) and the raw bytes for a bytes stream.
     """
 
     path: str  # the overflow file

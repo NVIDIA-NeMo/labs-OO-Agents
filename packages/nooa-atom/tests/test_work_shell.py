@@ -1479,3 +1479,13 @@ async def test_launched_command_files_go_in_its_shells_folder(manager, tmp_path)
     assert not Path(r.stdout_path).is_relative_to(tmp_path / "scratch")
     await sh.aclose()
     assert not Path(r.stdout_path).exists()
+
+
+def test_long_command_previews_are_cut_by_the_snapshot():
+    from nooa_atom.agent.work_shell import _blocker, _deadline_note
+
+    assert _blocker("ls  -la\n", "j") == "`ls -la` (job j)"  # short: whole, as before
+    long = "echo " + "x" * 200
+    assert _blocker(long, None) == "str(len=205, [:80]=" + repr(long[:80]) + ")"
+    assert "the Shell command 'ls -la';" in _deadline_note("ls -la")
+    assert "str(len=205, [:80]=" + repr(long[:80]) + ")" in _deadline_note(long)

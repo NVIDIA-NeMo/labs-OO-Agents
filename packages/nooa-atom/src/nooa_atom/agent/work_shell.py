@@ -72,7 +72,7 @@ from nooa import hidden
 from nooa.agentdoc import spec
 from nooa.overflow import OverflowDir, OverflowFile
 from nooa.runtime.cell_deadline import deadline_cancel
-from nooa.snapshot import Text, TextStream, render_output
+from nooa.snapshot import Text, TextStream, cut, render_output, render_python
 from nooa.tools import BashSession
 from nooa_atom.agent.metrics import atom_metrics
 from nooa_atom.agent.work_manager import (
@@ -133,9 +133,9 @@ _CLOSED_BEFORE = "the shell was closed before this command started; it did not r
 
 def _deadline_note(command: str) -> str:
     """The cell deadline's note for the Shell command the cell was awaiting."""
-    shown = command if len(command) <= 80 else command[:77] + "..."
+    shown = render_python(cut(command, head=80, tail=0))  # whole: its repr
     return (
-        f"It stopped the Shell command {shown!r}; the Shell is still usable. A command's own "
+        f"It stopped the Shell command {shown}; the Shell is still usable. A command's own "
         "timeout= returns exit 124 instead. For long commands, use "
         "self.jobs.launch(sh.run(cmd), name=...) and return Waiting."
     )
@@ -322,9 +322,9 @@ _BLOCKER_CHARS = 80
 def _blocker(command: str | None, job: str | None) -> str:
     """The command running in a Shell, as a note names it: `cmd` (job name)."""
     flat = " ".join((command or "a command").split())
-    if len(flat) > _BLOCKER_CHARS:
-        flat = flat[: _BLOCKER_CHARS - 1] + "…"
-    return f"`{flat}`" + (f" (job {job})" if job else "")
+    text = cut(flat, head=_BLOCKER_CHARS, tail=0)
+    shown = f"`{flat}`" if text.complete else render_python(text)
+    return shown + (f" (job {job})" if job else "")
 
 
 def _queued_note(blocker: str, waited: float) -> str:
@@ -394,10 +394,12 @@ class ShellOwner:
         self._closed = True
         shells = list(self._shells)
         self._shells.clear()
-        results = await asyncio.gather(*(s.aclose() for s in shells), return_exceptions=True)
-        overflow, self._overflow = self._overflow, None
-        if overflow is not None:  # also the output of Shells dropped unclosed
-            overflow.close()
+        try:
+            results = await asyncio.gather(*(s.aclose() for s in shells), return_exceptions=True)
+        finally:  # also when cancelled: the folder closes (a still-running writer may go on)
+            overflow, self._overflow = self._overflow, None
+            if overflow is not None:  # also the output of Shells dropped unclosed
+                overflow.close()
         errors = [r for r in results if isinstance(r, BaseException)]
         if errors:
             raise errors[0]
