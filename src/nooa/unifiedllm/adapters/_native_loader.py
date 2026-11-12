@@ -14,8 +14,15 @@ from ._native_settings import _resolve_native
 from ._native_transport import _NativeTransport
 
 
-def _load_native(name, config, family, media_policy, overrides):
+def _load_native(name, config, family, media_policy, overrides, require=None):
     settings, retry = _resolve_native(family, name, config, overrides)
+    from nooa.unifiedllm.requirements import _validate_requirements
+
+    _validate_requirements(settings.capabilities, require, label=name)
+    # Validate selected budgets before even allocating the transport root.
+    from ._view_limits import _adapter_limits
+
+    _adapter_limits(_NATIVE_TYPES[family](settings, None, None), settings.capabilities)
     if retry is None:
         retry = RetryConfig()
     elif retry is False:
