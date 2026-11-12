@@ -64,6 +64,43 @@ def test_registry_only_context_window_still_resolves():
     assert client.context_window == 131072
 
 
+def test_unknown_model_lookup_does_not_print_litellm_provider_list(monkeypatch, capsys):
+    """An unknown model has no window, and LiteLLM's banner is not printed each turn."""
+    monkeypatch.setattr(litellm, "suppress_debug_info", False)
+    client = ResponsesClient(model="gym-policy")
+    client._registry_config = {}
+    capsys.readouterr()
+
+    for _ in range(3):
+        assert client.get_context_limits().context_window is None
+
+    captured = capsys.readouterr()
+    assert "Provider List" not in captured.out + captured.err
+    assert litellm.suppress_debug_info is False
+
+
+def test_overlapping_quiet_lookups_restore_the_setting_once(monkeypatch):
+    from nooa.unifiedllm.unifiedllm import _quiet_litellm_lookup
+
+    monkeypatch.setattr(litellm, "suppress_debug_info", False)
+    first, second = _quiet_litellm_lookup(), _quiet_litellm_lookup()
+    first.__enter__()
+    second.__enter__()
+    first.__exit__(None, None, None)
+    assert litellm.suppress_debug_info is True
+    second.__exit__(None, None, None)
+    assert litellm.suppress_debug_info is False
+
+
+def test_known_model_lookup_still_reads_litellm_metadata(monkeypatch):
+    monkeypatch.setattr(litellm, "suppress_debug_info", False)
+    client = CompletionClient(model="gpt-4o")
+    client._registry_config = {}
+
+    assert client.context_window == litellm.get_model_info("gpt-4o")["max_input_tokens"]
+    assert litellm.suppress_debug_info is False
+
+
 def test_get_llm_client_override_is_metadata_not_request_config(monkeypatch):
     from nooa.unifiedllm import registry
 
