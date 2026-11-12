@@ -3,6 +3,7 @@
 """OpenTelemetry hooks implementation following OpenInference conventions."""
 
 import contextlib
+import dataclasses
 import difflib
 import inspect
 import os
@@ -134,6 +135,9 @@ _ERROR_MESSAGE_LIMIT = 5_000
 # The bounds of every input/output preview: ``Limits()``'s defaults are trace-sized
 # (50,000 chars of JSON, 2,000 nodes, depth 16).
 _PREVIEW_LIMITS = Limits()
+# A code_execution span's input: the code, each string cut to 10,000 chars by the
+# snapshot (so the preview records the cut), within the preview limits.
+_CODE_PREVIEW_LIMITS = dataclasses.replace(_PREVIEW_LIMITS, max_string=10_000)
 
 
 def _error_stream() -> TextStream:
@@ -184,25 +188,33 @@ def _call_snapshot(args: Any, kwargs: Any) -> Snapshot:
     return capture_fields(args=args, kwargs=kwargs, limits=_PREVIEW_LIMITS)
 
 
-def _execution_result_snapshot(result: Any) -> Snapshot:
-    """An ExecutionResult's ``{stdout, stderr, returned_value}``, every key kept.
+def _code_result_snapshot(result: Any) -> Snapshot:
+    """A code execution's result as a preview.
 
-    A cell that returned nothing (the ``_NO_RETURN`` sentinel, a bare
-    ``object()``) shows ``returned_value: null``.
+    An ``ExecutionResult`` (exactly that type: its fields are the framework's
+    own) is ``{stdout, stderr, returned_value}``, every key kept; a cell that
+    returned nothing (the ``_NO_RETURN`` sentinel) shows ``returned_value:
+    null``. Anything else is an ordinary ``capture``, which reads values
+    without running their code (no property is called).
     """
-    fields: dict[str, Any] = {}
-    for name in ("stdout", "stderr", "returned_value"):
-        if hasattr(result, name):
-            value = getattr(result, name)
-            fields[name] = None if type(value) is object else value
-    return capture_fields(limits=_PREVIEW_LIMITS, **fields)
+    from nooa.events import _NO_RETURN, ExecutionResult
+
+    if type(result) is not ExecutionResult:
+        return capture(result, _PREVIEW_LIMITS)
+    returned = result.returned_value
+    return capture_fields(
+        stdout=result.stdout,
+        stderr=result.stderr,
+        returned_value=None if returned is _NO_RETURN else returned,
+        limits=_PREVIEW_LIMITS,
+    )
 
 
 def _record_error(span: Span, exception: BaseException) -> None:
     """Attach common error attributes, including the traceback, to ``span``."""
     message = _error_message(exception)
     exception_type = type(exception).__name__
-    span.set_status(Status(StatusCode.ERROR, str(exception)))
+    span.set_status(Status(StatusCode.ERROR, message))  # bounded, like error.message
     span.set_attribute("error.type", exception_type)
     span.set_attribute("error.message", message)
     span.set_attribute("exception.type", exception_type)
@@ -616,14 +628,13 @@ class OpenInferenceHooks:
         span.set_attribute(VIEWER_PLUGIN_ATTR, ViewerPlugin.CODE_EXECUTION)
         span.set_attribute("tool.name", "python_executor")
         span.set_attribute("agent.name", agent_name)
-        capped_code = code[:10000]  # Limit code length
         span.set_attribute("code.length", len(code))
         span.set_attribute("execution.id", execution_id)
         # OpenInference-standard input: JSON {"code": ...} is the single
         # canonical representation of the executed code (the legacy flat ``code``
         # attr is no longer emitted; ``code.length`` metadata is retained).
         code_args_json = _set_preview(
-            span, "input", capture_fields(code=capped_code, limits=_PREVIEW_LIMITS)
+            span, "input", capture_fields(code=code, limits=_CODE_PREVIEW_LIMITS)
         )
         # Tool-call identity. No model tool-call id here, so fall back to
         # the execution id.
@@ -705,13 +716,10 @@ class OpenInferenceHooks:
         else:
             span.set_status(Status(StatusCode.OK))
             try:
-                # {stdout, stderr, returned_value} as JSON, every key kept — gives
-                # the ATIF exporter and the viewer a parseable observation source.
-                # Any other result is previewed like a method's.
-                if any(hasattr(result, attr) for attr in ("stdout", "stderr", "returned_value")):
-                    snapshot = _execution_result_snapshot(result)
-                else:
-                    snapshot = capture(result, _PREVIEW_LIMITS)
+                # An ExecutionResult is {stdout, stderr, returned_value} as JSON, every
+                # key kept — gives the ATIF exporter and the viewer a parseable
+                # observation source. Any other result is previewed like a method's.
+                snapshot = _code_result_snapshot(result)
                 # OpenInference-standard output is the single canonical representation
                 # (the legacy ``result`` attr is no longer emitted; ``result.type``
                 # metadata has no OI equivalent and is retained).
