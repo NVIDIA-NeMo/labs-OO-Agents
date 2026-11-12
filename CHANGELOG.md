@@ -19,8 +19,7 @@ to follow semantic versioning.
 
 - The output the model reads goes through `nooa.snapshot` (limits unchanged;
   only the cut markers change, to `render_output`'s one line): `Shell`
-  results (`[... N bytes omitted; full output: PATH]`, spill files from one
-  `SpillDir` per bash session, 20 files / 64 MiB, newest kept), `ShellProgress`
+  results (`[... N bytes omitted; full output: PATH]`), `ShellProgress`
   merges (`[... N bytes omitted; full output not kept]` instead of
   `[... progress omitted ...]`), cell stdout/stderr
   (`nooa.runtime.output_capture.CaptureBuffer`: `[... N chars omitted; ...]`
@@ -31,6 +30,28 @@ to follow semantic versioning.
   keep their head and tail around `[... N chars omitted; full output not
   kept]` instead of `<truncated-output>`; past the sandbox's transport ceiling an
   error keeps its head before that line instead of ending in `...<truncated>`.
+  A job line longer than 8,000 characters (run progress, `tail`, the done
+  update's tail) is its head, then `[... N chars omitted; full output not
+  kept]` on its own line, instead of `[... N chars of this line omitted]`;
+  a job's done-update tail is the last 20,000 characters of that line-framed
+  output.
+- Two `Shell` result changes besides the markers: (a) the first 256 KiB and
+  last 768 KiB of a stream are kept in memory whatever `max_output` is, so
+  with a small `max_output` (say 1,000) an output up to 1 MiB comes back
+  whole, and a longer one keeps its head and tail (before, the head came from
+  the `max_output`-byte file: a 900,000-byte output came back as 787,582
+  bytes); (b) the cut is UTF-8-safe: the head ends on a code point boundary,
+  so no replacement character appears there (the omitted count then includes
+  the trimmed bytes: 151,425 instead of 151,424 bytes for 400,000 `漢`).
+- Spill files are bounded per agent: in an Atom session one `SpillDir` (20
+  files of up to 64 MiB, newest kept) holds every spill of that agent: its
+  `Shell`s' direct runs, the commands inside its launched jobs and its cell
+  output, each file capped at its `Shell`'s `max_output`. Its files last until
+  the session closes (closing a `Shell` or pruning a job no longer removes
+  them); an evicted path raises `FileNotFoundError`. A `Shell` used outside an
+  agent keeps one folder for its direct runs and one per job for its launched
+  commands (before, every command in a job had its own folder, so the 20-file
+  cap never bound).
 
 - `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
   publishes a runtime event when a job finishes (the job's handle state and
