@@ -1091,34 +1091,42 @@ def _value_limits(
 
 
 def _record_cuts(snapshot: Any) -> None:
-    """Report what the snapshot left out to ``observe_truncation`` (the prefill warning)."""
+    """Report what the snapshot left out to ``observe_truncation`` (the prefill warning).
+
+    A cut inside a node-valued mapping key (a tuple key, say) is reported as
+    ``dictionary_key``: keys have their own fixed cap, which the prefill
+    limits do not change.
+    """
     from nooa.snapshot import Mapping, Object, Sequence, Text, Unavailable
 
-    stack = [snapshot]
+    stack: list[tuple[Any, bool]] = [(snapshot, False)]  # (node, inside a key)
     while stack:
-        node = stack.pop()
+        node, in_key = stack.pop()
         node_type = type(node)
         if node_type is Text:
             if not node.complete:
-                record_truncation("max_string")
+                record_truncation("dictionary_key" if in_key else "max_string")
             continue
         if node_type is Unavailable:
             if node.reason in _CUT_REASONS:
-                record_truncation(_CUT_REASONS[node.reason])
+                record_truncation("dictionary_key" if in_key else _CUT_REASONS[node.reason])
             continue
         if node_type is Sequence:
-            stack.extend(node.head + node.tail)
+            stack.extend((child, in_key) for child in node.head + node.tail)
         elif node_type is Mapping:
             for key, child in node.head + node.tail:
-                if type(key) is str and len(key) > 50:
-                    record_truncation("dictionary_key")
-                stack.append(child)
+                if type(key) is str:
+                    if len(key) > 50:
+                        record_truncation("dictionary_key")
+                else:  # a node key: its cuts are the key's
+                    stack.append((key, True))
+                stack.append((child, in_key))
         elif node_type is Object:
-            stack.extend(child for _name, child in node.fields)
+            stack.extend((child, in_key) for _name, child in node.fields)
         else:
             continue
         if node.reason in _CUT_REASONS:
-            record_truncation(_CUT_REASONS[node.reason])
+            record_truncation("dictionary_key" if in_key else _CUT_REASONS[node.reason])
 
 
 def _value_text(
