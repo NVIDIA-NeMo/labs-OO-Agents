@@ -142,4 +142,3 @@ HARBOR_PID=$!
 echo "$HARBOR_PID" > "$LOCK_FILE"
 log "Harbor started (PID=$HARBOR_PID)"
 rm -f "$LOCK_FILE"
-

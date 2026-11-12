@@ -814,3 +814,116 @@ class TestHundredMessageRoundtrip:
         )
         assert content_50 is not None, "Message 50 missing after augmentation"
         assert content_50["value"]["stringValue"] == "msg_050"
+
+
+# ---------------------------------------------------------------------------
+# get_session_spans — new-input flags for the concise LLM view
+# ---------------------------------------------------------------------------
+
+
+def _keyed(role: str, *keys: str) -> dict:
+    return {"role": role, "parts": [{"block_hash": f"sha256:{k}", "key": k} for k in keys]}
+
+
+def _seed_llm_call(store, span_id: str, parent: str, start: int, skeleton: list[dict]) -> None:
+    db = store._get_db()
+    db.execute(
+        """INSERT INTO spans (session_id, span_id, parent_span_id, name, kind, start_time_ns,
+           end_time_ns, attributes, resource, events) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (
+            "sess_new",
+            span_id,
+            parent,
+            "llm_call",
+            1,
+            start,
+            start + 1,
+            json.dumps([_str_attr("openinference.span.kind", "LLM")]),
+            "{}",
+            "[]",
+        ),
+    )
+    db.commit()
+    store.ingest_journal_call(
+        {
+            "call_id": f"call_{span_id}",
+            "session_id": "sess_new",
+            "span_id": span_id,
+            "ts_start": float(start),
+            "ts_end": float(start + 1),
+            "input_skeleton": skeleton,
+            "output_messages": [],
+        }
+    )
+
+
+def _new_flags(store, span_id: str) -> list[bool]:
+    span = next(s for s in store.get_session_spans("sess_new") if s["spanId"] == span_id)
+    flags = {
+        a["key"]: a["value"]["boolValue"]
+        for a in span["attributes"]
+        if a["key"].endswith(".message.nooa.viewer.new")
+    }
+    return [flags[k] for k in sorted(flags, key=lambda k: int(k.split(".")[2]))]
+
+
+class TestNewInputFlags:
+    def test_new_events_and_first_seen_blocks_are_new_repeated_blocks_are_not(self, store):
+        _seed_session(store, "sess_new")
+        db = store._get_db()
+        for span_id, parent, name, start in [
+            ("gen", None, "generation", 0),
+            ("code", "gen", "code_execution", 5),
+        ]:
+            db.execute(
+                """INSERT INTO spans (session_id, span_id, parent_span_id, name, kind,
+                   start_time_ns, end_time_ns, attributes, resource, events)
+                   VALUES (?, ?, ?, ?, 1, ?, ?, '[]', '{}', '[]')""",
+                ("sess_new", span_id, parent, name, start, start + 100),
+            )
+        db.commit()
+        system = _keyed("system", "system_prompt", "self")
+        _seed_llm_call(
+            store, "llm1", "gen", 1, [system, _keyed("user", "event_1"), _keyed("user", "state")]
+        )
+        tool = {"role": "tool", "tool_call_id": "t1", "parts": [{"block_hash": "sha256:ok"}]}
+        _seed_llm_call(
+            store,
+            "llm2",
+            "gen",
+            2,
+            [
+                system,
+                _keyed("user", "event_1"),
+                tool,
+                _keyed("user", "event_3"),
+                _keyed("user", "state"),
+            ],
+        )
+        # Nested under a non-generation span: still compared within the generation.
+        _seed_llm_call(
+            store,
+            "llm3",
+            "code",
+            6,
+            [
+                system,
+                _keyed("user", "event_1"),
+                tool,
+                _keyed("user", "event_3"),
+                _keyed("user", "state"),
+                _keyed("user", "todo_status"),
+            ],
+        )
+
+        assert _new_flags(store, "llm1") == []
+        assert _new_flags(store, "llm2") == [False, False, True, True, False]
+        assert _new_flags(store, "llm3") == [False, False, False, False, False, True]
+
+    def test_download_carries_no_viewer_flags(self, store):
+        _seed_session(store, "sess_new")
+        _seed_llm_call(store, "a", "gen", 1, [_keyed("user", "event_1")])
+        _seed_llm_call(store, "b", "gen", 2, [_keyed("user", "event_1"), _keyed("user", "event_2")])
+        assert _new_flags(store, "b") == [False, True]
+        exported = json.dumps(store.reconstruct_full_spans("sess_new"))
+        assert "nooa.viewer.new" not in exported

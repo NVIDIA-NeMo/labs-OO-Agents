@@ -185,16 +185,22 @@ CodeActConfig(restrictions=RestrictionsConfig(
 
 ## Overriding the strategy prompt
 
-Not a config field — use the decorator's scoped-context:
+Not a config field, and not something `self.context` or `context=` can change: the context view owns the strategy blocks. Override the view's `instruction_blocks`:
 
 ```python
-from nooa.context_blocks import ScopedContext
+from nooa import CodeActView, Context
 
-@strategy(CodeActStrategy(), ScopedContext(context={"strategy_prompt": "My leaner instructions..."}))
+class LeanView(CodeActView):
+    async def instruction_blocks(self, owner, call):
+        blocks = dict(await super().instruction_blocks(owner, call))
+        blocks["strategy_prompt"] = Context("My leaner instructions...", prefix=True)
+        return blocks
+
+@strategy(CodeActStrategy(), context_view=LeanView())
 async def solve(self, q: str) -> str: ...
 ```
 
-Block order is `[system_prompt, strategy_prompt, execution_context, self]`; both strategy blocks are dynamic expressions you can replace per method.
+Block order is `[system_prompt, strategy_prompt, sandbox, execution_context, self]`.
 
 ## Advanced PredictStrategy (`PredictConfig`)
 
@@ -209,7 +215,7 @@ Single LLM turn, no tools, no code. The prompt is the docstring plus each parame
 
 - Return-type handling: `Optional[X]` unwraps; `dict[K,V]` uses a root-object schema; bare `list`/scalars are wrapped in a hidden `{"value": ...}` schema (Responses-API rejects array-rooted schemas) and unwrapped after validation; models with hidden fields get a public-subset schema and are rehydrated. Non-JSON-serializable **return types** (DataFrame, ndarray) are rejected up front with a pointer to CodeAct (parameters are only size-checked via `max_param_chars`).
 - Reasoning models: the JSON must land in `content`; `reasoning` is only used as a fallback when content is empty. Prose-in-content + JSON-in-reasoning fails and retries.
-- Predict sees **all prior conversation events** by default. Isolate it with `@strategy(PredictStrategy(), ScopedContext(events=EventQuery.current_call()))`.
+- Predict sees all active model-visible history by default. A method's `context_view=` can select only its invocation's events; see `nooa-context-and-state`.
 - `PredictStrategy(max_retries=3)` (from an old docstring) constructs a broken strategy — always wrap in `PredictConfig`.
 
 ## Related skills

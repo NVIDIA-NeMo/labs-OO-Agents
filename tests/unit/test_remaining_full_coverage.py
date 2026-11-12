@@ -304,7 +304,7 @@ class TestSummarizationNoneGuards:
         summarizer = MethodSummarizer.install(agent, config=MethodSummarizerConfig())
         summarizer.target_event_manager = None
         mock_event = MagicMock()
-        mock_event.metadata = {"call_id": "abc"}
+        mock_event.call_id = "abc"
         result = summarizer._compute_range(mock_event)
         assert result is None
 

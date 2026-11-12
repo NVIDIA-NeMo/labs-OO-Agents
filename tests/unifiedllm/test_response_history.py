@@ -90,13 +90,10 @@ def test_hand_built_null_content_call_uses_the_same_public_builder():
         "truncated",
     ],
 )
-@pytest.mark.parametrize("cached", [False, True])
-def test_real_renderer_preserves_every_unedited_assistant_shape(shape, cached):
+def test_real_renderer_preserves_every_unedited_assistant_shape(shape):
     from nooa.context_blocks.events import ToolCallEvent, ToolResult
     from nooa.context_blocks.formatter import OpenAIProviderFormatter, XMLBlockFormatter
-    from nooa.context_blocks.models import ResolvedBlock, Role
     from nooa.context_blocks.renderer import render_context
-    from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 
     content = (
         None if shape == "calls_null" else "" if shape in {"calls", "reasoning_calls"} else "answer"
@@ -116,7 +113,7 @@ def test_real_renderer_preserves_every_unedited_assistant_shape(shape, cached):
         replay_scope=scope,
         finish_reason="tool_calls" if "calls" in shape else "stop",
     )
-    blocks = [ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=turn)]
+    blocks = [turn]
     for call in turn.tool_calls:
         execution = ToolCallEvent(
             tool_call_id=call.id,
@@ -125,12 +122,9 @@ def test_real_renderer_preserves_every_unedited_assistant_shape(shape, cached):
             llm_response_id=turn.id,
             result=ToolResult(tool_call_id=call.id, content="done"),
         )
-        blocks.append(
-            ResolvedBlock(key="execution", content="", role=Role.ASSISTANT, event=execution)
-        )
-    base = CachedBlockFormatter if cached else XMLBlockFormatter
+        blocks.append(execution)
 
-    class Formatter(base):
+    class Formatter(XMLBlockFormatter):
         def format_event(self, event, event_format=None):
             text = super().format_event(event, event_format)
             return text[:3] if shape == "truncated" else text
@@ -250,7 +244,6 @@ async def test_render_borrows_existing_response_without_reading_storage_again(mo
     from unittest.mock import AsyncMock, Mock
 
     from nooa import Agent
-    from nooa.context_blocks.models import ResolvedBlock, Role
     from nooa.unifiedllm import FakeLLMClient
 
     class TestAgent(Agent, llm=FakeLLMClient()):
@@ -258,7 +251,7 @@ async def test_render_borrows_existing_response_without_reading_storage_again(mo
 
     agent = TestAgent()
     _, original = source_turn("responses")
-    blocks = [ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=original)]
+    blocks = [original]
     monkeypatch.setattr(agent.runtime, "_prepare_context", AsyncMock(return_value=blocks))
     read_again = Mock(side_effect=AssertionError("History must not be loaded a second time"))
     monkeypatch.setattr(agent.event_manager, "values", read_again)

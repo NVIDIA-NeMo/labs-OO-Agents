@@ -46,7 +46,8 @@ features. Each file is standalone and includes its exact run command.
 | 13 | [`13_multimodal.py`](quickstart/13_multimodal.py) | Image inputs with CodeAct and Predict | A saved alias (`vision` by default) with `media_inputs: [image]` |
 | 14 | [`14_atif_trajectory.py`](quickstart/14_atif_trajectory.py) | Exporting ATIF trajectories for evals and downstream tooling | — |
 | 15 | [`15_nemo_relay.py`](quickstart/15_nemo_relay.py) | NeMo Relay intercepts, guardrails, events, and nested generation | `uv sync --extra nemo-relay` |
-| 16 | [`16_decisions.py`](quickstart/16_decisions.py) | A decision-only agent: choice, thresholded abstention, and batched questions with `DecideStrategy` | A decisions endpoint, e.g. `OPENROUTER_API_KEY` |
+| 16 | [`16_custom_context.py`](quickstart/16_custom_context.py) | An independent context API and assembly policy in ordinary Python | — |
+| 17 | [`17_decisions.py`](quickstart/17_decisions.py) | A decision-only agent: choice, thresholded abstention, and batched questions with `DecideStrategy` | A decisions endpoint, e.g. `OPENROUTER_API_KEY` |
 
 If you are new to NOOA, run examples 1–6 in order. After that, choose by the
 capability you need rather than treating the remaining files as required steps.

@@ -65,7 +65,7 @@ class TestSnapshotRoundtrip:
 
         from nooa.context_blocks import DynamicContext
 
-        raw = dict(agent2.context_manager._raw_items())
+        raw = dict(agent2.context_manager.declarations())
         assert isinstance(raw["status"], DynamicContext)
         assert raw["status"].expr == "self.__class__.__name__"
 

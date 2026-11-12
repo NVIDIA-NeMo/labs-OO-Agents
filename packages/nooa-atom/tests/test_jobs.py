@@ -144,11 +144,11 @@ async def test_jobs_lost_is_reported_when_an_older_snapshot_is_restored(tmp_path
 
 
 def _queues_expr(agent) -> str:
-    return dict(agent.context_manager._raw_items())["queues"].expr
+    return agent.context_manager["queues"].expr
 
 
 async def test_the_queues_block_does_not_name_the_queue_manager(tmp_path):
-    from nooa.storage.snapshot import AgentSnapshot
+    from nooa.storage.snapshot import AgentSnapshot, DynamicContextBlock
 
     agent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
     try:
@@ -156,9 +156,9 @@ async def test_the_queues_block_does_not_name_the_queue_manager(tmp_path):
         assert agent._queue_status() == agent.queue_manager.status()
         # An older snapshot still carries the old expression; the restore's after_restore puts it back.
         snapshot = AgentSnapshot.from_agent(agent)
-        for block in snapshot.context:
-            if block.key == "queues":
-                block.expr = "self.queue_manager.status()"
+        [block] = [block for block in snapshot.context if block.key == "queues"]
+        assert isinstance(block, DynamicContextBlock)
+        block.expr = "self.queue_manager.status()"
         restored = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
         snapshot.restore(restored)
         assert "queue_manager" not in _queues_expr(restored)

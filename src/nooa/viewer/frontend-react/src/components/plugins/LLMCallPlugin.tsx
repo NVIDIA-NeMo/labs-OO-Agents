@@ -21,6 +21,8 @@ interface Message {
   content: string | null;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
+  // Viewer backend flag: absent from the previous call of the same generation.
+  isNew?: boolean;
 }
 
 function extractInputMessages(attrs: Record<string, unknown>): Message[] {
@@ -61,6 +63,9 @@ function extractInputMessages(attrs: Record<string, unknown>): Message[] {
 
     const toolCallId = attrs[`llm.input_messages.${i}.message.tool_call_id`] as string | undefined;
     if (toolCallId) msg.tool_call_id = toolCallId;
+
+    const isNew = attrs[`llm.input_messages.${i}.message.nooa.viewer.new`];
+    if (typeof isNew === 'boolean') msg.isNew = isNew;
 
     messages.push(msg);
     i++;
@@ -339,28 +344,33 @@ export function LLMCallPlugin({ event, viewState, rawJsonOpen, viewControls }: P
   );
 
   if (viewState === 'concise') {
-    // Show last input message + output + tool calls
-    // Separate <context> wrapper messages (from cached block formatter) into a collapsed section
-    const isContextMsg = (m: Message): boolean => m.role === 'user' && (m.content?.trimStart().startsWith('<context>\n') ?? false);
-    const contextMsgs = inputMessages.filter(isContextMsg);
-    const lastMsg = inputMessages.length > 0
-      ? inputMessages.findLast(m => !isContextMsg(m)) ?? null
-      : null;
+    // Show what is new in this call + output + tool calls. The backend flags
+    // messages absent from the previous call of the same generation; the
+    // previous reply is already shown as that call's output. Repeated
+    // messages after the newest input (blocks re-sent every request) go
+    // into a collapsed section. Without flags, show the last message.
+    const flagged = inputMessages.some(m => m.isNew !== undefined);
+    const lastNewIndex = inputMessages.findLastIndex(m => m.isNew);
+    const shownMsgs = flagged
+      ? inputMessages.filter(m => m.isNew && m.role !== 'assistant')
+      : inputMessages.slice(-1);
+    const contextMsgs = flagged
+      ? inputMessages.slice(lastNewIndex + 1).filter(m => m.isNew === false && m.content)
+      : [];
 
     return (
       <div>
         {headerLine}
 
-        {lastMsg && lastMsg.content && (
-          <MessageBox
-            role={lastMsg.role}
-            content={lastMsg.content}
-            toolCallId={lastMsg.tool_call_id}
-          />
-        )}
-
-        {lastMsg?.tool_calls?.map((tc, i) => (
-          <ToolCallBox key={i} tc={tc} index={i} total={lastMsg.tool_calls!.length} />
+        {shownMsgs.map((msg, m) => (
+          <div key={`in-${m}`}>
+            {msg.content && (
+              <MessageBox role={msg.role} content={msg.content} toolCallId={msg.tool_call_id} />
+            )}
+            {msg.tool_calls?.map((tc, i) => (
+              <ToolCallBox key={i} tc={tc} index={i} total={msg.tool_calls!.length} />
+            ))}
+          </div>
         ))}
 
         {contextMsgs.length > 0 && (

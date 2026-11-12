@@ -24,6 +24,7 @@ class TestEventMaxStringOverride:
     def test_summary_text_not_truncated(self):
         """Summary.summary_text is already condensed — truncating defeats its purpose."""
         event = Summary(
+            source_call_ids=[],
             summary_tag="1..50",
             replaced_range=(1, 50),
             summary_text=LONG_STRING,
@@ -113,6 +114,7 @@ class TestOtherFieldsStillTruncated:
 
     def test_summary_doc_is_truncated(self):
         event = Summary(
+            source_call_ids=[],
             summary_tag="1..50",
             replaced_range=(1, 50),
             summary_text="short",

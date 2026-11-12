@@ -33,7 +33,7 @@ from types import SimpleNamespace
 
 import numpy as np  # noqa: F401
 
-from nooa import hidden, strategy
+from nooa import CodeActView, Context, hidden, strategy
 from nooa.interactive import Done, InteractiveAgent, Waiting  # noqa: F401
 from nooa.media import Image  # visual grid input (show()n to the LLM)
 from nooa.runtime import show  # CodeAct builtin — attach an image to the turn
@@ -638,12 +638,12 @@ class ArcSolverBase(InteractiveAgent):
 
         self.h = SimpleNamespace()
 
-        # Defense in depth: the framework renders the <state> block as
+        # Defense in depth: the default view renders the <state> block as
         # pformat(self, ...), which bypasses the cell-output redaction above — a
         # value repr (e.g. a loaded module's path, a stray Path) can re-expose the
-        # run-dir path (game code + benchmark). Override the protected block with a
-        # redacted renderer so ANY such leak is scrubbed, not just today's known one.
-        self.context_manager.set_dynamic_protected("state", "self._render_state()")
+        # run-dir path (game code + benchmark). handle() turns that block off and
+        # this redacted renderer takes its place, so ANY such leak is scrubbed.
+        self.context["state"] = Context(expr="self._render_state()")
 
         # Harness states arrive on their own queue: tail the JSONL file the
         # harness appends to, so every new state wakes the dispatcher.
@@ -1014,7 +1014,7 @@ class ArcSolverBase(InteractiveAgent):
     # ----------------------------------------------------------------- turn
 
     @hidden
-    @strategy(CodeActStrategy(config=_ARC_CELL_CONFIG))
+    @strategy(CodeActStrategy(config=_ARC_CELL_CONFIG), context_view=CodeActView(state=False))
     async def handle(self, notification: dict[str, list]) -> Done | Waiting:
         """One interactive-grid-game solving turn. Follow the <arc_skill> context block.
 

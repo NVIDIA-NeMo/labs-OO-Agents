@@ -15,7 +15,6 @@ from nooa.config.truncation_config import TruncationConfig
 from nooa.runtime import media_recovery as _media_recovery  # noqa: F401  registers its recovery
 from nooa.runtime.actor import ActorRuntime
 from nooa.runtime.event_manager import EventManager
-from nooa.runtime.event_query import EventQuery
 from nooa.runtime.events import EventsApi
 from nooa.runtime.hooks import (
     CompositeInstrumentationHooks,
@@ -32,7 +31,6 @@ __all__ = [
     "ActorRuntime",
     # Event system
     "EventManager",
-    "EventQuery",
     "EventsApi",
     # Hook-based instrumentation protocol
     "InstrumentationHooks",

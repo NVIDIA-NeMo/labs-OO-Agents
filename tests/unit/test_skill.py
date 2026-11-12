@@ -3,11 +3,26 @@
 """Tests for nooa.Skill — path-based loading."""
 
 import math
+from abc import ABC, abstractmethod
 from pathlib import Path
 
 import pytest
 
 from nooa import Skill, TextSkill
+
+
+def test_skill_metaclass_composes_with_abc():
+    class AbstractSkill(Skill, ABC):
+        @abstractmethod
+        def run(self): ...
+
+    class ConcreteSkill(AbstractSkill):
+        def run(self):
+            return "ok"
+
+    with pytest.raises(TypeError, match="abstract"):
+        AbstractSkill(content="abstract")
+    assert ConcreteSkill(content="concrete").run() == "ok"
 
 
 @pytest.fixture

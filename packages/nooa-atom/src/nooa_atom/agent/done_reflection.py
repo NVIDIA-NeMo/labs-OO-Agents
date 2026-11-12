@@ -17,13 +17,23 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from nooa.context_blocks.scoped import ScopedContext
-from nooa.runtime.event_query import EventQuery
+from nooa.default_context_view import PredictView, visible_events
 
 logger = logging.getLogger(__name__)
 REFLECTION_TIMEOUT = 15.0
 EVIDENCE_CHARS = 12_000
 NOTES_KEY = "done_reflection_notes"
+
+
+class CurrentCallPredictView(PredictView):
+    """Predict context whose history is only this call's own events.
+
+    The reflection request carries its bounded evidence explicitly, so the
+    default history (the whole session) is not replayed.
+    """
+
+    def history(self, owner: Any, call: Any):
+        return (event for event in visible_events(owner) if call.id in event.related_call_ids)
 
 
 class DoneReflectionPlan(BaseModel):
@@ -54,7 +64,7 @@ def _completed_range(agent: Any, call_id: str, start_tag: str | None) -> list[tu
     # Fetch at most 200 event objects, not every earlier turn's stored payload.
     for tag in tags[start : start + 200]:
         event = agent.events[tag]
-        if event.metadata.get("call_id") == call_id:
+        if event.call_id == call_id:
             selected.append((tag, event))
             if len(selected) == 200:
                 break
@@ -103,7 +113,7 @@ def _bounded_evidence(
             break
         # Only immutable scalar provenance enters the proposal snapshot. In a
         # memory backend, EventManager.update mutates the original Event object.
-        event_id, call_id = event.id, event.metadata.get("call_id")
+        event_id, call_id = event.id, event.call_id
         if type(event_id) is not str or type(call_id) is not str:
             break
         kept.append(CapturedEvent(tag, event_id, call_id, event.event_type, text))
@@ -138,7 +148,11 @@ async def reflect_accepted_done(agent: Any, outcome: Any) -> None:
     selected, evidence = _bounded_evidence(_completed_range(agent, call_id, candidate[2]))
     namespace = agent._handle_namespace
     snapshot = namespace.cleanup_snapshot() if namespace is not None else None
-    candidates = namespace.cleanup_candidates(snapshot) if snapshot is not None else []
+    candidates = (
+        namespace.cleanup_candidates(snapshot)
+        if namespace is not None and snapshot is not None
+        else []
+    )
     if agent.jobs.running():
         candidates = []
     old_notes = agent.context.get(NOTES_KEY)
@@ -157,11 +171,9 @@ async def reflect_accepted_done(agent: Any, outcome: Any) -> None:
         if asyncio.get_running_loop().time() >= deadline:
             return
         async with asyncio.timeout_at(deadline):
-            # The request explicitly contains bounded completed evidence. Do not
-            # rely on default history visibility, nor replay unbounded history.
-            # Governing/context blocks remain managed by the existing renderer.
-            with ScopedContext(events=EventQuery.current_call()):
-                plan = await agent._reflect_done_plan(request)
+            # The request explicitly contains bounded completed evidence; the
+            # method's CurrentCallPredictView replays only this call's events.
+            plan = await agent._reflect_done_plan(request)
         # A stale/overlapping event proposal or changed notes is rejected as a
         # whole before editing anything. Appended input after the watermark is
         # fine: it is not part of the captured range and cannot be collapsed.

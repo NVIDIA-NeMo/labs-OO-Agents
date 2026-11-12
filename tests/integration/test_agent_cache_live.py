@@ -186,7 +186,6 @@ async def _run_agent(case, client, database):
     usages, states, replay_counts = [], [], []
 
     async def observe(ctx, nxt):
-        assert not ctx.filtered_history, "unexpected history filtering"
         assert sum(isinstance(m, CacheBoundary) for m in ctx.messages) == 1
         public_strings = list(_strings([dict(m) for m in ctx.messages]))
         fixed = f"<cache_reference>\n{reference}\n</cache_reference>"
@@ -423,9 +422,9 @@ def _without_live_suffix(case, body, phase):
             is_text = isinstance(content, str)
             assert is_text, "unexpected live suffix shape"
             text = content
-        is_envelope = text.startswith("<context>\n") and text.endswith("\n</context>")
-        assert is_envelope, "live suffix was not a context envelope"
-        correct_phase = f'<live_state expr="self._live_state">\n{phase}\n</live_state>' in text
+        correct_phase = text.endswith(
+            f'<live_state expr="self._live_state">\n{phase}\n</live_state>'
+        )
         assert correct_phase, "live suffix had an unexpected phase"
         if case.name == "opus55":
             content.pop()
@@ -651,7 +650,7 @@ async def test_agent_cache_reference_unique_per_run_and_fixed_across_calls(tmp_p
 
 @pytest.mark.parametrize("case", CASES, ids=lambda c: c.name)
 def test_wire_prefix_comparison_preserves_content_not_cache_metadata(case):
-    live = '<context>\n<live_state expr="self._live_state">\n0\n</live_state>\n</context>'
+    live = '<live_state expr="self._live_state">\n0\n</live_state>'
     task = {"type": "text" if case.name == "opus55" else "input_text", "text": "fixed task"}
     if case.name == "opus55":
         # The historical task and live block share one user container.
@@ -714,7 +713,7 @@ def test_cell_validation_allows_formatting_only():
 @hidden
 def _observer_body(case, phase):
     key = "input" if case.responses else "messages"
-    live = f'<context>\n<live_state expr="self._live_state">\n{phase}\n</live_state>\n</context>'
+    live = f'<live_state expr="self._live_state">\n{phase}\n</live_state>'
     block_type = "text" if case.name == "opus55" else "input_text"
     if case.name == "opus55":
         items = [{"role": "user", "content": [{"type": block_type, "text": "fixed task"}]}]

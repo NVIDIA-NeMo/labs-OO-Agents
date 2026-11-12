@@ -79,10 +79,7 @@ class AgentSnapshot(BaseModel):
         all_allowlist: set[str] = set()
 
         context_blocks: list[StaticContextBlock | DynamicContextBlock] = []
-        protected = agent.context_manager.protected_keys
-        for key, value in agent.context_manager._raw_items():
-            if key in protected:
-                continue  # Framework blocks are recreated by __init__
+        for key, value in agent.context_manager.declarations():
             if isinstance(value, DynamicContext):
                 context_blocks.append(DynamicContextBlock(key=key, expr=value.expr))
             else:
@@ -164,25 +161,10 @@ class AgentSnapshot(BaseModel):
             )
 
         for block in self.context:
-            # ``from_agent`` skips protected (framework) keys, so snapshots
-            # produced by this codebase never carry them and the
-            # ``is_protected`` branches below are unreachable for round-tripped
-            # data. They are kept deliberately as defensive handling for
-            # externally-supplied snapshot JSON — hand-edited or legacy
-            # payloads that may still contain protected keys — so such keys are
-            # restored via the protected setters rather than corrupting state.
-            is_protected = block.key in agent.context_manager.protected_keys
             if isinstance(block, DynamicContextBlock):
-                if is_protected:
-                    agent.context_manager.set_dynamic_protected(block.key, block.expr)
-                else:
-                    agent.context_manager.set_dynamic(block.key, block.expr)
+                agent.context_manager.set_dynamic(block.key, block.expr)
             else:
-                value = deserialize(block.value, self.type_allowlist)
-                if is_protected:
-                    agent.context_manager.set_static_protected(block.key, value)
-                else:
-                    agent.context_manager[block.key] = value
+                agent.context_manager[block.key] = deserialize(block.value, self.type_allowlist)
 
         if self.disabled_context:
             agent.context_manager.disable(*self.disabled_context)

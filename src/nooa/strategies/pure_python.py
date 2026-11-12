@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, Any, get_type_hints
 
 from pydantic import ValidationError as PydanticValidationError
 
-from nooa.context_blocks import DynamicContext, ResultStatus
+from nooa.context_blocks import ContextAssemblyError, ResultStatus
 from nooa.decorators import strategy
 from nooa.errors import GenerationError, XMLFormatError
 from nooa.events import (
@@ -186,10 +186,11 @@ class PurePythonStrategy(CompositeStrategy):
         """Get the active runtime config, including method-level overrides."""
         return runtime.truncation_config
 
-    def get_block_overrides(self) -> dict[str, str | DynamicContext | None]:
-        return {
-            "strategy_prompt": DynamicContext("strategy.strategy_instructions(runtime)"),
-        }
+    @property
+    def default_context_view(self):
+        from nooa.default_context_view import PurePythonView
+
+        return PurePythonView()
 
     @strategy(TemplateStrategy())
     async def strategy_instructions(self, runtime: RuntimeServices) -> str:
@@ -319,7 +320,7 @@ class PurePythonStrategy(CompositeStrategy):
                 generate_event_id: str | None = None
                 try:
                     code, generate_event_id = await self._generate_code(runtime, session)
-                except ReasoningReplayError as e:
+                except (ContextAssemblyError, ReasoningReplayError) as e:
                     turn_final = True
                     turn_exception = type(e).__name__
                     raise

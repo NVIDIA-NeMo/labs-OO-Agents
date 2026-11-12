@@ -3,7 +3,7 @@
 """Integration tests for MethodSummarizer call_id based range computation.
 
 These tests run real agents with real strategies through the full runtime,
-then verify that call_id metadata is correctly present on all recorded events
+then verify that call_id field is correctly present on all recorded events
 and that MethodSummarizer._compute_range produces correct ranges.
 
 Scenarios tested:
@@ -65,7 +65,7 @@ def _get_events_with_metadata(agent):
     result = []
     for tag in em.keys():
         evt = em[tag]
-        result.append((tag, evt, evt.metadata.get("call_id")))
+        result.append((tag, evt, evt.call_id))
     return result
 
 
@@ -131,7 +131,7 @@ class TestCodeActSingleTurnCallId:
             is_final=True,
             success=True,
         )
-        after.metadata["call_id"] = call_id
+        after.call_id = call_id
 
         result = summarizer._compute_range(after)
         assert result is not None
@@ -287,7 +287,7 @@ class TestNestedCallsCallId:
             is_final=True,
             success=True,
         )
-        after.metadata["call_id"] = parent_call_id
+        after.call_id = parent_call_id
 
         result = summarizer._compute_range(after)
         assert result is not None
@@ -383,7 +383,7 @@ class TestExceptionMidCallCallId:
             is_final=True,
             success=False,
         )
-        after.metadata["call_id"] = call_id
+        after.call_id = call_id
 
         result = summarizer._compute_range(after)
         assert result is not None

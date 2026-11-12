@@ -12,6 +12,7 @@ import yaml
 from pydantic import BaseModel
 
 from nooa.agentdoc import hidden
+from nooa.context_blocks.models import Context
 
 # ---------------------------------------------------------------------------
 # @slash_command decorator
@@ -280,12 +281,26 @@ class Skill:
     # transitively when activate() is called.
     requires: Annotated[tuple[str, ...], hidden] = ()
 
-    # If set, SkillRegistry.activate() registers a dynamic context block
-    # with this (key, expr) pair. deactivate() removes it.
-    context_block: Annotated[tuple[str, str] | None, hidden] = None
+    # Context declaration materialized by the selected strategy view while the
+    # skill is active. Expressions are evaluated with ``self`` bound to the skill.
+    context_block: Annotated[tuple[str, Context] | None, hidden] = None
 
     _agent: Any = None
     _source_dir: Path
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        block = cls.__dict__.get("context_block")
+        if block is not None and not (
+            isinstance(block, tuple)
+            and len(block) == 2
+            and isinstance(block[0], str)
+            and isinstance(block[1], Context)
+        ):
+            raise TypeError(
+                f"{cls.__qualname__}.context_block must be (key, Context(...)) or None, "
+                f"got {block!r}"
+            )
 
     def __init__(self, obj: Any = None, *, content: str | None = None, name: str | None = None):
         n_given = sum(x is not None for x in (obj, content))
@@ -297,10 +312,10 @@ class Skill:
         if obj is not None:
             self._skill_obj = obj
             cls_name = name or "Skill"
-            self.__class__ = type(cls_name, (Skill,), {"__doc__": obj.__doc__ or ""})  # pyright: ignore[reportAttributeAccessIssue]
+            self.__class__ = type(cls_name, (type(self),), {"__doc__": obj.__doc__ or ""})  # pyright: ignore[reportAttributeAccessIssue]
         elif content is not None:
             cls_name = name or "Skill"
-            self.__class__ = type(cls_name, (Skill,), {"__doc__": content})  # pyright: ignore[reportAttributeAccessIssue]
+            self.__class__ = type(cls_name, (type(self),), {"__doc__": content})  # pyright: ignore[reportAttributeAccessIssue]
 
     @hidden
     def attach(self, agent: Any) -> None:

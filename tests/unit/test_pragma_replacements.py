@@ -16,131 +16,6 @@ import pytest
 from nooa.unifiedllm import FakeLLMClient
 
 # =============================================================================
-# Task 1: BlockSyntaxError handler (codeact.py — extracted method)
-# =============================================================================
-
-
-class TestHandleBlockSyntaxError:
-    """CodeActStrategy._handle_block_syntax_error() — formerly 7 inline pragmas."""
-
-    def _make_session(self, **kwargs):
-        from nooa.strategies.codeact import CodeActSession
-
-        defaults = {
-            "max_iterations": 5,
-            "max_retries": 3,
-            "target_method_name": "test_method",
-            "event_manager": MagicMock(),
-        }
-        defaults.update(kwargs)
-        return CodeActSession(**defaults)
-
-    def _make_error(self, key="bad_block", expr="not valid python {{{"):
-        from nooa.context_blocks.exceptions import BlockSyntaxError
-
-        return BlockSyntaxError(
-            key=key,
-            expr=expr,
-            original_error=SyntaxError("invalid syntax"),
-        )
-
-    def test_removes_bad_block_from_context(self):
-        """The bad block should be removed via runtime.context.remove()."""
-        from nooa.strategies.codeact import CodeActStrategy
-
-        session = self._make_session()
-        runtime = MagicMock()
-        runtime.context = MagicMock()
-
-        err = self._make_error(key="my_block")
-        CodeActStrategy._handle_block_syntax_error(err, session, runtime)
-
-        runtime.context.remove.assert_called_once_with("my_block")
-
-    def test_adds_error_event_with_fix_instructions(self):
-        """An Error event with fix instructions should be added to event_manager."""
-        from nooa.strategies.codeact import CodeActStrategy
-
-        session = self._make_session()
-        runtime = MagicMock()
-        runtime.context = MagicMock()
-
-        err = self._make_error(key="my_block", expr="bad expr")
-        CodeActStrategy._handle_block_syntax_error(err, session, runtime)
-
-        args = runtime.event_manager.add.call_args[0]
-        error_event = args[0]
-        assert "invalid Python syntax" in error_event.content
-        assert "my_block" in error_event.content
-        assert 'context.set("my_block", value=' in error_event.content
-        assert 'context.set("my_block", expr=' in error_event.content
-
-    def test_records_iteration_not_error(self):
-        """Should call session.record_iteration(), not record_error()."""
-        from nooa.strategies.codeact import CodeActStrategy
-
-        session = self._make_session()
-        runtime = MagicMock()
-        runtime.context = MagicMock()
-
-        err = self._make_error()
-        initial_iteration = session.iteration
-        initial_error = session.error_count
-
-        CodeActStrategy._handle_block_syntax_error(err, session, runtime)
-
-        assert session.iteration == initial_iteration + 1
-        assert session.error_count == initial_error  # unchanged
-
-    def test_survives_context_remove_failure(self):
-        """If context.remove() raises, the handler should still add error feedback."""
-        from nooa.strategies.codeact import CodeActStrategy
-
-        session = self._make_session()
-        runtime = MagicMock()
-        runtime.context = MagicMock()
-        runtime.context.remove.side_effect = RuntimeError("remove failed")
-
-        err = self._make_error()
-        # Should not raise
-        CodeActStrategy._handle_block_syntax_error(err, session, runtime)
-
-        # Error event should still be added
-        runtime.event_manager.add.assert_called_once()
-
-    def test_handles_no_context_on_runtime(self):
-        """If runtime has no context attribute, should still work."""
-        from nooa.strategies.codeact import CodeActStrategy
-
-        session = self._make_session()
-        runtime = MagicMock(spec=[])  # no context attr
-        runtime.event_manager = MagicMock()
-
-        err = self._make_error()
-        # Should not raise
-        CodeActStrategy._handle_block_syntax_error(err, session, runtime)
-        runtime.event_manager.add.assert_called_once()
-
-    def test_truncates_long_expr(self):
-        """Expressions > 100 chars should be truncated with '...'."""
-        from nooa.strategies.codeact import CodeActStrategy
-
-        session = self._make_session()
-        runtime = MagicMock()
-        runtime.context = MagicMock()
-
-        long_expr = "x" * 200
-        err = self._make_error(expr=long_expr)
-        CodeActStrategy._handle_block_syntax_error(err, session, runtime)
-
-        error_event = runtime.event_manager.add.call_args[0][0]
-        assert "..." in error_event.content
-        # Should contain first 100 chars, not full 200
-        assert "x" * 100 in error_event.content
-        assert "x" * 200 not in error_event.content
-
-
-# =============================================================================
 # Task 2: context_budget()
 # =============================================================================
 
@@ -355,7 +230,7 @@ class TestApplyPendingSummaryExceptionHandler:
 
 
 class TestMethodSummarizerComputeRange:
-    """MethodSummarizer._compute_range — matches events by call_id metadata."""
+    """MethodSummarizer._compute_range — matches events by call_id field."""
 
     def _make_summarizer(self, min_events=2):
         from nooa.agent import Agent
@@ -385,7 +260,7 @@ class TestMethodSummarizerComputeRange:
             is_final=True,
             success=True,
         )
-        event.metadata["call_id"] = call_id
+        event.call_id = call_id
         return event
 
     def test_returns_range_when_enough_matching_events(self):
@@ -397,11 +272,11 @@ class TestMethodSummarizerComputeRange:
 
         # Add events with matching call_id
         msg1 = Message(content="first")
-        msg1.metadata["call_id"] = "call-abc"
+        msg1.call_id = "call-abc"
         em.add(msg1)
 
         msg2 = Message(content="second")
-        msg2.metadata["call_id"] = "call-abc"
+        msg2.call_id = "call-abc"
         em.add(msg2)
 
         event = self._make_after_turn(call_id="call-abc")
@@ -420,17 +295,17 @@ class TestMethodSummarizerComputeRange:
 
         # Parent event
         msg1 = Message(content="parent start")
-        msg1.metadata["call_id"] = "call-parent"
+        msg1.call_id = "call-parent"
         em.add(msg1)
 
         # Child event (different call_id, but chronologically between parent events)
         msg2 = Message(content="child work")
-        msg2.metadata["call_id"] = "call-child"
+        msg2.call_id = "call-child"
         em.add(msg2)
 
         # Parent event again
         msg3 = Message(content="parent end")
-        msg3.metadata["call_id"] = "call-parent"
+        msg3.call_id = "call-parent"
         em.add(msg3)
 
         event = self._make_after_turn(call_id="call-parent")
@@ -448,7 +323,7 @@ class TestMethodSummarizerComputeRange:
         em = summarizer.target_event_manager
 
         msg = Message(content="only one")
-        msg.metadata["call_id"] = "call-abc"
+        msg.call_id = "call-abc"
         em.add(msg)
 
         event = self._make_after_turn(call_id="call-abc")
@@ -456,7 +331,7 @@ class TestMethodSummarizerComputeRange:
         assert result is None
 
     def test_returns_none_when_no_call_id(self):
-        """AfterTurn without call_id in metadata returns None."""
+        """AfterTurn without call_id returns None."""
         from nooa.events import AfterTurn
 
         summarizer = self._make_summarizer(min_events=1)
@@ -470,7 +345,7 @@ class TestMethodSummarizerComputeRange:
             is_final=True,
             success=True,
         )
-        # No call_id in metadata
+        # No call_id
         result = summarizer._compute_range(event)
         assert result is None
 

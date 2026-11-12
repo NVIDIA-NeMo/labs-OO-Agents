@@ -142,7 +142,9 @@ def test_direct_backend_batch_also_rejects_invalid_inputs(tmp_path, backend_kind
             ).event_backend
         candidates = {
             "runtime": TurnBegan(),
-            "summary": Summary(summary_tag="1..2", replaced_range=(1, 2), children_tags=[]),
+            "summary": Summary(
+                summary_tag="1..2", replaced_range=(1, 2), children_tags=[], source_call_ids=[]
+            ),
             "archived": Metadata(description="archived", status=EventStatus.ARCHIVED),
             "not_event": object(),
         }

@@ -108,9 +108,9 @@ class TestEventTypes:
         from nooa.events import Task
 
         event = Task(prompt="test")
-        event.metadata["call_id"] = "abc123"
+        event.call_id = "abc123"
         event.metadata["parent_id"] = "xyz789"
-        assert event.metadata["call_id"] == "abc123"
+        assert event.call_id == "abc123"
         assert event.metadata["parent_id"] == "xyz789"
 
     def test_event_has_timestamp(self):
@@ -224,6 +224,7 @@ class TestSummaryEvent:
         from nooa.events import Summary
 
         summary = Summary(
+            source_call_ids=[],
             summary_tag="2..40",
             replaced_range=(2, 40),
             children_tags=["2", "3", "4"],
@@ -240,6 +241,7 @@ class TestSummaryEvent:
         from nooa.events import Summary
 
         summary = Summary(
+            source_call_ids=[],
             summary_tag="2..40",
             replaced_range=(2, 40),
             children_tags=["2", "3", "4"],
@@ -251,6 +253,7 @@ class TestSummaryEvent:
         from nooa.events import Summary
 
         summary = Summary(
+            source_call_ids=[],
             summary_tag="5..10",
             replaced_range=(5, 10),
             children_tags=["5", "6", "7", "8", "9", "10"],
@@ -265,6 +268,7 @@ class TestSummaryEvent:
         from nooa.events import Summary
 
         summary = Summary(
+            source_call_ids=[],
             summary_tag="1..5",
             replaced_range=(1, 5),
         )
@@ -276,6 +280,7 @@ class TestSummaryEvent:
         from nooa.events import Summary
 
         summary = Summary(
+            source_call_ids=[],
             summary_tag="2..4",
             replaced_range=(2, 4),
             children_tags=["2", "3", "4"],
@@ -295,6 +300,7 @@ class TestSummaryEvent:
         from nooa.events import Summary
 
         summary = Summary(
+            source_call_ids=[],
             summary_tag="1..3",
             replaced_range=(1, 3),
         )

@@ -11,10 +11,10 @@ import httpx
 import pytest
 from pydantic import BaseModel, ConfigDict, field_serializer
 
-from nooa import Agent, Context, DecideStrategy, EventQuery, strategy
-from nooa.context_blocks import ScopedContext
+from nooa import Agent, Context, DecideStrategy, is_model_visible, replayable, strategy
 from nooa.decisions import DecisionClient, DecisionModel, DecisionRequest
 from nooa.decisions.client import BooleanQuestion
+from nooa.decisions.context_view import DecisionContextView
 from nooa.decisions.media import collect_decision_attachments
 from nooa.decisions.schema import compile_decision_schema
 from nooa.events import Task
@@ -24,6 +24,20 @@ from nooa.unifiedllm import FakeLLMClient, RetryConfig
 PNG = b"\x89PNG\r\n\x1a\nfixture"
 JPEG = b"\xff\xd8\xfffixture"
 ENDPOINT = "https://decision.example/decisions"
+
+
+class RecentEvents(DecisionContextView):
+    """Decision context plus the last ``n`` model-visible events."""
+
+    def __init__(self, n: int) -> None:
+        self.n = n
+
+    async def assemble(self, agent, call):
+        async for block in super().assemble(agent, call):
+            yield block
+        visible = [event for event in agent.event_manager.values() if is_model_visible(event)]
+        for event in replayable(visible[-self.n :]):
+            yield event
 
 
 @pytest.fixture(autouse=True)
@@ -75,7 +89,7 @@ async def test_actual_decide_strategy_transports_native_image_and_named_dedup(st
         )
 
         class Inspector(Agent, llm=FakeLLMClient(), decision_model=client):
-            @strategy(DecideStrategy(), ScopedContext(events=EventQuery.last_n(1)))
+            @strategy(DecideStrategy(), context_view=RecentEvents(1))
             async def damaged(self, first: Image, second: Image, label: str) -> bool:
                 """Visible damage?"""
                 ...
@@ -433,7 +447,7 @@ async def test_actual_decide_selected_event_rejects_visible_native_media_before_
         )
 
         class Inspector(Agent, llm=FakeLLMClient(), decision_model=client):
-            @strategy(DecideStrategy(), ScopedContext(events=EventQuery.last_n(10)))
+            @strategy(DecideStrategy(), context_view=RecentEvents(10))
             async def check(self, text: str) -> bool:
                 """Visible damage?"""
                 ...
@@ -467,7 +481,7 @@ async def test_hidden_event_native_media_not_inspected_or_sent(monkeypatch):
         client = DecisionClient("fake", endpoint=ENDPOINT, api_style="openai", client=http)
 
         class Inspector(Agent, llm=FakeLLMClient(), decision_model=client):
-            @strategy(DecideStrategy(), ScopedContext(events=EventQuery.last_n(10)))
+            @strategy(DecideStrategy(), context_view=RecentEvents(10))
             async def check(self, text: str) -> bool:
                 """Visible damage?"""
                 ...

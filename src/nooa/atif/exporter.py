@@ -653,9 +653,9 @@ class AtifExporter:
                     ps.reasoning_content = event.reasoning
             ps.message = event.replay_content
             ps.llm_call_count += 1
-            # Per-turn dynamic context envelope (re-rendered every LLM call
+            # Per-turn trailing context blocks (re-rendered every LLM call
             # from current agent state — see runtime/actor.py
-            # _extract_trailing_context_envelope). Stashed on the agent
+            # _dynamic_context_trace_snapshot). Stashed on the agent
             # step's extra so SFT pipelines can reconstruct the exact bytes
             # the LLM saw at this turn without storing the full per-turn
             # messages list.

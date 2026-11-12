@@ -7,7 +7,6 @@ from html import escape
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
-from nooa.context_blocks import DynamicContext
 from nooa.decorators import strategy
 from nooa.strategies.base import RuntimeServices
 from nooa.strategies.codeact import (
@@ -48,33 +47,11 @@ class CodeActV2(CodeActStrategy):
     def name(self) -> str:
         return "CODEACT_V2"
 
-    def get_block_overrides(self) -> dict[str, Any]:
-        """Put the execution contract on the tool and keep only runtime context blocks."""
-        overrides = super().get_block_overrides()
-        overrides["strategy_prompt"] = None
-        overrides["execution_context"] = None
-        overrides["python_cell_context"] = DynamicContext("strategy.python_cell_context(runtime)")
-        overrides["python_cell_state"] = DynamicContext(
-            "strategy.python_cell_state_context(runtime)"
-        )
-        return overrides
+    @property
+    def default_context_view(self):
+        from nooa.default_context_view import CodeActV2View
 
-    def get_static_block_keys(self) -> set[str]:
-        """Exclude the removed strategy prompt from the cacheable context prefix."""
-        return (super().get_static_block_keys() - {"strategy_prompt", "execution_context"}) | {
-            "python_cell_context"
-        }
-
-    def get_block_order(self) -> list[str] | None:
-        """Place live locals immediately after the stable execution context."""
-        order = [key for key in (super().get_block_order() or []) if key != "strategy_prompt"]
-        index = order.index("execution_context")
-        return [
-            *order[:index],
-            "python_cell_context",
-            "python_cell_state",
-            *order[index + 1 :],
-        ]
+        return CodeActV2View()
 
     async def python_cell_context(self, runtime: RuntimeServices) -> str:
         """Render the available namespace once, as commented Python declarations."""
@@ -202,8 +179,9 @@ class CodeActV2(CodeActStrategy):
 
         def python_cell_state() -> dict[str, dict[str, str]]:
             """Return the complete name-to-type inventory for this call's cell state."""
-            if getattr(call, "execution_namespace", None) is not None:
-                return call.execution_namespace.inventory()
+            namespace = getattr(call, "execution_namespace", None)
+            if namespace is not None:
+                return namespace.inventory()
             return self._cell_state(call)
 
         builtins["python_cell_state"] = python_cell_state

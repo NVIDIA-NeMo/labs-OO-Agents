@@ -8,10 +8,11 @@ named after its job.
 """
 
 import asyncio
+from typing import cast
 
 import pytest
 from atom_test_agents import AtomModels, ask, cell, done, work_done
-from nooa_atom.agent.roles import ROLE_INSTRUCTIONS
+from nooa_atom.agent.roles import ROLE_INSTRUCTIONS, TurnPolicy
 from nooa_atom.agent.work_shell import CommandResult, Shell
 from nooa_atom.agent.work_subagent import Question
 from nooa_atom.session.options import SessionOptions
@@ -106,7 +107,7 @@ async def test_one_shot_subagent_returns_its_task_result_and_notes_are_job_items
     for name in (None, "fix"):
         call = models.llms[name].calls[0]
         rendered = "\n".join(str(m.get("content", "")) for m in call.messages)
-        self_doc = rendered.split("<self>", 1)[1].split("</self>", 1)[0]
+        self_doc = rendered.split("<self", 1)[1].split("</self>", 1)[0]
         assert "write ``self.v.key = value``" in self_doc
         assert "read ``self.v.key``" in self_doc
         assert "delete ``del self.v.key``" in self_doc
@@ -465,7 +466,7 @@ def _no_installed_skills(monkeypatch, tmp_path):
     monkeypatch.setenv("HOME", str(home))
 
 
-MODES = {
+MODES: dict[str, TurnPolicy] = {
     "handle": "interactive",
     "handle_batch": "unattended",
     "handle_work": "child",
@@ -617,8 +618,10 @@ def test_one_turn_method_with_a_tiny_doc():
     from nooa_atom.agent.agent import AtomAgent
     from nooa_atom.session.session import turn_method_of
 
-    assert len(AtomAgent.handle.__doc__) <= 120
-    assert "Modes" not in AtomAgent.__doc__ and "mode:" not in AtomAgent.__doc__
+    handle_doc, class_doc = AtomAgent.handle.__doc__, AtomAgent.__doc__
+    assert handle_doc is not None and class_doc is not None
+    assert len(handle_doc) <= 120
+    assert "Modes" not in class_doc and "mode:" not in class_doc
     for method in MODES:
         assert turn_method_of(AtomAgent, method) == "handle"
     assert turn_method_of(object(), "handle_batch") == "handle_batch"
@@ -1147,7 +1150,7 @@ def _failed(error: str):
     from nooa_atom.session.items import ChildFailed, ChildRef
 
     ref = ChildRef(id="c1", name="review", path="/root/review", depth=1, status="idle")
-    return ChildFailed(child=ref, error=error)
+    return ChildFailed(name=ref.name, path=ref.path, child=ref, error=error)
 
 
 async def _armed(port: _FakePort, rounds: int = 200) -> None:
@@ -1165,7 +1168,7 @@ async def _armed(port: _FakePort, rounds: int = 200) -> None:
 @pytest.fixture
 async def fake_work(tmp_path):
     from nooa_atom.agent.work_manager import WorkManager
-    from nooa_atom.session.port import current_port
+    from nooa_atom.session.port import SessionPort, current_port
 
     from nooa.runtime.channels import QueueManager
 
@@ -1176,7 +1179,7 @@ async def fake_work(tmp_path):
         from nooa_atom.agent.work_subagent import Subagent
 
         port = _FakePort(stops=stops)
-        token = current_port.set(port)
+        token = current_port.set(cast(SessionPort, port))
         try:
             rev = manager.launch(Subagent("review"), name="review")
         finally:

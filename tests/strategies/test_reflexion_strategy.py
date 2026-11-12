@@ -38,6 +38,31 @@ def make_smart_execute_nested(mock_runtime, base_results):
     return smart_side_effect
 
 
+async def test_views_see_the_wrapped_strategy_under_reflexion():
+    """A custom CodeActView subclass works under Reflexion(CodeAct)."""
+    from nooa import Agent, strategy
+    from nooa.default_context_view import CodeActView
+    from nooa.strategies.codeact import CodeActStrategy
+    from nooa.strategies.reflexion import ReflexionStrategy
+
+    seen = []
+
+    class SpyView(CodeActView):
+        async def instruction_blocks(self, owner, call):
+            seen.append(call.strategy)
+            return await super().instruction_blocks(owner, call)
+
+    base = CodeActStrategy()
+
+    class Example(Agent, llm=object()):
+        @strategy(ReflexionStrategy(base=base), context_view=SpyView())
+        async def run(self) -> str: ...
+
+    items = await Example().runtime._prepare_context(Example.run)
+    assert seen == [base]
+    assert "strategy_prompt" in [getattr(item, "key", None) for item in items]
+
+
 class TestReflexionStrategyProperties:
     """Tests for ReflexionStrategy properties."""
 
@@ -58,14 +83,16 @@ class TestReflexionStrategyProperties:
         strategy = ReflexionStrategy(base=base)
         assert strategy.name == "REFLEXION[PURE_PYTHON]"
 
-    def test_block_overrides_delegates_to_base(self):
-        """ReflexionStrategy.get_block_overrides should delegate to base strategy."""
+    def test_context_strategy_delegates_to_base(self):
+        """Context views see the wrapped strategy, through nested wrappers."""
+        from nooa.default_context_view import PurePythonView
         from nooa.strategies.pure_python import PurePythonStrategy
         from nooa.strategies.reflexion import ReflexionStrategy
 
         base = PurePythonStrategy()
-        strategy = ReflexionStrategy(base=base)
-        assert strategy.get_block_overrides() == base.get_block_overrides()
+        strategy = ReflexionStrategy(base=ReflexionStrategy(base=base))
+        assert strategy.context_strategy is base
+        assert isinstance(strategy.default_context_view, PurePythonView)
 
     def test_requires_lock_delegates_to_base(self):
         """ReflexionStrategy.requires_lock should inherit from base."""

@@ -55,6 +55,9 @@ from nooa_atom.tools.repo_tools import RepoTools
 
 with hidden:
     from nooa.agents import TokenBudgetSummarizer
+    from nooa.context_blocks import BlockMetadata, Role
+    from nooa.context_view import Block
+    from nooa.default_context_view import CodeActV2View
     from nooa.runtime.channels import Channel, ChannelReader
     from nooa_atom.agent.conditions import (
         require_result,
@@ -63,6 +66,35 @@ with hidden:
         require_task_result,
     )
     from nooa_atom.session.port import SessionPort, _reject_removed
+
+    class _AtomView(CodeActV2View):
+        """CodeActV2's view with a concise class doc, no state dump and no events API block.
+
+        The strategy's own ``python_cell_state`` block replaces the state dump,
+        and the agent's ``context_usage`` block already says how to inspect and
+        collapse events.
+        """
+
+        events_api = False
+
+        def __init__(self) -> None:
+            super().__init__(state=False)
+
+        async def view_blocks(self, owner: Any, call: Any) -> tuple[Block, ...]:
+            return tuple(
+                _concise_interface(owner) if block.key == "self" else block
+                for block in await super().view_blocks(owner, call)
+            )
+
+    def _concise_interface(owner: Any) -> Block:
+        return Block(
+            key="self",
+            content=doc(type(owner), concise=True),
+            role=Role.SYSTEM,
+            metadata=BlockMetadata(expr="doc(type(self), concise=True)", static=True),
+        )
+
+    _ATOM_VIEW = _AtomView()
 
 if TYPE_CHECKING:
     from nooa.unifiedllm import UnifiedLLM
@@ -82,15 +114,6 @@ __all__ = [
     "Waiting",
     "session_title_request",
 ]
-
-# CodeActV2 replaces the framework context blocks with a concise self doc: the
-# ``state`` dump and the execution-context stub go, and the strategy adds its
-# own compact ``python_cell_state`` block.
-_V2_CONTEXT: Annotated[dict[str, Any], hidden] = {
-    "state": None,
-    "execution_context": None,
-    "self": Context(expr="doc(type(self), concise=True)", prefix=True),
-}
 
 
 class AtomAgentBase(InteractiveAgent):
@@ -283,10 +306,9 @@ class AtomAgentBase(InteractiveAgent):
         )
         spec(self, "context", hidden=False)
         spec(self, "events", hidden=False)
-        # self.events stays exposed, but the core events_api block is redundant
-        # here: context_usage already says how to inspect and collapse events
+        # self.events stays exposed; _AtomView leaves out the events_api block
+        # because context_usage already says how to inspect and collapse events
         # (``self.events.collapse(...)``, ``print(doc(self.events))``).
-        self.context_manager.remove_protected("events_api")
 
         self._summarization = summarization or SummarizationConfig()
         install_summarizer(self._summarization, self)
@@ -654,7 +676,7 @@ class AtomAgentBase(InteractiveAgent):
     @hidden
     @strategy(
         CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_running_wait])),
-        context=_V2_CONTEXT,
+        context_view=_ATOM_VIEW,
     )
     async def handle(
         self,
@@ -687,7 +709,7 @@ class AtomAgentBase(InteractiveAgent):
                 postconditions=[require_result, require_running_wait_unattended],
             )
         ),
-        context=_V2_CONTEXT,
+        context_view=_ATOM_VIEW,
     )
     async def handle_batch(
         self,
@@ -729,7 +751,7 @@ class AtomAgentBase(InteractiveAgent):
                 postconditions=[require_result, require_running_wait_unattended],
             )
         ),
-        context=_V2_CONTEXT,
+        context_view=_ATOM_VIEW,
     )
     async def handle_orchestrate(
         self,
@@ -801,7 +823,7 @@ class AtomAgentBase(InteractiveAgent):
     @hidden
     @strategy(
         CodeActV2(config=CodeActConfig(cell_timeout=1800.0, postconditions=[require_task_result])),
-        context=_V2_CONTEXT,
+        context_view=_ATOM_VIEW,
     )
     async def handle_work(
         self,

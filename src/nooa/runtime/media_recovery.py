@@ -117,10 +117,9 @@ class ImageLimitRecovery:
         # The provider's per-request image limit, once a request was refused for it.
         self.limit: int | None = None
 
-    def before_request(self) -> None:
+    def before_send(self) -> bool:
         """A limit learned earlier in this session: keep this request under it."""
-        if self.limit is not None:
-            self.collapse(self.limit)
+        return self.limit is not None and self.collapse(self.limit) > 0
 
     def recover(self, exc: BaseException) -> bool | None:
         """Remember the limit, collapse old images; True to retry, None if not recoverable."""
@@ -152,8 +151,8 @@ class ImageLimitRecovery:
         from nooa.agentdoc import pformat
 
         em = self.runtime.event_manager
-        # Only the events this request renders: an excluded event neither uses
-        # the budget nor gets collapsed.
+        # Only the events the view put in the request: an excluded event neither
+        # uses the budget nor gets collapsed.
         included = self.runtime._included_event_ids()
         bearing: list[tuple[str, int]] = []
         events: dict[str, Any] = {}
@@ -162,7 +161,7 @@ class ImageLimitRecovery:
                 event = em[tag]
             except Exception:  # noqa: BLE001
                 continue
-            if included is not None and id(event) not in included:
+            if included is not None and event.id not in included:
                 continue
             count = image_block_count(event)
             if count:

@@ -5,8 +5,9 @@
 ``ActorRuntime`` creates one instance of each registered recovery per runtime
 (in registration order) and, on every model request:
 
-- calls ``before_request()`` before the messages are built (a recovery that
-  learned a limit keeps later requests under it);
+- calls ``before_send()`` once the messages are built (a recovery that learned
+  a limit keeps later requests under it, counting only the events the context
+  view selected; if it changes stored events, the messages are rebuilt once);
 - when the request raises, offers the exception to each recovery in order.
   ``recover(exc)`` returns ``None`` (not this recovery's error: ask the next),
   ``True`` (recovered: rebuild the messages and retry) or ``False`` (this
@@ -28,8 +29,12 @@ __all__ = ["RequestRecovery", "register_request_recovery", "request_recoveries_f
 class RequestRecovery(Protocol):
     """One runtime's recovery from a kind of refused request (see the module docs)."""
 
-    def before_request(self) -> None:
-        """Called before each request's messages are built."""
+    def before_send(self) -> bool:
+        """Called once a request's messages are built, before it is sent.
+
+        Returns True when it changed stored events, so the runtime rebuilds the
+        messages once.
+        """
         ...
 
     def recover(self, exc: BaseException) -> bool | None:

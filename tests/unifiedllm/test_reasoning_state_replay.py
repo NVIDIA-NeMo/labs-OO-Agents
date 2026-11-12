@@ -13,11 +13,13 @@ from litellm.types.llms.openai import ResponsesAPIResponse
 from litellm.types.utils import ModelResponse
 
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
+from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.context_blocks.formatter import (
     OpenAIProviderFormatter,
     XMLBlockFormatter,
 )
 from nooa.context_blocks.models import ResolvedBlock, Role
+from nooa.context_view import replayable
 from nooa.llm_types import AssistantText, ToolCall
 from nooa.storage.sqlite import SQLiteEventBackend, _ensure_schema
 from nooa.unifiedllm import CompletionClient, LLMResponse, ResponsesClient, Tool
@@ -155,13 +157,13 @@ def test_duplicate_ids_cannot_reuse_one_execution(call_id, archive, caplog):
         turn = LLMResponse(parts=(AssistantText(text="answer"), *calls), finish_reason="tool_calls")
         turn = LLMResponse.model_validate_json(turn.model_dump_json())
     # Only one execution exists for the two calls, including after archive load.
-    neutral = XMLBlockFormatter().format(_response_blocks(turn)[:2])
-    wire = OpenAIProviderFormatter().format(neutral)
+    blocks = _response_blocks(turn)[:2]
+    with pytest.raises(UnsupportedContextLayout, match="incomplete execution batch"):
+        XMLBlockFormatter().format(blocks)
+    assert replayable(block.event for block in blocks) == ()
     assert len(turn.tool_calls) == 2  # Preserve the original for investigation.
-    assert not any(m.get("tool_calls") or m.get("role") == "tool" for m in wire)
     assert turn.content == "answer"  # The record survives, the invalid batch does not replay.
-    assert not any(m.get("content") == "answer" for m in wire)
-    assert "omitting the assistant tool-call turn" in caplog.text
+    assert "incomplete execution batch" in caplog.text
 
 
 @pytest.mark.asyncio

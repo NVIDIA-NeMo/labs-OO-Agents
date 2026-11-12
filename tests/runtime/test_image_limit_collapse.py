@@ -215,9 +215,9 @@ async def test_the_context_window_retry_is_covered_by_image_recovery():
         await run(Runtime(), call, rebuild, lambda exc: False)
 
 
-def test_only_the_events_the_request_includes_count_toward_the_limit():
+async def test_only_the_events_the_request_includes_count_toward_the_limit():
     from nooa.events import ResultStatus
-    from nooa.runtime.event_query import EventQuery
+    from nooa.runtime.actor import _current_context_view_var
     from nooa.runtime.media_recovery import image_limit_recovery
 
     done = ResultStatus.COMPLETE
@@ -237,9 +237,20 @@ def test_only_the_events_the_request_includes_count_toward_the_limit():
             tool_call_id="new", execution_count=2, execution_status=done, images=[image(2)]
         )
     )
-    em.set_event_query(EventQuery(limit=1))  # the request renders only the newest event
+    newest = list(em.values())[-1]
+
+    class NewestOnly:
+        """A view whose requests carry only the newest event."""
+
+        async def assemble(self, owner, call):
+            yield newest
+
+    token = _current_context_view_var.set(NewestOnly())
     try:
-        assert image_limit_recovery(agent.runtime).collapse(1) == 0  # one included image: fits
+        await agent.runtime._build_messages(ImageAgent.look)
     finally:
-        em.set_event_query(None)
-    assert image_limit_recovery(agent.runtime).collapse(1) == 1  # without the query both count
+        _current_context_view_var.reset(token)
+    assert image_limit_recovery(agent.runtime).collapse(1) == 0  # one included image: fits
+
+    await agent.runtime._build_messages(ImageAgent.look)  # the default view sends both
+    assert image_limit_recovery(agent.runtime).collapse(1) == 1

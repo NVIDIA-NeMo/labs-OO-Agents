@@ -20,7 +20,9 @@ reasoning stay in memory only; results contain counts and flags, not content.
 import asyncio
 import json
 import uuid
+from collections.abc import AsyncGenerator
 from copy import deepcopy
+from typing import Any, cast
 
 from . import REASONING_CHECK_PROMPT
 
@@ -234,7 +236,7 @@ def _reasoning_values(response):
             ):
                 offset = 0
                 for block in summary:
-                    length = block["_text_length"]
+                    length = cast(dict[str, int], block)["_text_length"]
                     if length:
                         yield part.text[offset : offset + length]
                     offset += length + 1  # matches the "\n" used when capturing
@@ -262,7 +264,7 @@ def _replayed(value, actual):
     )
 
 
-async def _session_steps(alias, entry, *, api_key, budget_tokens):
+async def _session_steps(alias, entry, *, api_key, budget_tokens) -> AsyncGenerator[Any]:
     """Run the three session calls and yield a ``ProbeUpdate`` per step and check.
 
     Each call uses the configured reply limit and reasoning level, no
@@ -273,12 +275,12 @@ async def _session_steps(alias, entry, *, api_key, budget_tokens):
     if any call fails or is incomplete. Requests are captured through an HTTP
     hook on the test's own client only.
     """
-    from nooa.context_blocks.formatter import OpenAIProviderFormatter
-    from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
+    from nooa.context_blocks.formatter import OpenAIProviderFormatter, XMLBlockFormatter
+    from nooa.context_blocks.models import BlockMetadata, Role
     from nooa.context_blocks.renderer import render_context
-    from nooa.context_blocks.renderers.cached import CachedBlockFormatter
+    from nooa.context_view import Block
     from nooa.unifiedllm import CacheBoundary, RetryConfig, Tool
-    from nooa.unifiedllm.connect import ProbeUpdate, _include_rejected
+    from nooa.unifiedllm.connect import ProbeRecord, ProbeUpdate, _include_rejected
     from nooa.unifiedllm.http_config import HttpConfig
     from nooa.unifiedllm.registry import client_from_config
 
@@ -319,7 +321,7 @@ async def _session_steps(alias, entry, *, api_key, budget_tokens):
         # Offered to the model, but Connect never runs tools during tests.
         raise RuntimeError("Setup checks never execute model tools")
 
-    formatter = CachedBlockFormatter()
+    formatter = XMLBlockFormatter()
     provider = OpenAIProviderFormatter()
     # Generated, varied filler text forms a long prefix that the provider can
     # cache, without using any user data. Short hex IDs are used instead of
@@ -333,32 +335,35 @@ async def _session_steps(alias, entry, *, api_key, budget_tokens):
     )
     messages = render_context(
         [
-            ResolvedBlock(
+            Block(
                 key="instructions",
                 role=Role.SYSTEM,
                 content="Use the reference to solve the task. Do not repeat the reference.",
                 metadata=BlockMetadata(static=True),
             ),
-            ResolvedBlock(
+            Block(
                 key="reference",
                 role=Role.USER,
                 content=padding,
                 metadata=BlockMetadata(static=True),
             ),
-            ResolvedBlock(
+            CacheBoundary(),
+            Block(
                 key="task",
-                # The cached formatter splits SYSTEM blocks into static and
-                # dynamic parts and sends the dynamic part (this task) as the
-                # last USER message.
+                # Context assembly explicitly places this volatile task after
+                # the reusable prefix boundary.
                 #
-                # The task is the reasoning-level puzzle, not simple
-                # arithmetic: models that decide how much to reason based on
-                # the question may skip reasoning on an easy task, which
-                # looked exactly like a reasoning replay bug (seen live with
-                # gpt-6-astra). The puzzle makes the model reason at any
-                # level. As in the level checks, the answer is not graded;
-                # only whether reasoning was observed.
-                role=Role.SYSTEM,
+                # Reuses the reasoning-level puzzle rather than a trivial
+                # arithmetic task: a model with adaptive/content-dependent
+                # reasoning effort can legitimately skip reasoning on
+                # something this easy even at a real reasoning level, which
+                # previously showed up as a false "reasoning not retained"
+                # result indistinguishable from an actual replay bug
+                # (observed live for gpt-6-astra). The puzzle is hard enough
+                # to force genuine reasoning at any configured level. As
+                # with level checks, a wrong answer here is not graded —
+                # only whether reasoning was observed at all.
+                role=Role.USER,
                 content=(
                     f"{REASONING_CHECK_PROMPT}\n\nCall probe_tool with your eight-letter "
                     "answer, or answer briefly."
@@ -389,13 +394,16 @@ async def _session_steps(alias, entry, *, api_key, budget_tokens):
         bodies.append(json.loads(request.content))
 
     try:
-        client = client_from_config(
-            alias,
-            entry,
-            api_key=api_key,
-            num_retries=0,
-            http_config=HttpConfig(read_timeout=120),
-            retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
+        client = cast(
+            Any,
+            client_from_config(
+                alias,
+                entry,
+                api_key=api_key,
+                num_retries=0,
+                http_config=HttpConfig(read_timeout=120),
+                retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
+            ),
         )
     except Exception as exc:
         yield ProbeUpdate("session", {"outcome": "not_confirmed", "error": type(exc).__name__})
@@ -405,8 +413,8 @@ async def _session_steps(alias, entry, *, api_key, budget_tokens):
     hooks = client._http.httpx_async.event_hooks["request"]
     hooks.append(capture)
     spent = 0
-    first = None
-    replay = None
+    first: Any = None
+    replay: list[Any] = []
     readings = []
     observations = []
     settings_ok = True
@@ -454,7 +462,7 @@ async def _session_steps(alias, entry, *, api_key, budget_tokens):
                 async with asyncio.timeout(120):
                     response = await client.acall(call_messages, **params)
             except Exception as exc:
-                record = {
+                record: ProbeRecord = {
                     "outcome": "not_confirmed",
                     "error": type(exc).__name__,
                     "tokens_charged_to_budget": spent,
@@ -477,7 +485,7 @@ async def _session_steps(alias, entry, *, api_key, budget_tokens):
             # tests Kimi/Qwen reported reasoning tokens on endpoints that never
             # return reasoning content, so nothing could be replayed.
             observed = any(p.kind == "reasoning" for p in response.parts)
-            record = {
+            record: ProbeRecord = {
                 "outcome": "accepted",
                 "reasoning_observed": observed,
                 "input_tokens": usage.input_tokens if usage else None,

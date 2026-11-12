@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from typing import Any, cast
 
+from nooa.decisions.context_view import DecisionContextView
 from nooa.decisions.schema import compile_decision_schema
 from nooa.strategies.base import DecisionRuntimeServices, GenerationStrategy, RuntimeServices
 from nooa.strategies.current_call import CurrentCall
@@ -24,6 +25,11 @@ class DecideStrategy(GenerationStrategy):
                 store it in the call's ``DecisionRecord``.
         """
         self.include_raw_response = include_raw_response
+
+    @property
+    def default_context_view(self) -> DecisionContextView:
+        """Select explicit supporting state without adding conversation history."""
+        return DecisionContextView()
 
     @property
     def uses_decision_model(self) -> bool:

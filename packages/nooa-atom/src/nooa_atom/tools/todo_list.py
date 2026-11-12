@@ -21,7 +21,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field, field_validator
 
-from nooa import Skill, hidden
+from nooa import Context, Skill, hidden
 from nooa.agentdoc import spec
 from nooa.storage.markers import snapshotable
 from nooa.tools.todo import Todo as _Todo
@@ -121,11 +121,17 @@ class TodoList(Skill):
     """Your plan: activate the item you work on to show its description and notes in the todo_status context block."""
 
     __nosnapshot__ = False  # Override Skill's __nosnapshot__ = True
-    context_block = ("todo_status", "self.todo.status()")
+    context_block = ("todo_status", Context(expr="self.status()"))
 
     _manager: TodoManager
 
-    def __init__(self, state: dict | None = None, *, manager: TodoManager | None = None) -> None:
+    # The ignore: @snapshotable types TodoManager as a bare ``type`` to pyright.
+    def __init__(
+        self,
+        state: dict | None = None,
+        *,
+        manager: TodoManager | None = None,  # pyright: ignore[reportGeneralTypeIssues]
+    ) -> None:
         self._manager = manager if manager is not None else TodoManager()
         if state:
             self.from_dict(state)

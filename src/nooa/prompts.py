@@ -111,11 +111,8 @@ async def _build_prompt_data_from_agent(
 ) -> PromptData:
     """Build :class:`PromptData` from a live agent instance.
 
-    .. warning::
-        Calls ``agent.runtime._build_messages()``, which updates the agent's
-        ``DynamicContext`` resolved-value cache as a side effect.  Avoid
-        calling this mid-session with speculative arguments if your agent
-        relies on cached DynamicContext values between turns.
+    Calls ``agent.runtime._build_messages()``, which assembles the selected
+    context view and therefore evaluates its expression blocks.
     """
     from nooa.runtime.actor import _current_strategy_var
     from nooa.strategies import get_default_strategy

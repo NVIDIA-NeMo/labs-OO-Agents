@@ -3,7 +3,9 @@
 """Atom agent construction and repository instructions."""
 
 import inspect
+from collections.abc import Mapping
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from nooa_atom.agent import (
@@ -13,6 +15,7 @@ from nooa_atom.agent import (
 )
 from nooa_atom.agent.base import AtomAgentBase
 
+from nooa.runtime.hooks import InstrumentationHooks
 from nooa.skill import Skill, get_slash_commands, slash_command
 from nooa.unifiedllm import FakeLLMClient
 
@@ -65,7 +68,7 @@ async def test_repository_instructions_follow_file_changes(tmp_path):
     path = tmp_path / "AGENTS.md"
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
-        raw = dict(agent.context_manager._raw_items())["repository_instructions"]
+        raw = agent.context_manager["repository_instructions"]
         assert raw.expr == "self._repository_instructions()"
         assert agent._repository_instructions() == ""
 
@@ -113,7 +116,7 @@ async def test_restored_static_instructions_become_the_dynamic_block(tmp_path):
     try:
         agent.context["repository_instructions"] = Context("stale saved rule", prefix=True)
         agent._install_context()  # what after_restore does with the restored blocks
-        raw = dict(agent.context_manager._raw_items())["repository_instructions"]
+        raw = agent.context_manager["repository_instructions"]
         assert raw.expr == "self._repository_instructions()"
         assert "current rule" in agent._repository_instructions()
     finally:
@@ -428,7 +431,8 @@ def test_cells_see_the_turn_types_but_not_the_helpers():
     assert {"ChildFailedError", "DepthLimitError"} <= names
     hidden = {
         "_todo_prompt",
-        "_V2_CONTEXT",
+        "_ATOM_VIEW",
+        "_AtomView",
         "require_result",
         "session_title_request",
         "SessionPort",
@@ -441,7 +445,9 @@ def test_the_class_prompt_names_every_input_channel():
     text = AtomAgentBase.__doc__ or ""
     for channel in ("user_messages", "system_messages", "slash_commands", "delegates", "jobs"):
         assert f"``{channel}``" in text, channel
-    assert len(inspect.getdoc(AtomAgentBase.handle)) < 800
+    handle_doc = inspect.getdoc(AtomAgentBase.handle)
+    assert handle_doc is not None
+    assert len(handle_doc) < 800
     assert "SessionInfo" not in (AtomAgentBase.get_summarization_status.__doc__ or "")
 
 
@@ -451,7 +457,8 @@ async def test_cd_moves_the_repo_tools_with_the_shell(tmp_path):
     (sub / "x.py").write_text("def only_in_sub():\n    pass\n")
     agent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
     try:
-        await agent.shell.run("cd sub")
+        # typeshed's functools.wraps result does not bind self on a method.
+        await agent.shell.run("cd sub")  # pyright: ignore[reportCallIssue]
         assert agent.shell.cwd == sub.resolve()
         assert agent.repo.cwd == agent.shell.cwd
         assert agent.repo.root == tmp_path.resolve()
@@ -472,7 +479,8 @@ async def test_the_state_block_shows_the_shell_directory_and_the_repo_root(tmp_p
     monkeypatch.chdir(elsewhere)
     agent = AtomAgentBase(llm=FakeLLMClient(), cwd=repo)
     try:
-        await agent.shell.run("cd pkg")
+        # typeshed's functools.wraps result does not bind self on a method.
+        await agent.shell.run("cd pkg")  # pyright: ignore[reportCallIssue]
         rendered = agent._workspace_state_context()
         assert str((repo / "pkg").resolve()) in rendered
         assert f"Repository root (the boundary for repo searches): {repo.resolve()}" in rendered
@@ -488,7 +496,9 @@ def test_the_class_prompt_says_locals_last_one_call():
     )
     assert sentence in " ".join((AtomAgentBase.__doc__ or "").split())
     for method in ("handle", "handle_batch", "handle_work", "handle_orchestrate"):
-        assert "locals" not in inspect.getdoc(getattr(AtomAgentBase, method)).lower(), method
+        method_doc = inspect.getdoc(getattr(AtomAgentBase, method))
+        assert method_doc is not None, method
+        assert "locals" not in method_doc.lower(), method
 
 
 async def test_repo_tools_take_a_cwd_for_one_call(tmp_path):
@@ -566,7 +576,7 @@ def test_the_turn_methods_run_on_the_single_tool_strategy(method):
     assert not isinstance(AtomAgentBase.name_session._plan_strategy, CodeActV2)
 
 
-async def _first_call_messages(tmp_path, method: str) -> list[dict]:
+async def _first_call_messages(tmp_path, method: str) -> tuple[Mapping[str, Any], ...]:
     """The messages of the first model call of a ``method`` turn."""
     from atom_test_agents import python_cell
 
@@ -659,9 +669,7 @@ async def test_atom_agent_first_turn_has_the_events_guidance(tmp_path):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         assert "events_api" not in agent.context_manager
-        assert dict(agent.context_manager._raw_items())["context_usage"].expr == (
-            "self._context_usage()"
-        )
+        assert agent.context_manager["context_usage"].expr == ("self._context_usage()")
         assert agent.context_stats is None
         text = agent._context_usage()
         assert "Compact history: self.events.collapse(" in text
@@ -675,9 +683,9 @@ async def test_the_tool_docs_are_in_the_cached_prefix(tmp_path):
     messages = await _first_call_messages(tmp_path, "handle")
     assert messages[0]["role"] == "system"
     assert "<python_cell_tools>" in str(messages[0]["content"])
-    envelope = str(messages[-1]["content"])
-    assert envelope.lstrip().startswith("<context>")
-    assert "<python_cell_tools" not in envelope
+    trailing = str(messages[-1]["content"])
+    assert "<context_usage" in trailing
+    assert "<python_cell_tools" not in trailing
 
 
 class _CallRecorder:
@@ -705,7 +713,7 @@ def test_host_reads_record_no_span(tmp_path):
     agent = ProbedAgent(llm=FakeLLMClient(), cwd=tmp_path)
     recorder = _CallRecorder()
     previous = get_hooks()
-    set_hooks(recorder)
+    set_hooks(cast(InstrumentationHooks, recorder))
     try:
         agent.probe()  # a traced method, so the recorder is known to work
         assert agent.plan() == []

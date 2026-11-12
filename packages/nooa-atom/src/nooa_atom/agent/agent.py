@@ -59,9 +59,13 @@ with hidden:
     from nooa.tools import TodoManager
     from nooa.tools.shell_tools import FileWrite, Match
     from nooa_atom.agent import work_shell
-    from nooa_atom.agent.base import AtomAgentBase, session_title_request  # noqa: F401
+    from nooa_atom.agent.base import _ATOM_VIEW, AtomAgentBase, session_title_request  # noqa: F401
     from nooa_atom.agent.conditions import PERSON_NAMES, require_result
-    from nooa_atom.agent.done_reflection import DoneReflectionPlan, reflect_accepted_done
+    from nooa_atom.agent.done_reflection import (
+        CurrentCallPredictView,
+        DoneReflectionPlan,
+        reflect_accepted_done,
+    )
     from nooa_atom.agent.metrics import atom_metrics
     from nooa_atom.agent.reflection_gate import _ReflectionGate
     from nooa_atom.agent.roles import TurnPolicy
@@ -170,7 +174,9 @@ def _mcp_tool_hint(agent: Any, error: BaseException, formatted: str) -> str | No
     name = _error_name(error, formatted, NameError) or _error_name(
         error, formatted, AttributeError, agent
     )
-    server = skills.mcp_tool_server(name) if name else None
+    if not name:
+        return None
+    server = skills.mcp_tool_server(name)
     if server is None:
         return None
     atom_metrics().mcp_tool_name_hint(f"{server}.{name}")
@@ -537,7 +543,7 @@ def _work_label(work: Any, kind: str) -> dict[str, str]:
     frame = getattr(work, "cr_frame", None)
     owner = frame.f_locals.get("self") if frame is not None else None
     code = getattr(work, "cr_code", None)
-    if code is not None and code.co_name == "run":
+    if frame is not None and code is not None and code.co_name == "run":
         if isinstance(owner, Shell):
             return {"what": "shell command"}
         if isinstance(owner, Subagent):
@@ -594,11 +600,6 @@ req = rev.send(todo)
 await rev.message("also check the docs")  # note, even mid-turn
 """
 
-_CONTEXT: Annotated[dict[str, Any], hidden] = {
-    "state": None,
-    "execution_context": None,
-    "self": Context(expr="doc(type(self), concise=True)", prefix=True),
-}
 _NOTIFICATION: Annotated[Any, hidden] = spec(max_string=50_000, max_length=100, max_depth=10)
 # An invalid return_result value is a cell error the model retries on; the
 # turn fails only when retries beyond this many are needed in one turn (other
@@ -610,9 +611,11 @@ _REMOVED: Annotated[str, hidden] = (
 )
 
 
-class AtomAgent(
+# The ignores: @hidden on InteractiveAgent types the base as Any to pyright,
+# which then rejects the Agent class keywords.
+class AtomAgent(  # pyright: ignore[reportGeneralTypeIssues]
     AtomAgentBase,
-    truncation=TruncationConfig(capture=CaptureConfig(unrecoverable_hint=_CUT_PRINT_HINT)),
+    truncation=TruncationConfig(capture=CaptureConfig(unrecoverable_hint=_CUT_PRINT_HINT)),  # pyright: ignore[reportCallIssue]
 ):
     """You are a careful agent working in one local repository.
 
@@ -1045,6 +1048,7 @@ class AtomAgent(
             max_context_tokens=32768,
             event_format=FormatConfig(max_string=40000, max_length=200, max_depth=8),
         ),
+        context_view=CurrentCallPredictView(),
     )
     async def _reflect_done_plan(self, request: dict[str, Any]) -> DoneReflectionPlan:
         """Internal bounded reflection after an already-delivered accepted Done.
@@ -1080,7 +1084,7 @@ class AtomAgent(
                 postconditions=[require_role],
             )
         ),
-        context=_CONTEXT,
+        context_view=_ATOM_VIEW,
     )
     async def handle(
         self, notification: Annotated[dict[str, list[Any]], _NOTIFICATION]
@@ -1137,4 +1141,4 @@ for _method in (
     spec(_method, hidden=True)
 spec(Shell, "current_dir", hidden=True)  # the status block shows a session's directory
 spec(Question, "id", hidden=True)
-del _name, _cls, _members, _member, _method
+del _name, _cls, _members, _member, _method  # pyright: ignore[reportPossiblyUnboundVariable]

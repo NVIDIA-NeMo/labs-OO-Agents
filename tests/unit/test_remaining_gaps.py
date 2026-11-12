@@ -6,7 +6,6 @@ Targets:
 - nemo_relay_middleware.py: async middleware handlers
 - config/truncation_config.py: validators
 - runtime/async_safety.py: concurrent.futures safety
-- runtime/event_query.py: event filtering
 - runtime/media_capture.py: media/image capture
 """
 
@@ -16,7 +15,6 @@ import concurrent.futures
 import importlib
 import sys
 from contextlib import contextmanager
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -813,139 +811,6 @@ class TestAsyncSafety:
         future.set_exception(ValueError("test error"))
         exc = future.exception()
         assert isinstance(exc, ValueError)
-
-
-# ===========================================================================
-# runtime/event_query.py
-# ===========================================================================
-
-
-class TestEventQuery:
-    """Cover event_query.py filtering paths (lines 78, 87, 112, 116-122, 126)."""
-
-    def _make_event(self, class_name: str, call_id: str | None = None, content: str = "") -> Any:
-        """Create a minimal mock event."""
-        ev = MagicMock()
-        ev.__class__.__name__ = class_name
-        ev.metadata = {"call_id": call_id} if call_id else {}
-        ev.__str__ = lambda self: content
-        return ev
-
-    def test_by_type_classmethod(self):
-        from nooa.runtime.event_query import EventQuery
-
-        q = EventQuery.by_type("Task", limit=5)
-        assert q.type == "Task"
-        assert q.limit == 5
-
-    def test_last_n_classmethod(self):
-        from nooa.runtime.event_query import EventQuery
-
-        q = EventQuery.last_n(10)
-        assert q.limit == 10
-
-    def test_current_call_classmethod(self):
-        from nooa.runtime.event_query import EventQuery
-
-        q = EventQuery.current_call(limit=3)
-        assert q.call_id == "current"
-        assert q.limit == 3
-
-    def test_apply_filter_by_type(self):
-        from nooa.runtime.event_query import EventQuery
-
-        events = [
-            self._make_event("Task"),
-            self._make_event("Error"),
-            self._make_event("Task"),
-        ]
-        q = EventQuery(type="Task")
-        result = q.apply(events)
-        assert len(result) == 2
-        assert all(e.__class__.__name__ == "Task" for e in result)
-
-    def test_apply_filter_by_call_id_literal(self):
-        from nooa.runtime.event_query import EventQuery
-
-        events = [
-            self._make_event("Task", call_id="call-1"),
-            self._make_event("Task", call_id="call-2"),
-            self._make_event("Task", call_id="call-1"),
-        ]
-        q = EventQuery(call_id="call-1")
-        result = q.apply(events)
-        assert len(result) == 2
-
-    def test_apply_filter_by_call_id_current(self):
-        from nooa.runtime.event_query import EventQuery
-
-        events = [
-            self._make_event("Task", call_id="call-abc"),
-            self._make_event("Task", call_id="call-xyz"),
-        ]
-        q = EventQuery(call_id="current")
-        result = q.apply(events, current_call_id="call-abc")
-        assert len(result) == 1
-
-    def test_apply_filter_by_query_text(self):
-        from nooa.runtime.event_query import EventQuery
-
-        events = [
-            self._make_event("Task", content="find the answer"),
-            self._make_event("Task", content="calculate pi"),
-        ]
-        q = EventQuery(query="answer")
-        result = q.apply(events)
-        assert len(result) == 1
-
-    def test_apply_filter_by_query_regex(self):
-        from nooa.runtime.event_query import EventQuery
-
-        events = [
-            self._make_event("Task", content="error 404 not found"),
-            self._make_event("Task", content="success"),
-        ]
-        q = EventQuery(query=r"error \d+", regex=True)
-        result = q.apply(events)
-        assert len(result) == 1
-
-    def test_apply_limit(self):
-        from nooa.runtime.event_query import EventQuery
-
-        events = [self._make_event("Task") for _ in range(10)]
-        q = EventQuery(limit=3)
-        result = q.apply(events)
-        assert len(result) == 3
-
-    def test_apply_limit_takes_last_n(self):
-        """limit slices from the end."""
-        from nooa.runtime.event_query import EventQuery
-
-        events = [self._make_event("Task", content=f"event {i}") for i in range(5)]
-        q = EventQuery(limit=2)
-        result = q.apply(events)
-        assert result == events[-2:]
-
-    def test_apply_combined_filters(self):
-        from nooa.runtime.event_query import EventQuery
-
-        events = [
-            self._make_event("Task", call_id="c1", content="alpha"),
-            self._make_event("Error", call_id="c1", content="beta"),
-            self._make_event("Task", call_id="c2", content="gamma"),
-            self._make_event("Task", call_id="c1", content="delta"),
-        ]
-        q = EventQuery(type="Task", call_id="c1", limit=1)
-        result = q.apply(events)
-        assert len(result) == 1
-
-    def test_apply_no_filters_returns_all(self):
-        from nooa.runtime.event_query import EventQuery
-
-        events = [self._make_event("Task") for _ in range(5)]
-        q = EventQuery()
-        result = q.apply(events)
-        assert result == events
 
 
 # ===========================================================================

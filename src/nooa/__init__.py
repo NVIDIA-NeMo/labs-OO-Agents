@@ -31,7 +31,24 @@ from nooa._logging import enable_logging  # noqa: E402
 from nooa._visible import visible  # noqa: E402
 from nooa.agent import Agent  # noqa: E402
 from nooa.agentdoc import hidden, spec  # noqa: E402
-from nooa.context_blocks import Context, ContextWindowStats, DynamicContext  # noqa: E402
+from nooa.context_blocks import (  # noqa: E402
+    Context,
+    ContextAssemblyError,
+    ContextWindowStats,
+    DynamicContext,
+)
+from nooa.context_view import (  # noqa: E402
+    Block,
+    CacheBoundary,
+    ContextItem,
+    ContextView,
+    apply_context_budget,
+    collect_context_items,
+    context_text,
+    evaluate_context_expression,
+    is_model_visible,
+    replayable,
+)
 from nooa.decisions import (  # noqa: E402
     BooleanDecision,
     ChoiceDecision,
@@ -47,7 +64,9 @@ from nooa.decisions import (  # noqa: E402
     Threshold,
     UnifiedDecisionModel,
 )
+from nooa.decisions.context_view import DecisionContextView  # noqa: E402
 from nooa.decorators import strategy  # noqa: E402
+from nooa.default_context_view import CodeActView, PredictView  # noqa: E402
 
 # Export errors
 from nooa.errors import (  # noqa: E402
@@ -75,7 +94,6 @@ from nooa.runtime.context import ContextApi  # noqa: E402
 from nooa.runtime.context_manager import ContextManager  # noqa: E402
 
 # Export event filtering
-from nooa.runtime.event_query import EventQuery  # noqa: E402
 from nooa.runtime.events import EventsApi  # noqa: E402
 from nooa.skill import Skill, TextSkill, get_slash_commands, slash_command  # noqa: E402
 from nooa.skill_registry import skill_from_module  # noqa: E402
@@ -157,8 +175,21 @@ __all__ = [
     # Types
     "ContextWindowStats",  # Re-exported from context_blocks
     "Context",  # Re-exported from context_blocks
+    "ContextAssemblyError",  # Re-exported from context_blocks
     "DynamicContext",  # Re-exported from context_blocks (deprecated, use Context)
-    "EventQuery",  # Event filtering configuration
+    "Block",
+    "CacheBoundary",
+    "ContextItem",
+    "ContextView",
+    "CodeActView",
+    "PredictView",
+    "DecisionContextView",
+    "apply_context_budget",
+    "collect_context_items",
+    "context_text",
+    "evaluate_context_expression",
+    "is_model_visible",
+    "replayable",
     "ContextApi",  # LLM-facing context API wrapper (Skill)
     "ContextManager",  # Context block state backend
     "EventsApi",  # Runtime events query API

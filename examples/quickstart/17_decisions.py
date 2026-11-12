@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Quickstart 16: Decision models — calibrated classification without a chat LLM.
+"""Quickstart 17: Decision models — calibrated classification without a chat LLM.
 
-OPENROUTER_API_KEY=... uv run python examples/quickstart/16_decisions.py
+OPENROUTER_API_KEY=... uv run python examples/quickstart/17_decisions.py
 
 Set DECISION_ENDPOINT to use a different decisions API, such as a gateway that
 adds credentials itself, and DECISION_MODEL to use a different model.
