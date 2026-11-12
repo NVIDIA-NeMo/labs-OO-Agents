@@ -1036,7 +1036,10 @@ Standard Python builtins and agent instance (`self`) are available."""
         if call.session_locals is None or session.execution_namespace is None:
             return
         write_back_session_locals(
-            session.execution_namespace, call.session_locals, seeded=call.seeded_locals
+            session.execution_namespace,
+            call.session_locals,
+            seeded=call.seeded_locals,
+            since=call.namespace_epoch,
         )
 
     def _create_sandbox_executor(

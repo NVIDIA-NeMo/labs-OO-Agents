@@ -460,7 +460,8 @@ def enter_call_namespace(
     user names a cell can rebind or delete; an argument wins over a same-named
     seed. Protected names (reserved runtime names, ``__builtins__``, the
     engine's internals) are never seeded. ``call.seeded_locals`` records the
-    caller's seeds for :func:`write_back_session_locals`.
+    caller's seeds and ``call.namespace_epoch`` the epoch its cells start after,
+    for :func:`write_back_session_locals`.
     """
     selector = getattr(agent, "execution_namespace_for", None)
     namespace = selector(call) if selector is not None else None
@@ -478,6 +479,8 @@ def enter_call_namespace(
                 if framework_name_allowed(name, namespace.reserved):
                     namespace.globals[name] = value
                     namespace.user_names.add(name)
+        # Cells bind names in later epochs: write-back takes only those.
+        call.namespace_epoch = namespace.epoch
         yield namespace
 
 
@@ -487,6 +490,7 @@ def write_back_session_locals(
     *,
     seeded: Mapping[str, Any],
     call_names: frozenset[str] = frozenset(),
+    since: int = 0,
 ) -> None:
     """Write what the call's cells changed back to the caller's ``session_locals``.
 
@@ -496,11 +500,18 @@ def write_back_session_locals(
     call never seeded (e.g. added by someone else while the call ran), keep the
     caller's current value; so does a seed the caller changed meanwhile when
     the cells deleted it. ``call_names`` (e.g. the call's arguments) never reach
-    the caller, and a caller key named like one keeps its value.
+    the caller, and a caller key named like one keeps its value. Only names a
+    cell bound after epoch ``since`` (``call.namespace_epoch``) are written: an
+    earlier call's bindings in a reused namespace never reach this caller.
     """
-    values = namespace.user_values()
+    values = namespace.bound_since(since)
     for name, seed in seeded.items():
-        if name not in call_names and name not in values and session_locals.get(name) is seed:
+        if (
+            name not in call_names
+            and name not in namespace.globals
+            and name in session_locals
+            and session_locals[name] is seed
+        ):
             del session_locals[name]
     for name, value in values.items():
         if name in call_names or (name in seeded and value is seeded[name]):
@@ -713,6 +724,15 @@ class ExecutionNamespace:
     def user_values(self) -> dict[str, Any]:
         """The names cells (or a caller's seed) bound, not the seeded runtime."""
         return {name: self.globals[name] for name in self.user_names if name in self.globals}
+
+    def bound_since(self, epoch: int) -> dict[str, Any]:
+        """The user names a cell bound after ``epoch`` that still exist."""
+        bound_in = self._bound_in
+        return {
+            name: self.globals[name]
+            for name in self.user_names
+            if name in self.globals and bound_in.get(name, 0) > epoch
+        }
 
     def inventory(self) -> dict[str, Any]:
         """Bounded names/types only, newest binding first; no repr, deep walks or callbacks."""
