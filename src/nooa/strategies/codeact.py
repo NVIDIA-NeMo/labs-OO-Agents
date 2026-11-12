@@ -66,7 +66,7 @@ from nooa.events import (
 )
 from nooa.runtime.execution_namespace import (
     ExecutionNamespace,
-    call_execution_namespace,
+    enter_call_namespace,
     write_back_session_locals,
 )
 from nooa.runtime.harness_metrics import get_harness_metrics
@@ -1035,7 +1035,9 @@ Standard Python builtins and agent instance (`self`) are available."""
         """
         if call.session_locals is None or session.execution_namespace is None:
             return
-        write_back_session_locals(session.execution_namespace, call.session_locals)
+        write_back_session_locals(
+            session.execution_namespace, call.session_locals, seeded=call.seeded_locals
+        )
 
     def _create_sandbox_executor(
         self, runtime: RuntimeServices, call: "CurrentCall", builtins: dict[str, Any]
@@ -1100,12 +1102,14 @@ Standard Python builtins and agent instance (`self`) are available."""
         # Guarantee the sandbox worker is torn down on EVERY exit — including the
         # GenerationError paths inside the loop — not just the success returns.
         session_holder: dict[str, Any] = {}
-        namespace = None  # The sandbox backend keeps its worker's namespace.
-        if self.config.execution_backend == "inprocess":
-            namespace = call_execution_namespace(runtime.agent, call)
-        call.execution_namespace = namespace
+        # The sandbox backend keeps its worker's namespace.
+        inprocess = self.config.execution_backend == "inprocess"
+        call.execution_namespace = None
         try:
-            with namespace.enter({}) if namespace is not None else contextlib.nullcontext():
+            with (
+                enter_call_namespace(runtime.agent, call) if inprocess else contextlib.nullcontext()
+            ) as namespace:
+                call.execution_namespace = namespace
                 return await self._run_generation(runtime, call, session_holder)
         finally:
             session = session_holder.get("session")

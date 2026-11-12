@@ -175,7 +175,7 @@ Rules:
 In-process cells have one execution path: `ActorRuntime.execute_code` runs
 every cell in an owned `ExecutionNamespace` (`nooa.runtime.execution_namespace`),
 one authoritative globals dictionary that the cell's bindings are written to.
-CodeAct and PurePython take it from `call_execution_namespace(agent, call)`,
+CodeAct and PurePython enter it with `enter_call_namespace(agent, call)`,
 i.e. `Agent.execution_namespace_for(call)` (a fresh namespace per call by
 default; Atom's `handle` keeps one per live session). A direct `execute_code`
 call without a namespace runs in a fresh one for that cell (pass a namespace
