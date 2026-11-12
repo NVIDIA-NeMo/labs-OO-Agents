@@ -4,12 +4,7 @@
 
 Used by pformat/truncating_pformat to bound memory during formatting of large objects.
 
-Two flavors:
-
-- :class:`TruncatingStringIO` — pure in-memory head/tail buffer (default).
-- :class:`FileBackedTruncatingStringIO` — same truncation, but also streams
-  all output to a temp file and includes the file path in the truncation
-  notice, so the full untruncated output remains retrievable.
+- :class:`TruncatingStringIO` — pure in-memory head/tail buffer.
 
 With ``tail_chars == limit`` (no head) the buffer keeps only the end of the
 output and the notice is one short line before it.
@@ -28,8 +23,6 @@ import codecs
 import collections
 import io
 import logging
-import os
-import tempfile
 from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING
 
@@ -203,126 +196,6 @@ class TruncatingStringIO(io.StringIO):
     def chars_written(self) -> int:
         """Total characters written (including chars that were dropped)."""
         return self._chars_written
-
-
-class FileBackedTruncatingStringIO(TruncatingStringIO):
-    """TruncatingStringIO that also writes full output to a file.
-
-    Behaves identically to :class:`TruncatingStringIO` for in-memory
-    head/tail truncation, but additionally streams all written content to a
-    file on disk (UTF-8; lone surrogates are written as ``\\udXXX`` escapes):
-    a new temp file. When truncated, ``getvalue()`` includes the file path
-    in the notice so the user can inspect the full output.
-
-    File I/O errors are handled gracefully — if the file cannot be
-    created or written to, the stream falls back to pure in-memory behavior
-    (identical to the parent class).
-
-    The caller is responsible for cleanup via :meth:`cleanup` (which removes
-    the file) or :meth:`close` (which closes the file handle but leaves
-    the file on disk for later reference).
-    """
-
-    def __init__(
-        self,
-        limit: int = TruncatingStringIO.DEFAULT_LIMIT,
-        tail_chars: int | None = None,
-        *,
-        dir: str | None = None,
-        prefix: str = "nemo_output_",
-        suffix: str = ".txt",
-        unrecoverable_hint: str | None = None,
-    ):
-        super().__init__(limit=limit, tail_chars=tail_chars, unrecoverable_hint=unrecoverable_hint)
-        self._file_failed = False
-        self._file_path: str | None = None
-        self._file: io.BufferedWriter | None = None
-        try:
-            fd, temp_path = tempfile.mkstemp(dir=dir, prefix=prefix, suffix=suffix)
-            self._file = os.fdopen(fd, "wb")
-            self._file_path = temp_path
-        except OSError:
-            _log.warning(
-                "Failed to create file for output capture; falling back to in-memory",
-                exc_info=True,
-            )
-            self._file_failed = True
-
-    def write(self, s: str) -> int:
-        """Write to both the file and the in-memory truncating buffer."""
-        if self._file is not None and not self._file_failed and not self._file.closed:
-            try:
-                self._file.write(s.encode("utf-8", errors="backslashreplace"))
-                self._file.flush()
-            except OSError:
-                _log.warning("Failed to write to file; disabling file backing", exc_info=True)
-                self._file_failed = True
-        return super().write(s)
-
-    def _output_path(self) -> str | None:
-        if self._file_path and not self._file_failed:
-            self._flush_file()
-            return self._file_path
-        return super()._output_path()
-
-    def _format_truncation_notice(
-        self, head: str, tail: str, total: int, head_chars: int, tail_chars: int, dropped: int
-    ) -> str:
-        """Include the file path in the truncation notice."""
-        path = self._output_path()
-        if path:
-            file_notice = (
-                f"The full untruncated output ({total:,} chars) is in: {path}\n"
-                f"Read that file to see the {dropped:,} chars not shown here.\n"
-            )
-        else:
-            file_notice = self._not_recoverable(dropped)
-
-        return (
-            f"<truncated-output>\n"
-            f"Output too large ({total:,} chars). "
-            f"Showing first {head_chars:,} and last {tail_chars:,} chars.\n"
-            f"{file_notice}\n"
-            f"{head}\n\n"
-            f"... {dropped:,} chars not shown ...\n\n"
-            f"{tail}\n"
-            f"</truncated-output>"
-        )
-
-    def _flush_file(self) -> None:
-        """Flush the file, ignoring errors."""
-        if self._file is not None and not self._file.closed:
-            try:
-                self._file.flush()
-            except OSError:
-                pass
-
-    @property
-    def file_path(self) -> str | None:
-        """Path to the file, or None if file creation failed."""
-        return self._file_path
-
-    def close(self) -> None:
-        """Close the file handle (file remains on disk).
-
-        Intentionally does NOT call ``super().close()`` — the underlying
-        ``io.StringIO`` must stay open so ``getvalue()`` remains usable
-        after the file handle is closed.
-        """
-        if self._file is not None and not self._file.closed:
-            try:
-                self._file.close()
-            except OSError:
-                pass
-
-    def cleanup(self) -> None:
-        """Close the file handle and remove the file from disk."""
-        self.close()
-        if self._file_path is not None:
-            try:
-                os.unlink(self._file_path)
-            except OSError:
-                pass
 
 
 class LineSplitter:

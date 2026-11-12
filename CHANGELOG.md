@@ -32,6 +32,10 @@ to follow semantic versioning.
   bytes); (b) the cut is UTF-8-safe: the head ends on a code point boundary,
   so no replacement character appears there (the omitted count then includes
   the trimmed bytes: 151,425 instead of 151,424 bytes for 400,000 `漢`).
+- `FileBackedTruncatingStringIO` is removed (from `nooa.agentdoc` and
+  `nooa.runtime`): cell output capture uses `nooa.runtime.output_capture.CaptureBuffer`
+  with a `nooa.snapshot.SpillDir` instead, and nothing else used it.
+  `TruncatingStringIO`, `LineSplitter` and `bounded_lines` stay.
 - Spill files are bounded per agent: in an Atom session one `SpillDir` (20
   files of up to 64 MiB, newest kept) holds every spill of that agent: its
   `Shell`s' direct runs, the commands inside its launched jobs and its cell
