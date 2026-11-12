@@ -138,9 +138,27 @@ def normalize(value: Any) -> Any:
     return f"<{type(value).__name__}>"
 
 
+def _without_owned_dispatch_carriers(kwargs):
+    """Compare the wire body, validating only the SDK's two private carriers."""
+    carriers = {"litellm_logging_obj", "litellm_call_id"}
+    present = carriers.intersection(kwargs)
+    if present:
+        from uuid import UUID
+
+        from litellm.litellm_core_utils.litellm_logging import Logging
+
+        assert present == carriers
+        assert isinstance(kwargs["litellm_logging_obj"], Logging)
+        assert UUID(kwargs["litellm_call_id"])
+        assert (
+            kwargs["litellm_logging_obj"].model_call_details.get("_nooa_logical_call_owned") is True
+        )
+    return {key: value for key, value in kwargs.items() if key not in carriers}
+
+
 def normalize_kwargs(kwargs: dict[str, Any]) -> dict[str, Any]:
     out = {}
-    for key, value in kwargs.items():
+    for key, value in _without_owned_dispatch_carriers(kwargs).items():
         if key == "client":
             out[key] = {
                 "__client__": type(value).__name__,
@@ -700,3 +718,23 @@ async def test_wire_snapshot(wire, name):
             "responses": [summarize(r) for r in results],
         }
     check_snapshot(observed, SNAPSHOT_DIR / f"{name}.json")
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"litellm_logging_obj": object()},
+        {"litellm_call_id": "not-a-uuid"},
+        {"litellm_logging_obj": object(), "litellm_call_id": "not-a-uuid"},
+    ],
+)
+def test_wire_carrier_normalization_rejects_invalid_carriers(bad):
+    with pytest.raises(AssertionError):
+        _without_owned_dispatch_carriers(bad)
+
+
+def test_wire_carrier_normalization_keeps_all_other_fields():
+    original = {"metadata": {"user": "caller", "nested": [1, 2]}, "native_param": 9}
+    result = _without_owned_dispatch_carriers(original)
+    assert result == original
+    assert result["metadata"] is original["metadata"]

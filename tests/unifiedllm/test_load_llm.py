@@ -649,7 +649,24 @@ async def test_single_final_projection_conservative_shared_ema_and_cap_aliases(
     try:
         await _call(llm, is_async)
         assert len(prepared_calls) == len(wires) == len(estimates) == 1
-        assert wires[0] == prepared_calls[0].api_params
+        # The owned actual SDK entry adds ONLY its private logging carrier and
+        # opaque call ID after the sole final projection. Neither belongs to the
+        # prepared provider payload or HTTP body; all routing/cap kwargs match.
+        sdk_carriers = {"litellm_call_id", "litellm_logging_obj"}
+        assert sdk_carriers.isdisjoint(prepared_calls[0].api_params)
+        assert sdk_carriers <= wires[0].keys()
+        from uuid import UUID
+
+        from litellm.litellm_core_utils.litellm_logging import Logging
+
+        assert isinstance(wires[0]["litellm_logging_obj"], Logging)
+        assert UUID(wires[0]["litellm_call_id"])
+        assert (
+            wires[0]["litellm_logging_obj"].model_call_details["_nooa_logical_call_owned"] is True
+        )
+        assert {
+            key: value for key, value in wires[0].items() if key not in sdk_carriers
+        } == prepared_calls[0].api_params
         caps = [
             layer[key]
             for layer in (wires[0], wires[0]["extra_body"])

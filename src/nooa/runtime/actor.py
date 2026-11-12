@@ -95,6 +95,19 @@ def _harness_metrics_lifecycle(should_trace: bool):
     Yields hm (a HarnessMetrics instance, or None if should_trace is False).
     """
     _hm, _prev_hm = start_harness_metrics() if should_trace else (None, None)
+    from nooa.runtime.token_usage import _terminal_receiver
+    from nooa.unifiedllm._accounting import _accounting_receiver, _session_receiver
+
+    terminal = _terminal_receiver()
+    session_receiver = _session_receiver.get()
+
+    def receive(snapshot):
+        terminal(snapshot)
+        if session_receiver is not None:
+            session_receiver(snapshot)
+
+    accounting = _accounting_receiver(receive)
+    accounting.__enter__()
     _llm_cb_token = None
     if _hm is not None:
         try:
@@ -106,19 +119,22 @@ def _harness_metrics_lifecycle(should_trace: bool):
     try:
         yield _hm
     finally:
-        if _hm is not None:
-            try:
-                _hm.flush_to_span()
-            finally:
-                if _prev_hm is not None:
-                    restore_harness_metrics(_prev_hm)
-        if _llm_cb_token is not None:
-            try:
-                from nooa.unifiedllm.unifiedllm import _llm_metrics_callback
+        try:
+            if _hm is not None:
+                try:
+                    _hm.flush_to_span()
+                finally:
+                    if _prev_hm is not None:
+                        restore_harness_metrics(_prev_hm)
+        finally:
+            accounting.__exit__(None, None, None)
+            if _llm_cb_token is not None:
+                try:
+                    from nooa.unifiedllm.unifiedllm import _llm_metrics_callback
 
-                _llm_metrics_callback.reset(_llm_cb_token)
-            except ImportError:
-                pass
+                    _llm_metrics_callback.reset(_llm_cb_token)
+                except ImportError:
+                    pass
 
 
 def _make_llm_metrics_bridge(hm: "HarnessMetrics") -> Callable[[str, Any], None]:
@@ -126,6 +142,10 @@ def _make_llm_metrics_bridge(hm: "HarnessMetrics") -> Callable[[str, Any], None]
     from nooa.runtime.token_usage import accumulate_tokens
 
     def _handle_token_usage(usage: Any) -> None:
+        from nooa.unifiedllm._accounting import _current_account
+
+        if _current_account.get() is not None:
+            return  # Terminal ledger, including failures, is the charge source.
         normalized = LLMUsage.from_provider(usage)
         if normalized is not None:
             accumulate_tokens(
@@ -1104,317 +1124,329 @@ class ActorRuntime:
             - LLMResponse from unifiedllm with content, reasoning, usage
             - event_id identifies the canonical provider turn for inspection or linking
         """
-        if self._current_method is None:
-            raise RuntimeError("generate() called with no current method context")
+        from nooa.unifiedllm._accounting import _invocation_delivery
 
-        from nooa.unifiedllm.limits import context_limits_for, reduced_reply_params
+        # Keep the final invocation receipt through both paths' canonical event add.
+        with _invocation_delivery():
+            if self._current_method is None:
+                raise RuntimeError("generate() called with no current method context")
 
-        # A limit a recovery learned earlier in this session (e.g. images): stay under it.
-        for recovery in self._request_recoveries:
-            recovery.before_request()
-        # Build messages from context + events (timers inside _build_messages).
-        # No proactive clamping — recovery is error-driven. If the API rejects
-        # with ContextWindowExceededError, the except handler archives events,
-        # rebuilds messages, and retries.
-        messages = await self._build_messages(
-            self._current_method,
-            call_args=self._current_call.args if self._current_call else (),
-            call_kwargs=self._current_call.kwargs if self._current_call else {},
-            tools=tools,
-            request_params=kwargs,
-        )
-        _gen_hm = get_harness_metrics()
+            from nooa.unifiedllm.limits import context_limits_for, reduced_reply_params
 
-        # Get LLM client from context var (set by _execute_with_generation)
-        llm_client = _current_llm_var.get()
-        if llm_client is None:
-            raise RuntimeError("generate() called with no LLM client in context")
+            # A limit a recovery learned earlier in this session (e.g. images): stay under it.
+            for recovery in self._request_recoveries:
+                recovery.before_request()
+            # Build messages from context + events (timers inside _build_messages).
+            # No proactive clamping — recovery is error-driven. If the API rejects
+            # with ContextWindowExceededError, the except handler archives events,
+            # rebuilds messages, and retries.
+            messages = await self._build_messages(
+                self._current_method,
+                call_args=self._current_call.args if self._current_call else (),
+                call_kwargs=self._current_call.kwargs if self._current_call else {},
+                tools=tools,
+                request_params=kwargs,
+            )
+            _gen_hm = get_harness_metrics()
 
-        current_generation_id = self._generation_id_stack[-1] if self._generation_id_stack else None
+            # Get LLM client from context var (set by _execute_with_generation)
+            llm_client = _current_llm_var.get()
+            if llm_client is None:
+                raise RuntimeError("generate() called with no LLM client in context")
 
-        # Snapshot system prompt + dynamic context from the rendered messages
-        # (consumed by the ATIF exporter). Captured here, at render time.
-        _dynamic_context = _snapshot_llm_request(
-            self.event_manager, messages, current_generation_id or ""
-        )
-
-        # --- Middleware: llm_call -------------------------------------------
-        # record_turn() first so turn_count reflects THIS turn (1-indexed) —
-        # both the lifecycle events below and the metric read the same value.
-        _gen_hm.record_turn()
-        em = self.event_manager
-
-        # --- Observable LLM-call lifecycle events --------------------------
-        # RUNTIME_EVENTs (never recorded) emitted around the acall() round-trip
-        # so observers can subscribe via on("LLMCallStart"/"LLMCallEnd") to
-        # surface "waiting on model" without inferring it from cell boundaries.
-        _llm_strategy = _current_strategy_var.get()
-        _llm_event_meta = {
-            "method_name": self._current_method.__name__,
-            "strategy": type(_llm_strategy).__name__ if _llm_strategy is not None else "default",
-            "generation_id": current_generation_id or "",
-            "turn_number": _gen_hm.turn_count if isinstance(_gen_hm.turn_count, int) else 0,
-        }
-
-        _llm_started_ns = [time.time_ns()]
-
-        def _notify_llm_call(response: Any = None, exception_type: str | None = None) -> None:
-            # One observation per logical call (tracing turns it into an llm_call span).
-            call_on_llm_call(
-                agent=self.agent,
-                method_name=_llm_event_meta["method_name"],
-                generation_id=_llm_event_meta["generation_id"],
-                start_time_ns=_llm_started_ns[0],
-                end_time_ns=time.time_ns(),
-                response=response,
-                exception_type=exception_type,
-                turn_number=_llm_event_meta["turn_number"],
-                strategy=_llm_event_meta["strategy"],
-                llm_client=llm_client,
+            current_generation_id = (
+                self._generation_id_stack[-1] if self._generation_id_stack else None
             )
 
-        def _emit_llm_start() -> None:
-            _llm_started_ns[0] = time.time_ns()
-            em.add(LLMCallStart(**_llm_event_meta), record=False)
-
-        def _emit_llm_end(*, success: bool, exception_type: str | None = None) -> None:
-            em.add(
-                LLMCallEnd(**_llm_event_meta, success=success, exception_type=exception_type),
-                record=False,
+            # Snapshot system prompt + dynamic context from the rendered messages
+            # (consumed by the ATIF exporter). Captured here, at render time.
+            _dynamic_context = _snapshot_llm_request(
+                self.event_manager, messages, current_generation_id or ""
             )
-            if not success:
-                _notify_llm_call(exception_type=exception_type)
 
-        has_mw = bool(em._middleware.get("llm_call"))
-        with _gen_hm.timer("time_llm_call"):
-            if has_mw:
-                from nooa.runtime.middleware import LLMCallContext
+            # --- Middleware: llm_call -------------------------------------------
+            # record_turn() first so turn_count reflects THIS turn (1-indexed) —
+            # both the lifecycle events below and the metric read the same value.
+            _gen_hm.record_turn()
+            em = self.event_manager
 
-                params: dict[str, Any] = {**kwargs, "tools": tools}
-                if output_model is not None:
-                    params["output_model"] = output_model
-                ctx = LLMCallContext(
-                    messages=messages,
-                    params=params,
+            # --- Observable LLM-call lifecycle events --------------------------
+            # RUNTIME_EVENTs (never recorded) emitted around the acall() round-trip
+            # so observers can subscribe via on("LLMCallStart"/"LLMCallEnd") to
+            # surface "waiting on model" without inferring it from cell boundaries.
+            _llm_strategy = _current_strategy_var.get()
+            _llm_event_meta = {
+                "method_name": self._current_method.__name__,
+                "strategy": type(_llm_strategy).__name__
+                if _llm_strategy is not None
+                else "default",
+                "generation_id": current_generation_id or "",
+                "turn_number": _gen_hm.turn_count if isinstance(_gen_hm.turn_count, int) else 0,
+            }
+
+            _llm_started_ns = [time.time_ns()]
+
+            def _notify_llm_call(response: Any = None, exception_type: str | None = None) -> None:
+                # One observation per logical call (tracing turns it into an llm_call span).
+                call_on_llm_call(
                     agent=self.agent,
-                    runtime=self,
-                    client=llm_client,
-                    filtered_history=any(
-                        query is not None
-                        for query in (
-                            self.agent.event_manager.get_event_query(),
-                            _scoped_events_var.get(),
-                            _decorator_events_var.get(),
-                            self.agent.event_query,
-                        )
-                    ),
+                    method_name=_llm_event_meta["method_name"],
+                    generation_id=_llm_event_meta["generation_id"],
+                    start_time_ns=_llm_started_ns[0],
+                    end_time_ns=time.time_ns(),
+                    response=response,
+                    exception_type=exception_type,
+                    turn_number=_llm_event_meta["turn_number"],
+                    strategy=_llm_event_meta["strategy"],
+                    llm_client=llm_client,
                 )
 
-                async def _core_llm(ctx: LLMCallContext) -> LLMCallContext:
-                    self._update_context_limits(ctx.client, ctx.params)
-                    # Tracing hook fires AFTER middleware pre-processing,
-                    # so it sees the final (possibly modified) messages.
+            def _emit_llm_start() -> None:
+                _llm_started_ns[0] = time.time_ns()
+                em.add(LLMCallStart(**_llm_event_meta), record=False)
+
+            def _emit_llm_end(*, success: bool, exception_type: str | None = None) -> None:
+                em.add(
+                    LLMCallEnd(**_llm_event_meta, success=success, exception_type=exception_type),
+                    record=False,
+                )
+                if not success:
+                    _notify_llm_call(exception_type=exception_type)
+
+            has_mw = bool(em._middleware.get("llm_call"))
+            with _gen_hm.timer("time_llm_call"):
+                if has_mw:
+                    from nooa.runtime.middleware import LLMCallContext
+
+                    params: dict[str, Any] = {**kwargs, "tools": tools}
+                    if output_model is not None:
+                        params["output_model"] = output_model
+                    ctx = LLMCallContext(
+                        messages=messages,
+                        params=params,
+                        agent=self.agent,
+                        runtime=self,
+                        client=llm_client,
+                        filtered_history=any(
+                            query is not None
+                            for query in (
+                                self.agent.event_manager.get_event_query(),
+                                _scoped_events_var.get(),
+                                _decorator_events_var.get(),
+                                self.agent.event_query,
+                            )
+                        ),
+                    )
+
+                    async def _core_llm(ctx: LLMCallContext) -> LLMCallContext:
+                        self._update_context_limits(ctx.client, ctx.params)
+                        # Tracing hook fires AFTER middleware pre-processing,
+                        # so it sees the final (possibly modified) messages.
+                        call_before_hook(
+                            "on_messages_built",
+                            agent=self.agent,
+                            method_name=self._current_method.__name__,
+                            messages=ctx.messages,
+                            generation_id=current_generation_id or "",
+                            context_stats=self._last_context_stats,
+                        )
+                        om = ctx.params.get("output_model", None)
+                        call_params = {k: v for k, v in ctx.params.items() if k != "output_model"}
+                        _mw_strategy = _current_strategy_var.get()
+                        _mw_strategy_tag = (
+                            type(_mw_strategy).__name__ if _mw_strategy is not None else "default"
+                        )
+                        ctx.params.setdefault(
+                            "prompt_cache_key",
+                            _derive_prompt_cache_key(self.agent._agent_id, _mw_strategy_tag),
+                        )
+                        call_params["prompt_cache_key"] = ctx.params["prompt_cache_key"]
+                        ctx.response = await llm_client.acall(
+                            ctx.messages,
+                            output_model=om,
+                            **call_params,
+                        )
+                        return ctx
+
+                    _emit_llm_start()
+
+                    async def _rebuild_middleware_messages() -> None:
+                        nonlocal _dynamic_context
+                        ctx.messages = await self._build_messages(
+                            self._current_method,
+                            call_args=self._current_call.args if self._current_call else (),
+                            call_kwargs=self._current_call.kwargs if self._current_call else {},
+                            tools=ctx.params.get("tools"),
+                            request_params=ctx.params,
+                            llm_client=ctx.client,
+                        )
+                        _dynamic_context = _snapshot_llm_request(
+                            self.event_manager, ctx.messages, current_generation_id or ""
+                        )
+
+                    async def _run_middleware() -> LLMCallContext:
+                        return await em.run_middleware("llm_call", ctx, _core_llm)
+
+                    def _recover_middleware_window(_cw_exc: BaseException) -> bool:
+                        # Always archive first — even if we can't reduce max_tokens,
+                        # shedding events lets the retry (or caller's next attempt) succeed.
+                        _ctx_window = _context_window_for_error(ctx.client, _cw_exc, ctx.params)
+                        self._archive_on_context_error(_ctx_window, exc=_cw_exc)
+                        _reduced = _compute_reduced_max_tokens(
+                            _cw_exc,
+                            _ctx_window,
+                            context_limits_for(ctx.client, ctx.params).reserved_output_tokens,
+                        )
+                        if _reduced is None:
+                            return False
+                        logger.warning(
+                            "context-window recovery (middleware): reducing max_tokens %s -> %d",
+                            ctx.params.get("max_tokens"),
+                            _reduced,
+                        )
+                        ctx.params = reduced_reply_params(ctx.client, ctx.params, _reduced)
+                        return True
+
+                    try:
+                        ctx = await self._call_with_recovery(
+                            _run_middleware,
+                            _rebuild_middleware_messages,
+                            _recover_middleware_window,
+                        )
+                    except Exception as _exc:
+                        _emit_llm_end(success=False, exception_type=type(_exc).__name__)
+                        raise
+                    _emit_llm_end(success=True)
+                    response = ctx.response
+                    if response is None:
+                        raise RuntimeError(
+                            "llm_call middleware returned without setting ctx.response. "
+                            "Short-circuiting middleware must set ctx.response before returning."
+                        )
+                else:
+                    # Fast path — no middleware registered
                     call_before_hook(
                         "on_messages_built",
                         agent=self.agent,
                         method_name=self._current_method.__name__,
-                        messages=ctx.messages,
+                        messages=messages,
                         generation_id=current_generation_id or "",
                         context_stats=self._last_context_stats,
                     )
-                    om = ctx.params.get("output_model", None)
-                    call_params = {k: v for k, v in ctx.params.items() if k != "output_model"}
-                    _mw_strategy = _current_strategy_var.get()
-                    _mw_strategy_tag = (
-                        type(_mw_strategy).__name__ if _mw_strategy is not None else "default"
+                    # Default prompt_cache_key to per-(agent, strategy) so:
+                    #   - Parallel agents (same prefix) get distinct shards by
+                    #     agent_id, avoiding the cybergym multi-trial collision
+                    #     above the ~15 req/min per-key routing guidance for
+                    #     OpenAI models before GPT-5.6.
+                    #   - Within one agent, calls that use different strategies
+                    #     (e.g. CodeAct vs Predict) get separate shards because
+                    #     their cacheable prefixes diverge anyway — preventing
+                    #     them from compounding load on a shared shard.
+                    #   - Same-strategy methods on one agent stay on one shard,
+                    #     keeping shared-prefix caching (system prompt + strategy
+                    #     prompt + execution_context + agent doc all match).
+                    _kwargs = dict(kwargs)
+                    _current_strategy = _current_strategy_var.get()
+                    _strategy_tag = (
+                        type(_current_strategy).__name__
+                        if _current_strategy is not None
+                        else "default"
                     )
-                    ctx.params.setdefault(
+                    _kwargs.setdefault(
                         "prompt_cache_key",
-                        _derive_prompt_cache_key(self.agent._agent_id, _mw_strategy_tag),
+                        _derive_prompt_cache_key(self.agent._agent_id, _strategy_tag),
                     )
-                    call_params["prompt_cache_key"] = ctx.params["prompt_cache_key"]
-                    ctx.response = await llm_client.acall(
-                        ctx.messages,
-                        output_model=om,
-                        **call_params,
-                    )
-                    return ctx
+                    _emit_llm_start()
 
-                _emit_llm_start()
+                    async def _rebuild_messages() -> None:
+                        nonlocal messages, _dynamic_context
+                        messages = await self._build_messages(
+                            self._current_method,
+                            call_args=self._current_call.args if self._current_call else (),
+                            call_kwargs=self._current_call.kwargs if self._current_call else {},
+                            tools=tools,
+                            request_params=_kwargs,
+                        )
+                        _dynamic_context = _snapshot_llm_request(
+                            self.event_manager, messages, current_generation_id or ""
+                        )
 
-                async def _rebuild_middleware_messages() -> None:
-                    nonlocal _dynamic_context
-                    ctx.messages = await self._build_messages(
-                        self._current_method,
-                        call_args=self._current_call.args if self._current_call else (),
-                        call_kwargs=self._current_call.kwargs if self._current_call else {},
-                        tools=ctx.params.get("tools"),
-                        request_params=ctx.params,
-                        llm_client=ctx.client,
-                    )
-                    _dynamic_context = _snapshot_llm_request(
-                        self.event_manager, ctx.messages, current_generation_id or ""
-                    )
+                    async def _call_llm() -> Any:
+                        return await llm_client.acall(
+                            messages, tools=tools, output_model=output_model, **_kwargs
+                        )
 
-                async def _run_middleware() -> LLMCallContext:
-                    return await em.run_middleware("llm_call", ctx, _core_llm)
+                    def _recover_window(_cw_exc: BaseException) -> bool:
+                        nonlocal _kwargs
+                        # Always archive first — even if we can't reduce max_tokens,
+                        # shedding events lets the retry (or caller's next attempt) succeed.
+                        _ctx_window = _context_window_for_error(llm_client, _cw_exc, _kwargs)
+                        self._archive_on_context_error(_ctx_window, exc=_cw_exc)
+                        _reduced = _compute_reduced_max_tokens(
+                            _cw_exc,
+                            _ctx_window,
+                            context_limits_for(llm_client, _kwargs).reserved_output_tokens,
+                        )
+                        if _reduced is None:
+                            # Archival already ran: the caller (e.g. CodeAct) retries
+                            # with fresh messages.
+                            return False
+                        logger.warning(
+                            "context-window recovery: reducing max_tokens %s -> %d "
+                            "(prompt=%s, ctx_window=%s)",
+                            kwargs.get("max_tokens"),
+                            _reduced,
+                            _parse_prompt_tokens(_cw_exc),
+                            _ctx_window,
+                        )
+                        # _kwargs keeps the per-(agent, strategy) cache key, so the
+                        # retry lands on the same shard as the original attempt.
+                        _kwargs = reduced_reply_params(llm_client, _kwargs, _reduced)
+                        return True
 
-                def _recover_middleware_window(_cw_exc: BaseException) -> bool:
-                    # Always archive first — even if we can't reduce max_tokens,
-                    # shedding events lets the retry (or caller's next attempt) succeed.
-                    _ctx_window = _context_window_for_error(ctx.client, _cw_exc, ctx.params)
-                    self._archive_on_context_error(_ctx_window, exc=_cw_exc)
-                    _reduced = _compute_reduced_max_tokens(
-                        _cw_exc,
-                        _ctx_window,
-                        context_limits_for(ctx.client, ctx.params).reserved_output_tokens,
-                    )
-                    if _reduced is None:
-                        return False
-                    logger.warning(
-                        "context-window recovery (middleware): reducing max_tokens %s -> %d",
-                        ctx.params.get("max_tokens"),
-                        _reduced,
-                    )
-                    ctx.params = reduced_reply_params(ctx.client, ctx.params, _reduced)
-                    return True
+                    try:
+                        response = await self._call_with_recovery(
+                            _call_llm, _rebuild_messages, _recover_window
+                        )
+                    except Exception as _exc:
+                        _emit_llm_end(success=False, exception_type=type(_exc).__name__)
+                        raise
+                    _emit_llm_end(success=True)
 
-                try:
-                    ctx = await self._call_with_recovery(
-                        _run_middleware, _rebuild_middleware_messages, _recover_middleware_window
-                    )
-                except Exception as _exc:
-                    _emit_llm_end(success=False, exception_type=type(_exc).__name__)
-                    raise
-                _emit_llm_end(success=True)
-                response = ctx.response
-                if response is None:
-                    raise RuntimeError(
-                        "llm_call middleware returned without setting ctx.response. "
-                        "Short-circuiting middleware must set ctx.response before returning."
-                    )
-            else:
-                # Fast path — no middleware registered
-                call_before_hook(
-                    "on_messages_built",
-                    agent=self.agent,
-                    method_name=self._current_method.__name__,
-                    messages=messages,
-                    generation_id=current_generation_id or "",
-                    context_stats=self._last_context_stats,
+            # UnifiedLLM creates the canonical response. Enrich that same object
+            # with runtime correlation data and persist it once as the assistant
+            # turn; there is no second output or completion event to synchronize.
+            if response.tag is not None:
+                raise RuntimeError(
+                    "LLM middleware returned an already-recorded LLMResponse; "
+                    "each call must return a fresh response object"
                 )
-                # Default prompt_cache_key to per-(agent, strategy) so:
-                #   - Parallel agents (same prefix) get distinct shards by
-                #     agent_id, avoiding the cybergym multi-trial collision
-                #     above the ~15 req/min per-key routing guidance for
-                #     OpenAI models before GPT-5.6.
-                #   - Within one agent, calls that use different strategies
-                #     (e.g. CodeAct vs Predict) get separate shards because
-                #     their cacheable prefixes diverge anyway — preventing
-                #     them from compounding load on a shared shard.
-                #   - Same-strategy methods on one agent stay on one shard,
-                #     keeping shared-prefix caching (system prompt + strategy
-                #     prompt + execution_context + agent doc all match).
-                _kwargs = dict(kwargs)
-                _current_strategy = _current_strategy_var.get()
-                _strategy_tag = (
-                    type(_current_strategy).__name__ if _current_strategy is not None else "default"
-                )
-                _kwargs.setdefault(
-                    "prompt_cache_key",
-                    _derive_prompt_cache_key(self.agent._agent_id, _strategy_tag),
-                )
-                _emit_llm_start()
-
-                async def _rebuild_messages() -> None:
-                    nonlocal messages, _dynamic_context
-                    messages = await self._build_messages(
-                        self._current_method,
-                        call_args=self._current_call.args if self._current_call else (),
-                        call_kwargs=self._current_call.kwargs if self._current_call else {},
-                        tools=tools,
-                        request_params=_kwargs,
+            response.model_name = getattr(llm_client, "model", "") or response.model_name
+            response.generation_id = current_generation_id or ""
+            response.dynamic_context = _dynamic_context
+            _notify_llm_call(response=response)
+            usage = response.usage
+            if usage is not None and usage.input_tokens > 0:
+                self._last_prompt_tokens_actual = usage.input_tokens
+                if self._last_context_stats is not None:
+                    # The provider's exact prompt-token count is the single source of
+                    # truth for ctx% display, summarization triggers, and archive
+                    # sizing. render_context leaves prompt_tokens=None (no local
+                    # estimate); we write the authoritative value back here.
+                    stats = self._last_context_stats
+                    self._last_context_stats = stats.model_copy(
+                        update={"prompt_tokens": usage.input_tokens}
                     )
-                    _dynamic_context = _snapshot_llm_request(
-                        self.event_manager, messages, current_generation_id or ""
-                    )
+                    # Recalibrate the chars→tokens ratio from this real response:
+                    # tokens_per_char = prompt_tokens / total_chars. The next
+                    # render's eviction sizing uses it instead of a fixed heuristic
+                    # or the litellm tokenizer.
+                    total_chars = stats.context_blocks_chars + stats.events_chars
+                    if total_chars > 0:
+                        self._tokens_per_char = usage.input_tokens / total_chars
+            event_id = self.event_manager.add(response)
 
-                async def _call_llm() -> Any:
-                    return await llm_client.acall(
-                        messages, tools=tools, output_model=output_model, **_kwargs
-                    )
-
-                def _recover_window(_cw_exc: BaseException) -> bool:
-                    nonlocal _kwargs
-                    # Always archive first — even if we can't reduce max_tokens,
-                    # shedding events lets the retry (or caller's next attempt) succeed.
-                    _ctx_window = _context_window_for_error(llm_client, _cw_exc, _kwargs)
-                    self._archive_on_context_error(_ctx_window, exc=_cw_exc)
-                    _reduced = _compute_reduced_max_tokens(
-                        _cw_exc,
-                        _ctx_window,
-                        context_limits_for(llm_client, _kwargs).reserved_output_tokens,
-                    )
-                    if _reduced is None:
-                        # Archival already ran: the caller (e.g. CodeAct) retries
-                        # with fresh messages.
-                        return False
-                    logger.warning(
-                        "context-window recovery: reducing max_tokens %s -> %d "
-                        "(prompt=%s, ctx_window=%s)",
-                        kwargs.get("max_tokens"),
-                        _reduced,
-                        _parse_prompt_tokens(_cw_exc),
-                        _ctx_window,
-                    )
-                    # _kwargs keeps the per-(agent, strategy) cache key, so the
-                    # retry lands on the same shard as the original attempt.
-                    _kwargs = reduced_reply_params(llm_client, _kwargs, _reduced)
-                    return True
-
-                try:
-                    response = await self._call_with_recovery(
-                        _call_llm, _rebuild_messages, _recover_window
-                    )
-                except Exception as _exc:
-                    _emit_llm_end(success=False, exception_type=type(_exc).__name__)
-                    raise
-                _emit_llm_end(success=True)
-
-        # UnifiedLLM creates the canonical response. Enrich that same object
-        # with runtime correlation data and persist it once as the assistant
-        # turn; there is no second output or completion event to synchronize.
-        if response.tag is not None:
-            raise RuntimeError(
-                "LLM middleware returned an already-recorded LLMResponse; "
-                "each call must return a fresh response object"
-            )
-        response.model_name = getattr(llm_client, "model", "") or response.model_name
-        response.generation_id = current_generation_id or ""
-        response.dynamic_context = _dynamic_context
-        _notify_llm_call(response=response)
-        usage = response.usage
-        if usage is not None and usage.input_tokens > 0:
-            self._last_prompt_tokens_actual = usage.input_tokens
-            if self._last_context_stats is not None:
-                # The provider's exact prompt-token count is the single source of
-                # truth for ctx% display, summarization triggers, and archive
-                # sizing. render_context leaves prompt_tokens=None (no local
-                # estimate); we write the authoritative value back here.
-                stats = self._last_context_stats
-                self._last_context_stats = stats.model_copy(
-                    update={"prompt_tokens": usage.input_tokens}
-                )
-                # Recalibrate the chars→tokens ratio from this real response:
-                # tokens_per_char = prompt_tokens / total_chars. The next
-                # render's eviction sizing uses it instead of a fixed heuristic
-                # or the litellm tokenizer.
-                total_chars = stats.context_blocks_chars + stats.events_chars
-                if total_chars > 0:
-                    self._tokens_per_char = usage.input_tokens / total_chars
-        event_id = self.event_manager.add(response)
-
-        return response, event_id
+            return response, event_id
 
     async def execute_code(
         self,

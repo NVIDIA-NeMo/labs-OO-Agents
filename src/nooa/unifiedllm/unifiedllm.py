@@ -9,7 +9,7 @@ import re
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Coroutine, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from typing import Any, Literal, cast
 
@@ -1347,6 +1347,12 @@ class UnifiedLLM(ABC):
                 messages, tools, output_model, kwargs, call_config
             )
             adapter = self._adapter
+        from ._accounting import _current_account
+
+        if _current_account.get() is not None:
+            from ._route_calibration import _calibration_adapter
+
+            adapter = _calibration_adapter(adapter)
         return request, model, adapter
 
     def _strict_adapter_request(self, messages, tools, output_model, overrides, call_config):
@@ -1621,14 +1627,15 @@ class UnifiedLLM(ABC):
         - json.JSONDecodeError: if JSON parsing fails
         - Other exceptions for API errors
         """
-        staged: list[tuple[set, Any]] = []
-        return logical_sync(
-            lambda: None,
-            lambda _: self._call_once(messages, tools, output_model, **kwargs),
-            recovery_attempts=self._media_recovery_attempts(),
-            recover=lambda exc: self._exclude_rejected_media(messages, kwargs, exc, staged),
-            rollback=lambda: self._unstage_media(staged),
-        )
+        with _legacy_account_scope(self, messages):
+            staged: list[tuple[set, Any]] = []
+            return logical_sync(
+                lambda: None,
+                lambda _: self._call_once(messages, tools, output_model, **kwargs),
+                recovery_attempts=self._media_recovery_attempts(),
+                recover=lambda exc: self._exclude_rejected_media(messages, kwargs, exc, staged),
+                rollback=lambda: self._unstage_media(staged),
+            )
 
     async def acall(
         self,
@@ -1638,14 +1645,15 @@ class UnifiedLLM(ABC):
         **kwargs,
     ) -> LLMResponse:
         """Async version of call"""
-        staged: list[tuple[set, Any]] = []
-        return await logical_async(
-            lambda: None,
-            lambda _: self._acall_once(messages, tools, output_model, **kwargs),
-            recovery_attempts=self._media_recovery_attempts(),
-            recover=lambda exc: self._exclude_rejected_media(messages, kwargs, exc, staged),
-            rollback=lambda: self._unstage_media(staged),
-        )
+        with _legacy_account_scope(self, messages):
+            staged: list[tuple[set, Any]] = []
+            return await logical_async(
+                lambda: None,
+                lambda _: self._acall_once(messages, tools, output_model, **kwargs),
+                recovery_attempts=self._media_recovery_attempts(),
+                recover=lambda exc: self._exclude_rejected_media(messages, kwargs, exc, staged),
+                rollback=lambda: self._unstage_media(staged),
+            )
 
     @abstractmethod
     def _call_once(
@@ -1666,6 +1674,20 @@ class UnifiedLLM(ABC):
         **kwargs,
     ) -> LLMResponse:
         """Async ``_call_once``; ``acall`` adds media recovery around it. Subclasses implement it."""
+
+
+@contextmanager
+def _legacy_account_scope(client, messages):
+    # These exact built-ins own the existing logical flow. Inherited custom
+    # clients may journal manually; no ambient identity claims for them.
+    from ._accounting import _logical_account_scope
+
+    owned = type(client) in (CompletionClient, ReasoningCompletionClient, ResponsesClient)
+    owned = owned and not any(
+        name in client.__dict__ for name in ("_call_once", "_acall_once", "call", "acall")
+    )
+    with _logical_account_scope(model=client.model, messages=messages) if owned else nullcontext():
+        yield
 
 
 def _collect_sync(raw: Any) -> "litellm.ModelResponse":
@@ -1709,11 +1731,19 @@ async def _collect_async(raw: Any) -> "litellm.ModelResponse":
     return raw
 
 
+# Private consumer lease hook, captured by the existing shielded transport owner.
+# It neither admits nor executes provider work; Gym retains its HTTP reservations
+# through actual exit rather than caller cancellation.
+_provider_lifetime: ContextVar[Any] = ContextVar("_provider_lifetime", default=None)
+
+
 async def _run_async_provider_call[T](
     call: Callable[[], Coroutine[Any, Any, T]],
     *,
     request_timeout: float | None,
     _wire_owner=None,
+    _attempt_owner=None,
+    _hidden_retries=False,
 ) -> T:
     """Dispatch after admission; the actual shielded task owns wire resources.
 
@@ -1721,12 +1751,15 @@ async def _run_async_provider_call[T](
     dispatched, caller cancellation remains prompt while the provider retains
     its admission permit and transport lease through streaming/actual exit.
     """
+    lifetime = _provider_lifetime.get()
     admission_controller = _current_admission_controller()
     permit = (
         await admission_controller.acquire(_record_admission_observation)
         if admission_controller is not None
         else None
     )
+    if _attempt_owner is not None:
+        _attempt_owner.writer.admission()
     acquired = False
     try:
         if _wire_owner is not None:
@@ -1738,7 +1771,14 @@ async def _run_async_provider_call[T](
         async def owned_call():
             nonlocal started
             started = True
-            return await _run_admitted_attempt(call, permit) if permit is not None else await call()
+            if _attempt_owner is not None:
+                _attempt_owner.writer.entering_provider(hidden_retries=_hidden_retries)
+            with lifetime() if lifetime is not None else nullcontext():
+                return (
+                    await _run_admitted_attempt(call, permit)
+                    if permit is not None
+                    else await call()
+                )
 
         def release_task_resources(completed):
             # A done callback also covers cancellation before coroutine entry.

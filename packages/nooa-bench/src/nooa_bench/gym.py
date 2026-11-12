@@ -27,6 +27,7 @@ import inspect
 import json
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -139,10 +140,13 @@ _current_invocation: ContextVar[str] = ContextVar("nooa_gym_invocation", default
 class _PolicySlot:
     """One admitted ``acall``: counts against the budget until a response under 400 lands."""
 
-    __slots__ = ("answered",)
+    __slots__ = ("answered", "active", "closed", "refusal")
 
     def __init__(self) -> None:
         self.answered = False
+        self.active = 0
+        self.closed = False
+        self.refusal: Exception | None = None
 
 
 _current_slot: ContextVar[_PolicySlot | None] = ContextVar("nooa_gym_policy_slot", default=None)
@@ -240,6 +244,53 @@ class _RecordingClient(ResponsesClient):
                 guard.refuse("client_policy_guard_missing")
             guard.check_model(_current_invocation.get(), output_model)
 
+    def _used_policy_slots(self) -> int:
+        return sum(
+            1 for r in self._records if r.status_code is not None and r.status_code < 400
+        ) + sum(1 for slot in self._slots if not slot.answered)
+
+    def _check_budget(self) -> None:
+        if (
+            self._max_policy_calls is not None
+            and self._used_policy_slots() >= self._max_policy_calls
+        ):
+            raise PolicyCallBudgetExceeded(
+                f"policy call budget of {self._max_policy_calls} exhausted"
+            )
+
+    def _cleanup_slot(self, slot) -> None:
+        if not slot.closed or slot.active:
+            return
+        self._slots.discard(slot)
+        for request_id, pending_slot in list(self._slot_of.items()):
+            if pending_slot is slot:
+                self._slot_of.pop(request_id, None)
+                self._pending.pop(request_id, None)
+
+    @contextmanager
+    def _provider_scope(self, slot):
+        slot.active += 1
+        slot.refusal = None
+        try:
+            yield
+        except Exception:
+            # LiteLLM maps exceptions raised by HTTP hooks to provider errors.
+            # Restore ONLY this call-bound policy refusal, never inspect causes
+            # or classify provider text (which may quote arbitrary replies).
+            if slot.refusal is not None:
+                raise slot.refusal from None
+            raise
+        finally:
+            slot.refusal = None
+            slot.active -= 1
+            # Transport failures have no response hook. Remove correlation only
+            # on actual provider exit; history records remain evidence.
+            for request_id, pending_slot in list(self._slot_of.items()):
+                if pending_slot is slot:
+                    self._slot_of.pop(request_id, None)
+                    self._pending.pop(request_id, None)
+            self._cleanup_slot(slot)
+
     async def _on_request(self, request: httpx.Request) -> None:
         # Gym attributes a model call to an invocation through this header.
         request.headers["x-session-id"] = _current_invocation.get()
@@ -247,11 +298,22 @@ class _RecordingClient(ResponsesClient):
             body = json.loads(request.content or b"{}")
         except ValueError:
             body = {"_raw": request.content.decode(errors="replace")}
-        guard = self._required_episode_policy
-        if guard is not None:
-            if self._episode_policy_guard is not guard:
-                guard.refuse("client_policy_guard_missing")
-            guard.check_dispatch(_current_invocation.get(), body)
+        slot = _current_slot.get()
+        try:
+            guard = self._required_episode_policy
+            if guard is not None:
+                if self._episode_policy_guard is not guard:
+                    guard.refuse("client_policy_guard_missing")
+                guard.check_dispatch(_current_invocation.get(), body)
+            if slot is not None and slot.answered:
+                # A successful wire record already paid for the old reservation.
+                # Rearm BEFORE internal SDK/parse/empty retry HTTP dispatch.
+                self._check_budget()
+                slot.answered = False
+        except Exception as refusal:
+            if slot is not None:
+                slot.refusal = refusal
+            raise
         record = ModelCallRecord(
             invocation_id=_current_invocation.get(), request=body, started_at=time.time()
         )
@@ -282,20 +344,20 @@ class _RecordingClient(ResponsesClient):
         self._check_episode_policy(output_model)  # before budget checks/serialization/inference
         # Admit synchronously, before the first await: a concurrent root or child call
         # must see this one, which gets its status only when its response arrives.
-        used = sum(1 for r in self._records if r.status_code is not None and r.status_code < 400)
-        used += sum(1 for slot in self._slots if not slot.answered)
-        if self._max_policy_calls is not None and used >= self._max_policy_calls:
-            raise PolicyCallBudgetExceeded(
-                f"policy call budget of {self._max_policy_calls} exhausted"
-            )
+        self._check_budget()
         slot = _PolicySlot()
         self._slots.add(slot)
         token = _current_slot.set(slot)
+        from nooa.unifiedllm.unifiedllm import _provider_lifetime
+
+        lifetime_token = _provider_lifetime.set(lambda: self._provider_scope(slot))
         try:
             response = await super().acall(messages, tools, output_model, **kwargs)
         finally:
+            _provider_lifetime.reset(lifetime_token)
             _current_slot.reset(token)
-            self._slots.discard(slot)
+            slot.closed = True
+            self._cleanup_slot(slot)
         if response.finish_reason == "length" and response.tool_calls:
             # Never execute a tool call that was cut off mid-generation.
             raise OutputTokenLimitExceeded(

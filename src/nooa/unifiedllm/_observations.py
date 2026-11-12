@@ -31,16 +31,28 @@ class _NumericUsage:
     reasoning_tokens: int | None = None
     total_tokens: int | None = None
     cost_usd: float | None = None
-    cost_source: Literal["unknown", "provider", "response_metadata"] = "unknown"
+    cost_source: Literal[
+        "unknown", "provider", "response_metadata", "gateway_header", "cache_hit"
+    ] = "unknown"
 
 
 @dataclass(frozen=True, slots=True)
 class _AttemptObservation:
+    logical_id: str | None = None
+    attempt_index: int | None = None
     raw_input_estimate: int | None = None
     transmission_started: bool = False
     response_received: bool = False
     usage: _NumericUsage | None = None
     finished: bool = False
+    adapter_entered: bool = False
+    dispatch_known: bool = False
+    admission_known: bool = False
+    provider_entered: bool = False
+    hidden_retries: bool = False
+    failure_kind: str | None = None
+    status_code: int | None = None
+    retry_after: float | None = None
 
 
 class _ObservationCollector:
@@ -77,6 +89,8 @@ class _AttemptWriter:
         self.record = _AttemptObservation()
 
     def _replace(self, **changes):
+        if self.record.finished:
+            return  # Caller-terminal records never settle late shielded results.
         self.record = replace(self.record, **changes)
         if self._collector is not None:
             self._collector._records[self._index] = self.record
@@ -89,8 +103,27 @@ class _AttemptWriter:
     def transmitting(self):
         self._replace(transmission_started=True)
 
+    def entering_adapter(self):
+        self._replace(adapter_entered=True)
+
+    def admission(self):
+        self._replace(dispatch_known=True, admission_known=True)
+
+    def entering_provider(self, *, hidden_retries=False):
+        self._replace(dispatch_known=True, provider_entered=True, hidden_retries=hidden_retries)
+
     def delivered(self, usage: _NumericUsage | None):
         self._replace(response_received=True, usage=usage)
+
+    def failed(self, failure):
+        from .errors import LLMFailure
+
+        if isinstance(failure, LLMFailure) and self.record.failure_kind is None:
+            self._replace(
+                failure_kind=failure.kind.value,
+                status_code=failure.status_code,
+                retry_after=failure.retry_after,
+            )
 
     def finish(self):
         self._replace(finished=True)
@@ -137,5 +170,8 @@ def _observe_attempt(owner: _ObservationOwner | None = None):
     try:
         yield writer
     finally:
-        if writer is not None:
+        if writer is not None and owner is None:
             writer.finish()
+        # Explicit owners close in the executor's immediate finally/fold, after
+        # paid response rejection (e.g. empty content) has supplied its facts.
+        # There is no await between adapter exit and that caller-terminal fold.

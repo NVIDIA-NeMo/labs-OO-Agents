@@ -309,7 +309,7 @@ def _request_kind(error, body, code, param, status, facts):
 
 
 @contextmanager
-def failure_boundary(strict, phase, *, reply=None):
+def failure_boundary(strict, phase, *, reply=None, observation=None):
     """Invocation-local policy; legacy views keep exact raw SDK/parse identity.
 
     Admission is outside the provider and stays raw until the public executor's
@@ -318,7 +318,15 @@ def failure_boundary(strict, phase, *, reply=None):
     try:
         yield
     except Exception as error:
-        if not strict or isinstance(error, (LLMFailure, AdmissionError)):
+        # Capture only trusted normalized facts at the actual adapter boundary.
+        # This does not change legacy raised/raw identity or retry classification.
+        if isinstance(error, AdmissionError) or (not strict and observation is None):
             raise
-        normalized = normalize(error, phase, reply=reply)
+        normalized = (
+            error if isinstance(error, LLMFailure) else normalize(error, phase, reply=reply)
+        )
+        if observation is not None:
+            observation.failed(normalized)
+        if not strict or normalized is error:
+            raise
         raise normalized from normalized.__cause__
