@@ -142,6 +142,28 @@ async def test_a_conversion_then_a_format_spec_applies_both():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("spec", [".30000", ".50050", ">70000"])
+async def test_a_conversion_then_a_format_spec_is_cut_once_at_the_end(spec):
+    # The spec applies to the whole converted text, never to an already-cut one:
+    # {v!s:.30000} inserts the first 30,000 characters, as format(str(v), spec) does.
+    value = "A" * 30_000 + "B" * 30_000
+    agent = _holder()
+    actual = await agent.runtime.expand_variables("{v!s:" + spec + "}", {"v": value})
+    assert actual == render_placeholder(value, "s", spec)
+    if spec == ".30000":
+        assert actual == "A" * 30_000
+
+
+def test_a_converted_spec_placeholder_reads_the_same_in_the_system_prompt():
+    class Spec(Agent):
+        """{self.value!s:.30000}"""
+
+    agent = Spec(llm=FakeLLMClient([]))
+    agent.value = "A" * 30_000 + "B" * 30_000
+    assert agent._resolve_system_prompt() == "A" * 30_000
+
+
+@pytest.mark.asyncio
 async def test_expand_variables_keeps_small_values_byte_identical():
     agent = _holder()
     for value, expected in SMALL:

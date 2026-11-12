@@ -2571,10 +2571,12 @@ class ActorRuntime:
                 # str whole up to the cut, any other value through the
                 # snapshot; a conversion or format spec as written, then cut.
                 if format_spec:
-                    if conversion is not None:
+                    if conversion in ("r", "s", "a"):
                         # Converted before the format try, as before #580: a failing
                         # repr/str/ascii raises in every mode, like {v!s} without a spec.
-                        value = render_placeholder(value, conversion)
+                        # The whole converted text: the spec applies to it, and
+                        # render_placeholder cuts only its result, once.
+                        value = formatter.convert_field(value, conversion)
                     try:
                         result_parts.append(render_placeholder(value, None, format_spec))
                     except Exception:
