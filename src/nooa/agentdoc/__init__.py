@@ -53,8 +53,12 @@ def truncating_pformat(
     """Format a value, with a hard total-size cap for non-string objects.
 
     Strings pass through unchanged. Other options are forwarded to ``pformat()``.
-    Rendering past ``max_chars`` keeps its first and last halves around
-    ``[... N chars omitted; full output not kept]``.
+    With ``max_chars``, a value is a bounded-snapshot preview: it is captured
+    within a ``max_chars`` budget (so memory and time follow the output, not
+    the input), and its long containers and strings say what they left out
+    (``list(len=N, [:k]=[...], [-j:]=[...])``). A rendering still longer than
+    ``max_chars`` keeps its first and last halves around ``[... N chars
+    omitted; full output not kept]``. Without ``max_chars`` it is ``pformat``.
     """
     if max_chars is not None and max_chars <= 0:
         raise ValueError(f"truncating_pformat max_chars must be > 0 or None, got {max_chars}")
@@ -71,9 +75,9 @@ def truncating_pformat(
 
     from nooa.snapshot import TextStream, render_output
 
-    # The rendering streams into a bounded TextStream: memory stays within max_chars.
+    # A value is captured within max_chars; the rendering streams into a bounded TextStream.
     bounded = TextStream(unit="chars", head=max_chars - max_chars // 2, tail=max_chars // 2)
-    _pformat(obj, bounded, **kwargs)
+    _pformat(obj, bounded, _max_chars=max_chars, **kwargs)
     return render_output(bounded.close())
 
 

@@ -6,6 +6,12 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `truncating_pformat(value, max_chars=N)` captures a non-string value within
+  an `N`-char budget, so its memory and time follow the output, not the
+  input: the result is a bounded snapshot preview (`list(len=100000,
+  [:27]=[...], [-k:]=[...])`), cut again to `N` chars (head and tail around
+  `[... N chars omitted; full output not kept]`) only if its rendering is
+  still longer. Without `max_chars` it is `pformat`, unchanged.
 - Trace span `input.value` / `output.value` are `nooa.snapshot` previews:
   `render_trace(capture(value))` JSON (at most 50,000 chars, always
   `application/json`), with `nooa.{input,output}.preview.*` attributes saying

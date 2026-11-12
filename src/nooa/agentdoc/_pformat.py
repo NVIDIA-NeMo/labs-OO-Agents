@@ -150,8 +150,8 @@ def _pformat(
     inline_depth: int | None = None,
     expand_all: bool = False,
     instance_mode: str = "repr",
-    _depth: int = 0,
     _indent: int = 0,
+    _max_chars: int | None = None,
 ) -> None:
     """Write pretty-formatted representation of *_object* to *_stream*.
 
@@ -166,8 +166,10 @@ def _pformat(
         inline_depth: How deep to expand referenced types inline.
         expand_all: Always expand containers.
         instance_mode: How to format instances — "repr" or "type".
-        _depth: Current nesting depth (internal).
         _indent: Current indentation level (internal).
+        _max_chars: A value's capture budget in chars (``truncating_pformat``'s
+            ``max_chars``): the value is captured within it, so memory and time
+            follow the output, not the input. None: unbounded (internal).
     """
     # Resolve inline_depth default
     if inline_depth is None:
@@ -345,6 +347,7 @@ def _pformat(
                     max_string=max_string,
                     max_depth=max_depth,
                     expand_all=expand_all,
+                    max_chars=_max_chars,
                 )
             )
 
@@ -359,7 +362,6 @@ def _pformat_to_str(
     inline_depth: int | None = None,
     expand_all: bool = False,
     instance_mode: str = "repr",
-    _depth: int = 0,
     _indent: int = 0,
 ) -> str:
     """Convenience wrapper: call ``_pformat`` into an ``io.StringIO`` and return the string."""
@@ -374,7 +376,6 @@ def _pformat_to_str(
         inline_depth=inline_depth,
         expand_all=expand_all,
         instance_mode=instance_mode,
-        _depth=_depth,
         _indent=_indent,
     )
     return stream.getvalue()
@@ -593,8 +594,6 @@ def _format_type_info(
                 max_string=50,
                 max_depth=1,
                 expand_all=False,
-                depth=0,
-                indent=0,
             )
             line += f" = {default_str}"
         elif field.default is not ...:
@@ -604,8 +603,6 @@ def _format_type_info(
                 max_string=50,
                 max_depth=1,
                 expand_all=False,
-                depth=0,
-                indent=0,
             )
             line += f" = {default_str}"
         if field.description:
@@ -653,8 +650,6 @@ def _format_type_info(
                     max_string=100,
                     max_depth=1,
                     expand_all=False,
-                    depth=0,
-                    indent=0,
                 )
                 lines.append(f"{ind}    {name}: {type_name} = {value_str}")
 
@@ -1056,7 +1051,11 @@ _UNLIMITED_DEPTH = 64
 _MAX_NODES = 200_000
 """The inspection work of one value preview: a bound even when every limit is ``None``."""
 _MAX_CHARS = 100_000_000
-"""capture's JSON budget, out of the way: pformat bounds items, strings and depth, not JSON size."""
+"""capture's JSON budget, out of the way: pformat bounds items, strings and depth, not JSON size.
+
+``truncating_pformat(max_chars=N)`` passes its own budget instead (``_value_limits``)."""
+_MIN_CHARS = 4
+"""The smallest capture budget ``Limits`` takes."""
 
 _CUT_REASONS = {
     "max_items": "max_length",
@@ -1068,13 +1067,20 @@ _CUT_REASONS = {
 
 
 def _value_limits(
-    max_length: int | None, max_string: int | None, max_depth: int | None
+    max_length: int | None,
+    max_string: int | None,
+    max_depth: int | None,
+    max_chars: int | None = None,
 ) -> "Limits":
-    """pformat's limits as one ``nooa.snapshot.Limits``: both ends kept, a bounded repr fallback."""
+    """pformat's limits as one ``nooa.snapshot.Limits``: both ends kept, a bounded repr fallback.
+
+    ``max_chars``: the capture's JSON budget (``truncating_pformat``'s bound);
+    None: ``_MAX_CHARS``, out of the way.
+    """
     from nooa.snapshot import Limits
 
     return Limits(
-        max_chars=_MAX_CHARS,
+        max_chars=_MAX_CHARS if max_chars is None else max(max_chars, _MIN_CHARS),
         max_nodes=_MAX_NODES,
         max_depth=_UNLIMITED_DEPTH if max_depth is None else max_depth,
         max_items=max_length,
@@ -1122,6 +1128,7 @@ def _value_text(
     max_string: int | None,
     max_depth: int | None,
     expand_all: bool = False,
+    max_chars: int | None = None,
 ) -> str:
     """A value in pformat's notation: ``render_python(capture(value, limits))``.
 
@@ -1129,13 +1136,14 @@ def _value_text(
     what it cannot read falls back to a ``repr`` cut to ``max_string``
     (``Limits(fallback="repr")``). agentdoc's own default markers keep their
     ``repr``. The layout is agentdoc's (``render_python(width=120)``;
-    ``expand_all`` puts every container on several lines).
+    ``expand_all`` puts every container on several lines). ``max_chars``: the
+    capture's budget (a bounded preview, see ``_value_limits``).
     """
     from nooa.snapshot import capture, render_python
 
     if type(_object) is _ClassRef or type(_object) is _InstanceRef:
         return repr(_object)
-    snapshot = capture(_object, _value_limits(max_length, max_string, max_depth))
+    snapshot = capture(_object, _value_limits(max_length, max_string, max_depth, max_chars))
     _record_cuts(snapshot)
     return render_python(snapshot, width=0 if expand_all else _LAYOUT_WIDTH)
 
@@ -1147,11 +1155,8 @@ def _format_value_to_str(
     max_string: int | None,
     max_depth: int | None,
     expand_all: bool = False,
-    depth: int = 0,
-    indent: int = 0,
 ) -> str:
     """A field default or instance value in ``doc()``: a class by its name, else ``_value_text``."""
-    del depth, indent
     if isinstance(_object, type):
         return _object.__name__
     return _value_text(
