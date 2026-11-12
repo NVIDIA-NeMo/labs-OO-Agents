@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""A cell print over the 50,000-character limit is cut and spilled to the session's folder."""
+"""A cell print over the 50,000-character limit is cut and kept in the session's overflow folder."""
 
 import asyncio
 import re
@@ -14,9 +14,7 @@ from nooa_atom.session.store import SessionStore
 from nooa.interactive import Done
 
 
-async def test_a_long_cell_print_is_cut_and_spilled_until_the_session_closes(
-    tmp_path, sessions_dir
-):
+async def test_a_long_cell_print_is_cut_and_kept_until_the_session_closes(tmp_path, sessions_dir):
     models = AtomModels()
     models.scripts[None] = [
         cell("print('h' * 30_000 + 'm' * 10_000 + 't' * 30_000)"),
@@ -35,7 +33,7 @@ async def test_a_long_cell_print_is_cut_and_spilled_until_the_session_closes(
         found = re.search(r"\\n\[\.\.\. 20,001 chars omitted; full output: ([^\]]+)\]\\n", seen)
         assert found, seen[-3000:]
         path = Path(found.group(1))
-        assert "nooa-shells-" in str(path)  # the session's spill folder
+        assert path.parent.name.startswith("nooa-overflow-")  # the session's folder
         assert path.read_text() == "h" * 30_000 + "m" * 10_000 + "t" * 30_000 + "\n"
         assert "<truncated-output>" not in seen and "not recoverable" not in seen
     finally:

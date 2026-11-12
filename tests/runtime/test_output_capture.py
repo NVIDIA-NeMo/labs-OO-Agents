@@ -1,15 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Cell stdout/stderr capture through nooa.snapshot (PR 2b): notation, limits, spill files."""
+"""Cell stdout/stderr capture through nooa.snapshot (PR 2b): notation, limits, overflow files."""
 
 from pathlib import Path
 
 import pytest
 
 from nooa.config.truncation_config import CaptureConfig
+from nooa.overflow import OverflowDir
 from nooa.runtime.actor import _make_capture_buffer
-from nooa.runtime.output_capture import CaptureBuffer, capture_spill
-from nooa.snapshot import SpillDir
+from nooa.runtime.output_capture import CaptureBuffer, capture_overflow
 
 
 def test_limits_are_unchanged():
@@ -54,13 +54,13 @@ def test_unrecoverable_hint_follows_the_cut_line_only_without_a_file():
     )
 
 
-def test_file_backed_spills_into_the_session_folder(tmp_path):
-    with SpillDir(str(tmp_path)) as spills:
-        token = capture_spill.set(spills)
+def test_file_backed_writes_into_the_session_folder(tmp_path):
+    with OverflowDir(str(tmp_path)) as folder:
+        token = capture_overflow.set(folder)
         try:
             buffer = _make_capture_buffer(20, CaptureConfig(tail=10, file_backed=True))
         finally:
-            capture_spill.reset(token)
+            capture_overflow.reset(token)
         buffer.write("0123456789" * 10)
         buffer.close()
         path = buffer.file_path

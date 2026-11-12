@@ -2191,7 +2191,7 @@ class ActorRuntime:
                 _block_stdin_var.reset(stdin_token)
             if media_token is not None:
                 _media_buffer_var.reset(media_token)
-            # End the capture streams: a cut stream's spill file stays (the
+            # End the capture streams: a cut stream's overflow file stays (the
             # LLM reads the path in the cut line), an uncut one's is deleted.
             # stdout_buffer/stderr_buffer may not be defined if an early return
             # (validation, SyntaxError) exited before buffer creation.
