@@ -92,8 +92,6 @@ class GenerationSession:
     session_locals: dict[str, Any] = field(default_factory=dict)
     # The namespace the cells run in (CurrentCall.execution_namespace).
     execution_namespace: ExecutionNamespace | None = None
-    # The call's arguments: user names in the namespace, never written back.
-    argument_names: frozenset[str] = frozenset()
     task_event_id: str = ""
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
 
@@ -101,10 +99,9 @@ class GenerationSession:
         """Initialize OutAccessor for Jupyter-style Out[n] access."""
         from nooa.runtime.out_accessor import OutAccessor
 
-        # Use event manager-backed mode if provided, otherwise internal storage
+        # Use event manager-backed mode if provided, otherwise internal storage.
+        # Cells see it as the ``Out`` builtin (``_run_loop``).
         self.out_accessor = OutAccessor(event_manager=self.event_manager)
-        # Make Out available in session namespace for LLM code
-        self.session_locals["Out"] = self.out_accessor
 
     def is_exhausted(self) -> bool:
         return self.iteration >= self.max_iterations or self.error_count >= self.max_retries
@@ -255,29 +252,13 @@ class PurePythonStrategy(CompositeStrategy):
         """Code executed successfully. Please continue (if you know the result use `return` to complete the task)"""
         ...
 
-    @staticmethod
-    def _sync_session_locals(call: "CurrentCall", session: "GenerationSession") -> None:
-        """Write the names cells bound back to the caller's ``session_locals`` seed.
-
-        The call's arguments never reach it; a caller key named like one keeps its value.
-        """
-        if call.session_locals is None or session.execution_namespace is None:
-            return
-        write_back_session_locals(
-            session.execution_namespace,
-            call.session_locals,
-            seeded=call.seeded_locals,
-            call_names=session.argument_names,
-            before=call.namespace_before,
-        )
-
     async def execute(self, runtime: RuntimeServices, call: "CurrentCall") -> Any:
         """Run the loop with every cell in the call's owned namespace (as CodeAct).
 
-        The method's arguments are ordinary names there, like a function's
-        locals: a cell can read, rebind and delete them.
+        The namespace is fresh for every call (``Agent.execution_namespace_for``
+        is CodeAct's). The method's arguments are ordinary names there, like a
+        function's locals: a cell can read, rebind and delete them.
         """
-        call.arguments_are_user_names = True
         with enter_call_namespace(
             runtime.agent, call, arguments=self._call_arguments(runtime, call)
         ) as namespace:
@@ -289,7 +270,6 @@ class PurePythonStrategy(CompositeStrategy):
     ) -> Any:
         session = self._initialize_session(call, runtime)
         session.execution_namespace = namespace
-        session.argument_names = frozenset(self._call_arguments(runtime, call))
         # The cells' globals (seeded with the caller's session_locals).
         session.session_locals = namespace.globals
         call.execution_locals = namespace.globals
@@ -365,7 +345,7 @@ class PurePythonStrategy(CompositeStrategy):
                     if session.api_errors_exhausted():
                         turn_final = True
                         turn_exception = "GenerationError"
-                        self._sync_session_locals(call, session)
+                        write_back_session_locals(call)
                         raise GenerationError(
                             f"LLM request timed out after {session.max_retries} retries. "
                             f"Original error: {type(e).__name__}: {e}"
@@ -383,7 +363,7 @@ class PurePythonStrategy(CompositeStrategy):
                     if session.is_exhausted():
                         turn_final = True
                         turn_exception = "GenerationError"
-                        self._sync_session_locals(call, session)
+                        write_back_session_locals(call)
                         raise session.build_failure_error() from None
                 except Exception as e:
                     # Catch other LLM API errors (rate limits, connection errors, etc.).
@@ -415,7 +395,7 @@ class PurePythonStrategy(CompositeStrategy):
                     if session.api_errors_exhausted():
                         turn_final = True
                         turn_exception = "GenerationError"
-                        self._sync_session_locals(call, session)
+                        write_back_session_locals(call)
                         raise GenerationError(
                             f"LLM API error after {session.max_retries} retries. "
                             f"Original error: {error_name}: {e}"
@@ -488,7 +468,7 @@ class PurePythonStrategy(CompositeStrategy):
                     if success:
                         turn_success = True
                         turn_final = True
-                        self._sync_session_locals(call, session)
+                        write_back_session_locals(call)
                         return validated  # finally runs, then returns
                     # If validation failed, turn_success stays False
                     continue
@@ -526,7 +506,7 @@ class PurePythonStrategy(CompositeStrategy):
             ),
             record=False,
         )
-        self._sync_session_locals(call, session)
+        write_back_session_locals(call)
         raise session.build_failure_error()
 
     def _initialize_session(
@@ -929,7 +909,8 @@ class PurePythonStrategy(CompositeStrategy):
         def emit_message(text: str) -> None:
             runtime.event_manager.add(Message(content=str(text)), record=False)
 
-        return {"message": emit_message, **self._call_arguments(runtime, call)}
+        # The arguments are namespace globals already (``enter_call_namespace``).
+        return {"message": emit_message}
 
     @staticmethod
     def _call_arguments(runtime: RuntimeServices, call: "CurrentCall") -> dict[str, Any]:

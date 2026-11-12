@@ -540,11 +540,15 @@ class Agent(metaclass=AgentMeta):
     def execution_namespace_for(self, call: Any) -> "ExecutionNamespace":
         """Hook: the owned namespace this method call's cells run in.
 
-        CodeAct's in-process backend calls it once per call (``call`` is the
-        :class:`~nooa.strategies.current_call.CurrentCall`). The default is a
-        fresh :class:`~nooa.runtime.execution_namespace.ExecutionNamespace` per
-        call (the call's arguments and the runtime names are reserved); override
-        it to share one namespace across calls.
+        Only CodeAct's in-process backend calls it, once per call (``call`` is
+        the :class:`~nooa.strategies.current_call.CurrentCall`); PurePython always
+        runs in a fresh namespace per call. The default is a fresh
+        :class:`~nooa.runtime.execution_namespace.ExecutionNamespace` per call
+        (the call's arguments and the runtime names are reserved); override it
+        to share one namespace across calls. A shared namespace holds one call
+        at a time: a call that enters it while another call (or a cell nested
+        in one) occupies it raises. Seeding and write-back: "session_locals
+        seeding and write-back" in ``nooa/runtime/README.md``.
         """
         from nooa.runtime.execution_namespace import default_execution_namespace
 

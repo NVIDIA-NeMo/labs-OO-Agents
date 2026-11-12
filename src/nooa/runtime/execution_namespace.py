@@ -5,12 +5,15 @@
 Every in-process cell runs in an :class:`ExecutionNamespace`: it is the only
 in-process execution path of ``ActorRuntime.execute_code`` (a call without a
 namespace gets a fresh one for that cell). CodeAct and PurePython take theirs
-from :func:`enter_call_namespace`, i.e. ``Agent.execution_namespace_for(call)``:
+from :func:`enter_call_namespace`. CodeAct asks ``Agent.execution_namespace_for(call)``:
 the default is a fresh namespace per call (:func:`default_execution_namespace`);
 an agent overrides the hook to share one across calls (Atom's ``handle`` keeps
-one per live session). Caller ``_session_locals`` seed the namespace as user
-globals and are written back when the call ends. The sandbox backend follows
-the same contract (one owned globals dictionary per session) in its worker.
+one per live session). PurePython always gets a fresh namespace per call.
+Caller ``_session_locals`` seed the namespace as user globals and are written
+back when the call ends: "session_locals seeding and write-back" in
+``nooa/runtime/README.md``. The sandbox backend keeps one owned globals
+dictionary per session in its worker; it seeds from ``_session_locals`` but
+never writes back.
 
 The async wrapper preserves Python's return/await/finally semantics. Only its
 bindings are lifted into one authoritative globals dictionary. Runtime names
@@ -435,15 +438,8 @@ def _discard_sources(entries: dict[str, tuple]) -> None:
 
 
 def default_execution_namespace(call: Any) -> ExecutionNamespace:
-    """A fresh namespace for one call; the runtime names are reserved.
-
-    The call's arguments are reserved too (CodeAct), unless the strategy made
-    them ordinary user names (``call.arguments_are_user_names``, PurePython).
-    """
-    arguments = (
-        frozenset() if getattr(call, "arguments_are_user_names", False) else frozenset(call.kwargs)
-    )
-    return ExecutionNamespace(reserved=RUNTIME_NAMES | arguments)
+    """A fresh namespace for one call: its arguments and the runtime names are reserved."""
+    return ExecutionNamespace(reserved=RUNTIME_NAMES | frozenset(call.kwargs))
 
 
 @contextmanager
@@ -452,81 +448,75 @@ def enter_call_namespace(
 ) -> Iterator[ExecutionNamespace]:
     """Enter the namespace a call's in-process cells run in, then seed it.
 
-    ``agent.execution_namespace_for(call)`` picks it (an object that is not an
-    Agent, or a hook returning None, gets :func:`default_execution_namespace`).
-    The namespace is entered first: one that another call occupies (a shared
-    namespace) raises before anything in it changes. Then the caller's
-    ``session_locals`` are seeded, and ``arguments`` (PurePython) after them, as
-    user names a cell can rebind or delete; an argument wins over a same-named
-    seed. Protected names (reserved runtime names, ``__builtins__``, the
-    engine's internals) are never seeded. ``call.seeded_locals`` records the
-    caller's seeds and ``call.namespace_before`` the user values the call starts
-    from (:meth:`ExecutionNamespace.user_globals`), for
-    :func:`write_back_session_locals`.
+    CodeAct (no ``arguments``): ``agent.execution_namespace_for(call)`` picks
+    the namespace (an object that is not an Agent, or a hook returning None,
+    gets :func:`default_execution_namespace`); the arguments are reserved
+    runtime names. PurePython passes its ``arguments``: it always gets a fresh
+    namespace where they are ordinary user names, and the hook is not
+    consulted (a shared namespace cannot hold one call's locals).
+
+    Seeding and write-back follow "session_locals seeding and write-back" in
+    ``nooa/runtime/README.md``; :func:`write_back_session_locals` completes it.
     """
-    selector = getattr(agent, "execution_namespace_for", None)
-    namespace = selector(call) if selector is not None else None
-    if namespace is None:
-        namespace = default_execution_namespace(call)
+    if arguments is None:
+        selector = getattr(agent, "execution_namespace_for", None)
+        namespace = selector(call) if selector is not None else None
+        if namespace is None:
+            namespace = default_execution_namespace(call)
+    else:
+        namespace = ExecutionNamespace(reserved=RUNTIME_NAMES)
+    # Entering first: a namespace another call occupies raises before it changes.
     with namespace.enter({}):
+        allowed = namespace.reserved
         seeds = {
             name: value
             for name, value in (call.session_locals or {}).items()
-            if framework_name_allowed(name, namespace.reserved)
+            if framework_name_allowed(name, allowed)
         }
+        own = {
+            name: value
+            for name, value in (arguments or {}).items()
+            if framework_name_allowed(name, allowed)
+        }
+        # An argument wins over a same-named seed.
+        for values in (seeds, own):
+            namespace.globals.update(values)
+            namespace.user_names.update(values)
         call.seeded_locals = seeds
-        for values in (seeds, arguments or {}):
-            for name, value in values.items():
-                if framework_name_allowed(name, namespace.reserved):
-                    namespace.globals[name] = value
-                    namespace.user_names.add(name)
-        # The call's changes are what differs from this at write-back (the
-        # namespace is the call's alone until it exits: entry refuses another).
-        # Seeded dunders (e.g. ``__version__``) are the caller's names too.
-        call.namespace_before = {
-            **namespace.user_globals(),
-            **{name: namespace.globals[name] for name in seeds if name in namespace.globals},
-        }
+        call.argument_names = frozenset(arguments or ())
+        call.namespace_before = namespace.snapshot()
         yield namespace
 
 
-def write_back_session_locals(
-    namespace: ExecutionNamespace,
-    session_locals: dict[str, Any],
-    *,
-    seeded: Mapping[str, Any],
-    call_names: frozenset[str] = frozenset(),
-    before: Mapping[str, Any],
-) -> None:
+def write_back_session_locals(call: Any) -> None:
     """Write what the call's cells changed back to the caller's ``session_locals``.
 
-    ``seeded`` is what the call took from ``session_locals`` (``call.seeded_locals``).
-    A name the cells rebound or bound updates the caller's key; a seeded name
-    the cells deleted is removed. A seed the cells left alone, and any key the
-    call never seeded (e.g. added by someone else while the call ran), keep the
-    caller's current value; so does a seed the caller changed meanwhile when
-    the cells deleted it. ``call_names`` (e.g. the call's arguments) never reach
-    the caller, and a caller key named like one keeps its value.
-
-    What the call changed is found by value, not by binding syntax: a user
-    global whose object differs from ``before`` (``call.namespace_before``) or
-    is new since. So a helper's ``global`` write counts, also from a helper an
-    earlier call defined, and so do writes no cell spells out; a reused
-    namespace's older bindings the call left alone never reach this caller.
+    The rules are "session_locals seeding and write-back" in
+    ``nooa/runtime/README.md``. What changed also joins the namespace's user
+    names (``inventory``). The sandbox backend (no ``call.execution_namespace``)
+    never writes back. Called once, when the call ends: it clears the entry
+    snapshot.
     """
-    values = namespace.changed_since(before)
-    for name, seed in seeded.items():
-        if (
-            name not in call_names
-            and name not in namespace.globals
-            and name in session_locals
-            and session_locals[name] is seed
-        ):
-            del session_locals[name]
-    for name, value in values.items():
-        if name in call_names or (name in seeded and value is seeded[name]):
-            continue
-        session_locals[name] = value
+    namespace = call.execution_namespace
+    if namespace is None:
+        return
+    changed = namespace.changed_since(call.namespace_before)
+    namespace.user_names.update(changed)
+    session_locals = call.session_locals
+    if session_locals is not None:
+        for name, seed in call.seeded_locals.items():
+            if (
+                name not in call.argument_names
+                and name not in namespace.globals
+                and name in session_locals
+                and session_locals[name] is seed
+            ):
+                del session_locals[name]
+        for name, value in changed.items():
+            if name not in call.argument_names:
+                session_locals[name] = value
+    call.seeded_locals = {}
+    call.namespace_before = {}
 
 
 class ExecutionNamespace:
@@ -704,7 +694,8 @@ class ExecutionNamespace:
         resolve to their last binding unchanged: output goes to the cell
         running in the caller's context, if any, else to the process's stdout.
         ``self`` resolves to the last bound agent. Every other runtime name
-        (``return_result``, call arguments...) belongs to a call and raises.
+        (``return_result``, CodeAct's reserved arguments...) belongs to a call
+        and raises; PurePython's arguments are ordinary globals, not runtime names.
         """
         call = self._foreground
         context = call.cell_context if call is not None and call.active else None
@@ -726,8 +717,6 @@ class ExecutionNamespace:
         """``name`` used outside its call: only the output names and ``self`` resolve."""
         if name in AFTERLIFE_NAMES and name in values:
             return values[name]
-        if name == "print":
-            return builtins.print
         raise RuntimeError(
             f"Runtime name {name!r} belongs to a cell that has ended (or is not running): "
             "only print, pprint, show and self keep working in a helper that outlives its "
@@ -735,41 +724,30 @@ class ExecutionNamespace:
             "before the cell ends (or use asyncio.to_thread, which keeps the cell's context)."
         )
 
-    def user_values(self) -> dict[str, Any]:
-        """The names cells (or a caller's seed) bound, not the seeded runtime."""
-        return {name: self.globals[name] for name in self.user_names if name in self.globals}
-
-    def user_globals(self) -> dict[str, Any]:
-        """Every global a cell can own: not protected, not a dunder.
-
-        Unlike :meth:`user_values` this includes names no binding syntax recorded
-        (a helper's ``global`` write, a ``globals()``/exec write).
-        """
+    def snapshot(self) -> dict[str, Any]:
+        """Every global a cell can own (not protected), dunders included: the entry state."""
         return {
             name: value
             for name, value in self.globals.items()
             if framework_name_allowed(name, self.reserved)
-            and not (name.startswith("__") and name.endswith("__"))
         }
 
     def changed_since(self, before: Mapping[str, Any]) -> dict[str, Any]:
-        """The user globals (and names in ``before``) whose object is not the one in ``before``, or new since.
+        """The globals a call changed since :meth:`snapshot` returned ``before``.
 
-        The environment :meth:`initialize` seeded (modules, tools) is not a change
-        while it holds the seeded object.
+        A name in ``before`` changed if it holds another object now. A new name
+        counts unless it is a dunder (``__annotations__``...) or the environment
+        :meth:`initialize` seeded (modules, tools) still holding its seeded object.
         """
         environment = self._environment
-        current = self.user_globals()
-        # A name in ``before`` that user_globals skips (a seeded dunder) is compared too.
-        for name in before:
-            if name not in current and name in self.globals:
-                current[name] = self.globals[name]
         changed = {}
-        for name, value in current.items():
+        for name, value in self.snapshot().items():
             if name in before:
                 if before[name] is not value:
                     changed[name] = value
-            elif name not in environment or environment[name] is not value:
+            elif not (name.startswith("__") and name.endswith("__")) and not (
+                name in environment and environment[name] is value
+            ):
                 changed[name] = value
         return changed
 
