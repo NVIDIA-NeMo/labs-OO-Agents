@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""RepoTools — code navigation that returns ShellTools Match anchors.
+"""RepoTools — code navigation that returns ``Match`` anchors (edit with ``self.files``).
 
 Use ``symbols()`` to find definitions and ``refs()`` to find usages. Both return
 ``RepoResult``: printable lines plus ``Match`` objects for
-``self.shell.replace_match(result[i], new)`` — the same host filesystem a wired
+``self.files.replace_match(result[i], new_text)`` — the same host filesystem a wired
 ``BashSession`` also operates on. Once core ``Match`` has ``editable`` (#382),
 anchors from a non-host session are read-only (``editable=False``), and the
 tool docs say so only then.
@@ -15,6 +15,7 @@ import inspect
 import logging
 import re
 import shlex
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +29,10 @@ from nooa.tools import BashSession
 from nooa.tools.shell_tools import Match
 
 logger = logging.getLogger(__name__)
+
+# Honor .gitignore in archives without .git, and search dot-directories such as
+# .github the way the grep fallback does, while skipping .git itself.
+_RG_FLAGS = "--no-require-git --hidden --glob '!.git'"
 
 # Core ``Match(editable=...)`` and read-only anchors come with #382. Until
 # then every anchor is editable, and the docs the model reads must not tell
@@ -90,7 +95,7 @@ class FileMapResult:
     truncated: Annotated[bool, spec(description="True if symbols were capped")] = False
     anchors: Annotated[
         list[Match],
-        spec(description="ShellTools-compatible anchors for each symbol line"),
+        spec(description="Match anchors (edit with self.files) for each symbol line"),
     ] = field(default_factory=list)
     diagnostic: str | None = None
 
@@ -115,7 +120,7 @@ class RepoMapResult:
     truncated: Annotated[bool, spec(description="True if output was capped")] = False
     anchors: Annotated[
         list[Match],
-        spec(description="ShellTools-compatible anchors for symbol lines in the map"),
+        spec(description="Match anchors (edit with self.files) for symbol lines in the map"),
     ] = field(default_factory=list)
 
     @property
@@ -134,7 +139,7 @@ class SymbolSearchResult:
     truncated: Annotated[bool, spec(description="True if results were capped")] = False
     anchors: Annotated[
         list[Match],
-        spec(description="ShellTools-compatible anchors for each returned match"),
+        spec(description="Match anchors (edit with self.files) for each returned match"),
     ] = field(default_factory=list)
 
     @property
@@ -160,7 +165,7 @@ class ReferenceSearchResult:
     truncated: Annotated[bool, spec(description="True if results were capped")] = False
     anchors: Annotated[
         list[Match],
-        spec(description="ShellTools-compatible anchors for each returned reference"),
+        spec(description="Match anchors (edit with self.files) for each returned reference"),
     ] = field(default_factory=list)
 
     @property
@@ -188,9 +193,9 @@ class RepoResult(BaseModel):
     matches: list[Match] = Field(
         default_factory=list,
         description=(
-            "Match anchors; only editable=True anchors support self.shell.replace_match()"
+            "Match anchors; only editable=True anchors support self.files.replace_match()"
             if _MATCH_HAS_EDITABLE
-            else "Match anchors; pass one to self.shell.replace_match() to edit it"
+            else "Match anchors; pass one to self.files.replace_match() to edit it"
         ),
     )
     total_matches: int = Field(default=0, description="Total matches found")
@@ -347,7 +352,7 @@ def _anchor(
     """Build a ``Match``; read-only anchors need a core ``Match`` with ``editable``.
 
     ``Match(editable=...)`` comes with the core change that makes
-    ``ShellTools.replace_match()`` refuse read-only anchors (#382). Until that is
+    ``ShellTools.replace()`` refuse read-only anchors (#382). Until that is
     on this branch, anchors are built without the flag: they are then
     editable host anchors, which is what they are for the Atom agent,
     whose ``RepoTools`` always shares the host filesystem (a real
@@ -505,7 +510,7 @@ def _extract_symbols(
 # RepoTools Skill
 # ---------------------------------------------------------------------------
 class RepoTools(Skill):
-    """Find code locations as ShellTools ``Match`` anchors.
+    """Find code locations as ``Match`` anchors (edit with ``self.files``).
 
     Two methods:
         symbols(path=".", query="")  — definitions / file or repo overview
@@ -514,10 +519,10 @@ class RepoTools(Skill):
     Results print like search output and index/iterate as matches. Host anchors
     support replacement::
         r = await self.repo.symbols("src/", query="Handler")
-        await self.shell.replace_match(r[0], new_code)
+        await self.files.replace_match(r[0], new_code)
 
     ``cwd`` is the base for relative paths: the wired session's current
-    directory, so a ``cd`` through ``self.shell`` moves these tools too
+    directory, so a ``cd`` in that session moves these tools too
     (``root`` without a session). ``root`` is the repository root: where
     whole-tree searches start and what result paths are shown relative
     to. Neither is a security boundary. Both an absolute ``path=`` argument and a
@@ -538,6 +543,7 @@ class RepoTools(Skill):
         self._root = Path(root).absolute() if session is not None else Path(root).resolve()
         self._session = session  # shared session with ShellTools (optional)
         self._has_rg: bool | None = None  # lazy-checked
+        self._rg = "rg"  # command used once _check_rg() found ripgrep
         if not _tree_sitter_available():
             message = "tree-sitter is not available; RepoTools will use regex/rg fallbacks"
             if require_tree_sitter:
@@ -579,7 +585,7 @@ class RepoTools(Skill):
 
         A non-``BashSession`` session object (e.g. a scripted session over
         its own in-memory filesystem) may not — its anchors stay read-only
-        so ``self.shell.replace_match()`` never writes to a same-named but
+        so ``self.files.replace_match()`` never writes to a same-named but
         unrelated host file.
         """
         return self._session is None or isinstance(self._session, BashSession)
@@ -594,16 +600,16 @@ class RepoTools(Skill):
             spec(
                 description=(
                     "Directory relative paths resolve against for this call; "
-                    "defaults to the shell's current directory"
+                    "defaults to the workspace"
                 )
             ),
         ] = None,
     ) -> RepoResult:
-        """Find definitions under a file or directory; ``cwd`` defaults to the shell's current directory.
+        """Find definitions under a file or directory; ``cwd`` defaults to the workspace.
 
-        Returns printable lines plus ``Match`` anchors for ``self.shell.replace_match``.
-        ``cwd`` (absolute, or relative to the shell's directory) does not move
-        the shell; results are still shown relative to ``root``.
+        Returns printable lines plus ``Match`` anchors for ``self.files.replace_match``.
+        ``cwd`` (absolute, or relative to the workspace) does not change the
+        workspace directory; results are still shown relative to ``root``.
         """
         base = self._base(cwd)
         resolved = self._resolve(path, base)
@@ -680,16 +686,16 @@ class RepoTools(Skill):
             spec(
                 description=(
                     "Directory relative paths resolve against for this call; "
-                    "defaults to the shell's current directory"
+                    "defaults to the workspace"
                 )
             ),
         ] = None,
     ) -> RepoResult:
         """Find references/usages of a symbol, excluding definitions.
 
-        Returns printable lines plus ``Match`` anchors for ``self.shell.replace_match``.
-        ``cwd`` (absolute, or relative to the shell's directory) does not move
-        the shell; results are still shown relative to ``root``.
+        Returns printable lines plus ``Match`` anchors for ``self.files.replace_match``.
+        ``cwd`` (absolute, or relative to the workspace) does not change the
+        workspace directory; results are still shown relative to ``root``.
         """
         base = self._base(cwd)
         resolved = self._resolve(path, base)
@@ -804,15 +810,27 @@ class RepoTools(Skill):
         return _line_match_from_lines(fpath, line_no, lines, editable=self._anchors_editable)
 
     async def _check_rg(self) -> bool:
-        """Check if rg (ripgrep) is available, caching the result."""
+        """Check if rg (ripgrep) is available, caching the result.
+
+        ``ripgrep-bin`` installs ``rg`` beside the interpreter, so when PATH
+        lacks it (a harness launched by absolute path) the copy next to
+        ``sys.executable`` is used by its full path.
+        """
         if self._has_rg is None:
+            bundled = Path(sys.executable).parent / "rg"
             if self._session:
                 _, _, code = await self._session.run("command -v rg", timeout=5)
+                if code != 0:
+                    _, _, code = await self._session.run(
+                        f"test -x {shlex.quote(str(bundled))}", timeout=5
+                    )
+                    if code == 0:
+                        self._rg = shlex.quote(str(bundled))
                 self._has_rg = code == 0
             else:
                 import shutil
 
-                self._has_rg = shutil.which("rg") is not None
+                self._has_rg = shutil.which("rg") is not None or bundled.is_file()
         return self._has_rg
 
     # ------------------------------------------------------------------
@@ -825,7 +843,7 @@ class RepoTools(Skill):
         Shows definitions but not their bodies.
 
         Args:
-            path: File path (relative to ``cwd``, the shell's directory).
+            path: File path (relative to ``cwd``, the workspace).
             max_symbols: Maximum symbols to show (default: 200).
 
         Returns:
@@ -913,7 +931,7 @@ class RepoTools(Skill):
             # Use rg to find files respecting gitignore, or fall back to walking
             if self._session and await self._check_rg():
                 stdout, _, _ = await self._session.run(
-                    f"rg --files {shlex.quote(str(resolved))} 2>/dev/null | head -{max_files * 3}",
+                    f"{self._rg} {_RG_FLAGS} --files {shlex.quote(str(resolved))} 2>/dev/null | head -{max_files * 3}",
                     timeout=15,
                 )
                 for line in stdout.splitlines():
@@ -1024,7 +1042,7 @@ class RepoTools(Skill):
             pattern = f"(def|class|function|func|struct|trait|interface|type|impl|module|const)\\s+\\w*{re.escape(name)}\\w*"
             if await self._check_rg():
                 stdout, _, _ = await self._session.run(
-                    f"rg -n -i --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 2}",
+                    f"{self._rg} {_RG_FLAGS} -n -i --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 2}",
                     timeout=30,
                 )
             else:
@@ -1168,7 +1186,7 @@ class RepoTools(Skill):
         if self._session:
             if await self._check_rg():
                 # -H: a single file also gets the file:line:text prefix parsed below.
-                cmd = f"rg -nH --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 3}"
+                cmd = f"{self._rg} {_RG_FLAGS} -nH --color=never {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 3}"
             else:
                 # GNU grep is present in images where rg is not (e.g. SWE-bench).
                 cmd = f"grep -rnHE {shlex.quote(pattern)} {shlex.quote(str(resolved))} 2>/dev/null | head -{max_results * 3}"

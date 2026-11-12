@@ -10,7 +10,6 @@ import re
 from collections.abc import AsyncGenerator, AsyncIterator
 from difflib import unified_diff
 from functools import wraps
-from os import PathLike
 from pathlib import Path
 from typing import Annotated, Any, ClassVar, Literal, cast
 from uuid import uuid4
@@ -28,7 +27,6 @@ from nooa.tools.shell_tools import (
     Match,
     ShellResult,
     ShellTools,
-    replace_call_form,
 )
 
 logger = logging.getLogger(__name__)
@@ -476,45 +474,48 @@ class ActivityShellTools(Skill):
     ) -> Match:
         return await self._shell.read(path, lines)
 
-    @replace_call_form
     @wraps(ShellTools.replace)
     async def replace(
         self,
-        path: Annotated[str, spec(description="File path (relative to cwd or absolute)")],
-        old: Annotated[str, spec(description="Exact text to find; must occur exactly once")],
-        new: Annotated[str, spec(description="Replacement text; '' deletes old")],
+        target: Annotated[
+            Any, spec(description="A Match (from read() or run().matches) or a file path string")
+        ],
+        old_or_new: Annotated[
+            str,
+            spec(
+                description="For Match: replacement text. For path: text to find (must be unique)"
+            ),
+        ] = "",
+        new: Annotated[
+            str | None, spec(description="For path: replacement text. Leave None for Match.")
+        ] = None,
     ) -> FileWrite:
-        if not isinstance(path, str | PathLike):
+        path = target.path if isinstance(target, Match) else target
+        if not isinstance(path, str):
             # Let ShellTools raise its wrong-argument TypeError.
-            return await self._shell.replace(path, old, new)
-        resolved = self._resolve_path(str(path))
+            return await self._shell.replace(target, old_or_new, new)
+
+        if isinstance(target, Match):
+            # ShellTools rejects replace(match, old, new) before anything is reported.
+            result = await self._shell.replace(target, old_or_new, new)
+            return await self._report_edit(
+                Path(target.resolved_path), target.text, result, target.start, target.end
+            )
+
+        resolved = self._resolve_path(path)
         start_line = None
         end_line = None
         try:
             with resolved.open("r") as stream:
                 content = stream.read(_MAX_EVENT_TEXT_CHARS + 1)
             if len(content) <= _MAX_EVENT_TEXT_CHARS:
-                offset = content.index(old)
+                offset = content.index(old_or_new)
                 start_line = content.count("\n", 0, offset) + 1
-                end_line = start_line + max(1, _line_count(old)) - 1
+                end_line = start_line + max(1, _line_count(old_or_new)) - 1
         except (OSError, UnicodeError, ValueError):
             pass
-        result = await self._shell.replace(path, old, new)
-        return await self._report_edit(resolved, old, result, start_line, end_line)
-
-    @replace_call_form
-    @wraps(ShellTools.replace_match)
-    async def replace_match(
-        self,
-        match: Annotated[Match, spec(description="A Match from read() or run().matches")],
-        new: Annotated[str, spec(description="Replacement text for the Match's whole line region")],
-    ) -> FileWrite:
-        # ShellTools raises its wrong-argument TypeError for a non-Match, before
-        # anything is reported.
-        result = await self._shell.replace_match(match, new)
-        return await self._report_edit(
-            Path(match.resolved_path), match.text, result, match.start, match.end
-        )
+        result = await self._shell.replace(target, old_or_new, new)
+        return await self._report_edit(resolved, old_or_new, result, start_line, end_line)
 
     async def _report_edit(
         self,
@@ -524,7 +525,7 @@ class ActivityShellTools(Skill):
         start_line: int | None,
         end_line: int | None,
     ) -> FileWrite:
-        """Emit the FileEdit event for a finished replace()/replace_match()."""
+        """Emit the FileEdit event for a finished replace()."""
         bounded_old = pformat(old_text, max_string=_MAX_EVENT_TEXT_CHARS, unquote_strings=True)
         old_truncated = len(old_text) > _MAX_EVENT_TEXT_CHARS
         # The edit may re-terminate the region, so report what it wrote rather

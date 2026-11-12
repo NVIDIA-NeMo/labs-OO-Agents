@@ -4,7 +4,7 @@
 
 import pytest
 from atom_test_agents import python_cell
-from nooa_atom.agent import AtomAgent
+from nooa_atom.agent.base import AtomAgentBase
 
 from nooa import strategy
 from nooa.config import CodeActConfig
@@ -12,7 +12,7 @@ from nooa.strategies import CodeActV2
 from nooa.unifiedllm import FakeLLMClient
 
 
-class PlainInputAgent(AtomAgent):
+class PlainInputAgent(AtomAgentBase):
     @strategy(CodeActV2(config=CodeActConfig()))
     async def inspect_plain(self, data: dict) -> None:
         """Inspect an ordinary input without notification-specific metadata."""
@@ -42,7 +42,7 @@ async def test_notification_prefill_keeps_nested_task_middle(tmp_path, method):
         ],
         strict_exhaustion=True,
     )
-    agent = AtomAgent(llm=llm, cwd=tmp_path)
+    agent = AtomAgentBase(llm=llm, cwd=tmp_path)
     try:
         await getattr(agent, method)(notification)
     finally:

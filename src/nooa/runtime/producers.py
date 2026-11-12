@@ -15,8 +15,11 @@ Usage::
 """
 
 import asyncio
+import codecs
 import os
 import signal
+
+from nooa._platform import require_posix
 
 
 async def after(delay: float) -> None:
@@ -37,19 +40,48 @@ async def cron(interval_seconds: float):
         yield tick
 
 
-async def tail(path: str, *, poll_interval: float = 0.5):
+async def tail(path: str, *, poll_interval: float = 0.5, max_line_bytes: int = 1 << 20):
     """Tail a file, yielding new lines as they appear.
 
     Starts from the current end of file. Polls every
-    *poll_interval* seconds.
+    *poll_interval* seconds. A line that is still being written is
+    held until its newline arrives, so a poll landing mid-write does
+    not split one line across two yields. Only ``\n`` ends a line; a
+    trailing ``\r`` is removed. Lines are decoded as UTF-8 with
+    undecodable bytes replaced, and a character split across writes is
+    decoded whole. A line that grows past *max_line_bytes* before its
+    newline is yielded in pieces of at most that size, so a newline-free
+    stream keeps memory bounded without losing its contents.
     """
-    fh = open(path)
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    fh = open(path, "rb")
     try:
         fh.seek(0, 2)
+        partial = b""
+        continued = False  # this line already came out in pieces
         while True:
-            line = fh.readline()
-            if line:
-                yield line.rstrip("\n")
+            chunk = fh.readline(max_line_bytes - len(partial))
+            if chunk:
+                partial += chunk
+                if partial.endswith(b"\n"):
+                    text = decoder.decode(partial[:-1], final=True)
+                    partial = b""
+                    text = text.removesuffix("\r")
+                    # The terminator of a line already yielded in pieces is no new line.
+                    if text or not continued:
+                        yield text
+                    continued = False
+                elif len(partial) >= max_line_bytes:
+                    # A cut between the \r and \n of a CRLF keeps the \r for
+                    # the next piece: it may end this line, not belong to it.
+                    held = b"\r" if partial.endswith(b"\r") and len(partial) > 1 else b""
+                    # A piece cut inside a character decodes to "" until the
+                    # rest arrives (the decoder keeps those bytes): skip it.
+                    text = decoder.decode(partial[: len(partial) - len(held)])
+                    partial = held
+                    if text:
+                        continued = True
+                        yield text
             else:
                 await asyncio.sleep(poll_interval)
     finally:
@@ -74,9 +106,14 @@ async def monitor(cmd: str):
     stderr is merged into stdout.  Uses ``start_new_session=True``
     for process-group isolation so multiple concurrent monitors
     (and the agent itself) don't contend for ptys or interfere
-    with each other.  On cancellation the entire process group
-    is killed to prevent orphaned children.
+    with each other. On cancellation or early close, the entire process
+    group is killed, even if its leader has already exited, to prevent
+    orphaned children.
+
+    POSIX-only (process groups); on native Windows the first iteration
+    raises :class:`~nooa._platform.PosixOnlyFeatureError`.
     """
+    require_posix("monitor() (process-group cleanup uses os.killpg)")
     proc = await asyncio.create_subprocess_shell(
         cmd,
         stdout=asyncio.subprocess.PIPE,
@@ -84,17 +121,22 @@ async def monitor(cmd: str):
         start_new_session=True,
     )
     assert proc.stdout is not None
+    completed = False
     try:
         async for line in proc.stdout:
             yield line.decode("utf-8", errors="replace").rstrip("\n")
         await proc.wait()
+        completed = True
     finally:
-        if proc.returncode is None:
+        # A child can retain stdout after the group leader exits. Its exit
+        # status alone must not suppress cleanup of an interrupted stream.
+        if not completed:
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
             except (ProcessLookupError, OSError):
-                try:
-                    proc.kill()
-                except ProcessLookupError:
-                    pass
+                if proc.returncode is None:
+                    try:
+                        proc.kill()
+                    except ProcessLookupError:
+                        pass
             await proc.wait()

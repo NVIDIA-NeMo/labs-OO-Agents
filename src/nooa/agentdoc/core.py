@@ -50,7 +50,7 @@ def doc(
         "Levels of referenced types to expand inline; 0 = none, 1 = direct (default), 2+ = transitive",
     ] = 1,
 ) -> str:
-    """Render prompt-ready API documentation for one or more Python objects.
+    """Return API documentation as str; display with print(doc(obj)).
 
     Types show their declared API and defaults. Instances show that same contract
     enriched with current values and public runtime fields. Visibility rules are

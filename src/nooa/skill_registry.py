@@ -218,6 +218,11 @@ class SkillRegistry(Skill):
         self._load_order: list[str] = []  # deterministic dependency-safe teardown order
         self._sources: dict[str, _SkillSource] = {}
         self._python_modules: dict[str, Any] = {}  # local synthetic name → imported module
+        # Skills not loaded because the agent already has their attribute
+        # name: registry name → the line shown to the agent (name_conflicts()).
+        self._name_conflicts: dict[str, str] = {}
+        # Lines a host or skill adds to the status (add_notice()), in order.
+        self._notices: list[str] = []
         self._load_generation = 0
         self._discover()
         super().__init__()
@@ -257,7 +262,7 @@ class SkillRegistry(Skill):
         return self._discovered.get(name)
 
     def discover_libs(self, libs_path: "Path") -> None:
-        """Scan a libs directory and register each skill package.
+        """Scan a libs directory and register each skill in it.
 
         Each subdirectory containing a pyproject.toml is imported and
         registered. The Skill subclass from __init__.py is used if found;
@@ -267,14 +272,30 @@ class SkillRegistry(Skill):
         (``[project.entry-points."nooa.skills"]``). If no
         entry_point is declared, falls back to ``local.<lib_name>``.
 
+        A subdirectory with a SKILL.md and no pyproject.toml registers as the
+        TextSkill ``local.<dir_name>``. As on every load path, a skill whose
+        attribute the agent already has from elsewhere is skipped and listed
+        in :meth:`name_conflicts`.
+
         Args:
-            libs_path: Directory containing library packages.
+            libs_path: Directory containing skill packages and text skills.
         """
         from pathlib import Path
 
         libs_path = Path(libs_path)
         if not libs_path.is_dir():
             return
+        for entry in sorted(libs_path.iterdir()):
+            if (
+                entry.is_dir()
+                and not (entry / "pyproject.toml").exists()
+                and ((entry / "SKILL.md").exists() or (entry / "skill.md").exists())
+            ):
+                self._register_local_text_skill(entry)
+        self._discover_packages(libs_path)
+
+    def _discover_packages(self, libs_path: "Path") -> None:
+        """Import and register each pyproject.toml subdirectory of ``libs_path``."""
         libraries = [
             entry
             for entry in sorted(libs_path.iterdir())
@@ -284,6 +305,9 @@ class SkillRegistry(Skill):
             lib_name = lib_dir.name
             reg_name, target = self._read_skill_entry(lib_dir, lib_name)
             if reg_name in self._loaded:
+                continue
+            if self._attr_taken(reg_name):
+                self._note_name_conflict(reg_name)  # its attribute is something else's
                 continue
             try:
                 skill = self._import_lib(lib_dir, lib_name, target)
@@ -381,8 +405,8 @@ class SkillRegistry(Skill):
     def discover_skills_dirs(self, dirs: "list[Path]") -> None:
         """Scan skill roots for packaged libraries, TextSkills, and Python skills.
 
-        Immediate child directories with a ``pyproject.toml`` are discovered
-        through :meth:`discover_libs`, using their ``nooa.skills`` entry-point
+        Immediate child directories with a ``pyproject.toml`` are imported
+        as packages, using their ``nooa.skills`` entry-point
         metadata. TextSkills (SKILL.md directories) register as
         cmd.<skill_id>. Python skills (.py files with Skill subclass) register
         as ext.<name>.
@@ -394,8 +418,8 @@ class SkillRegistry(Skill):
 
         skill_roots = [Path(path) for path in dirs if Path(path).is_dir()]
         for skills_dir in skill_roots:
-            self.discover_libs(skills_dir)
-            for entry in skills_dir.iterdir():
+            self._discover_packages(skills_dir)
+            for entry in sorted(skills_dir.iterdir()):
                 if entry.is_dir():
                     skill_md = entry / "SKILL.md"
                     if not skill_md.exists():
@@ -412,11 +436,67 @@ class SkillRegistry(Skill):
         try:
             skill = TextSkill(path=entry)
             reg_name = f"cmd.{skill.id}"
-            if reg_name not in self._loaded:
-                self.register(reg_name, skill)
-                self._sources[reg_name] = _SkillSource("text", entry.resolve())
+            if reg_name in self._loaded:
+                return
+            if self._attr_taken(reg_name):
+                self._note_name_conflict(reg_name)
+                return
+            self.register(reg_name, skill)
+            self._sources[reg_name] = _SkillSource("text", entry.resolve())
         except Exception:
             logger.warning("TextSkill %s skipped", entry, exc_info=True)
+
+    def name_conflicts(self) -> list[str]:
+        """One line per skill skipped because the agent already has its attribute name."""
+        return [self._name_conflicts[name] for name in sorted(self._name_conflicts)]
+
+    def add_notice(self, line: str) -> None:
+        """Show ``line`` in the skills status (once; e.g. a skills directory no longer loaded)."""
+        if line not in self._notices:
+            self._notices.append(line)
+
+    def notices(self) -> list[str]:
+        """The status lines added with :meth:`add_notice`, in order."""
+        return list(self._notices)
+
+    def name_conflict(self, name: str) -> str | None:
+        """The name-conflict line for skill ``name``, or None if it has none."""
+        return self._name_conflicts.get(name)
+
+    def _note_name_conflict(self, reg_name: str) -> None:
+        """Record (and warn once) that ``reg_name`` was skipped: its attribute is taken."""
+        attr = self._attr_name(reg_name)
+        line = (
+            f"skill {reg_name.split('.')[-1]!r} not loaded: the agent already has an "
+            f"attribute named {attr}; rename the skill"
+        )
+        if self._name_conflicts.get(reg_name) != line:
+            logger.warning("Skill %s: %s", reg_name, line)
+        self._name_conflicts[reg_name] = line
+
+    def _attr_taken(self, name: str) -> bool:
+        """Whether the agent has ``name``'s attribute from something other than this skill."""
+        attr = self._attr_name(name)
+        return name not in self._loaded and (
+            hasattr(self._agent, attr) or attr in set(self._attr_map.values())
+        )
+
+    def _register_local_text_skill(self, entry: "Path") -> None:
+        """Register a SKILL.md directory of a libs dir as ``local.<dir_name>``."""
+        from nooa.skill import TextSkill
+
+        reg_name = f"local.{entry.name}"
+        if reg_name in self._loaded:
+            return
+        if self._attr_taken(reg_name):
+            self._note_name_conflict(reg_name)
+            return
+        try:
+            skill = TextSkill(path=entry)
+            self.register(reg_name, skill)
+            self._sources[reg_name] = _SkillSource("text", entry.resolve())
+        except Exception:
+            logger.warning("Text skill %s skipped", entry, exc_info=True)
 
     def _register_python_skill(self, entry: "Path") -> None:
         """Register a Python skill from a .py file."""
@@ -431,7 +511,10 @@ class SkillRegistry(Skill):
                 skill._source_dir = entry.parent
                 name = entry.stem.replace("-", "_").replace(" ", "_")
                 reg_name = f"ext.{name}"
-                if reg_name not in self._loaded:
+                taken = reg_name not in self._loaded and self._attr_taken(reg_name)
+                if taken:
+                    self._note_name_conflict(reg_name)
+                if reg_name not in self._loaded and not taken:
                     self.register(reg_name, skill)
                     if module_name is not None:
                         self._python_modules[module_name] = sys.modules[module_name]
@@ -496,14 +579,9 @@ class SkillRegistry(Skill):
                         held_by,
                     )
                     continue
-                if hasattr(self._agent, attr_name) and attr_name not in set(
-                    self._attr_map.values()
-                ):
-                    logger.warning(
-                        "Skill %s overwrites existing agent attr '%s'",
-                        name,
-                        attr_name,
-                    )
+                if self._attr_taken(name):
+                    self._note_name_conflict(name)
+                    continue
                 setattr(self._agent, attr_name, skill)
                 skill.attach(self._agent)
                 self._loaded.add(name)
@@ -601,6 +679,7 @@ class SkillRegistry(Skill):
                 skill.attach(self._agent)
         newly_loaded = name not in self._loaded
         self._loaded.add(name)
+        self._name_conflicts.pop(name, None)
         self._attr_map[name] = attr
         if newly_loaded:
             self._load_order.append(name)
@@ -1342,6 +1421,8 @@ class SkillRegistry(Skill):
             for name, desc in available:
                 lines.append(f"  {name:28s} {desc}")
 
+        lines.extend(self.name_conflicts())
+        lines.extend(self.notices())
         return "\n".join(lines)
 
     # ------------------------------------------------------------------

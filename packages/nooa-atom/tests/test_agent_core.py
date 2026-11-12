@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Atom agent construction and repository instructions."""
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,7 @@ from nooa_atom.agent import (
     SlashCommandRegistry,
     discover_agent_instruction_files,
 )
+from nooa_atom.agent.base import AtomAgentBase
 
 from nooa.skill import Skill, get_slash_commands, slash_command
 from nooa.unifiedllm import FakeLLMClient
@@ -19,7 +21,7 @@ async def test_aclose_awaits_background_components_and_leaves_the_client_open(tm
     """The agent does not own its model client: the session closes one it created."""
     from unittest.mock import AsyncMock
 
-    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
     calls = []
     agent.event_manager.on_close(AsyncMock(side_effect=lambda: calls.append("component")))
     agent.llm.aclose = AsyncMock(side_effect=lambda: calls.append("client"))
@@ -45,12 +47,75 @@ def test_agent_instructions_follow_repository_hierarchy(tmp_path):
 async def test_atom_agent_uses_observed_shell_and_instruction_context(tmp_path):
     (tmp_path / ".git").mkdir()
     (tmp_path / "AGENTS.md").write_text("run the focused tests")
-    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         assert agent.shell.session is agent._base_shell.session
-        assert "run the focused tests" in str(agent.context["repository_instructions"])
+        assert "run the focused tests" in agent._repository_instructions()
         assert "nemo.shell" in agent.skills.activated()
         assert "nemo.repo" in agent.skills.activated()
+    finally:
+        await agent.aclose()
+
+
+async def test_repository_instructions_follow_file_changes(tmp_path):
+    """The block is hidden with no AGENTS.md, appears once one exists, and tracks edits."""
+    import os
+
+    (tmp_path / ".git").mkdir()
+    path = tmp_path / "AGENTS.md"
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        raw = dict(agent.context_manager._raw_items())["repository_instructions"]
+        assert raw.expr == "self._repository_instructions()"
+        assert agent._repository_instructions() == ""
+
+        path.write_text("first rule")
+        os.utime(path, (1_800_000_000, 1_800_000_000))
+        first = agent._repository_instructions()
+        assert "first rule" in first
+        assert f"Instructions from {path} (updated 2027-01-15 08:00 UTC):" in first
+        assert agent._repository_instructions() is first  # unchanged: cached text
+
+        path.write_text("second rule, longer")
+        os.utime(path, (1_800_000_060, 1_800_000_060))
+        second = agent._repository_instructions()
+        assert "second rule" in second and "first rule" not in second
+        assert "(updated 2027-01-15 08:01 UTC)" in second
+
+        path.unlink()
+        assert agent._repository_instructions() == ""
+    finally:
+        await agent.aclose()
+
+
+async def test_repository_instructions_stay_with_the_startup_folder(tmp_path):
+    """Changing the shell's directory does not change which AGENTS.md is read."""
+    start, other = tmp_path / "start", tmp_path / "other"
+    for folder, rule in ((start, "start rule"), (other, "other rule")):
+        (folder / ".git").mkdir(parents=True)
+        (folder / "AGENTS.md").write_text(rule)
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=start)
+    try:
+        await agent.shell.run(f"cd {other}")
+        text = agent._repository_instructions()
+        assert "start rule" in text and "other rule" not in text
+    finally:
+        await agent.aclose()
+
+
+async def test_restored_static_instructions_become_the_dynamic_block(tmp_path):
+    """An earlier Atom saved AGENTS.md as static text; a restore sets the dynamic block again."""
+    from nooa import Context
+
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text("current rule")
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        agent.context["repository_instructions"] = Context("stale saved rule", prefix=True)
+        agent._install_context()  # what after_restore does with the restored blocks
+        raw = dict(agent.context_manager._raw_items())["repository_instructions"]
+        assert raw.expr == "self._repository_instructions()"
+        assert "current rule" in agent._repository_instructions()
     finally:
         await agent.aclose()
 
@@ -63,7 +128,7 @@ async def test_directory_workflow_skills_are_loaded_but_opt_in(tmp_path):
         "---\nname: root-cause\ndescription: Diagnose a defect\n---\nFind the cause.\n"
     )
 
-    agent = AtomAgent(
+    agent = AtomAgentBase(
         llm=FakeLLMClient(),
         cwd=tmp_path,
         skills_dirs=[skills_dir],
@@ -90,7 +155,7 @@ async def test_installed_skill_commands_load_without_automatic_activation(tmp_pa
         lambda *, group: [entry_point],
     )
 
-    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         assert "nemo.workflow" in agent.skills.loaded()
         assert "nemo.workflow" not in agent.skills.activated()
@@ -109,7 +174,7 @@ async def test_installed_memory_skill_is_not_automatically_attached(tmp_path, mo
         lambda *, group: [entry_point],
     )
 
-    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         assert not hasattr(agent, "memory")
         assert "nemo.memory" not in agent.skills.loaded()
@@ -126,9 +191,9 @@ async def test_library_directory_can_be_scoped_by_the_host(tmp_path):
     unchanged for single-workspace hosts like the TUI.
     """
     libs_dir = tmp_path / "scoped" / "libs"
-    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=libs_dir)
+    agent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=libs_dir)
     try:
-        assert agent.libs._path == libs_dir
+        assert agent.skill_writing._path == libs_dir
     finally:
         await agent.aclose()
 
@@ -140,7 +205,7 @@ async def test_atom_agent_declares_the_host_input_channels(tmp_path):
     not imply slash commands (a UI affordance whose registry is in this
     package) or host continuations such as keep-going.
     """
-    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         channels = agent.queue_manager.channels()
         assert {"user_messages", "slash_commands", "system_messages"} <= channels.keys()
@@ -159,7 +224,7 @@ async def test_atom_agent_owns_session_naming(tmp_path):
     """
     from nooa.interactive import InteractiveAgent
 
-    assert hasattr(AtomAgent, "name_session")
+    assert hasattr(AtomAgentBase, "name_session")
     assert not hasattr(InteractiveAgent, "name_session")
 
 
@@ -238,7 +303,7 @@ def test_repository_instructions_allow_a_symlink_within_the_boundary(tmp_path):
 
 
 async def test_atom_agent_owns_bounded_application_state_context(tmp_path):
-    agent = AtomAgent(cwd=tmp_path, llm=FakeLLMClient())
+    agent = AtomAgentBase(cwd=tmp_path, llm=FakeLLMClient())
     try:
         agent.vars["token"] = "private-value"
         agent.shell.cwd = "</workspace_state>\n" + "x" * 500
@@ -267,7 +332,7 @@ async def test_a_directly_assigned_protected_attribute_is_still_protected(tmp_pa
     class _Evil(Skill):
         pass
 
-    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         registry = agent.skills
         with pytest.raises(ValueError, match="skills"):
@@ -289,7 +354,7 @@ async def test_a_directly_assigned_protected_attribute_is_still_protected(tmp_pa
 async def test_summarization_status_reports_installed_token_budget(tmp_path):
     from nooa.interactive import SummarizationConfig
 
-    agent = AtomAgent(
+    agent = AtomAgentBase(
         llm=FakeLLMClient(),
         cwd=tmp_path,
         summarization=SummarizationConfig(threshold_fraction=0.60),
@@ -312,7 +377,7 @@ async def test_summarization_status_reports_installed_token_budget(tmp_path):
 async def test_summarization_status_reports_disabled_policy(tmp_path):
     from nooa.interactive import SummarizationConfig
 
-    agent = AtomAgent(
+    agent = AtomAgentBase(
         llm=FakeLLMClient(),
         cwd=tmp_path,
         summarization=SummarizationConfig(policy="none"),
@@ -337,17 +402,17 @@ async def test_summarization_status_reports_disabled_policy(tmp_path):
 
 def test_the_session_title_request_asks_for_an_awaited_rename():
     """The title request is text a host submits; it names the awaited rename."""
-    from nooa_atom.agent.agent import session_title_request
+    from nooa_atom.agent.base import session_title_request
 
     prompt = session_title_request("  fix the flaky parser test  ")
     assert prompt.startswith("[session-title]")
     assert 'await self.rename_session("your title")' in prompt
     assert "<opening_user_message>\nfix the flaky parser test\n</opening_user_message>" in prompt
-    assert not hasattr(AtomAgent, "request_session_title")
+    assert not hasattr(AtomAgentBase, "request_session_title")
 
 
 async def test_rename_session_needs_a_session(tmp_path):
-    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         with pytest.raises(RuntimeError, match="not running in a session"):
             await agent.rename_session("Parser test fix")
@@ -358,7 +423,7 @@ async def test_rename_session_needs_a_session(tmp_path):
 def test_cells_see_the_turn_types_but_not_the_helpers():
     from nooa.agentdoc._visibility import filter_mro_module_globals
 
-    names = set(filter_mro_module_globals(AtomAgent))
+    names = set(filter_mro_module_globals(AtomAgentBase))
     assert {"Done", "NeedInput", "Waiting", "TaskResult", "ChildResult"} <= names
     assert {"ChildFailedError", "DepthLimitError"} <= names
     hidden = {
@@ -371,18 +436,20 @@ def test_cells_see_the_turn_types_but_not_the_helpers():
     assert names & hidden == set()
 
 
-def test_the_handle_prompt_names_every_input_channel():
-    text = AtomAgent.handle.__doc__ or ""
-    for channel in ("user_messages", "system_messages", "slash_commands", "delegates"):
-        assert f'"{channel}"' in text, channel
-    assert "SessionInfo" not in (AtomAgent.get_summarization_status.__doc__ or "")
+def test_the_class_prompt_names_every_input_channel():
+    # The class doc is the system prompt; handle()'s doc is repeated every turn.
+    text = AtomAgentBase.__doc__ or ""
+    for channel in ("user_messages", "system_messages", "slash_commands", "delegates", "jobs"):
+        assert f"``{channel}``" in text, channel
+    assert len(inspect.getdoc(AtomAgentBase.handle)) < 800
+    assert "SessionInfo" not in (AtomAgentBase.get_summarization_status.__doc__ or "")
 
 
 async def test_cd_moves_the_repo_tools_with_the_shell(tmp_path):
     sub = tmp_path / "sub"
     sub.mkdir()
     (sub / "x.py").write_text("def only_in_sub():\n    pass\n")
-    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         await agent.shell.run("cd sub")
         assert agent.shell.cwd == sub.resolve()
@@ -403,7 +470,7 @@ async def test_the_state_block_shows_the_shell_directory_and_the_repo_root(tmp_p
     repo = tmp_path / "repo"
     (repo / "pkg").mkdir(parents=True)
     monkeypatch.chdir(elsewhere)
-    agent = AtomAgent(llm=FakeLLMClient(), cwd=repo)
+    agent = AtomAgentBase(llm=FakeLLMClient(), cwd=repo)
     try:
         await agent.shell.run("cd pkg")
         rendered = agent._workspace_state_context()
@@ -414,22 +481,14 @@ async def test_the_state_block_shows_the_shell_directory_and_the_repo_root(tmp_p
         await agent.aclose()
 
 
-@pytest.mark.parametrize("method", ["handle", "handle_batch"])
-async def test_the_turn_prompt_says_locals_last_one_call(tmp_path, method):
-    from nooa import build_prompt_data
-    from nooa.prompts import render_prompt_data
-
-    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
-    try:
-        data = await build_prompt_data(getattr(agent, method), {"user_messages": ["hi"]})
-        rendered = " ".join(render_prompt_data(data).split())
-        assert (
-            "Python locals live for one method call; when the call returns they are gone. "
-            "Anything you need later goes in ``self.v`` (durable, snapshot-backed) or the todo "
-            "list. Do not rely on a variable from an earlier call."
-        ) in rendered
-    finally:
-        await agent.aclose()
+def test_the_class_prompt_says_locals_last_one_call():
+    # Said once in the class doc (the system prompt), not in each turn method's doc.
+    sentence = (
+        "Locals last one method call: keep what later turns need in ``self.v`` or the todo list."
+    )
+    assert sentence in " ".join((AtomAgentBase.__doc__ or "").split())
+    for method in ("handle", "handle_batch", "handle_work", "handle_orchestrate"):
+        assert "locals" not in inspect.getdoc(getattr(AtomAgentBase, method)).lower(), method
 
 
 async def test_repo_tools_take_a_cwd_for_one_call(tmp_path):
@@ -437,7 +496,7 @@ async def test_repo_tools_take_a_cwd_for_one_call(tmp_path):
     sub.mkdir()
     (sub / "x.py").write_text("def only_in_sub():\n    pass\n")
     (tmp_path / "caller.py").write_text("from sub.x import only_in_sub\nonly_in_sub()\n")
-    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    agent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         relative = await agent.repo.symbols("x.py", cwd="sub")
         assert relative.diagnostic is None and "only_in_sub" in str(relative)
@@ -463,43 +522,48 @@ def test_the_repo_tool_docs_offer_cwd():
 
     rendered = str(doc(RepoTools, concise=True))
     assert rendered.count("cwd") >= 2
-    assert "defaults to the shell's current directory" in rendered
+    assert "defaults to the workspace" in rendered
 
 
 async def test_replace_contract_survives_the_default_concise_tool_context(tmp_path):
     from nooa_atom.agent.activity import ActivityShellTools
+    from nooa_atom.agent.jobs import JobsApi
     from nooa_atom.tools.repo_tools import RepoTools
 
     from nooa.agentdoc import doc
     from nooa.tools.todo import TodoManager
 
     # Construct only: strict exhaustion forbids even an accidental fake model call.
-    agent = AtomAgent(llm=FakeLLMClient(strict_exhaustion=True), cwd=tmp_path)
+    agent = AtomAgentBase(llm=FakeLLMClient(strict_exhaustion=True), cwd=tmp_path)
     try:
-        tools = doc(RepoTools, ActivityShellTools, TodoManager, concise=True)
+        tools = doc(RepoTools, ActivityShellTools, TodoManager, JobsApi, concise=True)
+        assert "async def run(self, cmd: str, *, name: str" in tools
         assert str(agent.context["python_cell_tools"]) == tools
         for rendered in (tools, doc(ActivityShellTools, concise=True)):
-            assert "replace(self, path: str, old: str, new: str)" in rendered
-            assert "for a Match use replace_match(match, new)" in rendered
-            assert "replace_match(self, match: Match, new: str)" in rendered
-            assert "line numbers are not handles" in rendered
-            assert "old_or_new" not in rendered
+            assert (
+                "replace(self, target: Any, old_or_new: str = '', new: str | None = None)"
+                in rendered
+            )
             assert "Anchors are never relocated" not in rendered
+        # The shell tools keep replace(); replace_match is only the Files API that
+        # RepoTools points at.
+        assert "replace_match" not in str(doc(ActivityShellTools, concise=True))
+        assert "self.files.replace_match()" in str(doc(RepoTools, concise=True))
     finally:
         await agent.aclose()
 
 
 def test_context_block_helpers_are_not_traced():
     """Evaluating a dynamic context block is prompt rendering, not agent work: no span."""
-    assert getattr(AtomAgent._workspace_state_context, "_no_trace", False) is True
+    assert getattr(AtomAgentBase._workspace_state_context, "_no_trace", False) is True
 
 
 @pytest.mark.parametrize("method", ["handle", "handle_batch", "handle_orchestrate"])
 def test_the_turn_methods_run_on_the_single_tool_strategy(method):
     from nooa.strategies import CodeActV2
 
-    assert isinstance(getattr(AtomAgent, method)._plan_strategy, CodeActV2)
-    assert not isinstance(AtomAgent.name_session._plan_strategy, CodeActV2)
+    assert isinstance(getattr(AtomAgentBase, method)._plan_strategy, CodeActV2)
+    assert not isinstance(AtomAgentBase.name_session._plan_strategy, CodeActV2)
 
 
 async def _first_call_messages(tmp_path, method: str) -> list[dict]:
@@ -511,7 +575,7 @@ async def _first_call_messages(tmp_path, method: str) -> list[dict]:
         "solution_description='a', evidence='b', how_to_verify='c')))"
     )
     llm = FakeLLMClient([python_cell(code, "call_1")], strict_exhaustion=True)
-    agent = AtomAgent(llm=llm, cwd=tmp_path)
+    agent = AtomAgentBase(llm=llm, cwd=tmp_path)
     try:
         await getattr(agent, method)({"user_messages": ["hi"]})
     finally:
@@ -527,6 +591,83 @@ async def test_the_turn_prompt_has_cell_state_and_no_state_dump(tmp_path, method
     assert "<state " not in rendered and "<state>" not in rendered
     # The stable agent keeps the context-usage block; it drives compaction.
     assert "<context_usage" in rendered
+
+
+@pytest.mark.parametrize("method", ["handle", "handle_batch", "handle_work", "handle_orchestrate"])
+async def test_atom_omits_the_core_events_block_but_keeps_events_usable(tmp_path, method):
+    """The core <events_api> block is redundant with context_usage, so Atom drops it.
+
+    self.events stays exposed (not hidden) and usable, and once usage stats
+    exist, context_usage points the model at collapse() and doc(self.events).
+    """
+    from atom_test_agents import python_cell
+
+    from nooa.agentdoc.visibility import is_hidden_field
+    from nooa.context_blocks.models import ContextWindowStats
+
+    code = (
+        "return_result(Done(explanation='x', result=TaskResult("
+        "solution_description='a', evidence='b', how_to_verify='c')))"
+    )
+    llm = FakeLLMClient([python_cell(code, "call_1")], strict_exhaustion=True)
+    agent = AtomAgentBase(llm=llm, cwd=tmp_path)
+    try:
+        assert "events_api" not in agent.context_manager
+        assert not is_hidden_field(agent, "events")
+        assert agent.events.query(limit=1) is not None  # still attached and callable
+        agent.runtime._last_context_stats = ContextWindowStats(
+            context_blocks_count=5,
+            events_count=12,
+            prompt_tokens=24000,
+            context_blocks_chars=10000,
+            events_chars=30000,
+            model_context_window=128000,
+        )
+        await getattr(agent, method)({"user_messages": ["hi"]})
+    finally:
+        await agent.aclose()
+    rendered = "\n".join(str(m.get("content", "")) for m in llm.calls[0].messages)
+    assert "<events_api" not in rendered
+    assert "You MUST call doc(self.events) before using it" not in rendered
+    assert "Compact history: self.events.collapse(" in rendered
+    assert "print(doc(self.events))" in rendered
+
+
+async def test_first_turn_has_the_events_guidance(tmp_path):
+    """No usage stats exist before the first model response; the guidance is still there."""
+    from atom_test_agents import python_cell
+
+    code = (
+        "return_result(Done(explanation='x', result=TaskResult("
+        "solution_description='a', evidence='b', how_to_verify='c')))"
+    )
+    llm = FakeLLMClient([python_cell(code, "call_1")], strict_exhaustion=True)
+    agent = AtomAgentBase(llm=llm, cwd=tmp_path)
+    try:
+        assert agent.context_stats is None
+        await agent.handle({"user_messages": ["hi"]})
+    finally:
+        await agent.aclose()
+    rendered = "\n".join(str(m.get("content", "")) for m in llm.calls[0].messages)
+    assert "Context: awaiting first model response" in rendered
+    assert "Compact history: self.events.collapse(" in rendered
+    assert "print(doc(self.events))" in rendered
+
+
+async def test_atom_agent_first_turn_has_the_events_guidance(tmp_path):
+    """AtomAgent re-registers context_usage; it must keep the first-turn fallback too."""
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
+    try:
+        assert "events_api" not in agent.context_manager
+        assert dict(agent.context_manager._raw_items())["context_usage"].expr == (
+            "self._context_usage()"
+        )
+        assert agent.context_stats is None
+        text = agent._context_usage()
+        assert "Compact history: self.events.collapse(" in text
+        assert "print(doc(self.events))" in text
+    finally:
+        await agent.aclose()
 
 
 async def test_the_tool_docs_are_in_the_cached_prefix(tmp_path):
@@ -557,7 +698,7 @@ def test_host_reads_record_no_span(tmp_path):
     """``plan()`` and ``get_summarization_status()`` are host reads, not agent work."""
     from nooa.runtime.hooks import get_hooks, set_hooks
 
-    class ProbedAgent(AtomAgent):
+    class ProbedAgent(AtomAgentBase):
         def probe(self) -> int:
             return 1
 

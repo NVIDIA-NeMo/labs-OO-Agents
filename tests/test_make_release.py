@@ -15,7 +15,7 @@ import json
 import subprocess
 import sys
 from collections.abc import Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import pytest
@@ -813,8 +813,11 @@ def test_unmerged_rehearsal_does_not_require_github_token(mr, tmp_path, monkeypa
     assert manifest["unmerged_candidate"] is True
 
 
-@pytest.mark.parametrize("failure_point", ["deterministic", "infrastructure", "hard-gate"])
+@pytest.mark.parametrize(
+    "failure_point", ["deterministic", "quickstarts", "infrastructure", "hard-gate"]
+)
 def test_ci_never_creates_draft_after_gate_failure(mr, tmp_path, monkeypatch, failure_point):
+    """Any hard gate failure must prevent draft creation."""
     args = _ci_args(mr, tmp_path)
     monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "masked")
     monkeypatch.setenv("GH_TOKEN", "masked")
@@ -838,7 +841,13 @@ def test_ci_never_creates_draft_after_gate_failure(mr, tmp_path, monkeypatch, fa
         )
     else:
         monkeypatch.setattr(mr, "fast_checks", lambda *_args, **_kwargs: None)
-        if failure_point == "infrastructure":
+        if failure_point == "quickstarts":
+            monkeypatch.setattr(
+                mr,
+                "build_and_smoke",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(mr.ReleaseError("quickstart")),
+            )
+        elif failure_point == "infrastructure":
             monkeypatch.setattr(
                 mr,
                 "capability_diff",
@@ -912,3 +921,169 @@ def test_existing_publication_workflow_still_uses_published_release_trigger():
     assert "types: [published]" in workflow
     assert "workflow_dispatch:" in workflow
     assert "if: github.event_name == 'release'" in workflow
+
+
+@pytest.mark.parametrize("failure", [None, "install", "example", "timeout", "unexpected"])
+def test_fresh_wheel_quickstarts_isolate_customer_install_and_record_failures(
+    mr, tmp_path, monkeypatch, failure
+):
+    """Verify environment isolation and durable evidence across smoke failures."""
+    wheel = tmp_path / "nooa-1.2.3-py3-none-any.whl"
+    wheel.touch()
+    manifest = mr.ReleaseManifest(tmp_path / "evidence" / "release-manifest.json", {})
+    monkeypatch.setenv("NVIDIA_INTERNAL_API_KEY", "test-inference-key")
+    monkeypatch.delenv("NVIDIA_INFERENCE_API_KEY", raising=False)
+    monkeypatch.setenv("GH_TOKEN", "release-token-must-not-leak")
+    monkeypatch.setenv("OPENAI_API_KEY", "different-provider-must-not-win")
+    monkeypatch.setenv("PYTHONPATH", str(REPO / "src"))
+    monkeypatch.setenv("UV_CONSTRAINT", "ambient-constraints.txt")
+    monkeypatch.setenv("NEMO_OO_LLM_CONFIG", "ambient-registry.yaml")
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        """Simulate subprocess outcomes without running external services."""
+        calls.append((cmd, kwargs))
+        assert kwargs["cwd"] != REPO
+        assert kwargs["timeout"] > 0
+        env = kwargs["env"]
+        live = cmd[-1].endswith(tuple(mr.QUICKSTART_EXAMPLES))
+        assert env.get("NVIDIA_INFERENCE_API_KEY") == ("test-inference-key" if live else None)
+        for name in (
+            "GH_TOKEN",
+            "OPENAI_API_KEY",
+            "PYTHONPATH",
+            "UV_CONSTRAINT",
+            "NEMO_OO_LLM_CONFIG",
+        ):
+            assert name not in env
+        assert env["PYTHON_DOTENV_DISABLED"] == "1"
+        if "install" in cmd and failure == "install":
+            return subprocess.CompletedProcess(cmd, 1, "", "resolver failed")
+        if "-c" in cmd:
+            Path(cmd[-1]).write_text(
+                json.dumps({"packages": {"nooa": "1.2.3", "example-dependency": "4.5.6"}})
+            )
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                "import banner on stdout",
+                "",
+            )
+        if cmd[-1].endswith(mr.QUICKSTART_EXAMPLES[0]):
+            copied = Path(cmd[-1])
+            assert copied.parent == kwargs["cwd"]
+            assert copied.read_bytes() == (REPO / "examples/quickstart" / copied.name).read_bytes()
+            assert cmd[1:3] == ["-I", "-u"]
+            assert Path(cmd[-2]).name == "quickstart_smoke.py"
+            assert Path(cmd[-2]).read_bytes() == (REPO / "scripts/quickstart_smoke.py").read_bytes()
+            if failure == "timeout":
+                raise mr.ReleaseError("command timed out\npartial output test-inference-key")
+            if failure == "example":
+                return subprocess.CompletedProcess(cmd, 1, "", "error test-inference-key")
+            if failure == "unexpected":
+                raise TypeError("unexpected failure test-inference-key")
+        return subprocess.CompletedProcess(cmd, 0, "OK", "")
+
+    monkeypatch.setattr(mr, "run", fake_run)
+    if failure:
+        with pytest.raises(mr.ReleaseError):
+            mr.fresh_wheel_quickstarts(wheel, manifest)
+    else:
+        mr.fresh_wheel_quickstarts(wheel, manifest)
+    report = json.loads((manifest.path.parent / "quickstart-smoke/result.json").read_text())
+    assert report == json.loads(manifest.path.read_text())["quickstart_smoke"]
+    assert report["outcome"] == ("failed" if failure else "passed")
+    install = next(cmd for cmd, _ in calls if "install" in cmd)
+    assert install[:4] == ["uv", "--no-config", "pip", "install"]
+    assert install[-3:] == ["--index-url", "https://pypi.org/simple", str(wheel)]
+    if failure in ("example", "timeout", "unexpected"):
+        assert report["examples"][0]["outcome"] == "failed"
+        assert [case["outcome"] for case in report["examples"][1:]] == ["not_run", "not_run"]
+    if failure == "timeout":
+        log = manifest.path.parent / "quickstart-smoke" / f"{mr.QUICKSTART_EXAMPLES[0]}.log"
+        assert "partial output [REDACTED]" in log.read_text()
+    if failure is None:
+        assert [case["example"] for case in report["examples"]] == mr.QUICKSTART_EXAMPLES
+        assert all(case["outcome"] == "passed" for case in report["examples"])
+        assert report["validator_sha256"] == mr.sha256(REPO / "scripts/quickstart_smoke.py")
+    for log in (manifest.path.parent / "quickstart-smoke").iterdir():
+        assert "test-inference-key" not in log.read_text()
+
+
+def test_fresh_wheel_quickstarts_require_credentials(mr, tmp_path, monkeypatch):
+    """Missing credentials must produce explicit failed smoke evidence."""
+    monkeypatch.delenv("NVIDIA_INTERNAL_API_KEY", raising=False)
+    monkeypatch.delenv("NVIDIA_INFERENCE_API_KEY", raising=False)
+    manifest = mr.ReleaseManifest(tmp_path / "release-manifest.json", {})
+    with pytest.raises(mr.ReleaseError, match="require NVIDIA"):
+        mr.fresh_wheel_quickstarts(tmp_path / "nooa.whl", manifest)
+    assert manifest.data["quickstart_smoke"]["outcome"] == "failed"
+
+
+@pytest.mark.parametrize("flags", [[], ["--skip-capability"], ["--checks-only"], ["--dry-run"]])
+def test_local_release_requires_credentials_before_checks(mr, monkeypatch, flags):
+    """Local release modes must reject missing credentials before expensive checks."""
+    monkeypatch.delenv("NVIDIA_INTERNAL_API_KEY", raising=False)
+    monkeypatch.delenv("NVIDIA_INFERENCE_API_KEY", raising=False)
+    monkeypatch.setattr(
+        mr, "preflight", lambda *_args: pytest.fail("preflight ran before checking credentials")
+    )
+    with pytest.raises(mr.ReleaseError, match="require NVIDIA"):
+        mr.local_main(mr._parser().parse_args(["v1.2.3", *flags]))
+
+
+@pytest.mark.parametrize("partial", ["partial output", b"partial output"])
+def test_timeout_preserves_partial_output(mr, monkeypatch, partial):
+    """Timeout diagnostics must retain both byte and text subprocess output."""
+
+    def timed_out(*_args, **_kwargs):
+        """Model a timeout that retains partial stdout and stderr."""
+        raise subprocess.TimeoutExpired(["python"], 1, output=partial, stderr=b"partial stderr")
+
+    monkeypatch.setattr(mr.subprocess, "run", timed_out)
+    with pytest.raises(mr.ReleaseError, match="partial output\\s*partial stderr"):
+        mr.run(["python"], timeout=1)
+
+
+@pytest.mark.parametrize("fail_quickstart", [False, True])
+def test_built_core_wheel_must_pass_quickstarts_before_combined_smoke(
+    mr, tmp_path, monkeypatch, fail_quickstart
+):
+    """Fresh core-wheel failures must stop the combined-package smoke checks."""
+    monkeypatch.setattr(mr, "REPO", tmp_path)
+    monkeypatch.setattr(mr, "temporary_tag", lambda *_args: nullcontext())
+    manifest = mr.ReleaseManifest(tmp_path / "release-manifest.json", {})
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        """Simulate subprocess outcomes without running external services."""
+        calls.append(cmd)
+        if "build" in cmd:
+            dist = tmp_path / "dist"
+            dist.mkdir(exist_ok=True)
+            package = cmd[cmd.index("--package") + 1].replace("-", "_")
+            (dist / f"{package}-1.2.3-py3-none-any.whl").touch()
+        return subprocess.CompletedProcess(cmd, 0, "1.2.3", "")
+
+    def quickstarts(wheel, received_manifest):
+        """Check that the core-only gate runs before combined-package installation."""
+        assert wheel.name == "nooa-1.2.3-py3-none-any.whl"
+        assert received_manifest is manifest
+        assert not any("install" in cmd for cmd in calls)
+        calls.append(["quickstarts"])
+        if fail_quickstart:
+            raise mr.ReleaseError("live quickstart failed")
+
+    monkeypatch.setattr(mr, "run", fake_run)
+    monkeypatch.setattr(mr, "fresh_wheel_quickstarts", quickstarts)
+    monkeypatch.setattr(
+        mr.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess([], 0, "OK", "")
+    )
+    if fail_quickstart:
+        with pytest.raises(mr.ReleaseError, match="live quickstart failed"):
+            mr.build_and_smoke("v1.2.3", "a" * 40, manifest)
+        assert not any("install" in cmd for cmd in calls)
+    else:
+        mr.build_and_smoke("v1.2.3", "a" * 40, manifest)
+        assert any("install" in cmd for cmd in calls)
+    assert calls.count(["quickstarts"]) == 1

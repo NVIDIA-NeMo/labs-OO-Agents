@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """The workspace's settings: behaviour settings, skill directories, and persistence.
 
-One layered ``settings.yaml`` (user, then project ``.nooa/``, or the file
-``NEMO_OO_SETTINGS`` names) holds them for every interactive host. Atom reads
-and writes its ``atom`` section. The TUI and ``nooa-acp`` keep using
+One layered ``settings.yaml`` holds them for every interactive host:
+the user file, the project ``.nooa/`` file and the files ``NEMO_OO_SETTINGS``
+names, highest priority last (``load_settings_layers``). Atom reads and
+writes its ``atom`` section. The TUI and ``nooa-acp`` keep using
 ``coding``, the section Atom used to share with them: the first time Atom
 reads a settings file that has ``coding`` and no ``atom``, it copies one to
 the other (``copy_coding_settings``), and from then on each section changes
@@ -59,11 +60,7 @@ def load_skills_dirs(
     """
     root = Path(workspace).expanduser().resolve()
     copy_coding_settings(root / ".nooa")
-    settings = load_layered_yaml(
-        SETTINGS_FILENAME,
-        SETTINGS_ENV_VAR,
-        project_dir=root / ".nooa",
-    )
+    settings = load_settings_layers(root / ".nooa")
 
     configured: list[str | Path] = []
     atom = settings.get(SETTINGS_SECTION)
@@ -109,6 +106,15 @@ def load_skills_dirs(
         seen.add(resolved)
         result.append(resolved)
     return result
+
+
+def load_settings_layers(project_dir: Path | None = None) -> dict[str, Any]:
+    """Merge every ``settings.yaml`` layer for the project ``.nooa`` directory *project_dir*.
+
+    The user file, the project file and ``NEMO_OO_SETTINGS``, highest
+    priority last (``nooa.layered_config.load_layered_yaml``).
+    """
+    return load_layered_yaml(SETTINGS_FILENAME, SETTINGS_ENV_VAR, project_dir=project_dir)
 
 
 def _setting_paths(settings: Mapping[str, Any], section: str) -> list[str | Path]:
@@ -190,7 +196,7 @@ def behavior_fields() -> frozenset[str]:
 def load_settings_data(workspace: str | Path | None = None) -> dict[str, Any]:
     project = Path(workspace).expanduser().resolve() / ".nooa" if workspace is not None else None
     copy_coding_settings(project)
-    return load_layered_yaml(SETTINGS_FILENAME, SETTINGS_ENV_VAR, project_dir=project)
+    return load_settings_layers(project)
 
 
 def load_acp_verbosity(workspace: str | Path) -> Literal["silent", "concise", "verbose"]:
@@ -234,7 +240,11 @@ def _invalid_settings_files(workspace: str | Path) -> list[str]:
 
     project = Path(workspace).expanduser().resolve() / ".nooa"
     invalid = []
-    for path in layered_paths(SETTINGS_FILENAME, SETTINGS_ENV_VAR, project_dir=project):
+    for path in layered_paths(
+        SETTINGS_FILENAME,
+        SETTINGS_ENV_VAR,
+        project_dir=project,
+    ):
         try:
             data = yaml.safe_load(path.read_text())
         except (OSError, UnicodeError, yaml.YAMLError):

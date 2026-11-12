@@ -16,10 +16,14 @@ from pydantic import (
     BaseModel,
     Field,
     SerializeAsAny,
+    SerializerFunctionWrapHandler,
     ValidationError,
     field_validator,
+    model_serializer,
+    model_validator,
 )
 
+from nooa.agentdoc import spec
 from nooa.context_blocks import EventBase
 from nooa.interactive import Done, NeedInput, TaskResult  # noqa: F401  (TaskResult re-exported)
 from nooa.runtime.turn_loop import TurnCancelled  # noqa: F401  (re-exported)
@@ -49,21 +53,26 @@ class Receipt(BaseModel):
     delivered: Literal["queued", "steered"]
 
 
+@spec(hide_empty=True)
 class ChildRef(BaseModel):
     """A handle on a child session: data plus ``wait()``, ``send()`` and ``close()``.
 
-    It holds the child's id and a few facts, never the child itself. The
-    methods find the parent's port at call time from the running turn, so
-    a ``ChildRef`` kept in ``self.v`` still works after a checkpoint and a
-    reload, and one that arrives in a ``ChildResult`` can be acted on
-    directly (``item.child.send(...)``). Only the child's parent can use
-    it: ``parent_id`` is that parent, and the methods raise
-    ``ChildFailedError`` in any other session. Its repr shows a question
-    of the child's that you have not answered.
+    It holds the child's id, name, path (``/root/review_pr_462``) and a few
+    facts, never the child itself. The methods find the parent's port at
+    call time from the running turn, so a ``ChildRef`` kept in ``self.v``
+    still works after a checkpoint and a reload, and one that arrives in a
+    ``ChildResult`` can be acted on directly (``item.child.send(...)``).
+    Only the child's parent can control it (``send()``, ``close()``):
+    ``parent_id`` is that parent. An ancestor further up may read its
+    ``status`` and ``wait()`` for it; other sessions get
+    ``ChildFailedError``. Its repr shows a question of the child's that
+    you have not answered.
     """
 
     id: str
     name: str
+    path: str = ""
+    """Where it is in the session tree: its parent's path, ``/`` and its name."""
     depth: int
     status: ChildStatus
     parent_id: str | None = None
@@ -76,7 +85,7 @@ class ChildRef(BaseModel):
         # the stored value, the status when the ref was made. Dumps,
         # snapshots and comparisons read the stored field, so they are stable.
         if name == "status":
-            port = _parent_port(self)
+            port = _reader_port(self)
             if port is not None:
                 with suppress(ChildFailedError):
                     return port.child_status(object.__getattribute__(self, "id"))
@@ -96,6 +105,8 @@ class ChildRef(BaseModel):
 
     def __repr_args__(self) -> Any:
         for name, value in super().__repr_args__():
+            if name == "id":
+                continue  # the uuid stays on the ref; the repr shows name and path
             yield (name, self.status) if name == "status" else (name, value)
         port = _parent_port(self)
         question = None
@@ -112,7 +123,7 @@ class ChildRef(BaseModel):
         once when waiting could never end: the child is idle with nothing
         queued, or it waits for your answer. A ``ChildMessage`` does not end it.
         """
-        return await _port(self).wait_child(self.id)
+        return await _port(self, control=False).wait_child(self.id)
 
     async def send(self, item: Any, *, channel: str = "user_messages") -> "Receipt":
         """Send the child a message: a running turn reads it next, an idle child starts a turn."""
@@ -144,38 +155,71 @@ def _parent_port(ref: ChildRef) -> "SessionPort | None":
     return port
 
 
-def _port(ref: ChildRef) -> "SessionPort":
-    """The running turn's port, if its session is ``ref``'s parent."""
+def _reader_port(ref: ChildRef) -> "SessionPort | None":
+    """The running turn's port when it is ``ref``'s parent or an ancestor further up."""
+    from nooa_atom.session.port import current_port
+
+    port = current_port.get()
+    if port is None or ref.parent_id is None or ref.parent_id == port.id:
+        return port
+    return port if port.is_ancestor_of(ref.id) else None
+
+
+def _port(ref: ChildRef, *, control: bool = True) -> "SessionPort":
+    """The running turn's port, if its session is ``ref``'s parent.
+
+    With ``control=False`` (``wait()``), an ancestor further up will do too:
+    it may watch a deeper session, but only its parent controls it.
+    """
     from nooa_atom.session.port import require_port
 
     port = require_port()
-    if ref.parent_id is not None and ref.parent_id != port.id:
+    if ref.parent_id is None or ref.parent_id == port.id:
+        return port
+    if port.is_ancestor_of(ref.id):
+        if not control:
+            return port
         raise ChildFailedError(
-            f"Child {ref.id!r} belongs to session {ref.parent_id!r}, not to {port.id!r}"
+            f"{ref.path or ref.id} is not your child but a deeper session: you can read "
+            "its status and wait() for it; control it through its parent"
         )
-    return port
+    raise ChildFailedError(
+        f"Child {ref.path or ref.id!r} belongs to session {ref.parent_id!r}, not to {port.id!r}"
+    )
 
 
 class ChildFailedError(RuntimeError):
     """A child's turn failed, it is closed, or waiting for it could never end."""
 
 
+@spec(hide_empty=True)
 class ChildResult(BaseModel):
-    """A child finished a turn with ``Done``; delivered on the parent's ``delegates`` channel.
+    """A child finished a turn with ``Done``; its full report is ``item.result.report``."""
 
-    A ``done.result`` that arrives as data (a child that returned a dict, or
-    a result reloaded from the record) is rebuilt as a ``TaskResult`` when it
-    is one. A worker's ``done.result`` is always a ``TaskResult``: its turn
-    cannot end ``Done`` without one. ``delegate()`` gets its ``Done`` through
-    this class too.
-    """
-
-    child: ChildRef
-    done: Done
+    name: str = Field("", description="the child's name")
+    path: str = Field("", description="the child's path in the session tree, else its name")
+    summary: str = Field("", description="the child's Done.explanation: one status line")
+    result: Annotated[TaskResult | None, spec(max_string=8000)] = Field(
+        None,
+        description="the child's TaskResult (always one for a worker): .report is the full report",
+    )
+    message: Annotated[str, spec(max_string=1000)] = Field(
+        "", description="the child's Done.message, if it sent one"
+    )
+    evidence: Annotated[list[str], spec(max_length=5, max_string=300)] = Field(
+        default_factory=list, description="the child's Done.evidence"
+    )
+    child: ChildRef = Field(description="handle on the child: await item.child.send(...)")
+    done: Annotated[Done, spec(hidden=True)]
+    """The child's ``Done`` as it arrived. The fields above are derived from it
+    and ``child`` on validation and left out of dumps, so a record holds
+    ``child`` and ``done`` only."""
 
     @field_validator("done", mode="after")
     @classmethod
     def _task_result(cls, done: Done) -> Done:
+        # A result that arrives as data (a child that returned a dict, or one
+        # reloaded from the record) is rebuilt as a TaskResult when it is one.
         if isinstance(done.result, dict):
             try:
                 result = TaskResult.model_validate(done.result)
@@ -184,44 +228,101 @@ class ChildResult(BaseModel):
             done = done.model_copy(update={"result": result})
         return done
 
+    @model_serializer(mode="wrap")
+    def _dump(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        # A dump keeps the source of truth only; validation derives the rest.
+        return {key: value for key, value in handler(self).items() if key in ("child", "done")}
 
+    @model_validator(mode="after")
+    def _flatten(self) -> "ChildResult":
+        done = self.done
+        result = done.result if isinstance(done.result, TaskResult) else None
+        self.__dict__.update(
+            name=self.child.name,
+            path=self.child.path or self.child.name,
+            summary=done.explanation,
+            result=result,
+            message=done.message or "",
+            evidence=list(done.evidence),
+        )
+        return self
+
+    def status_source(self) -> str:
+        """Who sent it, for the per-turn ``Unread:`` count (never its content)."""
+        return self.path
+
+
+@spec(hide_empty=True)
 class ChildQuestion(BaseModel):
-    """A kept child asked you a question (its ``NeedInput``); reply with ``await item.child.send(...)``.
+    """A kept child asked you a question (its ``NeedInput``); reply with ``await item.child.send(...)``."""
 
-    It is data. Any ``send()`` to the child, and the child's next turn, end
-    it as the child's pending question; ``id`` names it until then. The
-    reply is plain text. An unanswered question does not stop you from
-    ending your own turn with ``Done``.
-    """
+    id: str = Field(
+        default_factory=lambda: uuid.uuid4().hex[:8],
+        description="names the question until any send() to the child or its next turn",
+    )
+    name: str = Field("", description="the child's name")
+    path: str = Field("", description="the child's path in the session tree, else its name")
+    question: Annotated[str, spec(max_string=2000)] = Field(description="the question")
+    reason: str | None = Field(None, description="why the child asks")
+    child: ChildRef = Field(description="handle on the child: await item.child.send(...)")
 
-    id: str = Field(default_factory=lambda: uuid.uuid4().hex[:8])
-    child: ChildRef
-    question: str
-    reason: str | None = None
+    @model_validator(mode="after")
+    def _flatten(self) -> "ChildQuestion":
+        self.__dict__.update(name=self.child.name, path=self.child.path or self.child.name)
+        return self
 
     @classmethod
     def from_need_input(cls, child: ChildRef, need: NeedInput) -> "ChildQuestion":
         """Convert a child's ``NeedInput``."""
         return cls(child=child, question=need.question, reason=need.reason)
 
+    def status_source(self) -> str:
+        """Who sent it, for the per-turn ``Unread:`` count (never its content)."""
+        return self.path
 
+
+@spec(hide_empty=True)
 class ChildFailed(BaseModel):
-    """A child's turn failed or the child ended without a result."""
+    """A child's turn failed or the child ended without a result; read ``item.error``."""
 
-    child: ChildRef
-    error: str
+    name: str = Field("", description="the child's name")
+    path: str = Field("", description="the child's path in the session tree, else its name")
+    error: Annotated[str, spec(max_string=2000)] = Field(description="what went wrong")
+    child: ChildRef = Field(description="handle on the child")
+
+    @model_validator(mode="after")
+    def _flatten(self) -> "ChildFailed":
+        self.__dict__.update(name=self.child.name, path=self.child.path or self.child.name)
+        return self
+
+    def status_source(self) -> str:
+        """Who sent it, for the per-turn ``Unread:`` count (never its content)."""
+        return self.path
 
 
+# Longest ``self.message()`` text a child's parent receives, in characters.
+# A progress note is short; the full report belongs in the child's result.
+CHILD_MESSAGE_CHARS = 1_000
+CHILD_MESSAGE_CUT = "\n[cut: the full report belongs in the result]"
+
+
+@spec(hide_empty=True)
 class ChildMessage(BaseModel):
-    """A child sent a message with ``self.message()``; delivered on the parent's ``delegates`` channel.
+    """A progress note a child sent with ``self.message()``, not its result; read ``item.text``."""
 
-    One item per message, in order, before the result of the same turn: a
-    progress note, not the result (a worker's result is its ``TaskResult``).
-    It does not end ``ChildRef.wait()``, which waits for a result or a question.
-    """
+    name: str = Field("", description="the child's name")
+    path: str = Field("", description="the child's path in the session tree, else its name")
+    text: Annotated[str, spec(max_string=2000)] = Field(description="the message")
+    child: ChildRef = Field(description="handle on the child: await item.child.send(...)")
 
-    child: ChildRef
-    text: str
+    @model_validator(mode="after")
+    def _flatten(self) -> "ChildMessage":
+        self.__dict__.update(name=self.child.name, path=self.child.path or self.child.name)
+        return self
+
+    def status_source(self) -> str:
+        """Who sent it, for the per-turn ``Unread:`` count (never its content)."""
+        return self.path
 
 
 class TurnCancelledOutcome(BaseModel):

@@ -15,7 +15,6 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from nooa import Skill, hidden
 from nooa.storage.markers import snapshotable
-from nooa.storage.persistent_vars import PersistentVars
 from nooa.storage.snapshot_vars import SnapshotVars
 
 _STATUS_MAX_ITEMS = 10
@@ -41,10 +40,6 @@ class TodoComment(BaseModel):
     id: str = Field(default_factory=lambda: _uuid.uuid4().hex[:8])
     body: str
     created_at: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"))
-
-
-# Backward-compatible import name for the task-scoped variable proxy.
-TodoVars = PersistentVars
 
 
 class Todo(BaseModel):
@@ -102,8 +97,8 @@ class Todo(BaseModel):
         raise TypeError(f"Todo.vars must be a dict or SnapshotVars, got {type(value).__name__}")
 
     @property
-    def v(self) -> PersistentVars:
-        """Durable task-specific work state backed by ``self.vars``.
+    def v(self) -> SnapshotVars:
+        """Durable task-specific work state backed by ``self.vars``; ``t.v["k"]`` is ``t.v.k``.
 
         Store plans, findings, artifacts, checkpoints, and verification metadata
         here. Use the agent's ``self.v`` for durable cross-task identity and
@@ -117,7 +112,7 @@ class Todo(BaseModel):
             del t.v.commits      # remove
             "commits" in t.v     # False
         """
-        return PersistentVars(self)
+        return self.vars
 
     @hidden
     def is_blocked(self, all_todos: dict[str, "Todo"]) -> bool:

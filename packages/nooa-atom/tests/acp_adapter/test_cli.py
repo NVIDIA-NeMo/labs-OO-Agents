@@ -38,9 +38,7 @@ def _invoke(args, **kwargs):
     return click.testing.CliRunner().invoke(command, args, **kwargs)
 
 
-def test_without_a_model_the_first_configured_one_is_used(
-    monkeypatch, served, requested, tmp_path
-):
+def test_without_a_model_the_first_configured_one_is_used(monkeypatch, served, requested, tmp_path):
     monkeypatch.delenv("NOOA_MODEL", raising=False)
     assert _invoke([]).exit_code == 0
     assert served["model"] is None
@@ -99,9 +97,7 @@ def test_without_agent_the_workspace_setting_decides(served):
 
 
 def test_sessions_dir_and_tee_are_passed_on(served, tmp_path):
-    result = _invoke(
-        ["--sessions-dir", str(tmp_path / "s"), "--tee", str(tmp_path / "t.jsonl")]
-    )
+    result = _invoke(["--sessions-dir", str(tmp_path / "s"), "--tee", str(tmp_path / "t.jsonl")])
     assert result.exit_code == 0, result.output
     assert served["sessions_dir"] == tmp_path / "s"
     assert served["tee"] == tmp_path / "t.jsonl"

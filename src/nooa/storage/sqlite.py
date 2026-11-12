@@ -7,7 +7,6 @@ Provides persistent storage using stdlib sqlite3 — no new dependencies.
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import os
@@ -25,6 +24,7 @@ from typing import TYPE_CHECKING, Literal, Self
 
 from pydantic import ValidationError as PydanticValidationError
 
+from nooa._platform import require_posix
 from nooa.context_blocks import Event, EventBase, EventStatus, Metadata
 from nooa.context_blocks.events import _EVENT_REGISTRY
 from nooa.events import (
@@ -36,10 +36,10 @@ from nooa.events import (
     Message,
     PythonOutput,
     Reasoning,
+    SessionCleared,
+    SessionResumed,
     Summary,
     Task,
-    TuiSessionCleared,
-    TuiSessionResumed,
 )
 from nooa.llm_types import LLMResponse
 from nooa.storage.json_snapshot import snapshot_from_dict, snapshot_to_dict
@@ -90,8 +90,8 @@ for _cls in (
     BeforeTurn,
     AfterTurn,
     DecisionRecord,
-    TuiSessionResumed,
-    TuiSessionCleared,
+    SessionResumed,
+    SessionCleared,
 ):
     _key: str = _registry_key(_cls)
     if _key in _CORE_TYPES:
@@ -101,6 +101,12 @@ for _cls in (
             "Each event class must have a unique event_type default."
         )
     _CORE_TYPES[_key] = _cls
+
+# Stored event_type -> the current one, for event classes that were renamed.
+_RENAMED_EVENT_TYPES: dict[str, str] = {
+    "TuiSessionResumed": "SessionResumed",
+    "TuiSessionCleared": "SessionCleared",
+}
 
 _SCHEMA_VERSION = 1
 
@@ -302,6 +308,8 @@ class SQLiteEventBackend:
         if event_type == "LLMOutput":
             raw["event_type"] = "LLMResponse"
             return LLMResponse.model_validate(raw, context={"archive": True})
+        if event_type in _RENAMED_EVENT_TYPES:  # rows stored under an older class name
+            event_type = raw["event_type"] = _RENAMED_EVENT_TYPES[event_type]
         cls = self._registry.get(event_type)
         if cls is None:
             # Fall back to the global auto-registration registry
@@ -357,51 +365,43 @@ class SQLiteEventBackend:
         """Allocate tags and append atomically, without event observers.
 
         Unlike single-event store's reconnect/retry policy, a failed batch
-        propagates. Counters advance only after the transaction succeeds.
+        propagates. Tags are assigned with the model's own setter before
+        storage; if that, serialization or the commit fails, the tags are reset
+        to None and nothing is stored. Counters advance only on success.
         """
-        from nooa.runtime.event_backend import _validate_fresh_batch
+        from nooa.runtime.event_backend import tagged_batch
 
-        with self._lock:
-            _validate_fresh_batch(
-                events,
-                self,
-                contains_id=lambda identity: (
-                    self._conn.execute(
-                        "SELECT 1 FROM events WHERE event_id = ? LIMIT 1", (identity,)
-                    ).fetchone()
-                    is not None
-                ),
-            )
+        def stored(identity: str) -> bool:
+            row = self._conn.execute(
+                "SELECT 1 FROM events WHERE event_id = ? LIMIT 1", (identity,)
+            ).fetchone()
+            return row is not None
+
+        with self._lock, tagged_batch(events, self, contains_id=stored) as tags:
             if not events:
                 return []
-            tags = [str(self._next_tag_num + i) for i in range(len(events))]
-            rows = []
-            for i, (tag, event) in enumerate(zip(tags, events, strict=True)):
-                # Serialize a tagged copy; publish caller tags only after commit.
-                stored = event.model_copy(update={"tag": tag})
-                rows.append(
-                    (
-                        tag,
-                        event.id,
-                        event.event_type,
-                        event.status.value,
-                        self._serialize(stored),
-                        self._insertion_counter + i,
-                    )
+            rows = [
+                (
+                    tag,
+                    event.id,
+                    event.event_type,
+                    event.status.value,
+                    self._serialize(event),
+                    self._insertion_counter + i,
                 )
+                for i, (tag, event) in enumerate(zip(tags, events, strict=True))
+            ]
             position = self._max_position() + 1
             with self._conn:
                 self._conn.executemany(
-                    "INSERT INTO events (tag, event_id, event_type, status, data, insertion_order) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO events (tag, event_id, event_type, status, data, "
+                    "insertion_order) VALUES (?, ?, ?, ?, ?, ?)",
                     rows,
                 )
                 self._conn.executemany(
                     "INSERT INTO active_tags (position, tag) VALUES (?, ?)",
                     [(position + i, tag) for i, tag in enumerate(tags)],
                 )
-            for tag, event in zip(tags, events, strict=True):
-                event.tag = tag
             self._next_tag_num += len(events)
             self._insertion_counter += len(events)
             return tags
@@ -735,10 +735,13 @@ def _acquire_session_lock(lock_path: str) -> int:
     with ``read_lock_owner``). We truncate before writing so a shorter
     record can't leave trailing bytes from a longer predecessor.
 
-    The caller releases the lock with ``fcntl.flock(fd, fcntl.LOCK_UN)``
-    and ``os.close(fd)``. Taking the lock only to test whether a session is
-    free still rewrites the record with this process's pid and host.
+    The caller releases the lock with ``_release_session_lock(fd)``.
+    Taking the lock only to test whether a session is free still rewrites
+    the record with this process's pid and host.
     """
+    require_posix("File-backed SQLite storage (its session lock uses fcntl)")
+    import fcntl
+
     fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -764,6 +767,16 @@ def _acquire_session_lock(lock_path: str) -> int:
     os.ftruncate(fd, 0)
     os.write(fd, _lock_owner_record())
     return fd
+
+
+def _release_session_lock(fd: int) -> None:
+    """Release and close a lock fd returned by ``_acquire_session_lock``."""
+    import fcntl
+
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
 
 
 def delete_sqlite_database(db_path: str | Path) -> bool:
@@ -799,8 +812,7 @@ def delete_sqlite_database(db_path: str | Path) -> bool:
         # Blank the record before releasing, as a clean close does, so the
         # retained lock file does not name this process as a live owner.
         _blank_lock_if_ours(lock_path)
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
+        _release_session_lock(lock_fd)
 
 
 class SQLiteStorageManager:
@@ -1008,7 +1020,7 @@ class SQLiteStorageManager:
         """Return the snapshot_id of the most recently saved snapshot, or None."""
         with self._db_lock:
             row = self._conn.execute(
-                "SELECT snapshot_id FROM snapshots ORDER BY created_at DESC LIMIT 1"
+                "SELECT snapshot_id FROM snapshots ORDER BY created_at DESC, rowid DESC LIMIT 1"
             ).fetchone()
             return row[0] if row is not None else None
 
@@ -1052,8 +1064,7 @@ class SQLiteStorageManager:
                 # the kernel lock reads "free" and not a stale owner.
                 if self._db_path != ":memory:":
                     _blank_lock_if_ours(str(Path(self._db_path).with_suffix(".lock")))
-                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
-                os.close(self._lock_fd)
+                _release_session_lock(self._lock_fd)
                 self._lock_fd = None
 
     def __enter__(self) -> Self:

@@ -9,12 +9,13 @@ non-clobbering.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
 import pytest
 
-from nooa.secrets import load_secrets_into_env, write_secret_env
+from nooa.secrets import load_secrets_into_env, new_secret_env, write_secret_env
 
 _KEY = "NEMO_TEST_SECRET_KEY"
 _KEY2 = "NEMO_TEST_SECRET_KEY2"
@@ -133,3 +134,26 @@ def test_non_mapping_env_warns(user_dir, project_dir, caplog):
     with caplog.at_level(logging.WARNING, logger="nooa.secrets"):
         assert load_secrets_into_env() == []
     assert "not a mapping" in caplog.text
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit, asyncio.CancelledError])
+def test_new_secret_rollback_preserves_interrupts(tmp_path, interrupt):
+    """Rollback still runs, then the interrupt or cancellation propagates unchanged."""
+    path = tmp_path / "secrets.yaml"
+    path.write_text("env:\n  OLD_KEY: kept\n")
+    before = path.read_bytes()
+    raised = interrupt()
+    with pytest.raises(interrupt) as caught:
+        with new_secret_env(path, "NEW_KEY", "synthetic"):
+            raise raised
+    assert caught.value is raised
+    assert path.read_bytes() == before
+
+
+def test_new_secret_rollback_wraps_ordinary_errors(tmp_path):
+    """An ordinary model-write failure still becomes the rollback ValueError."""
+    path = tmp_path / "secrets.yaml"
+    with pytest.raises(ValueError, match="the new key was rolled back"):
+        with new_secret_env(path, "NEW_KEY", "synthetic"):
+            raise OSError("model write failed")
+    assert not path.exists()

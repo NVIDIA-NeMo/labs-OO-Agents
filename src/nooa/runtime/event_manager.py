@@ -27,7 +27,7 @@ from nooa.events import (
     Summary,
 )
 from nooa.runtime.context_vars import _current_event_format_var, _get_agent_call_stack
-from nooa.runtime.event_backend import EventBackend, InMemoryBackend, _validate_fresh_batch
+from nooa.runtime.event_backend import EventBackend, InMemoryBackend
 
 if TYPE_CHECKING:
     from nooa.runtime.event_query import EventQuery
@@ -209,9 +209,9 @@ class EventManager:
         This explicit recorder path is for mandatory ledger transitions.
         A backend without atomic append support fails rather than degrading
         to partial single-event writes. Runtime events and summaries are not
-        accepted. Tags must support ordinary mutable Pydantic field assignment:
-        frozen tags/models, assignment validation and custom setters are rejected
-        before mutation. Use add() for ordinary context/observer events.
+        accepted. Tags are assigned with the model's own setter before storage;
+        a failing setter fails the batch with nothing stored and every tag
+        reset to None. Use add() for ordinary context/observer events.
         """
         if any(
             not isinstance(event, EventBase)
@@ -223,7 +223,7 @@ class EventManager:
         append = getattr(self._backend, "append_batch", None)
         if append is None:
             raise TypeError("backend does not support atomic batch recording")
-        _validate_fresh_batch(events, self._backend)
+        # The backend validates the whole batch once, under its own lock.
         return append(events)
 
     def register_event_type(self, cls: type[EventBase]) -> None:

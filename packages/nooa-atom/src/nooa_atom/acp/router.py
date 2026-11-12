@@ -70,6 +70,7 @@ from acp.connection import StreamDirection, StreamEvent
 from acp.schema import InitializeRequest, ListSessionsRequest
 from pydantic import ValidationError
 
+from nooa._platform import require_posix
 from nooa_atom.acp.framing import FRAME_LIMIT, Frame, encode, read_frame
 from nooa_atom.acp.listing import list_sessions
 from nooa_atom.acp.protocol import initialize_response
@@ -132,6 +133,8 @@ def process_spawn(command: Sequence[str]) -> Spawn:
     end is closed right after the spawn, so the router sees end of stream
     when the worker dies.
     """
+
+    require_posix("The ACP router's worker processes")
 
     async def spawn(k: int) -> WorkerProcess:
         ours, theirs = socket.socketpair()

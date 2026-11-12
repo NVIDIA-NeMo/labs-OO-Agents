@@ -64,3 +64,43 @@ async def test_runtime_builder_preserves_setup_identity_parent_docs_and_caller_l
         assert task.metadata["call_id"] == result["id"]
     finally:
         await agent.aclose()
+
+
+class TopLevelAgent(Agent):
+    topic: str = "expanded-topic"
+
+    @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
+    async def answer(self, value: int) -> dict:
+        """Answer about {self.topic} with {value}."""
+        ...
+
+
+async def test_top_level_call_uses_wrapper_call_id_and_expanded_docstring():
+    code = (
+        "call = self.runtime.current_call\n"
+        "return_result({'id': call.id, 'docstring': call.docstring, "
+        "'method_name': call.method_name, 'parent_id': call.parent_id, "
+        "'runtime_id': self.runtime._agent_call_id})"
+    )
+    llm = FakeLLMClient(
+        [
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(id="finish", name="python_cell", arguments=json.dumps({"code": code}))
+                ],
+                finish_reason="tool_calls",
+            )
+        ],
+        strict_exhaustion=True,
+    )
+    agent = TopLevelAgent(llm=llm)
+    try:
+        result = await agent.answer(7)
+        assert result["docstring"] == "Answer about expanded-topic with 7."
+        assert result["method_name"] == "answer"
+        assert result["parent_id"] is None
+        assert result["id"] == result["runtime_id"]
+        task = next(event for event in agent.events.query(type="Task"))
+        assert task.metadata["call_id"] == result["id"]
+    finally:
+        await agent.aclose()

@@ -43,7 +43,11 @@ def terminal_menu(monkeypatch):
                     )
                     if not sent:
                         sent = True
-                        pipe.send_text(keys)
+                        pipe.send_text(
+                            "\x1b[B\r"
+                            if "Would you like to test these media types:" in str(choice.message)
+                            else keys
+                        )
 
                 app.after_render += rendered
                 return app
@@ -101,8 +105,10 @@ def test_pipe_menu_labels_and_compatible_answers(answer, expected, current):
     assert result.exit_code == 0, result.output
     assert selected == [expected]
     assert "How would you like to continue?" in result.output
-    assert "1 (keep): Continue with " + (", ".join(current) or "text only") in result.output
-    assert "2 (manual): Choose media inputs manually" in result.output
+    assert "1 (keep): Continue with " + (", ".join(current) or "text only") in " ".join(
+        result.output.split()
+    )
+    assert "2 (manual): Choose media inputs manually" in " ".join(result.output.split())
 
 
 def review_state(path, current, *, yes=False):
@@ -267,8 +273,8 @@ def test_initial_pipe_menu_defaults_and_compatible_answers(editing, answer, expe
     assert result.exit_code == 0, result.output
     assert selected == [expected or ("manual" if editing else "test")]
     assert "How would you like to configure media inputs?" in result.output
-    assert "1 (test): Test all media inputs (generated samples)" in result.output
-    assert "2 (manual): Choose media inputs manually" in result.output
+    assert "1 (test): Test all media inputs (generated samples)" in " ".join(result.output.split())
+    assert "2 (manual): Choose media inputs manually" in " ".join(result.output.split())
     assert f"Choice [{2 if editing else 1}]" in result.output
 
 
@@ -322,10 +328,10 @@ def test_yes_skips_initial_menu_and_format_questions(monkeypatch, editing, expli
         (False, "\n", False),
         (False, "test\n", False),
         (False, "1\n", False),
-        (False, "manual\npdf\n", True),
-        (False, "2\npdf\n", True),
-        (True, "\n\n", True),
-        (True, "manual\n\n", True),
+        (False, "manual\npdf\nenable\n", True),
+        (False, "2\npdf\nenable\n", True),
+        (True, "\n\nenable\n", True),
+        (True, "manual\n\nenable\n", True),
         (True, "test\n", False),
         (True, "1\n", False),
     ],
@@ -348,3 +354,218 @@ def test_scripted_initial_wizard_paths_do_not_add_format_quiz(editing, answers, 
     assert "Formats to TEST" not in result.output
     assert state.media_inputs == (["audio"] if editing else ["pdf"] if manual else [])
     assert state.test_media_inputs == (None if manual else ["image", "audio", "video", "pdf"])
+
+
+@pytest.mark.parametrize("current", [[], ["image"]])
+@pytest.mark.parametrize("action", ["text", "manual", "test", "default"])
+def test_rendered_decision_image_actions_and_defaults(terminal_menu, current, action):
+    actions = (["keep"] if current else []) + ["text", "manual", "test"]
+    selected = ("keep" if current else "text") if action == "default" else action
+    keys = "\x1b[B" * actions.index(selected) + "\r"
+    before = current.copy()
+    result, screens = terminal_menu(keys, lambda: prompts.choose_decision_images(current))
+    assert result == selected and current == before
+    initial = screens[0]
+    assert "Should this decision model receive images?" in initial
+    for label in (
+        "Leave images off",
+        "Enable images without testing",
+        "Test images before enabling",
+    ):
+        assert label in initial
+    default_label = "Keep current image settings" if current else "Leave images off"
+    assert ">  1. " + default_label in initial
+    assert ("Keep current image settings" in initial) is bool(current)
+    for screen in screens:
+        for jargon in ("text:", "manual:", "test:", "keep:", "unverified", "native", "wire"):
+            assert jargon not in screen
+
+
+@pytest.mark.parametrize("current", [[], ["image"]])
+def test_rendered_decision_image_ctrl_c_preserves_inputs(terminal_menu, current):
+    before = current.copy()
+    with pytest.raises(click.Abort):
+        terminal_menu("\x03", lambda: prompts.choose_decision_images(current))
+    assert current == before
+
+
+@pytest.mark.parametrize("current", [[], ["image"]])
+@pytest.mark.parametrize("action", ["text", "manual", "test", "default"])
+@pytest.mark.parametrize("numeric", [False, True])
+def test_pipe_decision_image_actions(current, action, numeric):
+    actions = (["keep"] if current else []) + ["text", "manual", "test"]
+    expected = ("keep" if current else "text") if action == "default" else action
+    answer = (
+        "" if action == "default" else str(actions.index(expected) + 1) if numeric else expected
+    )
+    selected = []
+
+    @click.command()
+    def command():
+        selected.append(prompts.choose_decision_images(current))
+
+    result = CliRunner().invoke(command, input=answer + "\n")
+    assert result.exit_code == 0, result.output
+    assert selected == [expected]
+    assert "Image tests use a generated sample." in result.output
+    assert "approved check budget" not in result.output
+    for index, token in enumerate(actions, 1):
+        assert f"{index} ({token}):" in result.output
+    assert current == (["image"] if current else [])
+
+
+@pytest.mark.parametrize("answer", ["keep\n", "1\n"])
+def test_pipe_decision_images_explicit_keep(answer):
+    selected = []
+
+    @click.command()
+    def command():
+        selected.append(prompts.choose_decision_images(["image"]))
+
+    result = CliRunner().invoke(command, input=answer)
+    assert result.exit_code == 0 and selected == ["keep"]
+
+
+@pytest.mark.parametrize("previous", [[], ["image"]])
+@pytest.mark.parametrize("action", ["keep", "text", "manual", "test"])
+def test_decision_image_wizard_token_mapping(monkeypatch, tmp_path, previous, action):
+    from copy import deepcopy
+
+    from nooa.unifiedllm import connect
+    from tests.unifiedllm.connect.connect_http import mock_http
+
+    mock_http(monkeypatch, lambda request: pytest.fail("Configuring inputs must not send HTTP"))
+    existing = connect.plan(
+        "local",
+        "model",
+        "openai",
+        "https://api.test/v1/decisions",
+        "",
+        media_inputs=previous,
+    ).entry
+    original = deepcopy(existing)
+    state = wizard.WizardState(
+        alias="local",
+        model="model",
+        api_style="openai",
+        endpoint="https://api.test/v1/decisions",
+        api_key_env="",
+        editing=existing,
+        approval="all",
+        budget_tokens=9000,
+        path=tmp_path / "models.yaml",
+        media_hints=None,
+    )
+    seen = []
+
+    def choose(current):
+        seen.append(list(current))
+        return action
+
+    monkeypatch.setattr(prompts, "choose_decision_images", choose)
+    assert wizard.configure_media_inputs(state)
+    assert seen == [previous]
+    assert state.media_inputs == (
+        previous if action == "keep" else ["image"] if action == "manual" else []
+    )
+    assert state.test_media_inputs == (["image"] if action == "test" else None)
+    assert existing == original
+    assert not state.path.exists()
+
+
+@pytest.mark.parametrize(
+    "keys,action",
+    [
+        ("\r", "test"),
+        ("\x1b[B\r", "test-all"),
+        ("\x1b[B\x1b[B\r", "suggested"),
+        ("\x1b[B\x1b[B\x1b[B\r", "manual"),
+        ("\x1b[B\x1b[B\x1b[B\x1b[B\r", "none"),
+    ],
+)
+def test_listed_media_menu_requested_order_and_default(terminal_menu, monkeypatch, keys, action):
+    from nooa_cli.commands._connect_advertised_media import offer_suggestions
+
+    state = wizard.WizardState(
+        model="model",
+        api_style="chat",
+        approval="all",
+        guided=True,
+        media_hints={"id": "model", "input_modalities": ["image"]},
+    )
+    monkeypatch.setattr(prompts, "choose_media_inputs", lambda previous: ["video"])
+    accepted, screens = terminal_menu(keys, lambda: offer_suggestions(state, []))
+    assert accepted is True
+    labels = [
+        "Test and enable Images",
+        "Test all media inputs",
+        "Enable Images without testing",
+        "Select media inputs manually",
+        "Turn media inputs off",
+    ]
+    initial = screens[0]
+    assert [initial.index(label) for label in labels] == sorted(
+        initial.index(label) for label in labels
+    )
+    assert ">  1. Test and enable Images" in initial
+    assert "Keep current media" not in initial
+    assert state.test_media_inputs == (
+        ["image"]
+        if action == "test"
+        else ["image", "audio", "video", "pdf"]
+        if action == "test-all"
+        else None
+    )
+    assert (
+        state.media_inputs
+        == {"test": [], "test-all": [], "suggested": ["image"], "manual": ["video"], "none": []}[
+            action
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    "answer,action",
+    [
+        ("\n", "test"),
+        ("1\n", "test"),
+        ("test\n", "test"),
+        ("2\n", "test-all"),
+        ("test-all\n", "test-all"),
+        ("3\n", "suggested"),
+        ("4\nenable\n", "manual"),
+        ("5\n", "none"),
+    ],
+)
+def test_listed_media_pipe_order_and_default(monkeypatch, answer, action):
+    from nooa_cli.commands._connect_advertised_media import offer_suggestions
+
+    state = wizard.WizardState(
+        model="model",
+        api_style="chat",
+        approval="all",
+        guided=True,
+        media_hints={"id": "model", "input_modalities": ["image"]},
+    )
+    monkeypatch.setattr(prompts, "choose_media_inputs", lambda previous: ["video"])
+
+    @click.command()
+    def choose():
+        assert offer_suggestions(state, [])
+
+    result = CliRunner().invoke(choose, input=answer)
+    assert result.exit_code == 0, result.output
+    assert "1 (test): Test and enable Images" in " ".join(result.output.split())
+    assert state.test_media_inputs == (
+        ["image"]
+        if action == "test"
+        else ["image", "audio", "video", "pdf"]
+        if action == "test-all"
+        else None
+    )
+    assert (
+        state.media_inputs
+        == {"test": [], "test-all": [], "suggested": ["image"], "manual": ["video"], "none": []}[
+            action
+        ]
+    )

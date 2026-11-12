@@ -39,6 +39,8 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any, Literal
 
+import httpx
+
 from nooa.agentdoc import spec
 from nooa.mcp import MCPManager
 from nooa_atom.skills.mcp_auth import (
@@ -46,6 +48,7 @@ from nooa_atom.skills.mcp_auth import (
     AuthorizedHTTPClient,
     FileTokenStorage,
     PastedSignIn,
+    SignInTimeoutError,
     oauth_provider,
 )
 from nooa_atom.workspace.mcp_approval import (
@@ -57,6 +60,11 @@ from nooa_atom.workspace.mcp_approval import (
     redact_approved_environment,
     resolve_approved_environment,
 )
+
+try:  # mcp < 2 spells it McpError; mcp >= 2 renamed it
+    from mcp.shared.exceptions import McpError
+except ImportError:  # pragma: no cover - depends on the installed mcp
+    from mcp.shared.exceptions import MCPError as McpError
 
 logger = logging.getLogger(__name__)
 
@@ -99,11 +107,39 @@ class MCPSignInRequired(RuntimeError):
         )
 
 
+def _connection_error(
+    request: MCPApprovalRequest, error: BaseException, environment: dict[str, str]
+) -> str:
+    """Show transport/auth leaf types/codes, never their potentially secret messages."""
+    if not isinstance(error, BaseExceptionGroup | httpx.HTTPError | McpError | SignInTimeoutError):
+        return redact_approved_environment(request, error, environment)
+    leaves: list[str] = []
+
+    def visit(exc: BaseException) -> None:
+        if isinstance(exc, BaseExceptionGroup):
+            for child in exc.exceptions:
+                visit(child)
+            return
+        name = type(exc).__name__
+        code = getattr(getattr(exc, "error", None), "code", None)
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+        if isinstance(code, int):
+            name += f" (MCP code {code})"
+        if isinstance(status, int):
+            name += f" (HTTP status {status})"
+        leaves.append(name)
+
+    visit(error)
+    return "Connection failed: " + ", ".join(dict.fromkeys(leaves))
+
+
 class _PendingSignIn:
     def __init__(self, signin: PastedSignIn, task: asyncio.Task[Any], activate: bool) -> None:
         self.signin = signin
         self.task = task
         self.activate = activate
+        self.stopped = False
+        self.url: str | None = None
 
 
 class MCPServers:
@@ -142,9 +178,17 @@ class MCPServers:
         self._token_path = token_path
         self._discovered_cache: tuple[tuple[Any, ...], list[str]] | None = None
         self._connected: dict[str, Any] = {}
+        # The approved definition each connected tool was opened with.
+        self._connected_requests: dict[str, MCPApprovalRequest] = {}
         self._activated: set[str] = set()
         self._connecting: set[str] = set()
         self._signins: dict[str, _PendingSignIn] = {}
+        self._opening: dict[str, _PendingSignIn] = {}
+        self._forgetting: set[str] = set()
+        self._forgetting_urls: set[str] = set()
+        # Ownership outlives attachment/settings changes: stale alias tools may
+        # still have active requests and must be drained by actual cache URL.
+        self._oauth_clients: dict[AuthorizedHTTPClient, tuple[str, str]] = {}
         self._errors: dict[str, str] = {}
 
     def bind(self, agent: Any, notify: Callable[[str], None] | None = None) -> None:
@@ -175,16 +219,14 @@ class MCPServers:
         if not self._watch_settings:
             return []
 
-        from nooa.layered_config import load_layered_yaml
         from nooa_atom.workspace.settings import (
-            SETTINGS_ENV_VAR,
-            SETTINGS_FILENAME,
             SETTINGS_SECTION,
             copy_coding_settings,
+            load_settings_layers,
         )
 
         copy_coding_settings(self.project_dir)
-        data = load_layered_yaml(SETTINGS_FILENAME, SETTINGS_ENV_VAR, project_dir=self.project_dir)
+        data = load_settings_layers(self.project_dir)
         legacy = data.get("tui", {})
         tui = dict(legacy) if isinstance(legacy, dict) else {}
         atom = data.get(SETTINGS_SECTION, {})
@@ -414,6 +456,8 @@ class MCPServers:
         self.refresh_settings()
         newly: list[str] = []
         for name in sorted(self._match(patterns, set(self.discovered()))):
+            if name in self._forgetting:
+                raise RuntimeError(f"MCP server {name!r} authentication is being forgotten")
             if name in self._connected:
                 continue
             if name in self._connecting or name in self._signins:
@@ -423,6 +467,8 @@ class MCPServers:
                 )
             self._validate_attach_name(name)
             request, config, environment = self._approved_config(name)
+            if config.get("url") in self._forgetting_urls:
+                raise RuntimeError(f"MCP server {name!r} authentication is being forgotten")
             self._errors.pop(name, None)
             self._connecting.add(name)
             try:
@@ -445,16 +491,26 @@ class MCPServers:
         """Start the connection; return its tool, or raise ``MCPSignInRequired``."""
         signin = PastedSignIn()
         opening = asyncio.create_task(self._discover(name, config, signin, tool_call_timeout))
+        pending = _PendingSignIn(signin, opening, activate)
+        pending.url = config.get("url")
+        self._opening[name] = pending
         waiting = asyncio.create_task(signin.url_ready.wait())
         try:
             await asyncio.wait({opening, waiting}, return_when=asyncio.FIRST_COMPLETED)
         except asyncio.CancelledError:
+            signin.cancel()
             opening.cancel()
+            await asyncio.gather(opening, return_exceptions=True)
             raise
         finally:
             waiting.cancel()
+            self._opening.pop(name, None)
+        if pending.stopped:
+            # A completed discovery may still be waiting for _open to resume.
+            # Forgetting must prevent that already-finished tool from attaching.
+            raise asyncio.CancelledError
         if not opening.done():
-            self._signins[name] = _PendingSignIn(signin, opening, activate)
+            self._signins[name] = pending
             opening.add_done_callback(
                 lambda task: self._signed_in(name, request, environment, task)
             )
@@ -462,7 +518,7 @@ class MCPServers:
         try:
             return opening.result()
         except Exception as exc:
-            message = redact_approved_environment(request, exc, environment)
+            message = _connection_error(request, exc, environment)
             self._errors[name] = message
             raise RuntimeError(f"MCP server {name!r} connection failed: {message}") from None
 
@@ -494,22 +550,29 @@ class MCPServers:
         client = AuthorizedHTTPClient(
             url,
             provider=oauth_provider(signin, storage, scope=config.get("oauth_scope")),
+            signin=signin,
             headers=headers,
             transport=transport,
             tool_call_timeout=tool_call_timeout,
         )
-        # The first connection signs in when the server asks for it.
-        async with client.connect_to_server():
-            pass
-        tokens = await storage.get_tokens()
-        if tokens is not None and tokens.access_token:
-            headers["Authorization"] = f"Bearer {tokens.access_token}"
-        listed = await MCPManager.create_url_server(
-            name, url, headers=headers, transport=transport, tool_call_timeout=tool_call_timeout
-        )
-        # Same generated class, but its calls go through the OAuth provider,
-        # which refreshes tokens and signs in again when the server asks.
-        return type(listed)(client, name)
+        self._oauth_clients[client] = (name, url)
+        try:
+            # The first connection signs in when the server asks for it.
+            async with client.connect_to_server():
+                pass
+            tokens = await storage.get_tokens()
+            if tokens is not None and tokens.access_token:
+                headers["Authorization"] = f"Bearer {tokens.access_token}"
+            listed = await MCPManager.create_url_server(
+                name, url, headers=headers, transport=transport, tool_call_timeout=tool_call_timeout
+            )
+            # Same generated class, but its calls go through the OAuth provider,
+            # which refreshes tokens and signs in again when the server asks.
+            return type(listed)(client, name)
+        except BaseException:
+            await client.aclose()
+            self._oauth_clients.pop(client, None)
+            raise
 
     def _signed_in(
         self,
@@ -519,8 +582,16 @@ class MCPServers:
         task: asyncio.Task[Any],
     ) -> None:
         """A connection that waited for a sign-in ended: attach it or record why not."""
-        pending = self._signins.pop(name, None)
+        pending = self._signins.get(name)
+        # A disconnect/reconnect may already own a new sign-in for this name.
+        if pending is None or pending.task is not task:
+            if not task.cancelled():
+                task.exception()
+            return
+        self._signins.pop(name)
         if task.cancelled():
+            pending.signin.cancel()
+            self._errors[name] = "Connection cancelled before the sign-in completed."
             return
         error = task.exception()
         if error is None:
@@ -535,7 +606,7 @@ class MCPServers:
                     f"methods of self.{attr_name(name)}: {tools}."
                 )
                 return
-        message = redact_approved_environment(request, error, environment)
+        message = _connection_error(request, error, environment)
         self._errors[name] = message
         self._tell(f"MCP server {name!r} did not connect after the sign-in: {message}")
 
@@ -556,6 +627,7 @@ class MCPServers:
                 "Review and approve the current configuration before connecting again."
             )
         self._attach(name, tool)
+        self._connected_requests[name] = request
         if activate:
             self._activated.add(name)
 
@@ -581,16 +653,164 @@ class MCPServers:
             return f"Signed in; MCP server {name!r} is connected (tools: {tools})."
         raise RuntimeError(self._errors.get(name) or f"MCP server {name!r} did not connect")
 
+    def _auth_cache_url(self, name: str) -> str:
+        """Exact configured HTTP URL; resolve placeholders only under existing approval."""
+        request = self.approval_request(name)
+        if request.transport == "stdio":
+            raise ValueError(f"MCP server {name!r} is not an HTTP OAuth server")
+        url = request.config["url"]
+        if "${" in url:
+            _, config, _ = self._approved_config(name)
+            url = config["url"]
+        return url
+
+    async def forget_auth(self, name: str) -> list[str]:
+        """Forget one exact server URL's local OAuth cache and drain all its aliases.
+
+        This is NOT remote token revocation. Tokens, registration and issuer
+        bindings are forgotten, but settings, approvals and a configured
+        ``oauth_client_id`` are retained. Reconnect explicitly and complete a
+        fresh manual sign-in (reconfigure the client ID intentionally if needed).
+        Unknown names and stdio servers raise ``ValueError``; HTTP servers with
+        no OAuth cache simply disconnect and retain their configured headers.
+        """
+        self.refresh_settings()
+        url = self._auth_cache_url(name)
+        aliases = {name}
+        for alias in self.discovered():
+            try:
+                if self._auth_cache_url(alias) == url:
+                    aliases.add(alias)
+            except (ValueError, MCPApprovalRequired):
+                continue
+        clients = [
+            client for client, (_, owned_url) in self._oauth_clients.items() if owned_url == url
+        ]
+        affected = aliases | {self._oauth_clients[client][0] for client in clients}
+        for alias, pending in {**self._opening, **self._signins}.items():
+            if pending.url == url:
+                affected.add(alias)
+        if url in self._forgetting_urls:
+            raise RuntimeError("MCP authentication is already being forgotten")
+        self._forgetting.update(affected)
+        self._forgetting_urls.add(url)
+        try:
+            tasks = []
+            for alias in sorted(affected):
+                pending = self._signins.get(alias) or self._opening.get(alias)
+                if pending is not None and (
+                    pending.url == url or (pending.url is None and alias in aliases)
+                ):
+                    self._signins.pop(alias, None)
+                    pending.stopped = True
+                    pending.signin.cancel()
+                    pending.task.cancel()
+                    tasks.append(pending.task)
+                tool = self._connected.get(alias)
+                client = getattr(tool, "_client", None)
+                owned = self._oauth_clients.get(client)
+                # An old alias may now be attached to a different URL. Preserve
+                # that new connection while draining its historical provider.
+                if owned is None or owned[1] == url:
+                    if client is not None and hasattr(client, "aclose") and client not in clients:
+                        clients.append(client)
+                    self._detach(alias)
+                    self._errors.pop(alias, None)
+            # All potentially writing auth flows finish before cache deletion.
+            completed = await asyncio.gather(*tasks, return_exceptions=True)
+            for tool in completed:
+                client = getattr(tool, "_client", None)
+                if client is not None and hasattr(client, "aclose") and client not in clients:
+                    clients.append(client)
+            for client in clients:
+                await client.aclose()
+                self._oauth_clients.pop(client, None)
+            FileTokenStorage(url, self._token_path).forget_auth()
+        finally:
+            self._forgetting.difference_update(affected)
+            self._forgetting_urls.discard(url)
+        return sorted(affected)
+
+    def share_from(self, parent: MCPServers) -> list[str]:
+        """Attach the servers ``parent`` connected (a parent session's); return warnings.
+
+        Each gets ``parent``'s tool object, active where it is active there,
+        and the definition it was connected with when this workspace view
+        lacks one (inline or from the parent's ``.mcp.json``). No connection is opened and none is closed:
+        ``disconnect`` and ``aclose`` only detach them from this agent.
+        Nothing is shared when the approval scopes (workspaces) differ, and a
+        server is not shared when this view defines it differently.
+        """
+        warnings = []
+        if parent._connected and self._approval_scope() != parent._approval_scope():
+            return [
+                f"MCP servers {', '.join(sorted(parent._connected))} were not shared: "
+                "the parent approved them for another workspace"
+            ]
+        for name, tool in parent._connected.items():
+            mismatch = self._definition_mismatch(parent, name)
+            if mismatch:
+                warnings.append(f"MCP server {name!r} was not shared: {mismatch}")
+                continue
+            try:
+                self._attach(name, tool)
+            except ValueError as exc:
+                warnings.append(f"MCP server {name!r} was not shared: {exc}")
+                continue
+            if name in parent._connected_requests:
+                self._connected_requests[name] = parent._connected_requests[name]
+            if name not in self.discovered():
+                # Copy the definition the parent connected with (inline or
+                # from its .mcp.json) so the server is listed here too.
+                request = parent._connected_requests.get(name)
+                if request is None:
+                    try:
+                        request = parent.approval_request(name)
+                    except (KeyError, ValueError):
+                        request = None
+                if request is not None:
+                    self._servers[name] = copy.deepcopy(request.config)
+                    self._registered_server_names.add(name)
+            if name in parent._activated:
+                self._activated.add(name)
+        return warnings
+
     async def disconnect(self, patterns: list[str]) -> list[str]:
         """Detach connected servers matching ``patterns``; stop waiting sign-ins."""
         names = set(self._connected) | set(self._signins)
         matched = sorted(self._match(patterns, names))
+        tasks = []
         for name in matched:
             pending = self._signins.pop(name, None)
             if pending is not None:
+                pending.signin.cancel()
                 pending.task.cancel()
+                tasks.append(pending.task)
             self._detach(name)
+        await asyncio.gather(*tasks, return_exceptions=True)
         return matched
+
+    def _definition_mismatch(self, parent: MCPServers, name: str) -> str | None:
+        """Why this view's definition of ``name`` differs from ``parent``'s, else None.
+
+        ``parent``'s side is the definition its tool was connected with (its
+        current configuration may have changed since), when that is known.
+        """
+        if name not in self.discovered():
+            return None  # not defined here: the parent's definition is copied
+        try:
+            own = self.approval_request(name)
+        except ValueError:
+            return "it is defined here with an invalid configuration"
+        theirs = parent._connected_requests.get(name)
+        if theirs is None:
+            try:
+                theirs = parent.approval_request(name)
+            except (KeyError, ValueError):
+                return "it is defined here but not in the parent"
+        if own != theirs:  # fingerprint, transport, target and bindings
+            return "it is defined differently here"
+        return None
 
     def activate(self, patterns: list[str]) -> list[str]:
         """Make connected servers matching ``patterns`` active; return them."""
@@ -605,12 +825,11 @@ class MCPServers:
         return sorted(matched)
 
     async def aclose(self) -> None:
-        """Stop waiting sign-ins and detach every server."""
-        for pending in self._signins.values():
-            pending.task.cancel()
-        self._signins.clear()
-        for name in list(self._connected):
-            self._detach(name)
+        """Stop sign-ins and drain owned providers, including previously detached aliases."""
+        await self.disconnect(["*"])
+        for client in list(self._oauth_clients):
+            await client.aclose()
+            self._oauth_clients.pop(client, None)
 
     # ------------------------------------------------------------------
     # Host display
@@ -687,6 +906,7 @@ class MCPServers:
     def _detach(self, name: str) -> None:
         self._activated.discard(name)
         self._connected.pop(name, None)
+        self._connected_requests.pop(name, None)
         attr = attr_name(name)
         if self.agent is not None and attr in vars(self.agent):
             delattr(self.agent, attr)

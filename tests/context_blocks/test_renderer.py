@@ -7,6 +7,8 @@ them via BlockFormatter + ProviderFormatter. No eval function, no expression
 evaluation, no class — just a pure function.
 """
 
+import json
+
 import pytest
 
 from nooa.context_blocks.formatter import (
@@ -14,8 +16,8 @@ from nooa.context_blocks.formatter import (
     OpenAIProviderFormatter,
     XMLBlockFormatter,
 )
-from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
-from nooa.context_blocks.renderer import render_context
+from nooa.context_blocks.models import BlockMetadata, RenderedMessage, ResolvedBlock, Role
+from nooa.context_blocks.renderer import _utf8_safe, render_context
 
 
 class TestRenderContextBasic:
@@ -638,3 +640,136 @@ class TestCountTokens:
             count_tokens=counter,
         )
         assert len(call_count) > 0
+
+
+class TestRenderContextLoneSurrogates:
+    """A lone surrogate in the context must not make the request unencodable."""
+
+    def test_system_block_surrogate_is_escaped_in_output_and_messages(self):
+        """A status block holding "\\ud800" renders as the six characters ``\\ud800``."""
+        content = "Notes:\n10. probe ::1%\ud800.synthetic-secret passes"
+        block = ResolvedBlock(key="todo_status", content=content)
+
+        result = render_context(
+            [block],
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        )
+
+        system_content = result.output[0]["content"]
+        system_content.encode("utf-8")
+        assert "::1%\\ud800.synthetic-secret" in system_content
+        assert result.messages[0].content == system_content
+        assert block.content == content
+
+    def test_tool_result_surrogate_is_escaped(self):
+        """Event-derived messages are made safe, not only context blocks."""
+        from nooa.context_blocks.events import ToolCallEvent, ToolResult
+
+        event = ToolCallEvent(
+            tool_call_id="call_1",
+            name="python_cell",
+            arguments={"code": "print(name)"},
+            result=ToolResult(tool_call_id="call_1", content="bad-\udcff-name"),
+        )
+        blocks = [ResolvedBlock(key="tool1", content="", role=Role.ASSISTANT, event=event)]
+
+        output = render_context(
+            blocks,
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+
+        json.dumps(output, ensure_ascii=False).encode("utf-8")
+        assert output[2]["content"] == "bad-\\udcff-name"
+        assert event.result.content == "bad-\udcff-name"
+
+    def test_replay_message_renders_escaped_content(self):
+        """A replay turn is handed the escaped content, and its object is not rewritten."""
+        seen = []
+
+        class Replay:
+            def render_message(self, content, tool_calls, reasoning=None):
+                seen.append(content)
+                return {"role": "assistant", "content": content}
+
+        replay = Replay()
+
+        class ReplayFormatter(XMLBlockFormatter):
+            def format(self, blocks):
+                return [
+                    RenderedMessage(role=Role.ASSISTANT, content="x\udc80y", replay_message=replay)
+                ]
+
+        result = render_context(
+            [],
+            block_formatter=ReplayFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        )
+
+        assert seen == ["x\\udc80y"]
+        assert result.output[0]["content"] == "x\\udc80y"
+        assert result.messages[0].replay_message is replay
+
+    def test_context_budget_measures_escaped_content(self):
+        """Eviction and stats see the escaped text, which is longer than the original."""
+        status = "\ud800" * 100  # 100 chars before escaping, 600 after
+        blocks = [
+            ResolvedBlock(key="persona", content="Be helpful."),
+            ResolvedBlock(
+                key="todo_status",
+                content=status,
+                metadata=BlockMetadata(user_block=True),
+            ),
+        ]
+
+        result = render_context(
+            blocks,
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+            context_limit=200,
+            count_tokens=len,
+        )
+
+        assert result.stats.context_blocks_dropped == 1
+        assert "EVICTED" in result.output[0]["content"]
+        assert "Be helpful." in result.output[0]["content"]
+
+    def test_dict_tool_arguments_are_left_to_json_encoding(self):
+        """Dict arguments keep their exact keys; json.dumps escapes them for the wire."""
+        from nooa.context_blocks.models import ToolCallInfo
+
+        arguments = {"\ud800": "lone", "\\ud800": "literal"}
+        message = RenderedMessage(
+            role=Role.ASSISTANT,
+            tool_calls=(ToolCallInfo(id="call_1", name="python_cell", arguments=arguments),),
+        )
+
+        class Formatter(XMLBlockFormatter):
+            def format(self, blocks):
+                return [message]
+
+        result = render_context(
+            [],
+            block_formatter=Formatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        )
+
+        assert result.messages[0].tool_calls[0].arguments == arguments
+        sent = result.output[0]["tool_calls"][0]["function"]["arguments"]
+        sent.encode("utf-8")
+        assert json.loads(sent) == arguments
+
+    def test_valid_unicode_is_returned_unchanged(self):
+        """Encodable text, emoji included, passes through as the same objects."""
+        blocks = [ResolvedBlock(key="persona", content="Héllo 🎉 — ok")]
+
+        result = render_context(
+            blocks,
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        )
+
+        assert "Héllo 🎉 — ok" in result.output[0]["content"]
+        assert _utf8_safe(result.output) is result.output
+        assert _utf8_safe(result.messages) is result.messages

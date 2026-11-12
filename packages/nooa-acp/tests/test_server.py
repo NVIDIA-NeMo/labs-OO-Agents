@@ -1345,7 +1345,7 @@ async def test_prompt_on_a_closing_session_is_a_clean_protocol_error(tmp_path):
 
 
 async def test_sessions_on_different_workspaces_get_separate_library_dirs(tmp_path):
-    """One ACP process serves many workspaces, so libs cannot be process-global.
+    """One ACP process serves many workspaces, so agent-written skills cannot be process-global.
 
     SkillWriting puts the directory on sys.path and activates local.*, so a
     shared one exposes code the agent wrote for one repo to a session working
@@ -1364,8 +1364,8 @@ async def test_sessions_on_different_workspaces_get_separate_library_dirs(tmp_pa
 
     first_agent = await _session(adapter, first.session_id)
     second_agent = await _session(adapter, second.session_id)
-    assert first_agent.agent.libs._path == first_root / ".nooa" / "libs"
-    assert second_agent.agent.libs._path == second_root / ".nooa" / "libs"
+    assert first_agent.agent.skill_writing._path == first_root / ".nooa" / "skills"
+    assert second_agent.agent.skill_writing._path == second_root / ".nooa" / "skills"
     await adapter.close()
 
 
@@ -1615,6 +1615,26 @@ async def test_load_session_restores_the_agent_state_from_the_last_turn(tmp_path
 
     second, session = await _reload(tmp_path, session_id)
     assert session.agent.v.remembered == "kept across a reload"
+    await second.close()
+
+
+async def test_load_session_runs_after_restore_once(tmp_path, monkeypatch):
+    """The restore itself runs after_restore() (AgentSnapshot.restore); the adapter adds no second call."""
+    from nooa_acp.server import CodingAgent
+
+    first, session_id = await _session_that_remembered(tmp_path)
+    await first.close()
+
+    calls: list[object] = []
+
+    class CountingAgent(CodingAgent):
+        def after_restore(self) -> None:
+            calls.append(self)
+            super().after_restore()
+
+    monkeypatch.setattr("nooa_acp.server.CodingAgent", CountingAgent)
+    second, session = await _reload(tmp_path, session_id)
+    assert calls == [session.agent]
     await second.close()
 
 

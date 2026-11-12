@@ -15,6 +15,8 @@ the agent: status beyond the updates comes from ``model_info()`` and
 import asyncio
 import logging
 import re
+import threading
+from collections import deque
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -341,6 +343,12 @@ class ACPEventBridge:
         self.pool_dialects: tuple[PoolDialect, ...] = (POOLSIDE_DIALECT,)
         self._resolve_child = resolve_child
         self._own_sources = own_sources
+        self._loop = asyncio.get_running_loop()
+        self._owner_thread = threading.get_ident()
+        self._pending: deque[tuple[Callable[[Any], None], Any]] = deque()
+        self._pending_lock = threading.Lock()
+        self._accepting_updates = True
+        self._draining = False
         self._queue: asyncio.Queue[Any] = asyncio.Queue()
         self._error: Exception | None = None
         # Set when the pump exits on a BaseException it cannot handle. Nothing
@@ -384,7 +392,7 @@ class ACPEventBridge:
             "Summary": self._on_summary,
         }
         self._unsubscribers: list[Callable[[], None]] = [
-            session.subscribe(self._on_session_update),
+            session.subscribe(lambda update: self._dispatch(self._on_session_update, update)),
         ]
         self._pump_task = asyncio.create_task(self._pump(), name="nooa-acp-events")
 
@@ -392,6 +400,7 @@ class ACPEventBridge:
         """Set this ACP attachment's activity detail, without changing agent behavior."""
         if level not in VERBOSITY_LEVELS:
             raise ValueError("Use silent, concise, or verbose.")
+        self._drain()
         if level == self.verbosity:
             return
         # A mirrored child can still be running when the parent changes verbosity.
@@ -450,7 +459,9 @@ class ACPEventBridge:
             elif kind == "closed":
                 self._unmirror(child.id)
 
-        self._mirrors[child.id] = [child.subscribe(on_child_update)]
+        self._mirrors[child.id] = [
+            child.subscribe(lambda update: self._dispatch(on_child_update, update))
+        ]
 
     def _unmirror(self, child_id: str) -> None:
         self._reset_rolling("The subagent ended before this finished.", source=child_id)
@@ -498,6 +509,35 @@ class ACPEventBridge:
 
     # ---- queue -------------------------------------------------------
 
+    def _dispatch(self, callback: Callable[[Any], None], update: Any) -> None:
+        """Admit whole callbacks, so card state and queue writes stay on one loop."""
+        with self._pending_lock:
+            if not self._accepting_updates:
+                return
+            self._pending.append((callback, update))
+            if threading.get_ident() != self._owner_thread:
+                self._loop.call_soon_threadsafe(self._drain)
+                return
+        self._drain()
+
+    def _drain(self) -> None:
+        """An owner update or cleanup must not overtake an admitted worker update."""
+        if self._draining:
+            return
+        self._draining = True
+        try:
+            while True:
+                with self._pending_lock:
+                    if not self._pending:
+                        break
+                    callback, update = self._pending.popleft()
+                try:
+                    callback(update)
+                except (Exception, asyncio.CancelledError):
+                    logger.warning("ACP event handler failed", exc_info=True)
+        finally:
+            self._draining = False
+
     def _enqueue(self, update: Any) -> None:
         if not self._closed:
             for part in split_text_chunk(end_line(update)):
@@ -510,11 +550,11 @@ class ACPEventBridge:
 
     def publish(self, update: Any) -> None:
         """Queue a host-originated session update on the ordered ACP stream."""
-        self._enqueue(update)
+        self._dispatch(self._enqueue, update)
 
     def publish_best_effort(self, update: Any) -> None:
         """Queue bootstrap metadata without poisoning the live event stream."""
-        self._enqueue(_BestEffortUpdate(update))
+        self._dispatch(self._enqueue, _BestEffortUpdate(update))
 
     # ---- session updates ---------------------------------------------
 
@@ -784,7 +824,7 @@ class ACPEventBridge:
             title = self._card_title(key, card)
             if first:
                 update = start_tool_call(
-                    card.wire_id,
+                    slot.wire_id,
                     title,
                     kind="other",
                     status="in_progress",
@@ -793,7 +833,7 @@ class ACPEventBridge:
                 )
             else:
                 update = update_tool_call(
-                    card.wire_id,
+                    slot.wire_id,
                     title=title,
                     status="in_progress",
                     content=_python_content(code),
@@ -1158,6 +1198,7 @@ class ACPEventBridge:
                 self._queue.task_done()
 
     async def flush(self) -> None:
+        self._drain()
         if self._closed:
             return
         if self._pump_failure is not None:
@@ -1210,6 +1251,7 @@ class ACPEventBridge:
         when this session's turn is cancelled or fails, and its own results
         close them (or ``_unmirror`` does when it ends).
         """
+        self._drain()
         own = sorted(key for key in self._open if key[0] == self.session_id)
         self._fail_tools(own, reason, title=title)
 
@@ -1239,6 +1281,9 @@ class ACPEventBridge:
         await asyncio.shield(self._close_task)
 
     async def _close(self) -> None:
+        with self._pending_lock:
+            self._accepting_updates = False
+        self._drain()
         for unsubscribe in self._unsubscribers:
             unsubscribe()
         self._unsubscribers.clear()

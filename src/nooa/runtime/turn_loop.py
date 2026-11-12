@@ -132,6 +132,8 @@ class TurnLoop:
         self._turn_method = "handle"
         self._prepare: PrepareTurn | None = None
         self._commit: CommitTurn | None = None
+        self._after_settle: Callable[[TurnSettled], Awaitable[None]] | None = None
+        self._maintenance: asyncio.Task[None] | None = None
         self._task: asyncio.Task[None] | None = None
         self._turn: asyncio.Task[Any] | None = None
         self._paused = False
@@ -158,7 +160,7 @@ class TurnLoop:
     @property
     def in_turn(self) -> bool:
         """Whether the caller is the turn task (self-close would deadlock)."""
-        return asyncio.current_task() is self._turn
+        return asyncio.current_task() in (self._turn, self._maintenance)
 
     @property
     def paused(self) -> bool:
@@ -171,6 +173,7 @@ class TurnLoop:
         context: contextvars.Context | None = None,
         prepare: PrepareTurn | None = None,
         commit: CommitTurn | None = None,
+        after_settle: Callable[[TurnSettled], Awaitable[None]] | None = None,
     ) -> None:
         """Start in a fresh context; each turn receives its own context copy.
 
@@ -183,6 +186,7 @@ class TurnLoop:
         if self.started:
             return
         self._turn_method, self._prepare, self._commit = turn_method, prepare, commit
+        self._after_settle = after_settle
         self._stopping = False
         self._paused = False
         self.dispatch_error = None
@@ -220,11 +224,11 @@ class TurnLoop:
         if self._settled.is_set():
             return False
         self._cancel_by = by
-        turn = self._turn
+        turn = self._turn or self._maintenance
         if turn is not None and not turn.done():
             turn.cancel()
         # Reentrant close from the turn cannot await its own settlement.
-        if asyncio.current_task() in (self._turn, self._task):
+        if asyncio.current_task() in (self._turn, self._maintenance, self._task):
             return True
         await self._settled.wait()
         return True
@@ -267,13 +271,17 @@ class TurnLoop:
 
     async def _run(self) -> None:
         queues = self._agent.queue_manager
+        # A turn that found nothing to claim while ready() still held (they
+        # disagree, e.g. a registry whose ready() counts what claim does not
+        # take): wait for a change instead of spinning on ready().
+        idle_while_ready = False
         try:
             while not self._stopping:
                 await self._gate.wait()
                 if self._stopping:
                     return
                 try:
-                    await queues.wait_ready()
+                    await queues.wait_ready(changed=idle_while_ready)
                 except Exception as exc:
                     self._publish(TurnLoopEnded(error=exc, message=f"{type(exc).__name__}: {exc}"))
                     return
@@ -300,9 +308,25 @@ class TurnLoop:
                         )
                 finally:
                     self._turn = None
+                    idle_while_ready = settled is None and queues.ready()
                     try:
                         if settled is not None:
                             self._publish(settled)
+                            # Receipt publication is synchronous and already complete.
+                            # Maintenance cannot replace it or publish another settlement.
+                            if self._after_settle is not None and not self._stopping:
+                                self._maintenance = asyncio.create_task(
+                                    self._after_settle(settled), name="turn-maintenance"
+                                )
+                                try:
+                                    await self._maintenance
+                                except asyncio.CancelledError:
+                                    if asyncio.current_task().cancelling():
+                                        raise
+                                except Exception:
+                                    logger.exception("Post-settlement maintenance failed")
+                                finally:
+                                    self._maintenance = None
                     finally:
                         self._interrupted = None
                         self._settled.set()

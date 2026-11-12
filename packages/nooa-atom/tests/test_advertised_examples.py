@@ -13,11 +13,10 @@ from types import SimpleNamespace
 from unittest.mock import create_autospec
 
 import pytest
-from nooa_atom.agent import AtomAgent
+from nooa_atom.agent.base import AtomAgentBase
 from nooa_atom.skills.manager import SkillManager
 
 from nooa.context_blocks.models import ContextWindowStats
-from nooa.interactive import AgentVars
 from nooa.runtime.events import EventsApi
 from nooa.storage.snapshot_vars import SnapshotVars
 from nooa.tools.todo import TodoManager
@@ -37,7 +36,7 @@ def _calls(text: str) -> list[str]:
 
 def _owner() -> SimpleNamespace:
     owner = SimpleNamespace(vars=SnapshotVars())
-    owner.v = AgentVars(owner)
+    owner.v = owner.vars
     owner.v.note = "kept"
     owner.todo = TodoManager()
     owner.skills = create_autospec(SkillManager, instance=True)
@@ -66,7 +65,7 @@ async def agent(tmp_path, monkeypatch):
     (skills_dir / "review" / "SKILL.md").write_text(
         "---\nname: review\ndescription: Review a change\n---\nRead the diff.\n"
     )
-    made = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path, skills_dirs=[skills_dir])
+    made = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path, skills_dirs=[skills_dir])
     yield made
     await made.aclose()
 
@@ -74,7 +73,7 @@ async def agent(tmp_path, monkeypatch):
 async def test_workspace_state_examples_run(agent):
     rendered = agent._workspace_state_context()
     snippets = [s for s in _backticked(rendered) if "self." in s and s != "self.v"]
-    snippets = [s for s in snippets if s not in ("self.shell", "self.repo")]
+    snippets = [s for s in snippets if s not in ("self.files", "self.repo")]
     assert len(snippets) >= 3, rendered
     for snippet in snippets:
         owner = _owner()
@@ -92,10 +91,13 @@ async def test_skills_block_examples_run(agent):
     rendered = agent.skills.status()
     calls = _calls(rendered)
     assert any(call.startswith("await self.skills.activate(") for call in calls), rendered
-    assert len(calls) == 4, calls
+    assert len(calls) == 3, calls
+    assert "self.skills.read" not in rendered
+    assert "print(self.skills.doc('name'))" in rendered
     owner = _owner()
     for call in calls:
         await _run(call, owner)
+    await _run("print(self.skills.doc('name'))", owner)
 
 
 @pytest.mark.parametrize("with_comment", [False, True])

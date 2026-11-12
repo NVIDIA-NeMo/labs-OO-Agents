@@ -1,7 +1,11 @@
-# Configure a model without paid checks
+# Model configuration
 
-You can add a model to NOOA by editing `llm_config.yaml` yourself. This sends no
-requests to the model. An agent can do it for you with the
+Start with [nooa connect](model-connect.md) to configure the reply/output token
+limit, known context window, media formats, and other model settings, and test
+your route. This page explains the saved settings and how configuration files
+are loaded.
+
+You can also edit `llm_config.yaml` directly, or use the
 [nooa-model-configuration](../skills/nooa-model-configuration/SKILL.md) skill.
 
 Get the exact model ID, API format, and limits from the endpoint's
@@ -28,7 +32,7 @@ models:
 | `client_type` | `completion` or `responses`, see below. |
 | `api_base` | The API base URL, not the full request URL. Leave off `/chat/completions`, `/responses`, or `/messages`. |
 | `api_key_env` | The environment variable that holds the key. Never put the key itself in this file. Use `''` for a local server with no key. |
-| `max_tokens` | The reply limit per request, including reasoning. Use what you need, not the model's maximum. Connect suggests 32,768 when nothing better is known. |
+| `max_tokens` | The reply limit per request, including reasoning. Use what you need, not the model's maximum. Connect suggests a published recommendation or 32,768, adjusted to known limits. |
 | `context_window` | Optional. The model's context window, if documented. |
 | `media_inputs` | Optional. Which media the model can receive. See [below](#explicit-media-inputs-migration). |
 
@@ -90,14 +94,35 @@ assert "my-model" in entries
 print("Model configuration loaded; endpoint and credentials have not been tested.")
 ```
 
-This does not test the key or the endpoint. The first real request will, and it
-may cost money.
+This does not test the key or the endpoint. Use Connect to check the route.
 
-NOOA reads `llm_config.yaml` from its user configuration directory. To use
-another file, add its path to `NEMO_OO_LLM_CONFIG`. Later files override aliases
-from earlier ones; `nooa.llm_config.llm_config_chain()` lists the files in use.
+## Configuration discovery and precedence
 
-## Use Connect without generation calls
+Automatic discovery reads existing files in this order (later aliases win):
+
+1. User configuration: normally `~/.config/nooa/llm_config.yaml`; honors
+   `XDG_CONFIG_HOME` or the explicit `NEMO_OO_USER_DIR` directory override.
+2. Project configuration: normally `<project-root>/.nooa/llm_config.yaml`;
+   `NEMO_OO_PROJECT_DIR` overrides the directory containing this file.
+3. Comma-separated paths in `NEMO_OO_LLM_CONFIG`, in the order supplied.
+
+Later files replace the **whole model entry**. Call
+`nooa.llm_config.llm_config_chain()` to see which files your application reads.
+When running from source, NOOA uses the source checkout as the project root.
+For a file elsewhere, use one of the explicit loading methods below.
+
+For the standalone file above, either explicitly reload it in each application
+as shown, or make it discoverable before launching the application:
+
+```sh
+export NEMO_OO_LLM_CONFIG="$PWD/llm_config.yaml"
+```
+
+`reload_registry(Path(...))` loads only the supplied file(s); call
+`reload_registry()` without arguments to return to automatic discovery.
+Connect's `--output FILE` chooses where to write, not what Python will load.
+
+## Skipping checks (reference)
 
 `nooa connect` can write the entry for you without test requests. Add
 `--no-probe` to skip model checks and `--no-catalogue` to skip public model
@@ -106,8 +131,7 @@ details:
 ```sh
 uv run nooa connect your-model --as my-model \
   --endpoint https://gateway.example/v1 --api-style chat \
-  --api-key-env MY_MODEL_KEY --no-probe --no-catalogue \
-  --output llm_config.yaml
+  --api-key-env MY_MODEL_KEY --no-probe --no-catalogue
 ```
 
 For a decision model:
@@ -116,15 +140,16 @@ For a decision model:
 uv run nooa connect typesafe/jev-1.13 --as decisions \
   --endpoint https://openrouter.ai/api/alpha/decisions \
   --api-style systemone --api-key-env OPENROUTER_API_KEY \
-  --no-probe --no-catalogue --output llm_config.yaml
+  --no-probe --no-catalogue
 ```
 
-The entry is saved as **unverified**. Connect still asks before saving (skip with
-`--yes`). See [Connect](model-connect.md) to test the model later.
+These examples use the default user configuration destination. Supplying the
+exact model, endpoint, and API style avoids model discovery; `--no-catalogue`
+avoids metadata lookup. The entry is saved as **unverified**. Connect still asks
+before saving (skip with `--yes`). See [Connect](model-connect.md) to test the model later.
 
-To ask an agent: "Use the `nooa-model-configuration` skill to configure this
-model without API calls. Keep my other entries, use an environment variable for
-the key, and check the file locally only."
+When asking an agent to change configuration, specify the target alias and file.
+Keep other entries and user settings, and use an environment variable for the key.
 
 ## Explicit media inputs (migration)
 
@@ -171,17 +196,28 @@ responses = ResponsesClient("openai/your-model", media_inputs=["image", "pdf"])
 
 ### What happens to media the model cannot receive
 
-`show()` in agent code always works. If the model is not set up for that kind of
-media, the next request replaces it with a short note, for example:
+Pass media as method arguments or use `show()` while CodeAct runs. When a
+format is missing from `media_inputs`, NOOA sends a short note instead of the
+attachment, for example:
 
 - `[An image was removed here because this model is not set up to receive images.]`
 - `[A file was removed here. Only PDF files can be sent to a model.]`
 
-Stored history is not changed. If you switch to a model that accepts the media,
-it is sent again.
+Stored history keeps the original attachments. Using that history with a model
+configured for those formats can send them again. See the
+[media guide](media.md#text-only-requests-and-replay).
 
-To let a model receive it, add the kind to its entry, for example
-`media_inputs: [video]`, and keep any kinds already listed.
+To let a model receive an implemented input, add the kind to its entry and
+keep any valid kinds already listed. Native Anthropic Messages and Responses
+implement image/PDF inputs, not audio/video. Chat implements `input_audio` and
+`video_url` extensions, but a selected backend may reject them; untested Chat
+permissions remain unverified. Native audio/video flags must be explicitly
+repaired (choose supported formats, text-only, or another interface), not saved
+as untested. Connect never silently removes legacy flags to repair a profile.
+Direct clients and legacy aliases can still make text-only calls, but reject
+actual enabled unsupported native attachments locally before HTTP; disabled
+attachments are filtered first. Original history and raw test evidence are not
+rewritten.
 
 Connect can test media for you with generated samples. See
 [Connect media setup](model-connect.md#choose-media-inputs-during-setup).

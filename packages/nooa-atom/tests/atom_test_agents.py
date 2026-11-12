@@ -14,6 +14,7 @@ import contextvars
 import json
 from typing import Any, ClassVar
 
+from nooa_atom.agent.base import AtomAgentBase
 from nooa_atom.session.items import (  # noqa: F401
     ChildFailed,
     ChildFailedError,
@@ -158,10 +159,13 @@ def fresh_events() -> tuple[asyncio.Event, asyncio.Event]:
     return STARTED, BLOCK
 
 
+# Read through the module: fresh_events() rebinds the globals mid-test, and a
+# cell's namespace is seeded once (it does not re-read module globals).
 BLOCKING_CELL = """\
+import atom_test_agents as _t
 print("cell started")
-STARTED.set()
-await BLOCK.wait()
+_t.STARTED.set()
+await _t.BLOCK.wait()
 print("cell released")
 """
 
@@ -351,7 +355,24 @@ async def until(predicate: Any, timeout: float = 5) -> None:
     await asyncio.wait_for(poll(), timeout)
 
 
-ATOM_SPEC = "nooa_atom.agent:AtomAgent"
+ATOM_SPEC = "atom_test_agents:BaseAtom"
+"""The private Atom base with its own turn methods, for tests of the shared machinery.
+
+``AtomAgentBase`` keeps the session plumbing the public ``AtomAgent`` builds
+on: ``delegate``/``spawn`` children through the session port, ``JobsApi``,
+the slash commands and skills. Tests of that machinery run it through this
+test-only subclass; the public agent (``nooa_atom.agent:AtomAgent``) is
+tested in ``test_unified_agent.py`` and ``test_atom_resume.py``.
+"""
+PUBLIC_ATOM_SPEC = "nooa_atom.agent:AtomAgent"
+
+
+class BaseAtom(AtomAgentBase):
+    pass
+
+
+# Test-only: the private base as a session agent, with the base's own prompt.
+BaseAtom.__doc__ = AtomAgentBase.__doc__
 
 
 class AtomModels(ScriptedModels):

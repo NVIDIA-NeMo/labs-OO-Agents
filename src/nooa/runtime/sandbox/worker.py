@@ -95,6 +95,18 @@ class ChildBroker:
             or response.get("tool_call_id") != call_id
         ):
             raise ParentToolError("sandbox broker got an unexpected response")
+        images = response.get("images")
+        if images:
+            from nooa.runtime.media_capture import _media_buffer_var
+
+            buf = _media_buffer_var.get()
+            if buf is not None:
+                for block in images:
+                    if not buf.append(block):
+                        print(
+                            f"[show() limit reached ({buf.max_attachments}), attachment not added]"
+                        )
+                        break
         if not response.get("ok"):
             _raise_broker_error(response)
         return response
@@ -361,15 +373,10 @@ def build_namespace(
     restrictions: Any,
 ) -> dict[str, Any]:
     """Build the worker's persistent cell namespace, mirroring actor exec_globals."""
-    import typing as _typing
-
     from nooa.agentdoc import doc
     from nooa.agentdoc.introspect import methods, variables
     from nooa.agentdoc.visibility import filter_mro_module_globals
-    from nooa.decorators import strategy
-    from nooa.media import Audio, File, Image, Media, Video
-    from nooa.runtime.media_capture import show
-    from nooa.runtime.pprint import pprint
+    from nooa.runtime.namespace_providers import cell_namespace_names
     from nooa.runtime.restrictions import RestrictionsConfig
 
     # Only ``self.*`` brokers to the live parent; module-level state is a private
@@ -378,44 +385,17 @@ def build_namespace(
     # fails loud (SandboxStateError) instead. Applied to the module globals only,
     # before ``self`` / the framework builtins are added below.
     from nooa.runtime.sandbox.readonly import freeze_module_state
-    from nooa.strategies import (
-        CodeActStrategy,
-        CompositeStrategy,
-        PredictStrategy,
-        ReflexionStrategy,
-        TemplateStrategy,
-    )
-    from nooa.strategies.pure_python import PurePythonStrategy
 
     ns: dict[str, Any] = freeze_module_state(filter_mro_module_globals(type(agent)))
+    # The same registered names as the in-process namespace (core, media, strategies...).
+    ns.update({"self": proxy, "asyncio": asyncio, **cell_namespace_names()})
+    # Introspection runs on the live parent object, not the proxy.
     ns.update(
         {
-            "self": proxy,
-            "asyncio": asyncio,
-            "typing": _typing,
-            "Annotated": _typing.Annotated,
-            "Any": _typing.Any,
-            "Literal": _typing.Literal,
-            "Optional": _typing.Optional,
-            "Union": _typing.Union,
             "doc": _introspect_wrapper(doc, proxy, agent),
             "methods": _introspect_wrapper(methods, proxy, agent),
             "variables": _introspect_wrapper(variables, proxy, agent),
             "help": _introspect_wrapper(doc, proxy, agent),
-            "pprint": pprint,
-            "show": show,
-            "Media": Media,
-            "Image": Image,
-            "Audio": Audio,
-            "Video": Video,
-            "File": File,
-            "strategy": strategy,
-            "PurePythonStrategy": PurePythonStrategy,
-            "CodeActStrategy": CodeActStrategy,
-            "ReflexionStrategy": ReflexionStrategy,
-            "PredictStrategy": PredictStrategy,
-            "TemplateStrategy": TemplateStrategy,
-            "CompositeStrategy": CompositeStrategy,
         }
     )
     if framework_builtins:
@@ -471,6 +451,7 @@ def worker_main(conn: Connection, init: dict[str, Any]) -> None:  # pragma: no c
                     request,
                     max_error=init.get("max_error"),
                     tail_chars=init.get("error_tail"),
+                    max_media=init.get("max_media"),
                 )
                 wire.send(
                     conn,
@@ -494,12 +475,14 @@ def _run_one(
     *,
     max_error: int | None = None,
     tail_chars: int | None = None,
+    max_media: int | None = None,
 ) -> ResultDTO:
     result = loop.run_until_complete(
         run_cell_source(
             request["code"],
             namespace,
             execution_count=int(request.get("execution_count", 1)),
+            max_attachments=max_media if max_media is not None else 100,
         )
     )
     return _serialize(

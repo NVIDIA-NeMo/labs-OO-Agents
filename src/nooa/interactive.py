@@ -21,7 +21,7 @@ queues and re-enters ``handle()`` once per notification. It provides:
 interactive hosts such as the TUI and ACP.
 """
 
-from typing import Annotated, Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Literal, Protocol, runtime_checkable
 
 from pydantic import (
     BaseModel,
@@ -29,10 +29,13 @@ from pydantic import (
     ValidationError,
     field_serializer,
     field_validator,
+    model_validator,
 )
 
 from nooa import hidden, strategy
-from nooa.agentdoc import doc  # noqa: F401  # visible in the REPL, as on base
+from nooa.agentdoc import (
+    doc,  # noqa: F401  # visible in the REPL, as on base
+)
 from nooa.context_blocks import Metadata
 from nooa.context_blocks.roles import Role
 from nooa.runtime.turn_loop import ResultKind
@@ -40,8 +43,6 @@ from nooa.storage.markers import nosnapshot
 from nooa.storage.snapshot_vars import SnapshotVars
 
 with hidden:
-    from collections.abc import Callable
-
     from nooa import Agent, no_trace
     from nooa.agents import TokenBudgetSummarizer
     from nooa.config import CodeActConfig, PredictConfig  # noqa: F401
@@ -104,6 +105,17 @@ def _blank_to_none(value: str | None) -> str | None:
     return None if value is None else (value.strip() or None)
 
 
+def _without_own_kind(cls: Any, data: Any) -> Any:
+    """Accept the JSON form's ``"kind"`` tag when it names this result type.
+
+    The result types forbid unknown fields, so ``{"kind": "done", ...}`` would
+    otherwise fail; a mismatched kind still fails as an unknown field.
+    """
+    if isinstance(data, dict) and data.get("kind") == cls._turn_kind:
+        return {key: value for key, value in data.items() if key != "kind"}
+    return data
+
+
 class Done(BaseModel):
     """Turn result: the work for this turn is finished.
 
@@ -112,12 +124,14 @@ class Done(BaseModel):
     ``self.message()`` remains for text you want to show before the turn
     ends. ``explanation`` stays a short status line. ``evidence`` is
     optional: short factual lines a reviewer can check, used when you
-    verified something. ``result`` is set only when a delegated objective
-    or benchmark task completes; it is then a ``TaskResult`` (a worker
-    turn, ``handle_work``, requires one; other turns may leave it unset).
+    verified something. ``result`` is set only when a delegated task
+    completes; it is then a ``TaskResult`` (a worker turn, ``handle_work``,
+    requires one; other turns may leave it unset).
     """
 
+    model_config = {"extra": "forbid"}
     _turn_kind: ClassVar[ResultKind] = "done"
+    _accept_own_kind = model_validator(mode="before")(classmethod(_without_own_kind))
     explanation: str = Field(description="Status line saying what was finished; not the reply")
     message: str | None = Field(default=None, description="The reply to show the user")
     evidence: list[str] = Field(
@@ -125,7 +139,7 @@ class Done(BaseModel):
         description='Short checkable facts, e.g. "pytest tests/x.py: 24 passed"',
     )
     result: Any | None = Field(
-        default=None, description="TaskResult when a delegated or bench task completes"
+        default=None, description="TaskResult when a delegated task completes"
     )
 
     _check_explanation = field_validator("explanation")(_non_blank)
@@ -144,34 +158,41 @@ class NeedInput(BaseModel):
     ``self.message()``. The answer arrives as a plain ``str``; put any
     suggested answers in the question text. ``reason`` optionally says in
     one sentence why progress is not possible or not desirable without it.
+    ``explanation`` is an optional short status line, as on ``Done`` and
+    ``Waiting``; it is not shown as the question.
     """
 
     model_config = {"extra": "forbid"}
     _turn_kind: ClassVar[ResultKind] = "need_input"
+    _accept_own_kind = model_validator(mode="before")(classmethod(_without_own_kind))
 
     question: str = Field(description="The question to show the person")
     reason: str | None = Field(
         default=None, description="Why progress is not possible or not desirable without it"
     )
+    explanation: str | None = Field(default=None, description="Short status line; not the question")
 
     _check_question = field_validator("question")(_non_blank)
+    _check_explanation = field_validator("explanation")(_blank_to_none)
 
 
 class Waiting(BaseModel):
     """Turn result: waiting on a background job or queue, not on a person.
 
-    ``on`` lists what is being waited on by name: a queue channel
-    (``"delegates"``, ``"jobs"``), a spawned job's label, a subagent's name.
-    ``explanation`` says why, for the host. ``message`` is an optional line
+    ``on`` lists what is being waited on by name: queue channels or names
+    the host defines. ``explanation`` says why, for the host. ``message`` is an optional line
     the host shows the user. The host keeps the request open and runs the
     next turn when one of them delivers.
     """
 
+    model_config = {"extra": "forbid"}
     _turn_kind: ClassVar[ResultKind] = "waiting"
+    _accept_own_kind = model_validator(mode="before")(classmethod(_without_own_kind))
     explanation: str = Field(description="Why the turn is waiting")
     message: str | None = Field(default=None, description="Line to show the user while waiting")
     on: list[str] = Field(
-        min_length=1, description="Names of the channels, jobs or subagents being waited on"
+        min_length=1,
+        description="Names of what is being waited on: queue channels or names the host defines",
     )
 
     _check_explanation = field_validator("explanation")(_non_blank)
@@ -184,7 +205,7 @@ class Waiting(BaseModel):
 
 
 class TaskResult(BaseModel):
-    """Structured result of a delegated objective or a benchmark task.
+    """Structured result of a delegated task.
 
     A worker turn (``handle_work``) ends with a ``Done`` whose ``result`` is
     one. The field descriptions are what the model reads when it builds one.
@@ -220,6 +241,18 @@ class TaskResult(BaseModel):
         ),
     )
 
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return super().__getattr__(name)  # type: ignore[misc]  # pydantic's private attrs
+        except AttributeError:
+            if name.startswith("_"):
+                raise
+            fields = ", ".join(type(self).model_fields)
+            raise AttributeError(
+                f"TaskResult has no attribute {name!r}; its fields are {fields}. "
+                "A finished task has no status: read solution_description and evidence."
+            ) from None
+
 
 ONE_SHOT_QUESTION: Annotated[str, hidden] = (
     "Your parent can't answer a one-shot worker: decide, state your assumptions in "
@@ -227,19 +260,31 @@ ONE_SHOT_QUESTION: Annotated[str, hidden] = (
 )
 
 
+@runtime_checkable
+class AskPolicy(Protocol):
+    """Whether a turn may end with ``NeedInput``: someone is there to answer it.
+
+    A host installs one as ``InteractiveAgent.ask_policy`` (e.g. ``may_ask``
+    False for a one-shot worker); ``require_task_result`` reads it.
+    """
+
+    @property
+    def may_ask(self) -> bool: ...
+
+
 @hidden
 def require_task_result(agent: Any, result: Any, call: Any) -> None:
     """Reject a worker ``Done`` whose ``result`` is not a ``TaskResult``, and a one-shot question.
 
     The postcondition of every worker turn (``handle_work``). A worker's
-    parent reads ``done.result``; ``self.message()`` text reaches it only as
+    parent reads its ``result``; ``self.message()`` text reaches it only as
     progress notes. A dict that validates as a ``TaskResult`` is accepted
-    (the parent receives it as one). A one-shot worker may not ask: its
-    session port says so (``agent.session.may_ask``).
+    (the parent receives it as one). A worker that may not ask (a one-shot
+    worker) says so through its host-installed ``InteractiveAgent.ask_policy``.
     """
     if isinstance(result, NeedInput):
-        port = getattr(agent, "session", None)
-        if port is not None and not getattr(port, "may_ask", True):
+        policy = agent.ask_policy if isinstance(agent, InteractiveAgent) else None
+        if policy is not None and not policy.may_ask:
             raise InvariantError(ONE_SHOT_QUESTION)
         return
     if not isinstance(result, Done) or isinstance(result.result, TaskResult):
@@ -382,77 +427,33 @@ def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
     summarizer._automatic_context_budget_percent = config.threshold_fraction
 
 
-class AgentVars:
-    """Attribute-access proxy for an agent's persistent ``vars`` dict.
-
-    Mirrors ``TodoVars``: write ``self.v.spec = "..."`` instead of
-    ``self.vars["spec"] = "..."``. Reads and writes go straight
-    through to ``self.vars`` so snapshot serialization is unaffected.
-
-    Use for variables that need to survive across turns and across
-    sessions but aren't tied to a specific todo. (For per-todo state,
-    use ``self.todo.<id>.v`` — same shape, narrower scope.)
-
-    Values are snapshot-backed: assigning something that can't be
-    snapshot-serialized (a live client, socket, callable, ...) logs a
-    warning and is **not stored** — it won't survive ``/exit`` + resume.
-    Store serializable data (dict/str/number/Pydantic model) instead.
-    """
-
-    def __init__(self, agent: Any):
-        object.__setattr__(self, "_agent", agent)
-
-    def __getattr__(self, key: str) -> Any:
-        try:
-            return self._agent.vars[key]
-        except KeyError:
-            raise AttributeError(f"No var {key!r} on agent") from None
-
-    def __setattr__(self, key: str, value: Any) -> None:
-        self._agent.vars[key] = value
-
-    def __setitem__(self, key: str, value: Any) -> None:
-        raise TypeError(
-            f"self.v does not support item assignment; write self.v.{key} = ... instead."
-        )
-
-    def __delattr__(self, key: str) -> None:
-        try:
-            del self._agent.vars[key]
-        except KeyError:
-            raise AttributeError(f"No var {key!r} on agent") from None
-
-    def __contains__(self, key: str) -> bool:
-        return key in self._agent.vars
-
-    def __repr__(self) -> str:
-        return repr(self._agent.vars)
+# The ``queues`` context block. Its expression is shown to the model, so it
+# goes through a hidden method rather than naming ``self.queue_manager``.
+_QUEUES_EXPR: Annotated[str, hidden] = "self._queue_status()"
 
 
 @hidden
 class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
-    """Base class for agents driven by an outer dispatcher (TUI, harness, ...).
+    """Base class for agents driven by an outer dispatcher (an interactive host, a harness...).
 
     Subclass this and implement ``handle()`` to build a custom interactive
     agent. ``message()`` is provided for free.
 
     **Input queues.** Every ``InteractiveAgent`` has a ``self.user_messages``
-    queue (``InputQueue``) that the host feeds when the human types.
-    Subclasses may declare additional queues as instance attributes for
-    other producers (long-running job output, monitor streams, etc.).
+    queue that the host feeds when the human types. Subclasses may declare
+    additional queues as instance attributes for other producers.
 
-    Each queue is two objects: an ``InputQueue`` (full producer +
-    dispatcher API, hidden from the LLM under ``_<name>_in``) and an
-    ``OutputQueue`` reader facade exposed under the public name. The
-    LLM can ``await self.user_messages.get()`` to dequeue mid-turn;
-    everything else (put, snapshot, qsize, etc.) is dispatcher-only.
+    Each queue is two objects: a ``Channel`` (full producer + dispatcher
+    API, hidden from the LLM under ``_<name>_in``) and a ``ChannelReader``
+    facade exposed under the public name. The LLM can
+    ``await self.user_messages.get()`` to dequeue mid-turn; everything else
+    (put, snapshot, etc.) is dispatcher-only.
 
     ``handle()`` runs *per turn* — the outer dispatcher calls it with
     the next notification (a ``dict[str, list]``). Use ``self.v`` for
     state that should survive across turns.
     """
 
-    _render_message: Annotated[Callable[[str], None] | None, hidden, nosnapshot]
     # QueueManager owns the channel registry. Hidden from the LLM by
     # default — the LLM should access individual channels (e.g.
     # ``self.user_messages``) directly, not through a string-keyed
@@ -471,24 +472,29 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     # across sessions (snapshot-backed). Accessed via the ``self.v``
     # proxy for dot-attribute reads/writes (``self.v.spec = "..."``).
     vars: SnapshotVars
+    # Installed by the host: whether a turn may end with NeedInput (see
+    # AskPolicy). None: no host policy, a turn may ask.
+    ask_policy: Annotated[AskPolicy | None, hidden, nosnapshot]
 
-    def __init__(self, llm=None, **kwargs):
+    def __init__(self, llm=None, *, producers: bool = True, **kwargs):  # noqa: F811 (not the module)
+        """``producers=False``: no ``self.producers`` (a subclass with its own timers)."""
         super().__init__(llm=llm or _DEFAULT_LLM, **kwargs)
-        self._render_message = None
+        self.ask_policy = None
         self.vars = SnapshotVars()
         self.queue_manager = QueueManager(event_manager=self.event_manager)
         self._user_messages_in = self.queue_manager.queue("user_messages")
         self.user_messages = self._user_messages_in.reader
         self.event_manager.on_close(self.queue_manager.shutdown)
         self.turns = TurnLoop(self)
-        self.producers = ProducersSkill()
+        if producers:
+            self.producers = ProducersSkill()
         # Surface pending-queue counts (and a short preview of each item)
         # to the LLM every turn — the agent reads queue depth straight
         # from the ``queues`` context block. Composed via
         # ``QueueManager.status()`` so adding new channels Just Works.
         from nooa import Context
 
-        self.context["queues"] = Context(expr="self.queue_manager.status()")
+        self.context["queues"] = Context(expr=_QUEUES_EXPR)
 
     @hidden
     @no_trace
@@ -513,14 +519,34 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         finally:
             await self.queue_manager.shutdown()
 
+    @hidden
+    def after_restore(self) -> None:
+        """Called once at the end of ``AgentSnapshot.restore()`` (every snapshot restore).
+
+        Subclasses extend it to repair state that did not survive the restart.
+        Hosts do not call it themselves.
+        """
+        # A snapshot from before the queues block stopped naming the hidden
+        # queue_manager restores the old expression; put the current one back.
+        from nooa import Context
+
+        self.context["queues"] = Context(expr=_QUEUES_EXPR)
+
+    @hidden
+    @no_trace
+    def _queue_status(self) -> str:
+        """The ``queues`` context block: unread counts per channel, how to read them, running jobs."""
+        return self.queue_manager.status(
+            read_hints={"user_messages": "await self.user_messages.get()"}
+        )
+
     @property
-    def v(self) -> AgentVars:
-        """Attribute-access proxy for ``self.vars`` — the agent's
-        persistent variable dict.
+    def v(self) -> SnapshotVars:
+        """Durable facts: write ``self.v.key = value``, read ``self.v.key``, delete ``del self.v.key`` (or ``self.v["key"]``). Store serializable values.
 
         Use for state that should survive across turns and sessions
-        but isn't tied to a specific todo. Snapshot-backed via
-        ``self.vars``.
+        but isn't tied to a specific todo. ``self.v`` is ``self.vars``
+        (a :class:`SnapshotVars`), snapshot-backed.
 
         Usage::
 
@@ -532,17 +558,13 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         Compare:
         - REPL locals → cleared between turns.
         - ``self.v.k = v`` → snapshot-backed, survives turns + sessions.
-        - ``self.todo.<t>.v.k = v`` → same as ``self.v`` but scoped to
+        - ``self.todo.get(id).v.k = v`` → same as ``self.v`` but scoped to
           one todo.
         """
-        return AgentVars(self)
+        return self.vars
 
     def message(self, text: str, *, echo: bool = False) -> None:
         """Send a Markdown message to the user.
-
-        In a child session the text goes to the parent instead, as a
-        ``ChildMessage`` on its ``delegates`` channel: a progress note, not
-        the child's result.
 
         Each call renders as an independent block — so every call must be a
         complete, self-contained Markdown document.  In particular, never split
@@ -563,14 +585,11 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
     @hidden
     def _send_message(self, text: str, *, is_result_text: bool = False) -> None:
-        """Record and render one message; ``is_result_text`` marks a turn result's message."""
-        event = AgentMessage(content=str(text), is_result_text=is_result_text)
-        tag = self.event_manager.add(event)
-        if self._render_message is not None:
-            try:
-                self._render_message(text, event_id=str(event.id), tags={str(tag)})
-            except TypeError:
-                self._render_message(text)
+        """Record one message as an AgentMessage event; hosts render it from the event.
+
+        ``is_result_text`` marks a turn result's message.
+        """
+        self.event_manager.add(AgentMessage(content=str(text), is_result_text=is_result_text))
 
     @hidden
     @strategy(CodeActStrategy())
@@ -625,10 +644,10 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
         - ``Waiting(message=..., explanation=..., on=[...])`` — waiting on a
           background job or queue, not on a person. ``message`` is shown to
-          the user; ``on`` names what you wait for: a channel, a job label,
-          a subagent::
+          the user; ``on`` names what you wait for, such as a queue
+          channel::
 
-              return_result(Waiting(message="Tests are running; I will report when they finish.", explanation="tests running", on=["jobs:ci-42"]))
+              return_result(Waiting(message="CI is running; I will report when it finishes.", explanation="CI running", on=["ci"]))
 
         ## Available queues
 
@@ -644,8 +663,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
 
         Hosts declare the rest. ``CodingAgent`` adds ``"slash_commands"``
         (``SlashCommandResult``) and ``"system_messages"`` (host-owned
-        prompts such as keep-going continuations); a harness might add
-        ``"job_outputs"``. The
+        prompts such as keep-going continuations). The
         ``<queue_status>`` context block lists the pending count per
         queue each turn. After any result, the dispatcher races every
         declared queue/event and re-enters with the first arrival.
@@ -688,8 +706,8 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         reads only your result. The task is in ``notification["user_messages"]``;
         its first line says whether you can ask your parent questions (later
         messages there are follow-ups). Your task is the brief; your
-        ``TaskResult`` is your report; a Todo in your list is your own working
-        copy. Do all the work, verify it, then end with exactly one
+        ``TaskResult`` is your report. Do all the work, verify it, then end
+        with exactly one
         ``return_result(...)``:
 
         - ``Done`` with a ``TaskResult``, when the task is finished or blocked
@@ -713,7 +731,9 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         - ``Waiting(explanation=..., on=[...])`` only while a job you started
           is still running.
 
-        ``self.message()`` sends your parent a progress note (a
-        ``ChildMessage``); it does not replace the result.
+        Your parent reads your result: do not send routine progress notes.
+        Use ``self.message()`` (it reaches your parent as a note)
+        only for a short note your parent needs before you finish, never the
+        report. The full report goes only in ``TaskResult.report``.
         """
         ...

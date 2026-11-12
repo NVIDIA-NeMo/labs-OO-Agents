@@ -7,9 +7,10 @@ import json
 import pytest
 from atom_test_agents import CellLLM, cell
 from nooa_atom import SessionStore
+from nooa_atom.bench_agent import AtomBenchAgent
 from nooa_atom.session.store import sessions_root
 from nooa_bench import AGENT_CLASSES, runner
-from nooa_bench.atom_agent import AtomBenchAgent
+from nooa_bench.agents import available_agents, load_agent
 
 from nooa.unifiedllm import LLMUsage
 
@@ -34,8 +35,11 @@ def workspace(tmp_path):
     return path
 
 
-def test_atom_is_an_agent_type():
-    assert AGENT_CLASSES["atom"] == "nooa_bench.atom_agent:AtomBenchAgent"
+def test_atom_is_an_agent_type_through_the_entry_point():
+    # nooa-atom registers it; nooa-bench's built-in table does not name it.
+    assert "atom" not in AGENT_CLASSES
+    assert "atom" in available_agents()
+    assert load_agent("atom") is AtomBenchAgent
     assert runner._import_agent_class("atom") is AtomBenchAgent
 
 

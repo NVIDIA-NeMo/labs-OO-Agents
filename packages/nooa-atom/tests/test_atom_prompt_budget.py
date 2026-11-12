@@ -15,6 +15,7 @@ prompt must raise a limit here on purpose.
 """
 
 import asyncio
+import json
 
 import pytest
 from atom_test_agents import python_cell
@@ -105,14 +106,144 @@ RESULT = (
 # Re-measured after merging dev/atom with #447 into #451 (2026-10-19): #447's
 # truthful API text plus the child-session docs, 273 characters more in the system
 # prompt for every row (was 14,909). Measured values plus about 2% headroom.
+# Raised for self.jobs (2026-10-19): the class doc says to run long work with
+# self.jobs.run(...) and wait on its name, and the self doc lists the
+# jobs attribute: 224 characters more in the system prompt and in total for
+# every row (handle measured 18,475 total before, not 18,240). Measured values
+# plus about 2% headroom.
+# Raised for path names (feat/atom-jobs-skill): spawn()/delegate() take a
+# required name= (in the self doc's signatures and the class doc's examples),
+# ChildRef has path, and the class doc says jobs and children share one set of
+# names: about 110 characters more in the system prompt and in total for every
+# row. Measured values plus about 2% headroom.
+# Re-measured when the stable turn instructions moved from handle() into the
+# class doc (feat/atom-jobs-reland): before, 15,922 system for every row and
+# 19,285 / 18,465 / 18,980 / 20,460 total. The handle() doc fell from 2,005 to
+# 290 characters, so its total (repeated every turn) fell by 1,557; the class
+# doc grew by 158, which put the system prompt over 16,000: the system limit
+# was raised to the measured 16,080 rounded up to the next 100, and handle's
+# total limit lowered to its measured value plus about 2%.
+# Raised when the class doc gave self.jobs.run's full signature (name=, not
+# label=) and said results arrive in notification["jobs"] (feat/atom-jobs-reland):
+# 199 characters more in the system prompt and in total for every row (before,
+# 16,080 system and 18,150 / 18,409 / 18,924 / 20,404 total). Limits: measured
+# values plus about 2%, rounded up to the next 100 (system: next 100).
+# Raised when self.jobs (JobsApi with JobInfo/JobUpdate) joined the
+# python_cell_tools block and the class doc went back to the short self.jobs
+# sentence (feat/atom-jobs-reland): system 16,279 -> 19,737 (+3,458), still
+# under BENCH_SYSTEM_LIMIT. Limits: measured totals plus about 2%, rounded up
+# to the next 100 (system: next 100).
+# Session-namespace budgets already enforced before it became unconditional.
+# Removing the selector does not relax these limits or the hard system ceiling.
+# Raised when Done(message=...) became the documented reply (2026-10-29,
+# PR503 follow-up, user-approved: prompt budget is not a constraint here): the
+# class doc shows the Done/Waiting forms with message=, says what is shown as
+# the reply and who receives replies and notes (user or parent), and the
+# interactive and child roles say the same. System before/after: handle
+# 19,377 -> 19,689, handle_batch 19,605 -> 19,884, handle_work 19,714 ->
+# 20,052, handle_orchestrate 19,908 -> 20,187. Limits: measured values plus
+# about 2%, rounded up to the next 100; BENCH_SYSTEM_LIMIT raised with them.
+# Totals raised on the rebase onto dev/atom 060f59e66 (2026-10-29), whose own
+# prompt additions came along: totals 21,045 / 21,240 / 21,408 / 21,543; system
+# limits unchanged. Limits: measured totals plus about 2%, rounded up to the next 100.
+# Raised for the exact-output rule (2026-10-30, friction PR part 3, user-approved:
+# prompt budget is not a constraint): the class doc and the interactive role say an
+# exact value or format is the whole message. Measured system / total: handle
+# 20,202 / 21,227, handle_batch 20,321 / 21,346, handle_work 20,489 / 21,514,
+# handle_orchestrate 20,624 / 21,649.
+# Limits: measured values plus about 2%, rounded up to the next 100.
+# Raised for the filesystem-scan warning (2026-10-30, friction PR part 3,
+# user-approved): the class doc says a scan of the whole filesystem can run until
+# the timeout. Measured system / total: handle 20,298 / 21,323, handle_batch
+# 20,417 / 21,442, handle_work 20,585 / 21,610, handle_orchestrate 20,720 / 21,745.
+# Limits: measured values plus about 2%, rounded up to the next 100.
+# Raised for self.jobs.after/every/tail (2026-10-30, friction PR: producer features
+# into self.jobs, user-approved): the WorkManager doc and the work examples show the
+# timer, ticks and file tail with the "a delay counts from now" clause. Measured
+# system / total: handle 21,553 / 22,578, handle_batch 21,672 / 22,697, handle_work
+# 21,840 / 22,865, handle_orchestrate 21,975 / 23,000.
+# Limits: measured values plus about 2%, rounded up to the next 100.
+# Lowered when self.jobs.tail was dropped (2026-10-30, user decision: a Shell
+# running ``tail -F`` with a Throttle covers it): the docs show that idiom in one
+# line instead. Measured system / total: handle 21,247 / 22,272, handle_batch
+# 21,366 / 22,391, handle_work 21,534 / 22,559, handle_orchestrate 21,669 / 22,694.
+# Limits: measured values plus about 2%, rounded up to the next 100.
+# Raised for the PR512 small fixes (2026-10-30, friction PR, user-approved): the
+# libs attribute says where libraries are saved, the Subagent doc says awaiting a
+# request blocks until the child ends its turn (together about 220 characters),
+# and the class doc adds the quote-style and script-on-stdin advice next to the
+# triple-quote rule (about 210). Measured system / total: handle 21,676 / 22,701,
+# handle_batch 21,795 / 22,820, handle_work 21,963 / 22,988, handle_orchestrate
+# 22,098 / 23,123. Limits: measured values plus about 2%, rounded up to the next 100.
+# Re-measured for the PR512 live-names line (2026-10-30, friction PR, user decision):
+# python_cell_lifetime opens with "All your live Python names are listed in the
+# python_cell_state block; anything not listed there does not exist in this
+# session." (199 characters, every row). Measured system / total: handle 21,875 /
+# 22,900, handle_batch 21,994 / 23,019, handle_work 22,162 / 23,187,
+# handle_orchestrate 22,297 / 23,322. Within the limits, so they stay. The line was
+# reworded (CodeRabbit: the block is bounded, so "anything not listed does not
+# exist" was wrong) to the python_cell_state() wording below; still within the limits.
+# Totals raised for the #517 prompt-review decisions (2026-11-03, user-approved):
+# the <skills> block is back as self.skills.status() (active skills, connected MCP
+# servers, a count of the rest), the timers show their fn, and python_cell_lifetime
+# drops the late-output bullet. Measured system / total: handle 21,921 / 23,251,
+# handle_batch 22,040 / 23,370, handle_work 22,208 / 23,538, handle_orchestrate
+# 22,343 / 23,673. System limits still hold; totals: measured plus about 2%,
+# rounded up to the next 100.
+# The handle system limit raised for the interactive role as a bulleted block
+# (2026-11-03, #517 user decision): handle system / total 22,092 / 23,422 ->
+# 22,286 / 23,616. System limit set to the bench ceiling (measured plus 2% would
+# pass it); total still within its limit.
+# The handle_orchestrate system limit and the bench ceiling raised for the
+# self.skill_writing rename (2026-11-04, #517 user decision): the attribute line says
+# skills are code or instructions saved in .nooa/skills, and the SkillManager doc
+# says new skills are made with self.skill_writing. Measured system / total before
+# -> after: handle 22,366 / 23,696 -> 22,375 / 23,708, handle_batch 22,291 / 23,621
+# -> 22,300 / 23,633, handle_work 22,459 / 23,789 -> 22,468 / 23,801,
+# handle_orchestrate 22,594 / 23,924 -> 22,603 / 23,936. Only handle_orchestrate
+# passed its system limit (22,600), so it and the bench ceiling go to 22,700.
+# Raised again when rename_session became visible in <self> (2026-11-05, Paul's
+# decision on PASS): +127 chars on every method. Measured system / total before
+# -> after: handle 22,375 / 23,708 -> 22,502 / 23,835, handle_batch 22,300 /
+# 23,633 -> 22,427 / 23,760, handle_work 22,468 / 23,801 -> 22,595 / 23,928,
+# handle_orchestrate 22,603 / 23,936 -> 22,730 / 24,063.
+# The handle limits raised for the interactive role's "A running cell holds back
+# new messages until it ends." bullet (2026-11-10, Shell deadline handover):
+# handle system / total 22,541 / 23,874 -> 22,597 / 23,930 (only handle's role).
 LIMITS = {
-    (ATOM, "handle"): (15_500, 18_600),  # measured 15,182 / 18,240
-    (ATOM, "handle_batch"): (15_500, 18_100),  # measured 15,182 / 17,732
-    (ATOM, "handle_work"): (15_500, 18_600),  # measured 15,182 / 18,202
-    (ATOM, "handle_orchestrate"): (15_500, 20_100),  # measured 15,182 / 19,684
+    (ATOM, "handle"): (22_700, 24_000),
+    (ATOM, "handle_batch"): (22_500, 23_900),
+    (ATOM, "handle_work"): (22_700, 24_100),
+    (ATOM, "handle_orchestrate"): (22_800, 24_200),
 }
 # The bench guard's system-prompt ceiling; every agent stays under it.
-BENCH_SYSTEM_LIMIT = 20_000
+# Raised from 20,000 for the Done(message=...) guidance (2026-10-29, see above),
+# then from 21,200 to 22,600 for self.jobs.after/every/tail (2026-10-30), and
+# lowered to 22,300 when self.jobs.tail was dropped (2026-10-30), then raised to
+# 22,600 for the PR512 small fixes (2026-10-30, see above; handle_orchestrate 22,098),
+# then to 22,700 for the self.skill_writing rename (2026-11-04, see above),
+# then to 22,800 for the visible rename_session (2026-11-05, see above).
+BENCH_SYSTEM_LIMIT = 22_800
+# The one line every agent (root and child) gets in python_cell_lifetime.
+LIVE_NAMES_LINE = (
+    "The python_cell_state block lists up to 20 of your live Python names and "
+    'says how many more exist ("omitted: N"); python_cell_state() returns all of '
+    "them with their types. Check both before recreating a name."
+)
+
+# Separate CHAR/JSON-size guards, not token counts or a full provider-wire payload.
+# Effective restriction guidance grows default tool descriptions 2,069 -> 2,839;
+# canonical function-tool JSON 2,259 -> 3,032 (+773); schema JSON stays 79.
+# Raised to 3,150 for the task-vs-thinking-environment line (2026-10-31, user request;
+# descriptions 2,894 -> 3,136).
+# Raised to 3,250 for the #517 Shell snippet (2026-11-03, user decision): the first
+# sentence shows both forms, wait (sh.run) and background (self.jobs.launch);
+# descriptions 3,136 -> 3,198.
+TOOL_DESCRIPTION_CHAR_LIMIT = 3_250
+TOOL_SCHEMA_JSON_CHAR_LIMIT = 100
+# Raised to 3,350 with the description limit (2026-10-31; JSON 3,087 -> 3,331).
+# Raised to 3,450 with it (2026-11-03; JSON 3,331 -> 3,395).
+TOOL_PAYLOAD_JSON_CHAR_LIMIT = 3_450
 
 
 @pytest.fixture(autouse=True)
@@ -126,7 +257,7 @@ def _no_installed_skills(monkeypatch, tmp_path):
 
 
 async def _first_call(spec, method, tmp_path, sessions_dir):
-    """Run one turn of ``method`` and return the first call's messages and workspace."""
+    """Run one turn and return the first call's messages, workspace, and provider tools."""
     code = RESULT if method != "handle" else "return_result(Done(explanation='x'))"
     response = python_cell(code, "call_1")
     llm = FakeLLMClient([response], strict_exhaustion=True)
@@ -146,21 +277,88 @@ async def _first_call(spec, method, tmp_path, sessions_dir):
         await asyncio.wait_for(root.prompt("hello"), 30)
     finally:
         await registry.close_all()
-    return llm.calls[0].messages, workspace
+    return llm.calls[0].messages, workspace, llm.last_tools
+
+
+def _message_sizes(messages, workspace):
+    system = "\n".join(str(m.get("content", "")) for m in messages if m.get("role") == "system")
+    rendered = "\n".join(str(m.get("content", "")) for m in messages)
+    path = str(workspace.resolve())
+    return {
+        "raw_system": len(system),
+        "raw_messages": len(rendered),
+        "system": len(system.replace(path, "<workspace>")),
+        "messages": len(rendered.replace(path, "<workspace>")),
+    }
+
+
+async def test_prompt_sizes_normalize_workspace_in_system_and_messages(tmp_path, sessions_dir):
+    # Real requests, not synthetic strings: workspace appears in the static system block.
+    sizes = []
+    for name in ("short", "longer_workspace_path"):
+        root = tmp_path / name
+        root.mkdir()
+        messages, workspace, _ = await _first_call(ATOM, "handle", root, sessions_dir)
+        sizes.append(_message_sizes(messages, workspace))
+    short, long = sizes
+    assert short["raw_system"] < long["raw_system"]
+    assert short["raw_messages"] < long["raw_messages"]
+    assert short["system"] == long["system"]
+    assert short["messages"] == long["messages"]
 
 
 @pytest.mark.parametrize(("spec", "method"), list(LIMITS))
 async def test_first_call_prompt_stays_within_budget(spec, method, tmp_path, sessions_dir):
-    messages, workspace = await _first_call(spec, method, tmp_path, sessions_dir)
-    system = "\n".join(str(m.get("content", "")) for m in messages if m.get("role") == "system")
-    rendered = "\n".join(str(m.get("content", "")) for m in messages)
-    # The workspace path appears in the prompt; count it as a fixed token.
-    rendered = rendered.replace(str(workspace.resolve()), "<workspace>")
+    messages, workspace, tools = await _first_call(spec, method, tmp_path, sessions_dir)
+    tools_block = "\n".join(str(m.get("content", "")) for m in messages)
+    tools_block = tools_block.split("<python_cell_tools>", 1)[1].split("</python_cell_tools>", 1)[0]
+    from nooa.agentdoc import doc
+    from nooa.runtime.pprint import pprint
+
+    assert doc(doc, pprint, concise=True, inline_depth=0) in tools_block
+    assert tools_block.count("def doc(*objs:") == 1
+    assert tools_block.count("def pprint(_object:") == 1
+    assert "Return API documentation as str; display with print(doc(obj))" in tools_block
+    assert "Print (return None): max_length=items/container" in tools_block
+    assert "max_string=string chars, max_depth=nesting; None=unlimited" in tools_block
+    assert "get(self, id_or_title: str)" in tools_block
+    assert "def read(self, name: str)" not in tools_block
+    assert "_progress:" not in tools_block and "_ProgressSink" not in tools_block
+    manager_doc = tools_block.split("class SkillManager", 1)[1].split("# Work:", 1)[0]
+    assert "source_dir" not in manager_doc
+    sizes = _message_sizes(messages, workspace)
+    descriptions = sum(len(tool.description) for tool in tools)
+    schemas = [tool.get_parameter_schema() for tool in tools]
+    schema_chars = len(json.dumps(schemas, sort_keys=True, separators=(",", ":")))
+    payload = [
+        {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": schema,
+            },
+        }
+        for tool, schema in zip(tools, schemas, strict=True)
+    ]
+    tool_chars = len(json.dumps(payload, sort_keys=True, separators=(",", ":")))
+    print(f"provider tools: description={descriptions} schema={schema_chars} json={tool_chars}")
     system_limit, total_limit = LIMITS[(spec, method)]
-    print(f"{spec} {method}: system={len(system)} total={len(rendered)}")
-    assert len(system) <= system_limit
-    assert len(rendered) <= total_limit
-    assert len(system) < BENCH_SYSTEM_LIMIT
+    print(f"{spec} {method}: {sizes}")
+    rendered = "\n".join(str(message.get("content", "")) for message in messages)
+    assert "<experimental_namespace>" not in rendered
+    assert "<python_cell_lifetime>" in rendered
+    assert "job.output / JobEvent.output" in rendered
+    assert "Names you define in cells (values, functions, classes) survive Done" in rendered
+    assert "- Agent methods other than handle start each call with fresh names." in rendered
+    assert LIVE_NAMES_LINE in rendered
+    assert "cell locals last one method call" not in rendered
+    assert sizes["system"] <= system_limit
+    assert sizes["messages"] <= total_limit
+    assert sizes["system"] < BENCH_SYSTEM_LIMIT
+    assert descriptions <= TOOL_DESCRIPTION_CHAR_LIMIT
+    assert schema_chars <= TOOL_SCHEMA_JSON_CHAR_LIMIT
+    assert tool_chars <= TOOL_PAYLOAD_JSON_CHAR_LIMIT
 
 
 @pytest.mark.parametrize(("spec", "method"), list(LIMITS))
@@ -170,7 +368,7 @@ async def test_execution_context_hides_internal_helpers(spec, method, tmp_path, 
     ``_without_removed`` once leaked there with a docstring naming the removed
     ``retain=``/``mode=``/``keep=`` options, putting them in front of the model.
     """
-    messages, _ = await _first_call(spec, method, tmp_path, sessions_dir)
+    messages, _, _ = await _first_call(spec, method, tmp_path, sessions_dir)
     rendered = "\n".join(str(m.get("content", "")) for m in messages)
     start = rendered.index("<python_cell_context>")
     stub = rendered[start : rendered.index("</python_cell_context>", start)]
@@ -186,10 +384,52 @@ async def test_prompts_reply_to_a_child_question_with_send(spec, method, tmp_pat
 
     assert not hasattr(ChildQuestion, "answer")
     assert not hasattr(SessionPort, "answer_child")
-    messages, _ = await _first_call(spec, method, tmp_path, sessions_dir)
+    messages, _, _ = await _first_call(spec, method, tmp_path, sessions_dir)
     rendered = "\n".join(str(m.get("content", "")) for m in messages)
     assert ".answer(" not in rendered
     assert "answer_child" not in rendered
+
+
+@pytest.mark.parametrize(("spec", "method"), list(LIMITS))
+async def test_prompts_warn_that_a_whole_filesystem_scan_can_hit_the_timeout(
+    spec, method, tmp_path, sessions_dir
+):
+    messages, _, _ = await _first_call(spec, method, tmp_path, sessions_dir)
+    rendered = " ".join("\n".join(str(m.get("content", "")) for m in messages).split())
+    assert (
+        "Search inside the repository, never ``/``: a scan of the whole filesystem "
+        "(``find /``, ``grep -r /``, ``du /``) can run until the timeout. Prefer ``rg``"
+    ) in rendered
+
+
+@pytest.mark.parametrize(("spec", "method"), list(LIMITS))
+async def test_prompts_make_done_message_the_reply(spec, method, tmp_path, sessions_dir):
+    """Done(message=...) is the documented reply; the role says who receives it."""
+    messages, _, _ = await _first_call(spec, method, tmp_path, sessions_dir)
+    rendered = " ".join("\n".join(str(m.get("content", "")) for m in messages).split())
+    assert 'Done(message="your reply", explanation="short status")' in rendered
+    assert "Waiting(explanation=..., on=[names], message=...)" in rendered
+    assert (
+        "``message`` and ``question`` are shown as your reply. "
+        "``explanation`` is a short status line, not the reply; use ``self.message()`` for "
+        "notes while you work."
+    ) in rendered
+    # The exact-output rule is said once, in the interactive role.
+    assert rendered.count("exact value or format") == (1 if method == "handle" else 0)
+    assert (
+        "Replies and notes go to the user, or to your parent if you are a subagent; unattended, "
+        "only your result is read."
+    ) in rendered
+    assert "the reply with self.message()" not in rendered
+    role = rendered.split("<role>", 1)[1].split("</role>", 1)[0]
+    if method == "handle_work":
+        assert "not for the user: everything you send goes to your parent" in role
+        assert "the user," not in role
+    else:
+        assert "parent" not in role
+    if method == "handle":
+        assert "You are working with a person, the user. - After a user message," in role
+        assert "Send brief progress notes" not in role
 
 
 class _InstalledSkill:
@@ -209,14 +449,13 @@ class _InstalledSkill:
 
 
 async def test_installed_skills_are_counted_not_listed(monkeypatch, tmp_path, sessions_dir):
-    """With this machine's installed skills and 40 more, the ``<skills>`` block stays small.
+    """With this machine's installed skills and 40 more, none is named in the prompt.
 
     The other tests here turn installed skills off, which hid how the prompt
     grows with them. Each skill is found through ``self.skills.search()``;
     none is named or described in the prompt until it is activated.
     """
     import importlib.metadata
-    import re
 
     extra = [_InstalledSkill(index) for index in range(40)]
     monkeypatch.setattr(
@@ -237,10 +476,24 @@ async def test_installed_skills_are_counted_not_listed(monkeypatch, tmp_path, se
     finally:
         await registry.close_all()
     rendered = "\n".join(str(m.get("content", "")) for m in llm.calls[0].messages)
-    [block] = re.findall(r"<skills[^>]*>\n(.*?)\n</skills>", rendered, re.DOTALL)
-    print(block)
-    assert len(block) < 400
-    assert re.search(r"^\d+ more \(", block.splitlines()[-1])
+    # The skills block (#517 P04) is the manager's state, not the inventory:
+    # installed skills are a count with the search call, never named.
+    block = rendered.split('<skills expr="self.skills.status()">\n', 1)[1].split("</skills>")[0]
+    assert block.startswith("Active: ") and "more (code" in block
+    assert "self.skills.search('query')" in block
+    assert "class SkillManager" in rendered and "def status(self) -> str:" in rendered
     for skill in extra:
         assert skill.description not in rendered
         assert skill.name.split(".")[-1] not in rendered
+
+
+def test_the_quoting_advice_keeps_triple_quotes_only():
+    from nooa_atom.agent.agent import AtomAgent
+
+    text = " ".join(AtomAgent.__doc__.split())
+    # The triple-quote rule stays (it cut SWE quoting errors 35 -> 9).
+    assert "Write shell commands as triple-quoted strings (``sh.run('''...''')``)" in text
+    # Quote choice and script-on-stdin are an error hint on an unterminated string
+    # (nooa.errors.formatting), not always-on advice.
+    assert "neither contains nor ends with" not in text
+    assert "stdin=script" not in text

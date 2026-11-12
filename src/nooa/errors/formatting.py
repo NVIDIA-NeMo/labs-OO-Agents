@@ -77,16 +77,31 @@ _HEREDOC_RE = re.compile(r"<<-?\s*['\"]?\w+['\"]?")
 
 # Appended to SyntaxErrors that look like heredoc-in-quoted-string failures.
 _HEREDOC_HINT = '''\
-Hint: this looks like a shell heredoc (`<<...`) embedded in a single- or
-multiple-line Python string. Put the complete command in a triple-quoted
-string, then pass that value using the callable's documented API:
+Hint: this looks like a shell heredoc (`<<...`) embedded in a Python string.
+Pass the content on standard input instead, e.g. run("cat > notes.txt",
+stdin=content) or run("python3 -", stdin=code); check print(doc(...)) of your
+command runner for its stdin parameter. Otherwise put the complete command in
+a triple-quoted string:
 
     command = """cat <<'EOF'
 content
-EOF"""
+EOF"""'''
 
-Use `print(doc(...))` to inspect the available command runner and how it accepts
-commands or standard input.'''
+
+# Appended to a SyntaxError for an unterminated string literal (single- or
+# triple-quoted): the text usually contains or ends with the closing quote.
+_UNTERMINATED_STRING_RE = re.compile(r"^unterminated (?:triple-quoted )?string literal")
+_QUOTE_HINT = (
+    "Hint: pick a quote style the text neither contains nor ends with, or pass the "
+    "text on standard input or in a file instead of a string literal."
+)
+
+
+def _maybe_quote_hint(error: SyntaxError) -> str | None:
+    """Return the quote-style hint for an unterminated string literal, else None."""
+    if _UNTERMINATED_STRING_RE.match(error.msg or ""):
+        return _QUOTE_HINT
+    return None
 
 
 # Call-shape TypeError messages — a method/function called with the wrong
@@ -486,6 +501,61 @@ def _coroutine_misuse_hint(error: BaseException) -> str | None:
         return None
 
 
+# "Cell In[3]:3: RuntimeWarning: coroutine 'Tool.read' was never awaited",
+# optionally followed by its source line, then CPython's tracemalloc note.
+_NEVER_AWAITED_RE = re.compile(
+    r"^[^\n]*RuntimeWarning: coroutine '(?P<qualname>[^'\n]+)' was never awaited\n"
+    r"(?:(?![^\n]*RuntimeWarning:)[ \t]+[^\n]*\n)?"
+    r"(?:RuntimeWarning: Enable tracemalloc to get the object allocation traceback\n"
+    r"|Object allocated at \(most recent call last\):\n(?:[ \t]+[^\n]*\n)*)?",
+    re.MULTILINE,
+)
+
+
+def _agent_call_for(qualname: str, agent: Any) -> str | None:
+    """``"Tool.read"`` -> ``"self.tool.read"`` when the agent holds a ``Tool`` as ``self.tool``."""
+    owner, _, method = qualname.rpartition(".")
+    owner = owner.rsplit(".", 1)[-1]
+    if not owner or not method.isidentifier() or agent is None:
+        return None
+    if any(cls.__name__ == owner for cls in type(agent).__mro__):
+        return f"self.{method}"
+    try:
+        attributes = vars(agent)
+    except TypeError:
+        return None
+    for name, value in attributes.items():
+        if name.startswith("_") or not name.isidentifier():
+            continue
+        if any(cls.__name__ == owner for cls in type(value).__mro__):
+            return f"self.{name}.{method}"
+        # A wrapped method keeps the wrapped one's name: a ToolWrapper.read made
+        # with @wraps(Tool.read) runs a coroutine named 'Tool.read'.
+        if getattr(getattr(type(value), method, None), "__qualname__", None) == qualname:
+            return f"self.{name}.{method}"
+    return None
+
+
+def rewrite_never_awaited_warnings(text: str, agent: Any = None) -> str:
+    """Turn CPython's "coroutine ... was never awaited" warning into a one-line hint.
+
+    The stock text names the coroutine but not the fix, and adds a tracemalloc
+    note that means nothing to a model. Other warnings are left unchanged.
+    ``agent`` names the call the model should await (``self.tool.read``).
+    The other un-awaited hint, for an exception, is :func:`_coroutine_misuse_hint`.
+    """
+    if "was never awaited" not in text:
+        return text
+
+    def hint(match: re.Match[str]) -> str:
+        qualname = match.group("qualname")
+        call = _agent_call_for(qualname, agent)
+        fix = f"use `await {call}(...)`" if call else "put `await` before the call"
+        return f"`{qualname}(...)` was called without await and never ran; {fix}\n"
+
+    return _NEVER_AWAITED_RE.sub(hint, text)
+
+
 def _wrapped_syntax_error(error: Exception) -> SyntaxError | None:
     """Return the parser ``SyntaxError`` a validation error wraps, if any."""
     if not _is_validation_error(error):
@@ -850,7 +920,8 @@ class IPythonErrorFormatter:
         # Adjust line numbers for wrapper offset
         formatted = _adjust_line_numbers(formatted, line_offset)
 
-        hint = _maybe_heredoc_hint(error)
+        # The first hint that applies, as in Atom's cell-error hints.
+        hint = _maybe_heredoc_hint(error) or _maybe_quote_hint(error)
         if hint:
             formatted = f"{formatted}\n\n{hint}"
 

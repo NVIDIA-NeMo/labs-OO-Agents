@@ -509,7 +509,7 @@ class CodingACPAdapter:
             # Same anchoring as the session store above: one ACP process
             # serves many workspaces, so project-local paths follow the
             # session's workspace rather than the process.
-            libs_dir=root / ".nooa" / "libs",
+            libs_dir=root / ".nooa" / "skills",
             skills_dirs=load_coding_skills_dirs(root),
         )
 
@@ -533,11 +533,8 @@ class CodingACPAdapter:
             # close() also closes the agent's LLM client, so the new agent gets its own.
             await agent.close()
             return self._build_agent(self._llm_factory(), root, handle), False
-        # InteractiveAgent.after_restore() (with self.jobs) reports jobs lost
-        # in the previous process.
-        after_restore = getattr(agent, "after_restore", None)
-        if restored and callable(after_restore):
-            after_restore()
+        # The restore ran the agent's after_restore() (AgentSnapshot.restore),
+        # which repairs what did not survive the restart.
         return agent, restored
 
     async def _create_mcp_tools(

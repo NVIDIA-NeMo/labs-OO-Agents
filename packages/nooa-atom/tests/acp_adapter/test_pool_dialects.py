@@ -178,6 +178,20 @@ async def test_an_untagged_pool_gets_both_until_it_steers(make_adapter, workspac
     assert adapter._pool_dialects == (POOL_DIALECT,)
 
 
+async def test_an_invalid_steer_does_not_pick_the_dialect(make_adapter, workspace):
+    adapter = await make_adapter(ScriptedModels(), client_info=POOL_UNTAGGED)
+    session_id = await _new(adapter, workspace)
+    both = adapter._pool_dialects
+    assert len(both) == 2
+    for params in (
+        {"sessionId": session_id},
+        {"sessionId": session_id, "inputId": "x", "prompt": [text_block("/help").model_dump()]},
+    ):
+        with pytest.raises(RequestError):
+            await adapter.ext_method("poolside/session_steer", params)
+        assert adapter._pool_dialects == both
+
+
 async def test_a_replay_to_pool_2_uses_pool_input_events(make_adapter, workspace, client):
     adapter = await make_adapter(ScriptedModels({None: [reply("Hi.")]}), client_info=POOL_2)
     session_id = await _new(adapter, workspace)

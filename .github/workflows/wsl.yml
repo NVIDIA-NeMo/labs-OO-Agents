@@ -1,0 +1,90 @@
+name: WSL
+
+# WSL 2 is the supported way to run nooa on Windows: a quick check on every PR,
+# the full suite nightly, on manual runs, and on PRs labelled `wsl-full`.
+# No third-party actions (the org's action allow-list blocks setup-wsl): import
+# a pinned Ubuntu WSL rootfs with `wsl --import` and run scripts/wsl_ci.sh in it.
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wsl:
+    # Adding any other label must not start a run.
+    if: github.event.action != 'labeled' || github.event.label.name == 'wsl-full'
+    # Job-level, so a skipped run (another label) cannot cancel a real one.
+    concurrency:
+      group: wsl-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    # windows-latest (Windows Server 2025) has no usable WSL. windows-2022 has the
+    # in-box WSL, which works once `wsl --update` installs the WSL 2 kernel.
+    runs-on: windows-2022
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      MODE: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'wsl-full')) && 'full' || 'quick' }}
+      WSL_UTF8: "1"  # wsl.exe prints UTF-16 otherwise
+      # Pinned Ubuntu 24.04 WSL image. Its hash comes from that release's
+      # SHA256SUMS, verified on 2026-10-29 with gpg against the "UEC Image
+      # Automatic Signing Key <cdimage@ubuntu.com>" (fingerprint
+      # D2EB 4462 6FDD C30B 513D 5BB7 1A5D 6C4C 7DB8 7C81). To update it, verify
+      # the new release's SHA256SUMS.gpg the same way and copy its hash here.
+      ROOTFS_URL: https://cloud-images.ubuntu.com/wsl/releases/24.04/20240423/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz
+      ROOTFS_SHA256: 8251e27ffff381a4af5f41dcb94d867de3e0d9774a9241908ab34555d99315ea
+    steps:
+      # Keep LF line endings: the checkout is copied into Linux and run there.
+      - name: Disable CRLF conversion
+        run: |
+          git config --global core.autocrlf false
+          git config --global core.eol lf
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # tags needed for uv-dynamic-versioning
+          persist-credentials: false
+      - name: WSL status
+        run: |
+          $ErrorActionPreference = "Continue"
+          $info = ((& wsl.exe --status 2>&1) + (& wsl.exe --list --verbose 2>&1) | Out-String) -replace "`0", ""
+          Write-Output $info
+          Write-Output "::notice title=WSL on this runner::$($info.Trim() -replace "`r?`n", '%0A')"
+          exit 0
+      - name: Import Ubuntu 24.04 as a WSL 2 distribution
+        run: |
+          $ErrorActionPreference = "Stop"
+          function Fail([string]$title, [string]$text) {
+            Write-Output $text
+            Write-Output "::error title=$title::$(($text -replace "`0", '').Trim() -replace "`r?`n", '%0A')"
+            exit 1
+          }
+          try {
+            $rootfs = Join-Path $env:RUNNER_TEMP "ubuntu-wsl.rootfs.tar.gz"
+            Invoke-WebRequest $env:ROOTFS_URL -OutFile $rootfs
+            $actual = (Get-FileHash $rootfs -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $env:ROOTFS_SHA256) { Fail "rootfs checksum mismatch" "expected $env:ROOTFS_SHA256, got $actual" }
+          } catch {
+            Fail "rootfs download failed" ($_ | Out-String)
+          }
+          # The runner's in-box WSL lacks the WSL 2 kernel ("WSL 2 requires an
+          # update to its kernel component"): install it first.
+          $upd = (wsl --update --web-download 2>&1 | Out-String) -replace "`0", ""
+          if ($LASTEXITCODE -ne 0) { $upd += (wsl --update 2>&1 | Out-String) -replace "`0", "" }
+          Write-Output $upd
+          if ($LASTEXITCODE -ne 0) { Fail "wsl --update failed ($LASTEXITCODE)" $upd }
+          $out = (wsl --set-default-version 2 2>&1 | Out-String) -replace "`0", ""
+          if ($LASTEXITCODE -ne 0) { Fail "wsl --set-default-version 2 failed ($LASTEXITCODE)" $out }
+          $out = (wsl --import nooa-ubuntu (Join-Path $env:RUNNER_TEMP "wsl") $rootfs --version 2 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0) { Fail "wsl --import failed ($LASTEXITCODE)" $out }
+          wsl --list --verbose
+      - name: Tests inside WSL 2 (${{ env.MODE }})
+        # The script installs packages as root, then runs the tests as a normal user.
+        run: wsl --cd "$env:GITHUB_WORKSPACE" -d nooa-ubuntu -u root -- bash scripts/wsl_ci.sh $env:MODE

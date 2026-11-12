@@ -31,6 +31,7 @@ import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+from nooa._platform import require_posix
 from nooa.agentdoc import TruncatingStringIO
 
 logger = logging.getLogger(__name__)
@@ -90,6 +91,10 @@ class BashSession:
     and execute one at a time.  This is safe but sequential; for true
     parallelism, create multiple BashSession instances.
 
+    A session can be reused after its previous event loop has stopped and
+    all commands on that loop have finished. Sharing a session concurrently
+    across threads or event loops is not supported.
+
     Usage::
 
         session = BashSession(cwd="/my/project")
@@ -106,6 +111,7 @@ class BashSession:
         *,
         keep_background_on_close: bool = False,
     ) -> None:
+        """Configure the working directory and optional command to run on each start."""
         self._cwd = Path(cwd).resolve()
         self._keep_background_on_close = keep_background_on_close
         # PIDs of background jobs as of the last completed command.
@@ -137,8 +143,12 @@ class BashSession:
 
     @property
     def cwd(self) -> Path:
-        """Current working directory of the session."""
+        """Current working directory of the session; set it to choose where bash starts next."""
         return self._cwd
+
+    @cwd.setter
+    def cwd(self, value: str | Path) -> None:
+        self._cwd = Path(value).resolve()
 
     def __del__(self) -> None:
         """Best-effort cleanup: kill the bash subprocess if still running."""
@@ -232,6 +242,7 @@ class BashSession:
         """
         if self._ready:
             return
+        require_posix("The bash session (ShellTools, RepoTools, skills that run shell commands)")
         self._ensure_lock_on_current_loop()
         async with self._start_lock:
             # Callers that arrive while another start() runs the init command
@@ -314,13 +325,18 @@ class BashSession:
         # the first user command.
         if self._init_command:
             init_sentinel = f"__CTRL_{secrets.token_hex(8)}__"
-            init_script = (
-                f"{self._init_command}\n_nemo_ec=$?\n"
-                f"echo $_nemo_ec >&3\npwd >&3\necho {init_sentinel} >&3\n"
-            )
+            # Same framing as user commands: base64 keeps bash's parser away
+            # from the protocol lines, </dev/null keeps a stdin-reading init
+            # from consuming them.
+            init_script = self._build_script(self._init_command, init_sentinel)
             ctrl_lines, _out, _err, _timed = await self._send_and_wait(
                 init_script, init_sentinel, timeout=60.0
             )
+            if ctrl_lines:
+                ec = ctrl_lines[0].strip()
+                if ec.isdigit() and ec != "0":
+                    # The command itself may carry credentials: log only its status.
+                    logger.warning("init_command exited %s", ec)
             if len(ctrl_lines) >= 2 and ctrl_lines[1].strip().startswith("/"):
                 self._cwd = Path(ctrl_lines[1].strip())
         # Only now may run() use the session: the startup drain and the init
@@ -351,10 +367,16 @@ class BashSession:
 
         Keyed on the loop the locks belong to (not the loop bash was started
         on), so concurrent callers on a new loop share one fresh lock instead of
-        each creating their own while a reset is in progress.
+        each creating their own while a reset is in progress. Tracked separately
+        from the shell lifecycle so reset() cannot replace a lock a caller still
+        holds. The first call adopts the current loop without replacing them.
+
+        The previous loop's commands must have finished before switching loops.
         """
         loop = asyncio.get_running_loop()
-        if self._lock_loop is not loop:
+        if self._lock_loop is None:
+            self._lock_loop = loop
+        elif self._lock_loop is not loop:
             self._lock = asyncio.Lock()
             self._start_lock = asyncio.Lock()
             self._lock_loop = loop
@@ -363,7 +385,7 @@ class BashSession:
         """Run a command and return (stdout, stderr, exit_code).
 
         The session persists state: cd, export, etc. carry over.
-        Concurrent calls are serialized via an internal lock.
+        Concurrent calls on the same event loop are serialized via an internal lock.
 
         On timeout, exit_code is 124 — same as the ``timeout(1)`` command.
         Use ``run_with_timeout_flag()`` if you need to distinguish a real
@@ -382,10 +404,62 @@ class BashSession:
         async with self._lock:
             return await self._run_unlocked(command, timeout)
 
-    async def _run_unlocked(self, command: str, timeout: float) -> tuple[str, str, int, bool]:
+    def is_busy(self) -> bool:
+        """True while a command runs in the session or bash is starting.
+
+        A ``run()`` started now would wait for that to finish.
+        """
+        return self._lock.locked() or self._start_lock.locked()
+
+    async def snapshot_cwd_env(self, timeout: float = 5.0) -> tuple[str, dict[str, str]] | None:
+        """The session's current directory and exported environment, if it is idle.
+
+        Returns ``None`` without waiting or starting bash when the session is
+        not started yet, is busy (``is_busy()``), or the capture fails or
+        takes longer than ``timeout``. The capture runs as one command in the
+        session and changes nothing in it.
+        """
+        self._ensure_lock_on_current_loop()
+        if not self._ready or self.is_busy():
+            return None
+        try:
+            async with self._lock:
+                # Uncapped: a large environment (HPC modules) is far over
+                # MAX_OUTPUT_CHARS, and a cut base64 blob decodes to garbage.
+                out, _err, code, timed_out = await self._run_unlocked(
+                    'printf "%s\\n" "$PWD"; env -0 | base64 | tr -d "\\n"',
+                    timeout,
+                    bounded=False,
+                )
+        except Exception:
+            return None
+        if code != 0 or timed_out:
+            return None
+        first, _, encoded = out.partition("\n")
+        try:
+            # validate=True: anything but a clean base64 blob means the capture
+            # is incomplete or corrupt; the caller falls back rather than use it.
+            raw = base64.b64decode(encoded.strip(), validate=True)
+        except ValueError:  # binascii.Error
+            return None
+        env: dict[str, str] = {}
+        for entry in raw.split(b"\0"):
+            key, sep, value = entry.partition(b"=")
+            if sep and key:
+                env[key.decode(errors="replace")] = value.decode(errors="replace")
+        cwd = first.strip()
+        if not cwd.startswith("/") or not os.path.isdir(cwd) or not env:
+            return None
+        return cwd, env
+
+    async def _run_unlocked(
+        self, command: str, timeout: float, *, bounded: bool = True
+    ) -> tuple[str, str, int, bool]:
         """Actual run implementation (caller must hold self._lock).
 
-        Returns (stdout, stderr, exit_code, timed_out).
+        Returns (stdout, stderr, exit_code, timed_out). With ``bounded=False``
+        the output is returned whole instead of cut to ``MAX_OUTPUT_CHARS``
+        (for internal reads such as ``snapshot_cwd_env`` that must be complete).
         """
         if not self._ready:
             await self.start()
@@ -417,7 +491,8 @@ class BashSession:
                     int(line) for line in ctrl_lines[2:] if line.strip().isdigit()
                 )
 
-        stdout, stderr = _bounded(stdout), _bounded(stderr)
+        if bounded:
+            stdout, stderr = _bounded(stdout), _bounded(stderr)
 
         if timed_out:
             exit_code = 124
@@ -435,7 +510,7 @@ class BashSession:
         yields ('__done__', 'exit_code,timed_out_flag') where timed_out_flag
         is '1' if the command timed out, '0' otherwise.
 
-        Concurrent calls are serialized via an internal lock.
+        Concurrent calls on the same event loop are serialized via an internal lock.
         """
         self._ensure_lock_on_current_loop()
         async with self._lock:

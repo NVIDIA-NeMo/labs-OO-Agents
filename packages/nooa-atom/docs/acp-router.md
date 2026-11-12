@@ -36,7 +36,7 @@ The shared options are `NOOA_MODEL` (environment variable; default: the first mo
 each worker by re-running its own command line (`sys.orig_argv`) with
 `--worker-fd` and `--id-base` added. A worker therefore runs the same
 installation with the same options. `--tee` on the router records the traffic
-between the client and the router (see `docs/acp-tee.md`). Workers ignore it.
+between the client and the router (see `acp-tee.md`). Workers ignore it.
 The MCP handoff trace (`NOOA_ACP_MCP_TRACE`) is also written by the router
 only.
 

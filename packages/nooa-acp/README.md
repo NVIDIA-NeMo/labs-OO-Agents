@@ -1,5 +1,20 @@
 # nooa-acp
 
+> **Deprecated.** nooa-acp is replaced by
+> [nooa-atom](https://github.com/NVIDIA-NeMo/labs-OO-Agents/tree/main/packages/nooa-atom)
+> (`uv add nooa-atom`, then `nooa atom`), the NOOA Atom agent's ACP server.
+> This is the last nooa-acp release: it still works, and the `nooa-acp`
+> command prints a deprecation warning to standard error. Please move to
+> nooa-atom.
+>
+> **Moving Zed over.** Installing nooa-atom does not change the command Zed
+> launches: edit the `agent_servers` entry in `settings.json` (keep its `env`).
+> The server is the `atom` subcommand of the `nooa` command that nooa-atom
+> installs, so with uvx set
+> `"command": "uvx", "args": ["--from", "nooa-atom", "nooa", "atom"]`, or, when
+> the worktree's uv project has nooa-atom installed,
+> `"command": "uv", "args": ["run", "nooa", "atom"]`.
+
 **Run the NOOA coding agent inside your editor.** `nooa-acp` is an
 [Agent Client Protocol](https://agentclientprotocol.com) server, so any
 ACP-speaking client — Zed today — can drive the same agent the terminal host
@@ -19,6 +34,8 @@ This is new and we would like it exercised. If something breaks, please say so.
 ```bash
 uv add nooa-acp                 # or: uv add "nooa[acp]"
 ```
+
+> **Windows:** use [WSL 2](https://learn.microsoft.com/windows/wsl/install). Native Windows is not supported; see the [main README](https://github.com/NVIDIA-NeMo/labs-OO-Agents#installation).
 
 There is no default model. Set `NOOA_MODEL` or pass `--model`, or the command
 exits with a usage error.
@@ -106,7 +123,8 @@ Three paths load workspace code at `session/new` and `session/load`:
   `.nooa/config.toml` may name *additional* skill roots. Those paths are not
   confined to the workspace: a relative path escaping it, an absolute path, or a
   symlink is accepted as written.
-- **Libraries.** `<workspace>/.nooa/libs/<package>/` is imported and its
+- **Agent-written skills.** `<workspace>/.nooa/skills/<package>/` (and an older
+  `<workspace>/.nooa/libs/<package>/`) is imported and its
   directory is prepended to `sys.path` for the life of the process. One ACP
   server serves several workspaces, so a package name there can shadow the same
   import for later sessions on other workspaces.

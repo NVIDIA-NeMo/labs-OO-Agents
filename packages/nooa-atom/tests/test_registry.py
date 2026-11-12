@@ -163,6 +163,38 @@ async def test_load_of_a_live_id_attaches_to_the_same_session(registry, root_opt
     assert await registry.load(root.id) is root
 
 
+async def test_load_runs_after_restore_once_before_the_session_is_wired(
+    registry, root_options, sessions_dir, models
+):
+    """The restore runs after_restore() (AgentSnapshot.restore) once, before the port is installed."""
+    models.scripts[None] = [cell("self.v.note = 'kept'\nreturn_result(Done(explanation='noted'))")]
+    root = await registry.create(root_options)
+    assert await asyncio.wait_for(root.prompt("first"), TIMEOUT) == Done(explanation="noted")
+    await root.wait_for_checkpoint()
+    await registry.close_all()
+
+    resumed_models = ScriptedModels({None: []})
+    calls: list[tuple[object, object]] = []
+
+    def factory(options, storage):
+        built = type(resumed_models(options, storage))
+
+        class CountingAgent(built):
+            def after_restore(self) -> None:
+                calls.append((self, getattr(self, "session", None)))
+                super().after_restore()
+
+        return CountingAgent(storage=storage, llm=resumed_models.llms[options.name])
+
+    fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=factory)
+    try:
+        loaded = await fresh.load(root.id)
+        assert loaded._agent.v.note == "kept"
+        assert calls == [(loaded._agent, None)]
+    finally:
+        await fresh.close_all()
+
+
 async def test_load_restores_state_and_requeues_unhandled_items(
     registry, root_options, sessions_dir, models
 ):
@@ -194,7 +226,7 @@ async def test_load_restores_state_and_requeues_unhandled_items(
 
     def factory(options, storage):
         agent = resumed_models(options, storage)
-        agent.event_manager.on("TuiSessionResumed", resumed_events.append)
+        agent.event_manager.on("SessionResumed", resumed_events.append)
         return agent
 
     fresh = SessionRegistry(SessionStore(sessions_dir), agent_factory=factory)
@@ -330,7 +362,7 @@ async def test_the_llm_factory_builds_owned_clients(root_options, sessions_dir):
             "alias-a": [
                 [
                     cell(
-                        "c = await self.session.delegate('Other', 'x', model='alias-b')\n"
+                        "c = await self.session.delegate('Other', 'x', model='alias-b', name='other')\n"
                         "await c.wait()\n"
                         "return_result(Done(explanation='ok'))"
                     )
@@ -646,12 +678,12 @@ async def test_load_takes_options_from_the_record(registry, root_options, sessio
 async def test_a_throwaway_childs_turn_method_is_recorded(registry, root_options, models):
     models.scripts[None] = [
         cell(
-            "c = await self.session.delegate('T', 't')\n"
+            "c = await self.session.delegate('T', 't', name='t')\n"
             "await c.wait()\n"
             "return_result(Done(explanation='ok'))"
         )
     ]
-    models.scripts["T"] = [work_done("t")]
+    models.scripts["t"] = [work_done("t")]
     root = await registry.create(root_options)
     await asyncio.wait_for(root.prompt("go"), TIMEOUT)
     [child] = registry.children(root.id)

@@ -48,6 +48,18 @@ class LoopDetectedError(GenerationError):
     pass
 
 
+class IterationLimitExceeded(GenerationError):
+    """Generation stopped at the strategy's max_iterations without a result."""
+
+    pass
+
+
+class RetryLimitExceeded(GenerationError):
+    """Generation stopped after max_retries consecutive errors."""
+
+    pass
+
+
 # =============================================================================
 # Validation Errors
 # =============================================================================

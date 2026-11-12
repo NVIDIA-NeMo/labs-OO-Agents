@@ -126,8 +126,10 @@ class NooaBenchAgent(BaseInstalledAgent):
         enable_atif = "--enable-atif " if self._enable_atif else ""
         # Exit code 1 means the agent reported task failure: map it to exit 0 so
         # the verifier scores reward=0 instead of raising a harness error.
+        # ripgrep-bin puts rg in the venv's bin; RepoTools and the model's
+        # shell commands find it only if that directory is on PATH.
         command = (
-            f"({VENV}/bin/nemo-harbor "
+            f'(export PATH="{VENV}/bin:$PATH"; {VENV}/bin/nemo-harbor '
             f"--instruction {shlex.quote(instruction)} "
             f"--model {shlex.quote(self.model_name or '')} "
             f"--agent-type {shlex.quote(self._agent_type)} "

@@ -23,6 +23,7 @@ from pydantic.errors import PydanticSchemaGenerationError
 
 from nooa.agentdoc import pformat
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG, TruncationConfig
+from nooa.strategies.current_call import bind_call_arguments
 
 
 def _pformat(value: Any, tc: TruncationConfig) -> str:
@@ -711,8 +712,7 @@ class ArgumentValidator:
 
         # Step 1: Arity check via bind()
         try:
-            bound = sig_without_self.bind(*args, **kwargs)
-            bound.apply_defaults()
+            bound = bind_call_arguments(sig_without_self, args, kwargs)
         except TypeError as e:
             # Extract method name for error message
             method_name = getattr(original_func, "__name__", str(original_func))

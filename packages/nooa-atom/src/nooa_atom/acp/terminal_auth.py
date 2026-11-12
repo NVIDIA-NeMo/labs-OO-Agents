@@ -171,20 +171,16 @@ def _saved_entry(alias: str) -> dict:
 def run_terminal_connect() -> int:
     """Run ``nooa connect`` (its defaults, no arguments) here; 0 only when it saved an entry.
 
-    The wizard's own options come from the ``nooa connect`` command itself, so
-    the defaults cannot drift. Errors and Ctrl-C propagate (click turns them
-    into a non-zero exit).
+    The ``nooa connect`` command itself runs (with no arguments) and returns
+    the alias the wizard saved, so its option-to-wizard mapping and defaults
+    cannot drift. Errors and Ctrl-C propagate (click turns them into a
+    non-zero exit).
     """
     import click
     from nooa_cli.commands import connect as connect_command
-    from nooa_cli.commands._connect_wizard import run_wizard
 
     clear_result()
-    with connect_command.command.make_context("connect", []) as ctx:
-        options = dict(ctx.params)
-    options.pop("stage", None)
-    options.pop("input_file", None)
-    alias = run_wizard(**options)
+    alias = connect_command.command.main(args=[], prog_name="nooa connect", standalone_mode=False)
     if not alias:
         click.echo("Nothing was saved.", err=True)
         return 1

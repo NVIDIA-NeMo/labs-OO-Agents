@@ -94,7 +94,7 @@ async def test_need_input_is_returned_and_shown_as_a_question(make_session):
 
 async def test_waiting_keeps_prompt_open_until_a_later_turn_ends(make_session):
     session, _ = make_session(wait_on("jobs"), done("job finished"), start=False)
-    jobs = session._agent.queue_manager.queue("jobs")
+    jobs = session._agent.queue_manager.queue("jobs")  # a host-declared channel
     session.start()
     ended = []
     session.subscribe(lambda e: ended.append(e) if isinstance(e, TurnEndedUpdate) else None)
@@ -113,7 +113,7 @@ async def test_prompt_for_an_item_taken_mid_turn_resolves_with_that_turn(make_se
     started, block = agents.fresh_events()
     session, _ = make_session(
         cell(
-            "STARTED.set()\nawait BLOCK.wait()\n"
+            "import atom_test_agents as _t\n_t.STARTED.set()\nawait _t.BLOCK.wait()\n"
             "extra = await self.user_messages.get()\n"
             "return_result(Done(explanation=f'read {extra}'))"
         )
@@ -828,6 +828,47 @@ async def test_a_done_message_is_sent_once_before_the_turn_ends(make_session, co
     messages = [i for i, (_, t) in enumerate(seen) if t == "AgentMessage"]
     assert len(messages) == 1
     assert messages[0] < seen.index(("turn_ended", None))
+
+
+@pytest.mark.parametrize(
+    ("code", "lines"),
+    [
+        # No reply at all: the explanation is the reply, sent once.
+        ("return_result(Done(explanation='Fixed it; tests pass.'))", ["Fixed it; tests pass."]),
+        # A message is the reply: the explanation is not added.
+        ("return_result(Done(explanation='x', message='All set.'))", ["All set."]),
+        # A note already went out: no fallback.
+        ("self.message('Here it is.')\nreturn_result(Done(explanation='x'))", ["Here it is."]),
+        # Waiting and NeedInput never reply with their explanation.
+        ("return_result(Waiting(explanation='w', on=['jobs']))", []),
+        ("return_result(NeedInput(question='Which branch?'))", []),
+    ],
+    ids=["explanation_only", "message", "noted_earlier", "waiting", "need_input"],
+)
+async def test_a_done_without_any_reply_sends_its_explanation(make_session, code, lines):
+    session, _ = make_session(cell(code))
+    seen = _order(session)
+    await session.submit("go")
+    await until(lambda: ("turn_ended", None) in seen)
+    assert _agent_lines(session) == lines
+    if lines:
+        assert seen.index(("agent_event", "AgentMessage")) < seen.index(("turn_ended", None))
+
+
+async def test_the_explanation_fallback_counts_a_reply_sent_before_a_waiting(make_session):
+    """A prompt answered over a Waiting: the Waiting's message already replied."""
+    session, _ = make_session(
+        cell("return_result(Waiting(explanation='w', message='Started.', on=['jobs']))"),
+        done("finished"),
+        start=False,
+    )
+    jobs = session._agent.queue_manager.queue("jobs")  # a host-declared channel
+    session.start()
+    pending = asyncio.ensure_future(session.prompt("go"))
+    await until(lambda: session.last_outcome_kind == "waiting")
+    jobs.put("job output")
+    assert await asyncio.wait_for(pending, TIMEOUT) == Done(explanation="finished")
+    assert _agent_lines(session) == ["Started."]
 
 
 async def test_a_waiting_message_is_sent_before_the_turn_ends(make_session):

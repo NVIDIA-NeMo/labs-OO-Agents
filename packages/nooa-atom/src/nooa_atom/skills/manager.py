@@ -9,7 +9,8 @@ from dataclasses import dataclass
 from typing import Annotated, Any, Literal
 
 from nooa.agentdoc import doc as agentdoc
-from nooa.agentdoc import hidden
+from nooa.agentdoc import hidden, spec
+from nooa.agentdoc._visibility import is_hidden_method
 from nooa.events import Notification
 from nooa.skill import Skill, TextSkill, slash_command
 from nooa.skill_registry import SkillRegistry
@@ -24,13 +25,15 @@ from nooa_atom.workspace.mcp_approval import MCPApprovalRequired
 Kind = Literal["code", "text", "mcp"]
 _KIND_LABELS = {"code": "code", "text": "text", "mcp": "MCP"}
 _DESCRIPTION_WIDTH = 100
+_TOOL_MATCHES_SHOWN = 10  # tool/method-name matches a search lists
+_MCP_SERVERS_SHOWN = 8  # connected servers the MCP line names
 
 
 @dataclass(frozen=True)
 class SkillEntry:
     """One skill of any kind, as search and the host controls show it.
 
-    ``name`` is what the model passes to ``activate``, ``read`` and ``doc``:
+    ``name`` is what the model passes to ``activate`` and ``doc``:
     the agent attribute of a code skill, the id of a text skill, the name of
     an MCP server. ``key`` is the name the skill is registered under
     (``nemo.shell``, ``cmd.review``, ``mcp.<client server>``, or the MCP
@@ -49,9 +52,44 @@ class SkillEntry:
         if self.kind == "mcp" and self.state in ("active", "connected"):
             # The call form is otherwise invisible: attached servers are hidden
             # from doc(self).
-            state += f"; call: await self.{attr_name(self.name)}.<tool>(...)"
+            state += f"; call: {call_form(_call_attr(self.name, self.key))}"
         text = f"{self.name} ({self.kind}, {state}): {self.description}"
         return text if len(text) <= 160 else text[:159] + "…"
+
+
+def _public_methods(obj: Any) -> list[str]:
+    """Public method names a skill object's class defines (not ``Skill``'s own)."""
+    names: set[str] = set()
+    for cls in type(obj).__mro__:
+        if cls in (Skill, TextSkill, object):
+            break
+        for name, value in cls.__dict__.items():
+            if is_hidden_method(value):
+                continue
+            if isinstance(value, classmethod | staticmethod):
+                value = value.__func__  # a class method's descriptor is not callable
+            if not name.startswith("_") and callable(value) and not is_hidden_method(value):
+                names.add(name)
+    return sorted(names)
+
+
+def call_form(attr: str, tool: str = "<tool>") -> str:
+    """How a cell calls an MCP server's tool: ``await self.<attr>.<tool>(...)``."""
+    return f"await self.{attr}.{tool}(...)"
+
+
+def _server_tools(tool: Any) -> list[str]:
+    """A server object's tools: an MCP tool object's, else a client object's public methods."""
+    return tool_names(tool) or _public_methods(tool)
+
+
+def _call_attr(name: str, key: str) -> str:
+    """The agent attribute a server is called on: a client one (``mcp.<x>``) is ``self.<x>``.
+
+    ``name`` is only the shown name, which is the key itself when another
+    skill has the leaf.
+    """
+    return attr_name(_leaf(key) if key.startswith("mcp.") else name)
 
 
 def _first_line(text: str | None) -> str:
@@ -59,16 +97,18 @@ def _first_line(text: str | None) -> str:
 
 
 class SkillManager(Skill):
-    """Find, turn on and read skills: code skills, text skills and MCP servers.
+    """Find, activate and inspect code/text skills and MCP servers.
 
-    ``search(query)`` finds skills of every kind by name and description.
+    ``search(query)`` finds skills of every kind by name and description,
+    and the tool names of connected MCP servers and loaded code skills.
     ``await activate([...])`` turns skills on: a code skill is loaded and its
     object is ``self.<name>``; an MCP server is connected and its tools are
     methods of ``self.<server>``; a text skill's instructions arrive on the
-    ``system_messages`` channel at the start of your next turn (``read(name)``
-    returns them now). ``doc(name)`` describes one skill, including an MCP
-    server's tools. An MCP server may first need the person's approval or
+    ``system_messages`` channel at the start of your next turn. Use
+    ``print(self.skills.doc(name))`` for full text instructions, code APIs or
+    MCP tools now. An MCP server may first need the person's approval or
     sign-in; ``activate`` says so, and you get a notice when it connects.
+    New skills for later sessions are made with ``self.skill_writing``.
     """
 
     __nosnapshot__ = True
@@ -92,22 +132,41 @@ class SkillManager(Skill):
         """Find skills whose name or description contains any word of ``query``.
 
         One line per match: name, kind, state and a one-line description.
-        Names that match come first. Searching loads nothing.
+        Names that match come first. Then tool names that match, as
+        ``<skill> has <tool>``: the tools of connected MCP servers and the
+        public methods of loaded code skills. Searching loads nothing.
         """
         words = [word for word in query.lower().split() if word]
         scored = []
+        tools = []
         for entry in self.entries():
             name = entry.name.lower()
             text = f"{name} {entry.key.lower()} {entry.description.lower()}"
             hits = sum(word in text for word in words)
             if hits:
                 scored.append((-sum(word in name for word in words), -hits, entry.name, entry))
-        if not scored:
+            for tool in self._tool_names(entry):
+                # Short words ("a", "in") would match most tool names.
+                tool_hits = sum(len(word) >= 3 and word in tool.lower() for word in words)
+                if tool_hits:
+                    tools.append((-tool_hits, entry.name, tool, entry))
+        if not scored and not tools:
             return f"No skills match {query!r}."
         scored.sort(key=lambda item: item[:3])
         lines = [entry.line() for *_, entry in scored[:limit]]
         if len(scored) > limit:
             lines.append(f"... {len(scored) - limit} more; narrow the query or raise limit")
+        tools.sort(key=lambda item: item[:3])
+        shown = min(limit, _TOOL_MATCHES_SHOWN)
+        for _, _, tool, entry in tools[:shown]:
+            if entry.kind == "mcp":
+                call = f"MCP tool: {call_form(_call_attr(entry.name, entry.key), tool)}"
+            else:
+                # The registry attaches a code skill as its leaf, whatever name it is shown under.
+                call = f"method: self.{attr_name(_leaf(entry.key))}.{tool}"
+            lines.append(f"{entry.name} has {tool} ({call})")
+        if len(tools) > shown:
+            lines.append(f"... {len(tools) - shown} more tools; narrow the query")
         return "\n".join(lines)
 
     async def activate(self, names: list[str]) -> str:
@@ -145,6 +204,7 @@ class SkillManager(Skill):
                     lines.append(f"{entry.name}: inactive")
         return "\n".join(lines)
 
+    @hidden
     def read(self, name: str) -> str:
         """The instructions of the text skill ``name``, as text."""
         entry = self._one(name)
@@ -157,7 +217,7 @@ class SkillManager(Skill):
         return (type(skill).__doc__ or "").split("\n---\n", 1)[-1].strip()
 
     def doc(self, name: str) -> str:
-        """The full description of one skill of any kind, with an MCP server's tools.
+        """Return full text instructions, code APIs or MCP tools as str; use print(self.skills.doc(name)).
 
         An unconnected MCP skill returns a connection-status message instead of its tools.
         """
@@ -190,28 +250,36 @@ class SkillManager(Skill):
     # The context block
     # ------------------------------------------------------------------
 
-    @hidden
     def status(self) -> str:
-        """The ``<skills>`` block: what is active, and how to find the rest."""
+        """Which skills are active now, and how many more there are (sync).
+
+        Also the text of the ``<skills>`` block: active skills by name, the
+        connected MCP servers with the call form (one line), and a count of
+        the rest with the search call; never the catalog itself.
+        """
+        mcp_line = self.mcp_line()
         active, rest_kinds, rest = [], [], 0
         for name, kind, key in self._index():
             if self._is_active(kind, key):
-                active.append(f"{name} (mcp: self.{attr_name(name)})" if kind == "mcp" else name)
+                if kind != "mcp":  # an active MCP server is connected: on the MCP line
+                    active.append(name)
             else:
                 rest += 1
                 if _KIND_LABELS[kind] not in rest_kinds:
                     rest_kinds.append(_KIND_LABELS[kind])
-        mcp_last = sorted(active, key=lambda item: (" (mcp: self." in item, item))
-        lines = [f"Active: {', '.join(mcp_last) or 'none'}"]
+        lines = [f"Active: {', '.join(sorted(active)) or 'none'}"]
+        if mcp_line:
+            lines.append(mcp_line)
         if rest:
             order = [label for label in _KIND_LABELS.values() if label in rest_kinds]
             lines.append(
                 f"{rest} more ({', '.join(order)}): self.skills.search('query') (sync); "
-                "self.skills.doc('name') (sync) for one skill's full docs "
-                "(an unconnected MCP skill returns its connection status); "
-                "await self.skills.activate(['name']) (async); "
-                "self.skills.read('name') (sync) for text skills"
+                "print(self.skills.doc('name')) for full instructions/APIs "
+                "(unconnected MCP: connection status); "
+                "await self.skills.activate(['name']) (async)"
             )
+        lines.extend(self.registry.name_conflicts())
+        lines.extend(self.registry.notices())
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
@@ -223,6 +291,44 @@ class SkillManager(Skill):
         """Use ``servers`` for the agent's configured MCP servers."""
         servers.bind(self._owner, self._notice)
         self.mcp = servers
+
+    @hidden
+    def share_from(self, parent: SkillManager) -> list[str]:
+        """Use ``parent``'s connected MCP servers here too; return warnings.
+
+        For a child session: the client-provided servers (``mcp.<name>``)
+        and the configured servers ``parent`` has connected get the same
+        tool objects here (no new connection), active where they are active
+        in ``parent``. Closing this manager detaches them and closes nothing.
+        """
+        warnings: list[str] = []
+        for key in parent.registry.loaded():
+            if not key.startswith("mcp."):
+                continue
+            tool = parent.registry[key]
+            if hasattr(tool, "attach"):
+                # Registering it here would detach it from the parent's agent.
+                warnings.append(
+                    f"MCP server {_leaf(key)!r} was not shared: it is bound to the parent agent"
+                )
+                continue
+            attr = _leaf(key)
+            held = getattr(self._owner, attr, None)
+            if held is not None and held is not tool:
+                # Registering would replace the child's own skill at self.<attr>.
+                warnings.append(
+                    f"MCP server {attr!r} was not shared: self.{attr} is already in use here"
+                )
+                continue
+            try:
+                self.registry.register(key, tool)
+                if key in parent.registry.activated():
+                    self.registry.activate([_literal(key)])
+            except (KeyError, ValueError) as exc:
+                warnings.append(f"MCP server {_leaf(key)!r} was not shared: {exc}")
+        if self.mcp is not None and parent.mcp is not None:
+            warnings.extend(self.mcp.share_from(parent.mcp))
+        return warnings
 
     @hidden
     def after_restore(self) -> None:
@@ -253,6 +359,61 @@ class SkillManager(Skill):
                 "at start are connected again; find the others with self.skills.search() and "
                 "turn them on with self.skills.activate()."
             )
+
+    @hidden
+    def connected_mcp(self) -> list[tuple[str, str, Any]]:
+        """``(server, attribute, tool object)`` of every MCP server callable here now.
+
+        A client server (``mcp.<x>``, also one shared from a parent) is
+        ``self.<x>`` once registered; a configured one is ``self.<server>``
+        once connected, active or not. Sorted by attribute.
+        """
+        found: dict[str, tuple[str, str, Any]] = {}
+        for key in self.registry.loaded():
+            if key.startswith("mcp."):
+                attr = _call_attr(key, key)
+                found.setdefault(attr, (_leaf(key), attr, self.registry[key]))
+        if self.mcp is not None:
+            for name in self.mcp.connected():
+                attr = attr_name(name)
+                found.setdefault(attr, (name, attr, self.mcp.tool(name)))
+        return [found[attr] for attr in sorted(found)]
+
+    @hidden
+    def mcp_line(self) -> str:
+        """One line naming the connected MCP servers and the call form; "" when none.
+
+        Tool names are not listed: ``print(doc(self.<server>))`` lists them.
+        """
+        servers = self.connected_mcp()
+        if not servers:
+            return ""
+
+        def named(attr: str, tool: Any) -> str:
+            count = len(_server_tools(tool))
+            return (
+                f"self.{attr} ({count} tool{'s' if count != 1 else ''})"
+                if count
+                else f"self.{attr}"
+            )
+
+        shown = [named(attr, tool) for _, attr, tool in servers[:_MCP_SERVERS_SHOWN]]
+        more = len(servers) - _MCP_SERVERS_SHOWN
+        if more > 0:
+            shown.append(f"+{more} more: self.skills.search('query')")
+        attr = servers[0][1] if len(servers) == 1 else "<server>"
+        return (
+            f"MCP servers (connected, no activation needed): {', '.join(shown)}; "
+            f"list tools: print(doc(self.{attr})); call: {call_form(attr)}"
+        )
+
+    @hidden
+    def mcp_tool_server(self, name: str) -> str | None:
+        """The attribute of a connected MCP server that has the tool ``name``, else None."""
+        for _, attr, tool in self.connected_mcp():
+            if name in _server_tools(tool):
+                return attr
+        return None
 
     @hidden
     def entries(self) -> list[SkillEntry]:
@@ -468,7 +629,18 @@ class SkillManager(Skill):
             raise KeyError(f"No skill called {name!r}; try self.skills.search({name!r})")
         return entry
 
+    def _tool_names(self, entry: SkillEntry) -> list[str]:
+        """Tool names known without loading: connected MCP servers, loaded code skills."""
+        if entry.kind == "mcp":
+            tool = self._mcp_tool(entry)
+        elif entry.kind != "text" and entry.key in self.registry.loaded():
+            tool = self.registry[entry.key]
+        else:
+            return []
+        return _server_tools(tool) if tool is not None else []
+
     def _mcp_tool(self, entry: SkillEntry) -> Any:
+        """The tool object of a connected MCP server (configured or client), else None."""
         if entry.key.startswith("mcp."):
             return self.registry[entry.key] if entry.key in self.registry.loaded() else None
         return self.mcp.tool(entry.key) if self.mcp is not None else None
@@ -479,12 +651,15 @@ class SkillManager(Skill):
             channel.put(self.doc(entry.name))
             return (
                 f"{entry.name}: its instructions arrive on the system_messages channel in "
-                f"your next turn; self.skills.read({entry.name!r}) returns them now"
+                f"your next turn; print(self.skills.doc({entry.name!r})) shows them now"
             )
         if entry.kind == "mcp" and not entry.key.startswith("mcp."):
             return await self._connect(entry)
         self.registry.activate([_literal(entry.key)])
         if entry.key not in self.registry.activated():
+            conflict = self.registry.name_conflict(entry.key)
+            if conflict is not None:
+                return f"{entry.name}: {conflict}"
             return f"{entry.name}: could not be activated; see the log"
         return f"{entry.name}: active; use self.{_leaf(entry.key)}"
 
@@ -521,3 +696,7 @@ def _leaf(key: str) -> str:
 def _literal(name: str) -> str:
     """``name`` as a glob that matches only itself."""
     return "".join({"[": "[[]", "*": "[*]", "?": "[?]"}.get(c, c) for c in name)
+
+
+# This inherited implementation directory is not the registry's discovery roots.
+spec(SkillManager, "source_dir", hidden=True)

@@ -147,7 +147,7 @@ class FakeLLMClient(UnifiedLLM):
         """Return the number of scripted responses that have not been consumed."""
         return len(self._response_queue)
 
-    async def acall(
+    async def _acall_once(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
@@ -163,14 +163,14 @@ class FakeLLMClient(UnifiedLLM):
         async with self._lock:
             return self._scripted_call(messages, tools, output_model, kwargs)
 
-    def call(
+    def _call_once(
         self,
         messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
         tools: list[Tool] | None = None,
         output_model: type[BaseModel] | None = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        """Synchronous version of acall for UnifiedLLM compatibility."""
+        """Synchronous version of ``_acall_once``."""
         return self._scripted_call(messages, tools, output_model, kwargs)
 
     def _scripted_call(

@@ -637,157 +637,144 @@ async def test_not_found_is_bounded_and_escaped(shell, tmp_path):
     assert all(len(line) <= 400 for line in message.splitlines())
 
 
-# --- replace() / replace_match() call-form errors ----------------------------
+async def test_not_found_shows_the_closest_region_and_what_differs(shell, tmp_path):
+    content = "def f(x):\n    if x:\n        return 1\n    return 2\n\nclass A:\n    pass\n"
+    old = "def f(x):\n  if x:\n        return 10\n    return 2\n"
+    message = await ambiguous_error(shell, tmp_path, content, old)
+    assert "Closest region: lines 1-4 (97% similar)." in message
+    assert "  line 2: old '  if x:'\n          file '    if x:'  (whitespace only)" in message
+    assert "  line 3: old '        return 10'\n          file '        return 1'\n" in message
+    assert "To retry: read() lines 1-4 and copy old from it" in message
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    [{"old": "a", "new_text": "b"}, {"old_text": "a"}, {"new_text": "b"}],
-)
-async def test_misnamed_keywords_name_the_exact_path_call(shell, tmp_path, kwargs):
-    path = tmp_path / "example.py"
-    path.write_text("a\n")
-    with pytest.raises(TypeError) as error:
-        await shell.replace("example.py", **kwargs)
-    assert path.read_text() == "a\n"
-    message = str(error.value)
-    assert "no file was changed" in message
-    for name in kwargs:
-        if name != "old":
-            assert f"{name}=" in message
-    assert "replace(path, old, new)" in message
-    assert "replace_match(match, new)" in message
+async def test_closest_region_escapes_tabs_and_is_bounded(shell, tmp_path):
+    body = "".join(f"\tvalue_{i} = {i}\n" for i in range(40))
+    old = body.replace("\t", "    ")
+    message = await ambiguous_error(shell, tmp_path, "def f():\n" + body, old)
+    assert "file '\\tvalue_0 = 0'  (whitespace only)" in message
+    assert message.count("(whitespace only)") == 8
+    assert "... 64 more rows; read() the region" in message
+    assert len(message) < 4000
 
 
-@pytest.mark.parametrize(
-    ("args", "kwargs"),
-    [
-        ((), {"target": "example.py", "old_or_new": "a", "new": "b"}),
-        (("example.py",), {"old_or_new": "a", "new": "b"}),
-        (("example.py", "a"), {"old_or_new": "x", "new": "b"}),
-    ],
-)
-async def test_legacy_replace_keywords_are_rejected(shell, tmp_path, args, kwargs):
-    path = tmp_path / "example.py"
-    path.write_text("a\n")
-    with pytest.raises(TypeError) as error:
-        await shell.replace(*args, **kwargs)
-    assert path.read_text() == "a\n"
-    message = str(error.value)
-    assert "no file was changed" in message
-    for name in ("target", "old_or_new"):
-        if name in kwargs:
-            assert f"{name}=" in message
-    assert "parameters are path, old, new" in message
-    assert "replace(path, old, new)" in message
+async def test_nothing_close_shows_no_region(shell, tmp_path):
+    message = await ambiguous_error(shell, tmp_path, "alpha\nbeta\n", "something else entirely\n")
+    assert "Closest region" not in message
 
 
-async def test_legacy_target_keyword_is_rejected_by_replace_match(shell, tmp_path):
-    path = tmp_path / "example.py"
-    path.write_text("a\n")
-    match = await shell.read("example.py")
-    with pytest.raises(TypeError) as error:
-        await shell.replace_match(target=match, new="b\n")
-    assert path.read_text() == "a\n"
-    assert "target=" in str(error.value)
-    assert "replace_match(match, new)" in str(error.value)
+async def test_a_stale_match_says_where_the_text_moved(shell, tmp_path):
+    from nooa.tools.shell_tools import StaleMatchError
+
+    path = tmp_path / "moved.py"
+    path.write_text("a = 1\nb = 2\nc = 3\n")
+    match = await shell.read("moved.py", (2, 3))
+    path.write_text("# header\n# more\na = 1\nb = 2\nc = 3\n")
+    with pytest.raises(StaleMatchError) as error:
+        await shell.replace(match, "b = 20\nc = 30\n")
+    assert "The captured text is now closest to lines 4-5 (100% similar)" in str(error.value)
+    assert path.read_text() == "# header\n# more\na = 1\nb = 2\nc = 3\n"
 
 
-async def test_misnamed_keyword_with_match_names_the_match_call(shell, tmp_path):
-    path = tmp_path / "example.py"
-    path.write_text("a\n")
-    match = await shell.read("example.py")
-    with pytest.raises(TypeError) as error:
-        await shell.replace_match(match, new_text="b\n")
-    assert path.read_text() == "a\n"
-    assert "new_text=" in str(error.value)
-    assert "replace_match(match, new)  #" in str(error.value)
+def test_closest_region_search_gives_up_on_costly_near_identical_lines():
+    """200 near-identical 8,000-character lines once took ~25 s of ratio() calls."""
+    import random
+    import time
+
+    from nooa.tools.shell_tools import _closest_region_lines
+
+    rng = random.Random(0)
+    base = "".join(rng.choice("abcdefgh") for _ in range(7_990))
+    content = "\n".join(base[: i * 30] + "X" + base[i * 30 + 1 :] for i in range(200))
+    old = base[:4_000] + "Q" + base[4_001:]
+    started = time.monotonic()
+    assert _closest_region_lines(content, old) == []
+    assert time.monotonic() - started < 0.5
 
 
-@pytest.mark.parametrize("extra", [(), ("b\n",)])
-async def test_replace_with_a_match_names_replace_match(shell, tmp_path, extra):
-    path = tmp_path / "example.py"
-    path.write_text("a\n")
-    match = await shell.read("example.py")
-    with pytest.raises(TypeError) as error:
-        await shell.replace(match, "a\n", *extra)
-    assert path.read_text() == "a\n"
-    message = str(error.value)
-    assert "replace() takes a file path, not a Match" in message
-    assert "replace_match(match, new)" in message
-    assert "replace(match.resolved_path, old, new)" in message
-    assert "no file was changed" in message
+def test_closest_region_search_bounds_one_long_window_comparison():
+    """One ~8,000-character window once took ~3 s in a single ratio() call."""
+    import time
+
+    from nooa.tools.shell_tools import _closest_region_lines
+
+    line = "x = foo(a, b, c)  # " + "abcdefgh" * 4
+    old = "\n".join(line + str(i) for i in range(150))[:7_990]
+    content = "\n".join(line + str(i % 7) for i in range(150))
+    started = time.monotonic()
+    _closest_region_lines(content, old)
+    assert time.monotonic() - started < 0.5
 
 
-@pytest.mark.parametrize("path_arg", ["example.py", "PATH"])
-@pytest.mark.parametrize("extra", [(), ("b\n",)])
-async def test_replace_match_with_a_path_names_replace(shell, tmp_path, path_arg, extra):
-    path = tmp_path / "example.py"
-    path.write_text("a\n")
-    target = path if path_arg == "PATH" else path_arg
-    with pytest.raises(TypeError) as error:
-        await shell.replace_match(target, "a\n", *extra)
-    assert path.read_text() == "a\n"
-    message = str(error.value)
-    assert "replace_match() takes a Match" in message
-    assert "replace(path, old, new)" in message
-    assert "no file was changed" in message
+def test_closest_region_search_checks_its_deadline_on_skipped_windows():
+    """Windows the quick bounds skip still count against the 0.25 s budget."""
+    import time
 
+    from nooa.tools.shell_tools import _closest_region_lines
 
-async def test_match_with_new_keyword_points_to_path_form(shell, tmp_path):
-    path = tmp_path / "example.py"
-    path.write_text("a\n")
-    match = await shell.read("example.py")
-    with pytest.raises(TypeError) as error:
-        await shell.replace_match(match, "a", new="b")
-    assert path.read_text() == "a\n"
-    assert "replace_match(match, new)" in str(error.value)
-    assert "replace(match.resolved_path, old, new)" in str(error.value)
-
-
-async def test_path_without_new_names_both_methods(shell, tmp_path):
-    (tmp_path / "example.py").write_text("a\n")
-    with pytest.raises(TypeError) as error:
-        await shell.replace("example.py", "a")
-    assert "replace(path, old, new)" in str(error.value)
-    assert "replace_match(match, new)" in str(error.value)
-    assert (tmp_path / "example.py").read_text() == "a\n"
-
-
-async def test_replace_accepts_a_pathlib_path(shell, tmp_path):
-    path = tmp_path / "example.py"
-    path.write_text("a\n")
-    await shell.replace(path, "a", "b")
-    assert path.read_text() == "b\n"
-
-
-def test_replace_docstrings_match_real_parameters():
-    import inspect
-
-    replace_doc = inspect.getdoc(ShellTools.replace)
-    match_doc = inspect.getdoc(ShellTools.replace_match)
-    assert list(inspect.signature(ShellTools.replace).parameters) == ["self", "path", "old", "new"]
-    assert list(inspect.signature(ShellTools.replace_match).parameters) == ["self", "match", "new"]
-    for name in ("path", "old", "new"):
-        assert f"{name}:" in replace_doc
-    for name in ("match", "new"):
-        assert f"{name}:" in match_doc
-    for text in (replace_doc, match_doc):
-        assert "old_or_new" not in text
-        assert "target" not in text
-        assert "file_path" not in text
-        assert "replace(path, old, new)" in text
-        assert "replace_match(match, new)" in text
-
-
-async def test_replace_docstring_examples_execute(shell, tmp_path):
-    (tmp_path / "pkg").mkdir()
-    target = tmp_path / "pkg" / "mod.py"
-    target.write_text(
-        "".join(f"line {n}\n" for n in range(1, 13)).replace("line 1\n", "return 1\n", 1)
+    lines = [f"value_{i % 50} = compute(alpha, beta, gamma, delta)" for i in range(19_000)]
+    old = "\n".join(lines[:150])
+    content = (
+        "\n".join(lines[:150]).replace("compute", "compute2", 1)
+        + "\n"
+        + "\n".join(line[::-1] for line in lines[150:])
     )
-    await shell.replace("pkg/mod.py", "return 1", "return 2")
-    m = await shell.read("pkg/mod.py", (10, 12))
-    await shell.replace_match(m, "new lines 10-12\n")
-    assert target.read_text().startswith("return 2\n")
-    assert target.read_text().endswith("line 9\nnew lines 10-12\n")
+    started = time.monotonic()
+    _closest_region_lines(content, old)
+    assert time.monotonic() - started < 0.5
+
+
+def test_closest_region_search_bounds_one_line_by_line_comparison():
+    """4,000 repeated short lines once took ~1.7 s in a single line ratio() call."""
+    import time
+
+    from nooa.tools.shell_tools import _closest_region_lines
+
+    old = "a\n" * 3_999 + "b"
+    content = "a\n" * 4_000
+    assert len(old) <= 8_000  # within the old-text bound, so the search runs
+    started = time.monotonic()
+    assert _closest_region_lines(content, old) == []
+    assert time.monotonic() - started < 0.5
+
+
+def test_closest_region_compares_large_old_text_line_by_line():
+    """An old text too large for a character ratio() still gets a closest region."""
+    from nooa.tools.shell_tools import _closest_region_lines
+
+    body = [f"    result_{i} = transform(value_{i}, factor={i})  # step {i}" for i in range(80)]
+    content = "def f():\n" + "\n".join(body) + "\n"
+    old_lines = list(body)
+    old_lines[40] = "    result_40 = transform(value_40, factor=99)  # step 40"
+    old = "\n".join(old_lines) + "\n"
+    assert len(old) > 1_500
+    lines = _closest_region_lines(content, old)
+    assert lines and lines[0].startswith("Closest region: lines 2-81 (")
+    assert any("factor=99" in line for line in lines)
+
+
+async def test_closest_region_search_does_not_block_the_event_loop(shell, tmp_path):
+    """The not-found hint is built off the loop: other tasks keep running meanwhile."""
+    import asyncio
+
+    lines = [
+        f"value_{i} = compute(alpha_{i}, beta_{i}, gamma_{i})  # step {i}" for i in range(6000)
+    ]
+    (tmp_path / "big.py").write_text("\n".join(lines) + "\n")
+    old = "\n".join(line.replace("compute", "computer") for line in lines[3000:3100])
+    ticks = 0
+    done = asyncio.Event()
+
+    async def ticker():
+        nonlocal ticks
+        while not done.is_set():
+            ticks += 1
+            await asyncio.sleep(0.005)
+
+    task = asyncio.create_task(ticker())
+    started_ticks = ticks
+    with pytest.raises(ValueError, match="not found|Closest region|does not occur"):
+        await shell.replace("big.py", old, "x")
+    done.set()
+    await task
+    # The search runs up to its time budget; the ticker must have run during it.
+    assert ticks - started_ticks >= 3

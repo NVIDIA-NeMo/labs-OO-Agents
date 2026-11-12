@@ -80,7 +80,7 @@ cd my-agent-project
 uv add nooa
 ```
 
-Or with pip: `pip install nooa`.
+> **Windows:** use [WSL 2](https://learn.microsoft.com/windows/wsl/install). Native Windows is not supported: `import nooa` and the `nooa` command stop with an error that points to WSL 2. Setting `NOOA_SKIP_PLATFORM_CHECK=1` skips that check. The pure-Python core (agents, PredictStrategy, in-process CodeAct, in-memory storage) and `nooa connect` are tested on native Windows. Other features may work but are unsupported; those that need POSIX (shell tools, the CodeAct sandbox, file-backed SQLite storage, `monitor()`) stop with a `PosixOnlyFeatureError`.
 
 <details>
 <summary><b>Optional sub-packages</b> — CLI, ACP, memory, benchmarks, evaluation pipeline</summary>
@@ -101,16 +101,14 @@ uv add "nooa[cli,memory]"       # several at once
 
 | Package | Extra | What it adds |
 |---|---|---|
-| `nooa-cli` | `nooa[cli]` | the `nooa` command, trace viewer, eval runner |
-| `nooa-acp` | `nooa[acp]` | coding agent for Agent Client Protocol hosts such as Zed — [setup](packages/nooa-acp/README.md) |
+| `nooa-cli` | `nooa[cli]` | the `nooa` command, trace-viewer command, eval runner |
+| `nooa-acp` | `nooa[acp]` | **deprecated, replaced by nooa-atom (last release)**: coding agent for Agent Client Protocol hosts such as Zed — [setup](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/packages/nooa-acp/README.md) |
 | `nooa-memory` | `nooa[memory]` | long-term memory subsystem (`MemoryManager`) |
 | `nooa-bench` | `nooa[bench]` | `BenchAgent` and the Harbor benchmark runner |
 
-`eval_pipeline` is not published to PyPI — install it from the repo:
-
-```bash
-uv add "eval_pipeline @ git+https://github.com/NVIDIA-NeMo/labs-OO-Agents.git@main#subdirectory=util/eval_pipeline"
-```
+For `eval_pipeline`, follow the [Contributing](#contributing) instructions to clone
+the repo and run `uv sync --group dev`. This installs it editable with the other
+workspace packages.
 
 </details>
 
@@ -138,18 +136,40 @@ NOOA is **research software**, and agents can be configured to execute LLM-gener
 NOOA validates generated code (AST checks) and applies module deny-lists before execution. **These are defense-in-depth guardrails, not a containment boundary.** They exist to keep generated code from freezing the event loop and to catch common mistakes early — not to stop code that is actively trying to escape. A static checker over Python cannot provide that guarantee: `open()` gives arbitrary file access, `importlib` can load modules straight from a path, and reflection reaches the rest. **The containment boundary is OS-level isolation** — always run agents that execute generated code inside a sandbox such as a container, VM, or [NVIDIA OpenShell](https://github.com/NVIDIA/OpenShell). Do not rely on the in-process validators alone.
 
 
-### 1. Choose a model
+### 1. Connect a model
 
-Choose from supported hosted or local [LiteLLM-supported](https://docs.litellm.ai/) model:
+Install the CLI and run the guided setup:
+
+```bash
+uv add "nooa[cli]"
+uv run nooa connect
+```
+
+Choose your provider or endpoint, API key, exact model, and an alias such as
+`my-model`. Connect helps your agents run smoothly: it suggests and saves a
+reply/output token limit, records the context window when known (you can supply
+it), and lists your chosen media formats. It also tests the configured route,
+tools, reasoning, and caching. The checks send real requests and may incur
+provider charges. The wizard asks before checks and saving. Keep keys in
+environment variables or NOOA's secrets file, not in model configuration or
+committed code.
+
+Use the saved alias in Python:
 
 ```python
-from nooa.unifiedllm.registry import get_llm_client
+from nooa.unifiedllm import get_llm_client
 
-llm = get_llm_client("claude-haiku-4-5")                                            # Anthropic (after `export ANTHROPIC_API_KEY=...`)
-llm = get_llm_client("gpt-5-mini")                                                  # OpenAI    (after `export OPENAI_API_KEY=...`)
-llm = get_llm_client("ollama_chat/qwen3:1.7b", api_base="http://localhost:11434")   # Ollama    (no key)
-llm = get_llm_client("hosted_vllm/Qwen/Qwen3-1.7B", api_base="http://localhost:8000/v1")  # vLLM (no key)
+llm = get_llm_client("my-model")
 ```
+
+See [Connect setup](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/model-connect.md)
+for providers, model settings, editing, and diagnostic stages.
+
+NOOA uses LiteLLM as its provider abstraction layer, allowing agents to use
+supported models and endpoints without changing agent code. You can also
+construct clients directly using
+[LiteLLM-supported model names](https://docs.litellm.ai/), with your endpoint
+and credentials. See [Model configuration](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/model-configuration.md).
 
 ### 2. Your first agent
 
@@ -170,19 +190,24 @@ class FeedbackAgent(Agent, llm=llm):
 
 
 async def main():
-    agent = FeedbackAgent()
-    result = await agent.analyze_feedback("Great product, but shipping was slow")
-    print(result)
+    try:
+        agent = FeedbackAgent()
+        result = await agent.analyze_feedback("Great product, but shipping was slow")
+        print(result)
+    finally:
+        await llm.aclose()
 
 
 asyncio.run(main())
 ```
 
-Run the same code from your own project with `python`. You can run the checked-in example:
+Save the model-selection and agent snippets together as `first_agent.py`, then
+run `uv run python first_agent.py` in your project. After your final call,
+`await llm.aclose()` releases client resources.
 
-```bash
-uv run python examples/quickstart/01_first_generation_method.py
-```
+The [checked-in first example](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/quickstart/01_first_generation_method.py)
+is a separate source-checkout example: it chooses its own client from environment
+credentials and does not automatically use your `my-model` alias.
 
 Rename `analyze_feedback` to `analyze_feedback_briefly` and the output changes — your method name, parameters, and docstring *are* the prompt.
 
@@ -195,10 +220,47 @@ Ready to run something specific? Use the [**examples catalog**](https://github.c
 Every LLM call, code execution, and method invocation is traced by default — orchestrators, generation methods, and helpers, with parent-child spans preserved. If you installed the CLI and viewer dependencies, start the trace viewer and open the run in your browser:
 
 ```bash
+uv add "nooa[cli,viewer]"    # includes viewer runtime dependencies
 uv run nooa start-dev        # trace viewer on http://localhost:5001
 ```
 
 If the viewer isn't running, tracing is silently disabled — no configuration needed either way.
+
+### 4. Give your agent media inputs
+
+Pass `Image`, `Audio`, `Video`, or PDF `File` objects as method arguments.
+CodeAct can also use `show()` to see media created while it runs.
+
+NOOA assumes models are text-only until configured. Set `media_inputs`, such
+as `[image, pdf]`, in the model entry. Connect lets you choose formats manually
+or test them with generated samples. If you enable a format the provider does
+not accept, requests may fail.
+
+```python
+from nooa import Agent, PredictStrategy, strategy
+from nooa.media import Image
+from nooa.unifiedllm import get_llm_client
+
+# This alias must allow image input and use an endpoint that accepts it.
+vision = get_llm_client("vision")
+
+class PhotoReader(Agent, llm=vision):
+    @strategy(PredictStrategy())
+    async def describe(self, image: Image) -> str:
+        """Describe the image briefly. Do not invent details."""
+        ...
+
+# In your async application, with permission to send the photo:
+# result = await PhotoReader().describe(Image.from_file("photo.png"))
+# await vision.aclose()
+```
+
+Load media with `from_file`, `from_bytes(..., media_type=...)`, or `from_url`.
+URL support depends on the provider. `File` supports PDFs. Formats left out of
+`media_inputs` are replaced with text notices when sending a request.
+
+See the [media API guide](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/media.md)
+for a complete example, CodeAct `show()`, audio/video/PDF inputs, and limits.
 
 ## Learn more
 
