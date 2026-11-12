@@ -262,7 +262,11 @@ def _bind_adapter(
     client.config = _thaw(settings.config)
     client.reasoning_level = settings.reasoning_level
     client.structured_output_mode = mode
+    from ._calibration import _route_calibration
+
+    record = _route_calibration(adapter)
     view = copy.copy(adapter)
+    view._route_calibration_record = record
     view._client = client
     client._adapter = view  # Completion's transport hook dispatches through this.
     view._bound_settings = settings

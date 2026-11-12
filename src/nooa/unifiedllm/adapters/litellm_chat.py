@@ -375,6 +375,9 @@ class LiteLLMChatAdapter:
         """Wrap ``client``, whose settings and hooks every call reads."""
         self._client = client
         self._legacy_options: dict[str, Any] | None = None
+        # Private lazy numeric bridge; legacy success hooks remain unchanged.
+        self._route_calibration_record = None
+        self._route_calibration_identity = object()
 
     @property
     def capabilities(self) -> Capabilities:
