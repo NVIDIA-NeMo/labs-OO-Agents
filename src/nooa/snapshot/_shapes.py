@@ -234,10 +234,12 @@ def mapping_like(
       ``int``).
     - ``items``: ``items(v)`` yields ``(key, value)`` pairs (exact 2-tuples),
       read forwards and only as far as the kept entries plus at most one.
-      Keys are kept as for a ``dict``: exact ``str``, ``int`` (at most 128
-      bits), finite ``float``, ``bool`` or ``None``; another key, or one
-      whose JSON form an earlier kept key has, stops the mapping with
-      reason ``"key"``.
+      Keys are kept as for a ``dict`` (see ``Key``): an exact ``str``,
+      ``int`` (at most 128 bits), finite ``float``, ``bool`` or ``None`` as
+      itself; any other key (a tuple, an enum member, a larger ``int``...)
+      as its own small snapshot node. A key whose JSON form an earlier kept
+      key has (a node key's is its ``render_python`` text) stops the
+      mapping with reason ``"key"``.
     - ``fields`` (default ``None``): an ordered ``dict`` of field name ->
       ``accessor(v)``. Names must be ``str`` (a subclass is copied) and
       not taken by the shape's own parts. Each accessor is called at most

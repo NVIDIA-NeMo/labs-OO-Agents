@@ -17,8 +17,7 @@ import collections
 import logging
 from typing import Literal
 
-from nooa.overflow import OverflowFile
-from nooa.overflow._overflow import OverflowWriter
+from nooa.overflow import OverflowFile, OverflowWriter
 from nooa.snapshot._codec import complete_prefix, encode_text, safe_end, safe_start
 from nooa.snapshot._model import Overflow, Text
 
@@ -57,9 +56,10 @@ class TextStream:
       ``Text`` of it starts and ends on code point boundaries. Bytes are
       never decoded here; a chars stream keeps its ``str`` as written.
     - The overflow file holds the first ``OverflowFile.max_bytes`` bytes of the
-      output (``Text.full``; a chars stream's file is cut on a code point
-      boundary, so it is valid UTF-8); a file error never raises (see
-      ``OverflowFile``).
+      output (``Text.full``; a chars stream's file is UTF-8, cut on a code
+      point boundary, except that a ``surrogateescape`` character is written
+      as its original byte, so such text need not give valid UTF-8); a file
+      error never raises (see ``OverflowFile``).
 
     Threads: one writer. ``snapshot()`` only reads memory (and flushes
     the overflow file) but is not synchronised with ``write``: call it from
@@ -144,8 +144,8 @@ class TextStream:
             return
         part = data
         if len(data) > room:
-            # A chars stream's file stays valid UTF-8: it ends before a code
-            # point that does not fit whole, and takes nothing after it (the
+            # A chars stream's file is never cut inside a code point: it ends
+            # before one that does not fit whole, and takes nothing after it (the
             # file is a prefix of the output).
             part = data[: safe_end(data, room)] if self.unit == "chars" else data[:room]
             self._file_max = self._kept + len(part)
