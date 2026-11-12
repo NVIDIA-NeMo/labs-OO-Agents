@@ -8,12 +8,12 @@ from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 from nooa.decorators import strategy
-from nooa.events import Error
 from nooa.strategies.base import RuntimeServices
 from nooa.strategies.codeact import (
     CodeActStrategy,
     TextOnlyResponseAction,
     TextOnlyResponseContext,
+    _text_only_correction,
 )
 from nooa.strategies.template import TemplateStrategy
 
@@ -75,7 +75,8 @@ class CodeActV2(CodeActStrategy):
             "# Python cell context",
             "# Already in scope inside python_cell(); state persists across cells.",
             "# Use these names directly; do not re-import or re-define them.",
-            "# Use doc(name) for details about any type or function.",
+            "# Import anything else you need (os, re, json...).",
+            "# Use print(doc(name)) for details about any type or function.",
             "",
             *code,
         ]
@@ -88,6 +89,7 @@ class CodeActV2(CodeActStrategy):
                 "# Runtime helpers (already available):",
                 f"# {names}",
                 "# Standard-library modules asyncio and typing are also available.",
+                *(f"# {line}" for line in self._namespace_note_lines()),
                 "```",
             )
         )
@@ -177,6 +179,9 @@ class CodeActV2(CodeActStrategy):
 
         def python_cell_state() -> dict[str, dict[str, str]]:
             """Return the complete name-to-type inventory for this call's cell state."""
+            namespace = getattr(call, "execution_namespace", None)
+            if namespace is not None:
+                return namespace.inventory()
             return self._cell_state(call)
 
         builtins["python_cell_state"] = python_cell_state
@@ -209,7 +214,7 @@ Use Python for arithmetic, iteration, transforms, and batches rather than manual
 constructing large outputs. Define reusable helpers at the top of a cell. Existing
 methods on `self` may be called with `await` when async.
 
-If `self` exposes delegation, inspect its documentation with `doc(self.delegate)`.
+If `self` exposes delegation, inspect its documentation with `print(doc(self.delegate))`.
 Use bounded objectives when an independent context helps; run independent work
 with `asyncio.gather` and inspect each result. For single-shot extraction or
 classification, use a documented `@strategy(PredictStrategy())` helper.
@@ -241,16 +246,7 @@ Restrictions (will throw):
         """{reason} Call `python_cell(code)`. To finish, call `return_result(value)` inside the cell."""
         ...
 
-    @staticmethod
-    def _retry_text_only_response(context: TextOnlyResponseContext) -> TextOnlyResponseAction:
+    def _retry_text_only_response(self, context: TextOnlyResponseContext) -> TextOnlyResponseAction:
         return TextOnlyResponseAction.retry(
-            Error(
-                content=(
-                    "Your last reply was plain text with no tool call. It was preserved, "
-                    "but a bare message cannot end the turn or run code. "
-                    f"To finish `{context.call.method_name}`, call `python_cell` with "
-                    "`return_result(value)` inside the cell. To continue working, "
-                    "call `python_cell` with the next computation."
-                )
-            )
+            _text_only_correction(context, python_tool=self._python_tool_name())
         )

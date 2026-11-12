@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """ShellTools — persistent shell + file ops with grep that hands you editable Match objects.
 
-Identical surface to v4 (run / read / replace / write_file). The one addition:
+Surface: run / read / replace / write_file. The one addition:
 when ``run()`` executes a *pure search* (a bare grep/rg/egrep with no
 output-mangling pipe or anchor-dropping flag), the result still prints as the
 exact bytes the agent's command produced — but it ALSO carries a parsed
@@ -29,18 +29,27 @@ Attach to an agent::
 
 from __future__ import annotations
 
+import asyncio
 import difflib
 import json
 import math
 import re
 import shlex
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Annotated, Any
 
 from nooa.agentdoc import hidden, spec
+from nooa.errors.hints import RUN_COMMAND, has_own_hint, register_hint
 from nooa.skill import Skill
 from nooa.tools._bash_session import BashSession
+from nooa.tools._bounded_io import (
+    DEFAULT_MAX_FILE_BYTES,
+    read_line_range,
+    read_specific_lines,
+    read_whole_file_checked,
+)
 from nooa.tools._results import StreamDone, StreamEvent
 
 
@@ -52,6 +61,11 @@ class FileWrite:
     record matches what landed on disk. It is deliberately left out of
     ``__str__`` — the agent already knows the text it asked for.
     """
+
+    path: str
+    message: str
+    diff: str
+    new_text: str
 
     def __init__(self, path: str, message: str, diff: str = "", new_text: str = ""):
         self.path = path
@@ -172,7 +186,7 @@ class StaleMatchError(ValueError):
 
     code = "STALE_MATCH"
 
-    def __init__(self, target: Match, current: str | None, reason: str):
+    def __init__(self, target: Match, current: str | None, reason: str, hint: str = ""):
         self.path = target.path
         self.resolved_path = target.resolved_path
         self.start = target.start
@@ -196,6 +210,8 @@ class StaleMatchError(ValueError):
                 message += (
                     "Diff preview truncated (capped at 20 lines and 2 KiB); not a complete diff."
                 )
+        if hint:
+            message += f"\n{hint}"
         super().__init__(message)
 
 
@@ -325,6 +341,407 @@ _LONG_ANCHOR_BREAKING = (
 )
 
 
+@hidden
+def _replace_diagnostic_excerpt(
+    content: str, start: int, end: int, focus: int, limit: int, column_origin: int = 1
+) -> str:
+    """Escape a bounded window with original columns, indentation, and whole escapes."""
+
+    def escape(char: str) -> str:
+        return char if char.isprintable() and char != "\\" else repr(char)[1:-1]
+
+    # Keep short rows whole, including deep indentation before the match.
+    # The raw-length guard also bounds escaping work for control-heavy rows.
+    if end - start <= limit:
+        text = "".join(escape(char) for char in content[start:end])
+        if len(text) <= limit:
+            return text
+
+    # Reserve room for explicit clipping/column labels before collecting text.
+    # Never slice or escape an entire potentially enormous source line.
+    last_column = column_origin + end - start - 1
+    budget = limit - len(f"[columns {last_column}-{last_column}; clipped] ...  ...")
+    left = focus
+    preceding = 0
+    while left > start:
+        size = len(escape(content[left - 1]))
+        if preceding + size > min(20, budget // 3):
+            break
+        preceding += size
+        left -= 1
+    pieces: list[str] = []
+    right, size = left, 0
+    while right < end:
+        piece = escape(content[right])
+        if size + len(piece) > budget:
+            break
+        pieces.append(piece)
+        size += len(piece)
+        right += 1
+    text = "".join(pieces)
+    if left == start and right == end:
+        return text
+    return (
+        f"[columns {column_origin + left - start}-{column_origin + right - start - 1}; clipped] "
+        + ("... " if left > start else "")
+        + text
+        + (" ..." if right < end else "")
+    )
+
+
+@hidden
+def _not_found_replace_message(path: str, resolved: Path, content: str, old: str, new: str) -> str:
+    """Explain a zero-match path replacement; bounded, escaped, never writes.
+
+    Reports the resolved file, the first line of ``old`` and where that line
+    occurs with different leading whitespace/tabs, plus a hint that an earlier
+    edit may already have changed the file. At most three locations are listed
+    and every quoted row is limited to 160 characters.
+    """
+
+    def excerpt(text: str) -> str:
+        return _replace_diagnostic_excerpt(text, 0, len(text), 0, 160)
+
+    def describe(whitespace: str) -> str:
+        if not whitespace:
+            return "no indentation"
+        tabs, spaces = whitespace.count("\t"), whitespace.count(" ")
+        parts = [f"{tabs} tab(s)"] if tabs else []
+        if spaces:
+            parts.append(f"{spaces} space(s)")
+        other = len(whitespace) - tabs - spaces
+        if other:
+            parts.append(f"{other} other whitespace char(s)")
+        return " + ".join(parts)
+
+    lines = [
+        f"old text not found in {excerpt(path)} (resolved path: {excerpt(str(resolved))}). "
+        "No file was changed.",
+        "It must match exactly once — check whitespace and indentation.",
+    ]
+    first = old.split("\n", 1)[0].rstrip("\r")
+    stripped = first.strip()
+    if stripped:
+        lines.append(
+            f"First line of old text: '{excerpt(first)}' ({describe(first[: len(first) - len(first.lstrip())])})"
+        )
+        exact: list[int] = []
+        shifted: list[str] = []
+        wanted = first[: len(first) - len(first.lstrip())]
+        # One linear pass over the lines; a long line is only compared once.
+        for number, row in enumerate(content.split("\n"), start=1):
+            if len(exact) + len(shifted) >= 3:
+                break
+            row = row.rstrip("\r")
+            if stripped not in row or row.strip() != stripped:
+                continue
+            indent = row[: len(row) - len(row.lstrip())]
+            if indent == wanted and row.rstrip() == first.rstrip():
+                exact.append(number)
+            else:
+                shifted.append(f"  line {number} has it with {describe(indent)}: '{excerpt(row)}'")
+        if exact:
+            lines.append(
+                "That first line occurs unchanged at line(s) "
+                + ", ".join(str(n) for n in exact)
+                + "; the difference is in a later line of old text."
+            )
+        if shifted:
+            lines.append("That first line occurs with different leading whitespace:")
+            lines.extend(shifted)
+        if not exact and not shifted:
+            lines.append("That first line does not occur as a whole line anywhere in the file.")
+        if "\t" in old and "\t" not in content:
+            lines.append("old text contains tabs but the file has none.")
+        elif "\t" in content and "\t" not in old and shifted:
+            lines.append("The file uses tabs; old text uses none.")
+    # Short replacements (``x``, ``)``) occur by chance; only report distinctive text.
+    if len(new.strip()) >= 8 and new in content:
+        number = content.count("\n", 0, content.find(new)) + 1
+        lines.append(
+            f"The replacement text already appears in the file (starting on line {number}); "
+            "this edit may already have been applied."
+        )
+    lines.extend(_closest_region_lines(content, old))
+    lines.append(
+        "Earlier edits (including ones in the same cell) may already have changed this file: "
+        "re-read it with read() and retry only the edits that are not yet applied."
+    )
+    return "\n".join(lines)
+
+
+_CLOSEST_MAX_FILE_LINES = 20_000  # bound the search work; larger files get no closest region
+_CLOSEST_MAX_OLD_CHARS = 8_000
+_CLOSEST_MIN_RATIO = 0.6
+_CLOSEST_DIFF_ROWS = 8
+# The search runs on the event loop, so past this many seconds the optional
+# hint is skipped; the deadline is checked before every window.
+_CLOSEST_MAX_SECONDS = 0.25
+# A character ``ratio()`` is roughly quadratic (8,000 x 8,000 chars took ~3 s),
+# so a window and ``old`` larger than this product of lengths (one call
+# ~0.05 s) are compared line by line instead, which is cheap.
+_CLOSEST_MAX_CHAR_CELLS = 1_500 * 1_500
+# A line ``ratio()`` is quadratic in line counts when short lines repeat
+# (4,000 x 4,000 identical lines took ~1.7 s, 700 x 700 ~0.05 s); past this
+# product the deadline could not interrupt it, so the hint is skipped.
+_CLOSEST_MAX_LINE_CELLS = 700 * 700
+
+
+def _old_lines(old: str) -> list[str]:
+    old_lines = old.split("\n")
+    if old_lines and old_lines[-1] == "" and len(old_lines) > 1:
+        old_lines.pop()  # old ends with a newline
+    return old_lines
+
+
+@hidden
+def _closest_region(content: str, old: str) -> tuple[int, int, float] | None:
+    """Where the file is most like ``old`` (difflib): 1-based (first, last, ratio), bounded.
+
+    Slides a window of ``old``'s line count over the file and keeps the most
+    similar one (at least 60%). None when nothing is close, or the search
+    would cost too much.
+    """
+    old_lines = _old_lines(old)
+    file_lines = content.split("\n")
+    if (
+        not old.strip()
+        or len(old) > _CLOSEST_MAX_OLD_CHARS
+        or len(file_lines) > _CLOSEST_MAX_FILE_LINES
+    ):
+        return None
+    size = len(old_lines)
+    wanted = "\n".join(old_lines)
+    best_ratio, best_start = 0.0, -1
+    chars = difflib.SequenceMatcher(None, autojunk=False)
+    chars.set_seq2(wanted)
+    by_line = difflib.SequenceMatcher(None, autojunk=False)
+    by_line.set_seq2(old_lines)
+    deadline = time.monotonic() + _CLOSEST_MAX_SECONDS
+    for start in range(max(1, len(file_lines) - size + 1)):
+        if time.monotonic() > deadline:
+            return None  # too costly for an optional hint
+        window_lines = file_lines[start : start + size]
+        window = "\n".join(window_lines)
+        if len(window) * len(wanted) <= _CLOSEST_MAX_CHAR_CELLS:
+            matcher = chars
+            matcher.set_seq1(window)
+        else:  # a character ratio() this large could block the loop for seconds
+            if len(window_lines) * size > _CLOSEST_MAX_LINE_CELLS:
+                return None  # so could a line ratio() over this many short lines
+            matcher = by_line
+            matcher.set_seq1(window_lines)
+        if matcher.real_quick_ratio() <= best_ratio or matcher.quick_ratio() <= best_ratio:
+            continue
+        ratio = matcher.ratio()
+        if ratio > best_ratio:
+            best_ratio, best_start = ratio, start
+    if best_start < 0 or best_ratio < _CLOSEST_MIN_RATIO:
+        return None
+    return best_start + 1, min(best_start + size, len(file_lines)), best_ratio
+
+
+@hidden
+def _closest_region_lines(content: str, old: str) -> list[str]:
+    """The closest region to ``old`` (``_closest_region``) and what differs, bounded.
+
+    Lists at most eight differing lines, each escaped (tabs show as ``\\t``)
+    and cut at 160 characters, and says when a line differs only in
+    whitespace. Empty when nothing is close.
+    """
+
+    def excerpt(text: str) -> str:
+        return _replace_diagnostic_excerpt(text, 0, len(text), 0, 160)
+
+    found = _closest_region(content, old)
+    if found is None:
+        return []
+    first, last, best_ratio = found
+    old_lines = _old_lines(old)
+    region = content.split("\n")[first - 1 : last]
+    lines = [
+        f"Closest region: lines {first}-{last} ({best_ratio:.0%} similar). What differs "
+        "(file line: old text vs file):"
+    ]
+    rows: list[str] = []
+    ops = difflib.SequenceMatcher(None, old_lines, region, autojunk=False).get_opcodes()
+    for tag, i1, i2, j1, j2 in ops:
+        if tag == "equal":
+            continue
+        pairs = max(i2 - i1, j2 - j1)
+        for k in range(pairs):
+            o = old_lines[i1 + k] if i1 + k < i2 else None
+            f = region[j1 + k] if j1 + k < j2 else None
+            number = first + (j1 + k if f is not None else j2)
+            if o is not None and f is not None:
+                note = "  (whitespace only)" if o.split() == f.split() else ""
+                rows.append(f"  line {number}: old '{excerpt(o)}'")
+                rows.append(f"  {' ' * len(str(number))}       file '{excerpt(f)}'{note}")
+            elif o is not None:
+                rows.append(f"  near line {number}: old has '{excerpt(o)}'; the file does not")
+            else:
+                rows.append(f"  line {number}: file has '{excerpt(f)}'; old does not")
+    shown = rows[: _CLOSEST_DIFF_ROWS * 2]
+    lines.extend(shown)
+    if len(rows) > len(shown):
+        lines.append(f"  ... {len(rows) - len(shown)} more rows; read() the region")
+    if len(rows) == 0:
+        lines.append("  only line endings or trailing newlines differ")
+    lines.append(
+        f"To retry: read() lines {first}-{last} and copy old from it, or replace() that Match."
+    )
+    return lines
+
+
+@hidden
+def _ambiguous_replace_message(path: str, content: str, old: str, count: int) -> str:
+    """At most five matches, 160 chars/source row, 12,000 chars/diagnostic.
+
+    Coordinates are inclusive Python-character offsets in read_text() content;
+    a line terminator belongs to its preceding line, including both CRLF chars.
+    Two streaming boundary passes retain only coordinates and selected spans,
+    never copies of entire lines, the old payload, or the file's line index.
+    """
+    path = _replace_diagnostic_excerpt(path, 0, len(path), 0, 160)
+    header = f"old text matched {count} times in {path}. No file was changed."
+    if not old:
+        return (
+            header + "\nThe old text is empty and matches every character boundary. "
+            "Supply non-empty old text copied from the file."
+        )
+
+    line_break = r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]"
+    breaks = re.finditer(line_break, content)
+    boundary = next(breaks, None)
+    line, line_start, search_start = 1, 0, 0
+    shown = min(count, 5)
+    samples: list[tuple[int, int, int, int, int]] = []
+    wanted: set[int] = set()
+    for _ in range(shown):
+        position = content.find(old, search_start)
+        coordinates = []
+        # Inclusive end avoids a phantom matched line after a terminal newline.
+        for offset in (position, position + len(old) - 1):
+            while boundary is not None and boundary.end() <= offset:
+                line += 1
+                line_start = boundary.end()
+                boundary = next(breaks, None)
+            coordinates.append((line, offset - line_start + 1))
+        (first, first_col), (last, last_col) = coordinates
+        samples.append((position, first, first_col, last, last_col))
+        wanted.update(range(max(1, first - 5), first))
+        wanted.add(first)
+        wanted.update(range(last, last + 6))
+        search_start = position + len(old)
+
+    spans: dict[int, tuple[int, int]] = {}
+    start = 0
+    last_wanted = max(wanted)
+    # The final zero-width boundary covers a non-newline-terminated last line;
+    # ignore it after a terminal separator (splitlines() has no phantom line).
+    for number, boundary in enumerate(re.finditer(line_break + r"|\Z", content), 1):
+        end = boundary.end()
+        if number > last_wanted or start == end:
+            break
+        if number in wanted:
+            spans[number] = (start, end)
+        start = end
+
+    rows = [
+        (header, False),
+        (
+            "Match ranges (line:column, 1-based, inclusive; Python characters, not tab width). "
+            "Terminators belong to the preceding line. > marks omitted matching text; "
+            "escaped source, up to 5 lines before/after the entire match, "
+            "plus unmatched boundary prefixes/suffixes at original columns. "
+            "Source rows limited to 160 characters; diagnostic limited to 12000 characters.",
+            False,
+        ),
+    ]
+
+    def source_row(
+        number: int,
+        start: int,
+        end: int,
+        focus: int,
+        boundary: str = "",
+        column_origin: int = 1,
+    ) -> None:
+        # Trim only ordinary line endings for display, using the full span so
+        # a boundary inside CRLF cannot expose either half of the terminator.
+        line_start, display_end = spans[number]
+        if content.endswith("\r\n", line_start, display_end):
+            display_end -= 2
+        elif content[display_end - 1] in "\r\n":
+            display_end -= 1
+        end = min(end, display_end)
+        if boundary and start >= end:
+            return
+        focus = max(start, min(focus, end))
+        label = f"  {number}| "
+        if boundary:
+            label += f"[{boundary} columns {column_origin}-{column_origin + end - start - 1}] "
+        text = _replace_diagnostic_excerpt(
+            content, start, end, focus, 160 - len(label), column_origin
+        )
+        rows.append((label + text if text else label[:-1], True))
+
+    for index, (position, first, first_col, last, last_col) in enumerate(samples, 1):
+        rows.append(
+            (f"Match {index}: lines {first}-{last} ({first}:{first_col}-{last}:{last_col})", False)
+        )
+
+        for number in range(max(1, first - 5), first):
+            start, end = spans[number]
+            source_row(number, start, end, start)
+        start, _ = spans[first]
+        if start < position:
+            source_row(first, start, position, position, "prefix")
+        matching_lines = last - first + 1
+        unit = "line" if matching_lines == 1 else "lines"
+        rows.append(
+            (
+                f"> [{matching_lines} matching {unit} omitted; identical to the supplied old text]",
+                False,
+            )
+        )
+        _, end = spans[last]
+        suffix_start = position + len(old)
+        if suffix_start < end:
+            source_row(last, suffix_start, end, suffix_start, "suffix", last_col + 1)
+        for number in range(last + 1, last + 6):
+            if number in spans:
+                start, end = spans[number]
+                source_row(number, start, end, start)
+    rows.append(
+        (f"Showing {shown} of {count} matches; {count - shown} more matches not shown.", False)
+    )
+    rows.append(
+        (
+            "It must match exactly once — add surrounding context to old text to make it unique. "
+            "Use read() to inspect the reported lines before retrying.",
+            False,
+        )
+    )
+    # Keep all five headers and omission placeholders even if the global budget is hit.
+    # Omit whole context rows, not fragments of escaped characters.
+    total = sum(len(text) + 1 for text, _ in rows) - 1
+    if total > 12_000:
+        omitted = 0
+        for index in range(len(rows) - 1, -1, -1):
+            text, context = rows[index]
+            if context:
+                total -= len(text) + 1
+                del rows[index]
+                omitted += 1
+            if total <= 12_000 - 80:
+                break
+        rows.append(
+            (f"... {omitted} context lines omitted (12000-character diagnostic limit).", False)
+        )
+    return "\n".join(text for text, _ in rows)
+
+
 def _has_unquoted_pipe(cmd: str) -> bool:
     """True if cmd contains a shell pipe ``|`` outside of quotes."""
     in_single = in_double = False
@@ -393,6 +810,19 @@ def is_pure_search_command(cmd: str) -> bool:
     return True
 
 
+_REPLACE_OVERSIZE_HINT = (
+    "Replacing text requires rebuilding the file. To edit a file this "
+    "large, construct ShellTools(max_file_bytes=...)."
+)
+
+
+# The RUN_COMMAND fix hint (nooa.errors.hints) of an agent that holds ShellTools as self.shell.
+SHELL_RUN_HINT = (
+    'run the command with `await self.shell.run("...")` '
+    "(result has .stdout, .stderr and .returncode)"
+)
+
+
 class ShellTools(Skill):
     """
     Persistent shell + file ops, with grep that hands you editable Match objects.
@@ -415,6 +845,12 @@ class ShellTools(Skill):
     output after a timeout; partial output is not evidence of successful completion.
     Timeouts return a result, not an exception. Printed timeout results include
     ``timed_out=True`` and the effective ``timeout_seconds``.
+
+    File reads are bounded. A ranged read consumes only that range, however
+    large the file is. Reading or replacing a whole file is capped by
+    ``max_file_bytes`` (8 MiB by default, raise it per instance:
+    ``ShellTools(cwd=..., max_file_bytes=...)``) and raises above the cap
+    rather than loading the file.
 
     Grep that you can edit from directly. When run() executes a plain search
     (grep/rg/egrep), the result still prints the EXACT bytes your command
@@ -459,6 +895,7 @@ class ShellTools(Skill):
         *,
         default_timeout: float = 30.0,
         keep_background_on_close: bool = False,
+        max_file_bytes: int = DEFAULT_MAX_FILE_BYTES,
         **kwargs: Any,
     ):
         if (
@@ -467,9 +904,19 @@ class ShellTools(Skill):
             or default_timeout <= 0
         ):
             raise ValueError("default_timeout must be a positive finite number of seconds")
+        if (
+            isinstance(max_file_bytes, bool)
+            or not isinstance(max_file_bytes, int)
+            or max_file_bytes <= 0
+        ):
+            raise ValueError("max_file_bytes must be a positive whole number of bytes")
         super().__init__(**kwargs)
         self.default_timeout = float(default_timeout)
         self.cwd = Path(cwd).resolve()
+        # Ceiling for reads and replacements that need a whole file at once.
+        # Ranged reads and anchor harvesting are bounded by construction and
+        # are not limited by this. Raise it to work on files above the default.
+        self.max_file_bytes: int = max_file_bytes
         # Construct the session eagerly (it starts lazily on first run) so a
         # consumer wired at construction time — e.g. RepoTools(session=shell.session)
         # in the TUI — shares this shell's bash session instead of capturing None.
@@ -492,9 +939,15 @@ class ShellTools(Skill):
         return self._session
 
     async def _get_session(self) -> BashSession:
-        if not self._session._started:
-            await self._session.start()
+        await self._session.start()  # returns at once when already started
         return self._session
+
+    @hidden
+    def attach(self, agent: Any) -> None:
+        """Installed on an agent: its class gets :data:`SHELL_RUN_HINT`, unless it has a hint."""
+        super().attach(agent)
+        if agent is not None and not has_own_hint(RUN_COMMAND, agent):
+            register_hint(RUN_COMMAND, SHELL_RUN_HINT, owner=type(agent))
 
     @hidden
     async def close(self) -> None:
@@ -720,7 +1173,10 @@ class ShellTools(Skill):
             return None
 
         anchors: list[tuple[str, int]] = []
-        file_cache: dict[str, tuple[Path, list[str]]] = {}
+        # path -> (resolved path, {line number: line text}), holding only the
+        # anchored lines. The resolved path is carried so each Match stays
+        # bound to the file the hit came from even if the shell cwd moves.
+        file_cache: dict[str, tuple[Path, dict[int, str]]] = {}
         for raw in rg_out.splitlines():
             raw = raw.strip()
             if not raw:
@@ -778,24 +1234,41 @@ class ShellTools(Skill):
         else:
             keep = anchors
 
+        # Fetch only the anchored lines. A search hit near the end of a very
+        # large file used to pull that whole file into memory to quote one
+        # line of it, and the agent never asked for a read — any grep could
+        # trigger it. Cost now scales with the number of anchors instead.
+        wanted: dict[str, set[int]] = {}
+        for mpath, line_no in keep:
+            wanted.setdefault(mpath, set()).add(line_no)
+
+        for mpath, line_nos in wanted.items():
+            try:
+                resolved = self._resolve_path(mpath)
+                file_cache[mpath] = (
+                    resolved,
+                    read_specific_lines(resolved, line_nos, max_line_chars=self.max_file_bytes),
+                )
+            except (OSError, ValueError):
+                # Includes FileTooLargeError. Harvesting is fail-closed by
+                # design: no anchors is a supported outcome, a wrong anchor
+                # is not.
+                return None
+
         out: list[Match] = []
         for mpath, line_no in keep:
-            if mpath not in file_cache:
-                try:
-                    resolved = self._resolve_path(mpath)
-                    lines = resolved.read_text().splitlines(keepends=True)
-                    file_cache[mpath] = (resolved, lines)
-                except (OSError, ValueError):
-                    return None
             resolved, lines = file_cache[mpath]
-            if not (1 <= line_no <= len(lines)):
+            line = lines.get(line_no)
+            if line is None:
+                # Anchor points past the end of the file — same distrust of
+                # the rg output as before.
                 return None
             out.append(
                 Match(
                     mpath,
                     line_no,
                     line_no,
-                    lines[line_no - 1],
+                    line,
                     resolved_path=resolved,
                 )
             )
@@ -907,19 +1380,30 @@ class ShellTools(Skill):
 
         Returns:
             Match with .text, .numbered, .path, .start, .end.
+
+        Raises:
+            FileTooLargeError: Whole-file read over ``max_file_bytes``.
         """
         resolved = self._resolve_path(path)
-        content = resolved.read_text()
-        all_lines = content.splitlines(keepends=True)
-        total = len(all_lines)
 
         if lines is not None:
             start, end = lines
             start = max(1, start)
-            end = min(total, end)
-            text = "".join(all_lines[start - 1 : end])
-            return Match(str(path), start, end, text, resolved_path=resolved)
+            text, clamped_end = read_line_range(
+                resolved, start, end, max_line_chars=self.max_file_bytes
+            )
+            return Match(str(path), start, clamped_end, text, resolved_path=resolved)
 
+        content = read_whole_file_checked(
+            resolved,
+            self.max_file_bytes,
+            hint=(
+                "Read a region instead: read(path, lines=(start, end)). To allow "
+                "whole-file reads this large, construct "
+                "ShellTools(max_file_bytes=...)."
+            ),
+        )
+        total = len(content.splitlines(keepends=True))
         return Match(str(path), 1, total, content, resolved_path=resolved)
 
     async def replace(
@@ -943,6 +1427,9 @@ class ShellTools(Skill):
         1. replace(match, new_text) — replace the Match's line region.
         2. replace(path, old, new)  — old must match exactly once. new="" deletes.
 
+        Both forms rebuild the file, so both are capped at ``max_file_bytes``
+        (8 MiB by default) and raise above it instead of loading the file.
+
         A Match replaces its entire line region, not a substring within it.
         Stale or invalid anchors raise StaleMatchError without writing; re-read or
         re-search and recompute the Match. Anchors are never relocated. This is
@@ -953,6 +1440,9 @@ class ShellTools(Skill):
             target: A Match or file path string.
             old_or_new: For Match: the new text. For path: old text to find.
             new: Only for path form: the replacement text.
+
+        Raises:
+            FileTooLargeError: The file is over ``max_file_bytes``.
         """
         if isinstance(target, Match):
             if new is not None:
@@ -968,7 +1458,9 @@ class ShellTools(Skill):
             new_text = old_or_new
             resolved = Path(target.resolved_path)
             try:
-                content = resolved.read_text()
+                content = read_whole_file_checked(
+                    resolved, self.max_file_bytes, hint=_REPLACE_OVERSIZE_HINT
+                )
             except FileNotFoundError:
                 raise StaleMatchError(target, None, "file no longer exists") from None
             all_lines = content.splitlines(keepends=True)
@@ -990,7 +1482,18 @@ class ShellTools(Skill):
                 if target.end > len(all_lines):
                     raise StaleMatchError(target, current, "captured line range is out of bounds")
                 if current != target.text:
-                    raise StaleMatchError(target, current, "captured text no longer matches")
+                    # Where the captured text is now, if it moved (the anchor is not relocated).
+                    found = await asyncio.to_thread(_closest_region, content, target.text)
+                    hint = ""
+                    if found is not None:
+                        first, last, ratio = found
+                        hint = (
+                            f"The captured text is now closest to lines {first}-{last} "
+                            f"({ratio:.0%} similar); read() those lines for a fresh Match."
+                        )
+                    raise StaleMatchError(
+                        target, current, "captured text no longer matches", hint=hint
+                    )
 
             before = all_lines[: target.start - 1]
             after = all_lines[target.end :]
@@ -1025,19 +1528,20 @@ class ShellTools(Skill):
                 )
             old_text = old_or_new
             resolved = self._resolve_path(target)
-            content = resolved.read_text()
+            content = read_whole_file_checked(
+                resolved, self.max_file_bytes, hint=_REPLACE_OVERSIZE_HINT
+            )
 
             count = content.count(old_text)
             if count == 0:
-                raise ValueError(
-                    f"old text not found in {target}. "
-                    "It must match exactly once — check whitespace and indentation."
+                # The closest-region search is CPU work: run it off the event loop so
+                # jobs, Shells and children keep running while the hint is built.
+                message = await asyncio.to_thread(
+                    _not_found_replace_message, target, resolved, content, old_text, new
                 )
+                raise ValueError(message)
             if count > 1:
-                raise ValueError(
-                    f"old text matched {count} times in {target}. "
-                    "It must match exactly once — add surrounding context to make it unique."
-                )
+                raise ValueError(_ambiguous_replace_message(target, content, old_text, count))
 
             new_content = content.replace(old_text, new, 1)
             resolved.write_text(new_content)

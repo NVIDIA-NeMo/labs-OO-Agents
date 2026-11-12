@@ -11,21 +11,22 @@ Covers:
 - CodeAct calling module-level functions and other standalone functions
 - ScopedContext: context blocks in system prompt
 - Wrapper metadata: _standalone, _plan_strategy, _plan_llm, __name__, __doc__
-- Error cases: non-async function, stacked decorators, invalid context type
+- Error cases: missing ellipsis, non-async function, stacked decorators, invalid context type
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import linecache
 from typing import Any
 
 import pytest
 from pydantic import BaseModel
 
-from nooa import strategy
+from nooa import Agent, strategy
 from nooa.context_blocks import ScopedContext
-from nooa.strategies import CodeActStrategy, PredictStrategy
+from nooa.strategies import CodeActStrategy, DecideStrategy, PredictStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
 # ---------------------------------------------------------------------------
@@ -177,15 +178,6 @@ class TestStandaloneMetadata:
 
         assert isinstance(fn._plan_strategy, CodeActStrategy)  # type: ignore[attr-defined]
 
-    def test_no_ellipsis_not_wrapped(self) -> None:
-        """A standalone function without ellipsis body is returned unchanged."""
-
-        @strategy(PredictStrategy())
-        async def fn(x: str) -> str:
-            return "static"
-
-        assert not hasattr(fn, "_standalone")
-
 
 # ---------------------------------------------------------------------------
 # Validation / error-path tests
@@ -193,6 +185,61 @@ class TestStandaloneMetadata:
 
 
 class TestStandaloneErrors:
+    @pytest.mark.parametrize(
+        "decorator",
+        [
+            strategy(),
+            strategy(PredictStrategy()),
+            strategy(llm=FakeLLMClient()),
+            strategy(DecideStrategy(), decision_model="test-decisions"),
+        ],
+        ids=["default-strategy", "explicit-strategy", "explicit-llm", "decision-model"],
+    )
+    def test_no_ellipsis_raises_at_definition_time(self, decorator: Any) -> None:
+        """A standalone @strategy function must declare generation with ``...``."""
+
+        with pytest.raises(
+            TypeError,
+            match=r"standalone function 'fn'.*add '\.\.\.' as the function body or remove the decorator",
+        ):
+
+            @decorator
+            async def fn(x: str) -> str:
+                """Represent an implemented standalone function, not a generation stub."""
+                return f"static: {x}"
+
+    @pytest.mark.parametrize("body", ["return 1", "return None", "pass", '"Doc only."', "..."])
+    def test_raw_exec_requires_source_verifiable_ellipsis(self, body: str) -> None:
+        """Reject unknown source instead of silently guessing generation from bytecode."""
+        code = f"@strategy()\nasync def fn():\n    {body}\n"
+        with pytest.raises(TypeError, match="source-verifiable"):
+            exec(compile(code, "<standalone-no-source>", "exec"), {"strategy": strategy})
+
+    @pytest.mark.asyncio
+    async def test_exec_with_registered_source_still_generates(self, monkeypatch) -> None:
+        """A source-backed dynamic standalone function still reaches its configured LLM."""
+        fake = FakeLLMClient(scripted_responses=[_resp('{"value": "dynamic"}')])
+        code = '''\
+@strategy(PredictStrategy(), llm=fake)
+async def classify(text: str) -> str:
+    """Classify the supplied text."""
+    ...
+'''
+        filename = "<standalone-with-registered-source>"
+        monkeypatch.setitem(
+            linecache.cache, filename, (len(code), None, code.splitlines(True), filename)
+        )
+        namespace = {
+            "__name__": __name__,
+            "strategy": strategy,
+            "PredictStrategy": PredictStrategy,
+            "fake": fake,
+        }
+        exec(compile(code, filename, "exec"), namespace)
+
+        assert await namespace["classify"]("input") == "dynamic"
+        assert fake.call_count == 1
+
     def test_non_async_raises_typeerror(self) -> None:
         with pytest.raises(TypeError, match="must be async"):
 
@@ -331,6 +378,39 @@ class TestStandaloneCodeActStrategy:
             ...
 
         assert await compute("3+4") == 7
+
+    @pytest.mark.asyncio
+    async def test_generated_helper_without_ellipsis_reports_error_and_recovers(self) -> None:
+        """CodeAct sees the definition error and can correct it on the next turn."""
+        fake_llm = RecordingFakeLLM(
+            scripted_responses=[
+                _resp(
+                    tool_calls=[
+                        _exec(
+                            "@strategy(PredictStrategy())\n"
+                            "async def classify_one(text: str) -> str:\n"
+                            '    """Classify the supplied text."""'
+                        )
+                    ]
+                ),
+                _resp(tool_calls=[_ret("recovered")]),
+            ]
+        )
+
+        @strategy(CodeActStrategy(), llm=fake_llm)
+        async def run_batch(texts: list[str]) -> str:
+            """Classify the supplied texts."""
+            ...
+
+        assert await run_batch(["great", "bad"]) == "recovered"
+        assert fake_llm.call_count == 2
+
+        recovery_context = "\n".join(
+            str(message.get("content", "")) if isinstance(message, dict) else str(message)
+            for message in fake_llm.all_calls[1]["messages"]
+        )
+        assert "@strategy(...) on standalone function 'classify_one'" in recovery_context
+        assert "add '...' as the function body or remove the decorator" in recovery_context
 
     @pytest.mark.asyncio
     async def test_default_strategy_executes(self) -> None:
@@ -691,7 +771,7 @@ class TestStandaloneAgentIdSharding:
     """`prompt_cache_key` sharding contract for standalone functions.
 
     Each standalone call creates a fresh agent stub. The stub's ``_agent_id``
-    feeds the actor's default ``prompt_cache_key = f"{agent_id}-{strategy_tag}"``.
+    feeds the actor's default prompt-cache-key derivation.
     The id must satisfy three properties:
 
     1. Same function in the same process → same shard (fan-out cache hits).
@@ -726,9 +806,6 @@ class TestStandaloneAgentIdSharding:
         assert len(fake_llm.prompt_cache_keys) == 2
         assert fake_llm.prompt_cache_keys[0] == fake_llm.prompt_cache_keys[1]
         assert fake_llm.prompt_cache_keys[0] is not None
-        # The id must carry function identity so two different functions diverge
-        # (asserted in the next test) — sanity-check the format here.
-        assert "classify" in fake_llm.prompt_cache_keys[0]
 
     @pytest.mark.asyncio
     async def test_different_functions_get_different_cache_keys(self) -> None:
@@ -782,8 +859,10 @@ class TestStandaloneAgentIdSharding:
         )
 
     @pytest.mark.asyncio
-    async def test_agent_id_carries_per_process_token(self) -> None:
-        """The id format must include the module-level per-process token.
+    async def test_agent_id_carries_per_process_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Changing the module-level per-process token changes the shard.
 
         This is what spreads load when the same code is run as N separate
         Python processes — each gets a different ``_PROCESS_AGENT_ID`` at
@@ -792,16 +871,145 @@ class TestStandaloneAgentIdSharding:
         """
         from nooa import standalone as standalone_mod
 
-        fake_llm = _CaptureKwargsLLM(scripted_responses=[_resp('{"value": "x"}')])
+        fake_llm = _CaptureKwargsLLM(
+            scripted_responses=[_resp('{"value": "x"}'), _resp('{"value": "y"}')]
+        )
 
-        @strategy(PredictStrategy(), llm=fake_llm)
-        async def summarise(text: str) -> str:
-            """Summarise {text}."""
+        def make_summarise():
+            @strategy(PredictStrategy(), llm=fake_llm)
+            async def summarise(text: str) -> str:
+                """Summarise the input."""
+                ...
+
+            return summarise
+
+        monkeypatch.setattr(standalone_mod, "_PROCESS_AGENT_ID", "process1")
+        first = make_summarise()
+        monkeypatch.setattr(standalone_mod, "_PROCESS_AGENT_ID", "process2")
+        second = make_summarise()
+
+        await first("input")
+        await second("input")
+
+        assert fake_llm.prompt_cache_keys[0] != fake_llm.prompt_cache_keys[1]
+
+    @pytest.mark.asyncio
+    async def test_long_standalone_identity_produces_bounded_cache_key(self) -> None:
+        """Long package and qualified names cannot exceed the provider limit."""
+        fake_llm = _CaptureKwargsLLM(scripted_responses=[_resp('{"value": "ok"}')])
+
+        async def summarise_document(text: str) -> str:
+            """Summarise the document."""
             ...
 
-        await summarise("input")
+        summarise_document.__module__ = "myproject.agents.summarization.pipeline"
+        summarise_document.__qualname__ = "DocumentSummarizer.summarise_document"
+        wrapped = strategy(PredictStrategy(), llm=fake_llm)(summarise_document)
 
-        assert fake_llm.prompt_cache_keys[0] is not None
-        # Locks in the contract: if anyone ever drops the per-process token
-        # the cybergym-style multi-trial collision returns.
-        assert standalone_mod._PROCESS_AGENT_ID in fake_llm.prompt_cache_keys[0]
+        await wrapped("input")
+
+        key = fake_llm.prompt_cache_keys[0]
+        assert key is not None
+        assert key.startswith("nooa-")
+        assert len(key) <= 64
+
+    @pytest.mark.asyncio
+    async def test_long_agent_strategy_name_produces_bounded_cache_key_with_middleware(
+        self,
+    ) -> None:
+        """Long custom strategy names are bounded on the middleware path too."""
+
+        class MultiStepResearchPlanningAndVerificationStrategy(PredictStrategy):
+            pass
+
+        fake_llm = _CaptureKwargsLLM(scripted_responses=[_resp('{"value": "ok"}')])
+
+        class SummarizerAgent(Agent, llm=fake_llm):
+            @strategy(MultiStepResearchPlanningAndVerificationStrategy())
+            async def summarise(self, text: str) -> str:
+                """Summarise the text."""
+                ...
+
+        observed_keys: list[str | None] = []
+
+        async def passthrough(ctx, call_next):
+            result = await call_next(ctx)
+            observed_keys.append(ctx.params.get("prompt_cache_key"))
+            return result
+
+        agent = SummarizerAgent()
+        agent.event_manager.intercept("llm_call", passthrough)
+        await agent.summarise("input")
+
+        key = fake_llm.prompt_cache_keys[0]
+        assert key is not None
+        assert key.startswith("nooa-")
+        assert len(key) <= 64
+        assert observed_keys == [key]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("with_middleware", [False, True])
+    async def test_explicit_cache_key_is_preserved(self, with_middleware: bool) -> None:
+        """Explicit request keys survive both runtime call paths unchanged."""
+        explicit_key = "caller-selected-cache-key"
+
+        class ExplicitKeyStrategy(PredictStrategy):
+            def _build_sampling_kwargs(self) -> dict[str, Any]:
+                return {**super()._build_sampling_kwargs(), "prompt_cache_key": explicit_key}
+
+        fake_llm = _CaptureKwargsLLM(scripted_responses=[_resp('{"value": "ok"}')])
+
+        class Summarizer(Agent, llm=fake_llm):
+            @strategy(ExplicitKeyStrategy())
+            async def summarise(self, text: str) -> str:
+                """Summarise the input."""
+                ...
+
+        async def passthrough(ctx, call_next):
+            return await call_next(ctx)
+
+        agent = Summarizer()
+        if with_middleware:
+            agent.event_manager.intercept("llm_call", passthrough)
+        await agent.summarise("input")
+
+        assert fake_llm.prompt_cache_keys == [explicit_key]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("with_middleware", [False, True])
+    async def test_same_agent_different_strategies_get_different_keys(
+        self, with_middleware: bool
+    ) -> None:
+        """Strategy identity separates default keys within the same agent."""
+
+        class AlternatePredictStrategy(PredictStrategy):
+            pass
+
+        fake_llm = _CaptureKwargsLLM(scripted_responses=[_resp('{"value": "ok"}')] * 3)
+
+        class Summarizer(Agent, llm=fake_llm):
+            @strategy(PredictStrategy())
+            async def summarise(self, text: str) -> str:
+                """Summarise the input."""
+                ...
+
+            @strategy(AlternatePredictStrategy())
+            async def alternate(self, text: str) -> str:
+                """Summarise the input."""
+                ...
+
+        async def passthrough(ctx, call_next):
+            return await call_next(ctx)
+
+        agent = Summarizer()
+        if with_middleware:
+            agent.event_manager.intercept("llm_call", passthrough)
+        await agent.summarise("input")
+        await agent.alternate("input")
+        await agent.summarise("input")
+
+        first, alternate, repeated = fake_llm.prompt_cache_keys
+        assert first is not None
+        assert alternate is not None
+        assert first == repeated
+        assert first != alternate

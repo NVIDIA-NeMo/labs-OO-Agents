@@ -89,7 +89,7 @@ class TestRegistration:
         first, rejected = FakeSkill(), FakeSkill()
         registry.register(first_name, first)
         registry.activate([first_name])
-        with pytest.raises(ValueError, match="already provided by active skill"):
+        with pytest.raises(ValueError, match="already provided by 'research"):
             registry.register(second, rejected)
         assert registry.loaded() == [first_name]
         assert registry._managed_skills() == (first,)
@@ -136,7 +136,7 @@ class TestRegistration:
 
 
 class TestLoading:
-    def test_load_replaces_inactive_conflicting_leaf(self, agent, caplog):
+    def test_load_reports_a_conflicting_leaf(self, agent, caplog):
         entries = []
         for name in ("research.search", "support.search"):
             entry = MagicMock(name=name)
@@ -146,10 +146,13 @@ class TestLoading:
         with patch("nooa.skill_registry.entry_points", return_value=entries):
             registry = SkillRegistry(agent)
         registry.load(["*"])
-        assert registry.loaded() == ["support.search"]
-        assert "replaces inactive skill research.search" in caplog.text
+        # A discovered duplicate leaf is a name conflict, not a replacement.
+        assert registry.loaded() == ["research.search"]
+        assert registry.name_conflicts() == [
+            "skill 'search' not loaded: the agent already has an attribute named search; "
+            "rename the skill"
+        ]
         registry.activate(["*"])
-        assert len(registry.loaded()) == 1
         assert registry.active_skills() == (agent.search,)
 
     def test_load_skips_leaf_of_active_skill(self, agent, caplog):
@@ -164,7 +167,7 @@ class TestLoading:
         registry.load(["support.search"])
         assert registry.loaded() == ["research.search"]
         assert agent.search is first
-        assert "already provided by active skill 'research.search'" in caplog.text
+        assert "already provided by 'research.search'" in caplog.text
 
     def test_load_from_entry_point(self, agent):
         ep = MagicMock()
@@ -473,3 +476,75 @@ def test_a_directly_assigned_undeclared_attribute_is_not_protected():
     registry = SkillRegistry(agent)
     registry.register("mcp.notes", _Tool())
     assert isinstance(agent.notes, _Tool)
+
+
+# ---------------------------------------------------------------------------
+# Tests: name conflicts (every load path)
+# ---------------------------------------------------------------------------
+
+
+def _conflict_line(leaf: str) -> str:
+    return (
+        f"skill {leaf!r} not loaded: the agent already has an attribute named {leaf}; "
+        "rename the skill"
+    )
+
+
+def test_an_entry_point_skill_whose_attribute_is_taken_is_not_loaded():
+    class _Agent:
+        def __init__(self):
+            self.fake = "mine"
+
+    agent = _Agent()
+    ep = MagicMock()
+    ep.name = "nemo.fake"
+    ep.load.return_value = FakeSkill
+    with patch("nooa.skill_registry.entry_points", return_value=[ep]):
+        reg = SkillRegistry(agent)
+    reg.load(["nemo.fake"])
+    assert "nemo.fake" not in reg.loaded()
+    assert agent.fake == "mine"
+    assert reg.name_conflicts() == [_conflict_line("fake")]
+
+
+def _write_package(root, name: str) -> None:
+    pkg = root / name
+    (pkg / name).mkdir(parents=True)
+    (pkg / "pyproject.toml").write_text(
+        f'[project]\nname = "{name}"\n[project.entry-points."nooa.skills"]\n'
+        f'"local.{name}" = "{name}"\n'
+    )
+    (pkg / name / "__init__.py").write_text(
+        "from nooa.skill import Skill\n\n\nclass Tool(Skill):\n"
+        "    def hi(self) -> str:\n        return 'hi'\n"
+    )
+
+
+def test_a_libs_package_skill_whose_attribute_is_taken_is_not_loaded(tmp_path, agent):
+    _write_package(tmp_path, "pkgconflict")
+    agent.pkgconflict = "mine"
+    with patch("nooa.skill_registry.entry_points", return_value=[]):
+        reg = SkillRegistry(agent)
+    reg.discover_libs(tmp_path)
+    assert "local.pkgconflict" not in reg.loaded()
+    assert agent.pkgconflict == "mine"
+    assert reg.name_conflicts() == [_conflict_line("pkgconflict")]
+
+
+def test_a_text_skill_registers_from_any_libs_dir(tmp_path, registry, agent):
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "SKILL.md").write_text("---\nname: notes\ndescription: d\n---\nbody\n")
+    registry.discover_libs(tmp_path)
+    assert "local.notes" in registry.loaded()
+    assert registry.name_conflicts() == []
+
+
+async def test_reloading_a_skill_is_not_a_name_conflict(tmp_path, registry, agent):
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "SKILL.md").write_text("---\nname: notes\ndescription: d\n---\nbody\n")
+    registry.discover_libs(tmp_path)
+    result = await registry.reload("local.notes")
+    assert result.startswith("Reloaded "), result
+    registry.discover_libs(tmp_path)  # rediscovering its own directory is no conflict either
+    assert "local.notes" in registry.loaded()
+    assert registry.name_conflicts() == []

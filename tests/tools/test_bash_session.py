@@ -128,3 +128,64 @@ class TestBashSession:
         await session.run(f"echo 'test content' > {tmp_path}/test.txt")
         out, _, _ = await session.run(f"cat {tmp_path}/test.txt")
         assert "test content" in out
+
+
+class TestPublicStateHelpers:
+    """``is_busy()`` and ``snapshot_cwd_env()``: public, non-blocking state reads."""
+
+    async def test_not_started_is_not_busy_and_has_no_snapshot(self, tmp_path):
+        s = BashSession(cwd=tmp_path)
+        try:
+            assert s.is_busy() is False
+            assert await s.snapshot_cwd_env() is None  # does not start bash
+        finally:
+            await s.close()
+
+    async def test_snapshot_reads_cwd_and_exports(self, session, tmp_path):
+        (tmp_path / "sub").mkdir()
+        await session.run("cd sub; export SNAP_VAR='a b=c'; NOT_EXPORTED=1")
+        snap = await session.snapshot_cwd_env()
+        assert snap is not None
+        cwd, env = snap
+        assert cwd == str(tmp_path / "sub")
+        assert env["SNAP_VAR"] == "a b=c" and "NOT_EXPORTED" not in env
+        # The capture changes nothing in the session.
+        out, _, _ = await session.run('pwd; echo "$SNAP_VAR"')
+        assert out.splitlines() == [str(tmp_path / "sub"), "a b=c"]
+
+    async def test_snapshot_reads_a_large_environment_whole(self, session, tmp_path):
+        # Over 40 KB of env: its base64 is far past MAX_OUTPUT_CHARS, which a
+        # capped read would cut (and then decode to garbage or fail).
+        (tmp_path / "sub").mkdir()
+        await session.run('cd sub; export BIG_VAR="$(head -c 45000 /dev/zero | tr "\\0" x)"')
+        snap = await session.snapshot_cwd_env()
+        assert snap is not None
+        cwd, env = snap
+        assert cwd == str(tmp_path / "sub")
+        assert env["BIG_VAR"] == "x" * 45000
+        assert "PATH" in env
+
+    async def test_snapshot_is_none_when_the_capture_is_corrupt(self, session, monkeypatch):
+        async def cut(command, timeout, *, bounded=True):
+            # A cut blob that a lenient decode still accepts (non-base64 chars
+            # are dropped) and turns into garbage after "PATH=/bin".
+            return "/somewhere\nUEFUSD0vYmlu<truncated-output-x>", "", 0, False
+
+        monkeypatch.setattr(session, "_run_unlocked", cut)
+        assert await session.snapshot_cwd_env() is None  # never a wrong environment
+
+    async def test_busy_while_a_command_runs_and_no_snapshot_then(self, session):
+        import asyncio
+
+        assert session.is_busy() is False
+        running = asyncio.create_task(session.run("sleep 0.5"))
+        for _ in range(100):
+            if session.is_busy():
+                break
+            await asyncio.sleep(0.01)
+        assert session.is_busy() is True
+        assert await session.snapshot_cwd_env() is None  # returns at once, does not wait
+        assert not running.done()
+        await running
+        assert session.is_busy() is False
+        assert await session.snapshot_cwd_env() is not None

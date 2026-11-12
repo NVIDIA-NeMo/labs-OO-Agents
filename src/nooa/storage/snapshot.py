@@ -129,7 +129,7 @@ class AgentSnapshot(BaseModel):
             type_allowlist=all_allowlist,
         )
 
-    def restore(self, agent: Any) -> None:
+    def restore(self, agent: Any) -> dict[str, str]:
         """Restore this snapshot's state into an agent, mutating it in place.
 
         Note: this performs additive restoration — it does not clear
@@ -141,8 +141,19 @@ class AgentSnapshot(BaseModel):
         Args:
             agent: A freshly constructed Agent instance to restore into.
 
+        An attribute that fails to deserialize is skipped with a warning; the
+        other attributes are still restored. Last, if the agent has a callable
+        ``after_restore`` (``InteractiveAgent`` and its subclasses), it runs
+        once, so every restore path repairs what did not survive the restart;
+        hosts do not call it again.
+
+        Returns:
+            The skipped attributes: name mapped to a short reason
+            (``"<ExceptionType>: <message>"``). Empty when everything restored.
+
         Raises:
             SerializationError: If the snapshot version doesn't match.
+            DeserializationError: If a static context block can't be restored.
         """
         if self.version != SNAPSHOT_VERSION:
             raise SerializationError(
@@ -158,5 +169,25 @@ class AgentSnapshot(BaseModel):
         if self.disabled_context:
             agent.context_manager.disable(*self.disabled_context)
 
+        skipped: dict[str, str] = {}
         for attr_name, attr_value in self.attributes.items():
-            setattr(agent, attr_name, deserialize(attr_value, self.type_allowlist))
+            try:
+                value = deserialize(attr_value, self.type_allowlist)
+            except Exception as exc:
+                # Mirror ``from_agent``: one unrestorable attribute (e.g. nested
+                # deeper than ``MAX_SNAPSHOT_DEPTH`` in an older checkpoint, a
+                # schema-drifted model, or a failing ``__restore_snapshot__``)
+                # must not abort the whole restore. Skip it and warn.
+                logger.warning(
+                    "Snapshot: skipping non-restorable attribute %r: %s",
+                    attr_name,
+                    exc,
+                    exc_info=True,
+                )
+                skipped[attr_name] = f"{type(exc).__name__}: {exc}"
+                continue
+            setattr(agent, attr_name, value)
+        after_restore = getattr(agent, "after_restore", None)
+        if callable(after_restore):
+            after_restore()
+        return skipped

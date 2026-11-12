@@ -39,11 +39,11 @@ Extension point:
 from __future__ import annotations
 
 import contextlib
-from typing import Annotated, Any
+from typing import Annotated, Any, overload
 
 from nooa.agentdoc._metadata import set_docs_metadata, set_field_metadata
 
-_SENTINEL = object()
+_SENTINEL: Any = object()
 
 
 def _sync_hidden(target: Any, hidden_value: bool | None) -> None:
@@ -79,7 +79,7 @@ class SpecAnnotation:
     def __init__(self, **kwargs: Any) -> None:
         self.kwargs = kwargs
 
-    def __call__(self, target: Any) -> Any:
+    def __call__[T](self, target: T) -> T:
         """Apply as decorator: ``@spec(...)``."""
         # Sync _agentdoc_hidden attribute so is_hidden_method() and the _ prefix
         # override check in _extract_methods() both see the correct state.
@@ -106,6 +106,36 @@ class Spec:
     explicitly shown with ``spec(hidden=False)``.
     """
 
+    @overload
+    def __call__(
+        self,
+        /,
+        *,
+        hidden: bool | None = None,
+        description: str | None = None,
+        expand: bool | None = None,
+        max_length: int | None = ...,
+        max_string: int | None = ...,
+        max_depth: int | None = ...,
+        hide_empty: bool | None = None,
+    ) -> SpecAnnotation: ...
+
+    @overload
+    def __call__(
+        self,
+        target: Any,
+        field: str | None = None,
+        /,
+        *,
+        hidden: bool | None = None,
+        description: str | None = None,
+        expand: bool | None = None,
+        max_length: int | None = ...,
+        max_string: int | None = ...,
+        max_depth: int | None = ...,
+        hide_empty: bool | None = None,
+    ) -> None: ...
+
     def __call__(
         self,
         target: Any = _SENTINEL,
@@ -124,7 +154,7 @@ class Spec:
         ] = None,
         max_length: Annotated[
             int | None,
-            "Override max items per container in pformat — parameter annotations only, e.g. Annotated[list, spec(max_length=20)] (not honored on class fields)",
+            "Override max items per container in pformat for this annotation (parameter annotation or class field), e.g. Annotated[list, spec(max_length=20)]",
         ] = _SENTINEL,
         max_string: Annotated[
             int | None,
@@ -134,6 +164,10 @@ class Spec:
             int | None,
             "Override max nesting depth in pformat — parameter annotations only (not honored on class fields)",
         ] = _SENTINEL,
+        hide_empty: Annotated[
+            bool | None,
+            "In pformat, leave out a field whose value is None or empty ('', [], {}); on a class (all its fields) or one field. doc() still lists it",
+        ] = None,
     ) -> SpecAnnotation | None:
         """Specify documentation metadata — step 1.
 
@@ -189,6 +223,8 @@ class Spec:
             kwargs["max_string"] = max_string
         if max_depth is not _SENTINEL:
             kwargs["max_depth"] = max_depth
+        if hide_empty is not None:
+            kwargs["hide_empty"] = hide_empty
 
         if target is _SENTINEL:
             return SpecAnnotation(**kwargs)

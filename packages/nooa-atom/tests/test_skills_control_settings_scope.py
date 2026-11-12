@@ -1,0 +1,98 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""/skills activate|deactivate|add must never copy a user's personal
+settings.yaml entries into the shared, committed project settings file.
+"""
+
+import yaml
+from nooa_atom.agent.agent import AtomAgent
+from nooa_atom.agent.slash_commands import SlashCommandRegistry
+from nooa_atom.workspace.controls import SkillsControl
+from nooa_atom.workspace.options import AtomOptions
+
+from nooa.unifiedllm import FakeLLMClient
+
+
+async def test_deactivate_does_not_leak_a_users_personal_active_skill(tmp_path, monkeypatch):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+
+    # A personal, user-scope setting that only this user has -- never
+    # committed to the shared project file.
+    user_dir = tmp_path / "user-config"
+    user_dir.mkdir()
+    (user_dir / "settings.yaml").write_text(
+        yaml.safe_dump({"atom": {"active_skills": ["personal.secret-skill"]}})
+    )
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_dir))
+
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=workspace)
+    try:
+        config = AtomOptions(working_dir=str(workspace))
+        control = SkillsControl(agent, config, workspace=workspace)
+
+        result = await control.invoke("deactivate nemo.methodwriting")
+        assert result.success, str(result)
+
+        project_settings = yaml.safe_load((workspace / ".nooa" / "settings.yaml").read_text())
+        persisted_active = project_settings["atom"]["active_skills"]
+        assert "personal.secret-skill" not in persisted_active
+        assert "nemo.methodwriting" not in persisted_active
+    finally:
+        await agent.aclose()
+
+
+async def test_add_skills_dir_does_not_leak_a_users_personal_directory(tmp_path, monkeypatch):
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    extra_dir = tmp_path / "extra-skills"
+    extra_dir.mkdir()
+
+    user_dir = tmp_path / "user-config"
+    user_dir.mkdir()
+    (user_dir / "settings.yaml").write_text(
+        yaml.safe_dump({"atom": {"additional_skills_dirs": [str(tmp_path / "personal-only-dir")]}})
+    )
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_dir))
+
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=workspace)
+    try:
+        config = AtomOptions(working_dir=str(workspace))
+        command_registry = SlashCommandRegistry(agent)
+        control = SkillsControl(
+            agent, config, workspace=workspace, command_registry=command_registry
+        )
+
+        result = await control.invoke(f"add {extra_dir}")
+        assert result.success, str(result)
+
+        project_settings = yaml.safe_load((workspace / ".nooa" / "settings.yaml").read_text())
+        persisted_dirs = project_settings["atom"]["additional_skills_dirs"]
+        assert not any("personal-only-dir" in entry for entry in persisted_dirs)
+        assert any(str(extra_dir) in entry for entry in persisted_dirs)
+    finally:
+        await agent.aclose()
+
+
+async def test_activate_works_when_project_settings_mask_an_mcp_server(tmp_path, monkeypatch):
+    """forget_mcp() leaves ``mcp_servers: {name: null}``; /skills must still load settings."""
+    workspace = tmp_path / "project"
+    (workspace / ".nooa").mkdir(parents=True)
+    (workspace / ".nooa" / "settings.yaml").write_text(
+        yaml.safe_dump({"atom": {"mcp_servers": {"forgotten": None}}})
+    )
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user-config"))
+
+    options = AtomOptions.load(workspace)
+    assert "forgotten" not in options.mcp_servers
+
+    agent = AtomAgent(llm=FakeLLMClient(), cwd=workspace)
+    try:
+        control = SkillsControl(agent, options, workspace=workspace)
+        result = await control.invoke("activate nemo.methodwriting")
+        assert result.success, str(result)
+        project_settings = yaml.safe_load((workspace / ".nooa" / "settings.yaml").read_text())
+        assert "nemo.methodwriting" in project_settings["atom"]["active_skills"]
+        assert project_settings["atom"]["mcp_servers"] == {"forgotten": None}
+    finally:
+        await agent.aclose()

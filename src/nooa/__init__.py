@@ -10,7 +10,12 @@ serialized execution, and complete transparency.
 import logging as _logging
 import typing as _typing
 
+from nooa._platform_policy import check_platform as _check_platform
 from nooa._version import __version__
+
+# Native Windows is unsupported: stop here, before any other nooa module loads,
+# unless NOOA_SKIP_PLATFORM_CHECK=1 (see nooa._platform_policy).
+_check_platform()
 
 # ---------------------------------------------------------------------------
 # Library logging: add NullHandler so applications that don't configure
@@ -65,6 +70,7 @@ from nooa.default_context_view import CodeActView, PredictView  # noqa: E402
 
 # Export errors
 from nooa.errors import (  # noqa: E402
+    CodeSyntaxError,
     DynamicMethodAdditionError,
     GenerationError,
     NemoOOAgentsError,
@@ -257,6 +263,7 @@ __all__ = [
     "GenerationError",
     "ValidationError",
     "RestrictedCodeError",
+    "CodeSyntaxError",
     "NemoOOAgentsRuntimeError",
     "DynamicMethodAdditionError",
     "SerializationError",

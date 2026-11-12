@@ -16,6 +16,7 @@ import typing
 from typing import Any
 
 from nooa.agentdoc._info import REQUIRED, CallableInfo, FieldInfo, ModuleInfo, TypeInfo
+from nooa.agentdoc._visibility import _resolve_type_hints
 from nooa.agentdoc.protocols import SupportsCallableInfo, SupportsTypeInfo
 
 # Re-export REQUIRED for backward compatibility
@@ -238,7 +239,7 @@ def extract_callable_info(obj: Any) -> CallableInfo:
             hint_targets = (call_method,) if call_method is not None else (sig_obj,)
         for hint_target in hint_targets:
             try:
-                resolved = typing.get_type_hints(hint_target, include_extras=True)
+                resolved = _resolve_type_hints(hint_target)
                 break
             except (NameError, AttributeError, TypeError):
                 continue
@@ -612,6 +613,43 @@ def _extract_pydantic_fields(obj: type) -> list[FieldInfo]:
                 name=name, type=type_str, default=default, description=description, repr=repr_value
             )
         )
+    fields.extend(_extract_pydantic_properties(obj, {field.name for field in fields}))
+    return fields
+
+
+def _extract_pydantic_properties(obj: type, seen_names: set[str]) -> list[FieldInfo]:
+    """Document accessors without making them serialized model fields."""
+    from pydantic import BaseModel
+
+    from nooa.agentdoc._visibility import explicit_field_visibility, is_hidden_field
+
+    fields = []
+    # Derived definitions win, including non-property overrides. BaseModel's
+    # own inspection/serialization API is not the model's advertised data.
+    for klass in obj.__mro__:
+        for name, value in klass.__dict__.items():
+            if name in seen_names:
+                continue
+            seen_names.add(name)
+            if klass in (BaseModel, object) or name.startswith("_"):
+                continue
+            if not isinstance(value, (property, functools.cached_property)):
+                continue
+            # An unhide declared on a base class holds for its subclasses too.
+            explicitly_unhidden = explicit_field_visibility(obj, name) is False
+            getter = value.fget if isinstance(value, property) else value.func
+            if not explicitly_unhidden and (
+                is_hidden_field(obj, name)
+                or getattr(value, "_agentdoc_hidden", None) is True
+                or getattr(getter, "_agentdoc_hidden", None) is True
+            ):
+                continue
+            extract = (
+                _extract_property_field
+                if isinstance(value, property)
+                else _extract_cached_property_field
+            )
+            fields.append(extract(obj, name, value))
     return fields
 
 
@@ -619,7 +657,7 @@ def _extract_dataclass_fields(obj: type) -> list[FieldInfo]:
     """Extract fields from dataclass."""
     # Resolve full hints (preserving Annotated metadata) for description extraction
     try:
-        resolved = typing.get_type_hints(obj, include_extras=True)
+        resolved = _resolve_type_hints(obj)
     except (NameError, AttributeError, TypeError):
         resolved = {}
 
@@ -651,8 +689,7 @@ def _extract_dataclass_fields(obj: type) -> list[FieldInfo]:
         )
 
     # Also extract @property and @cached_property descriptors (same as _extract_plain_class_fields step 4)
-    from nooa.agentdoc._metadata import get_field_metadata
-    from nooa.agentdoc._visibility import is_hidden_field
+    from nooa.agentdoc._visibility import explicit_field_visibility, is_hidden_field
 
     seen_names = {f.name for f in fields}
     for klass in reversed(obj.__mro__):
@@ -665,7 +702,7 @@ def _extract_dataclass_fields(obj: type) -> list[FieldInfo]:
                 continue
             if name in seen_names:
                 continue
-            explicitly_unhidden = get_field_metadata(obj, name).get("hidden") is False
+            explicitly_unhidden = explicit_field_visibility(obj, name) is False
             if not explicitly_unhidden:
                 if is_hidden_field(obj, name):
                     continue
@@ -693,7 +730,7 @@ def _extract_namedtuple_fields(obj: type) -> list[FieldInfo]:
     fields = []
     field_names = obj._fields
     try:
-        field_types = typing.get_type_hints(obj, include_extras=True)
+        field_types = _resolve_type_hints(obj)
     except (NameError, AttributeError, TypeError):
         field_types = inspect.get_annotations(obj)
     defaults = getattr(obj, "_field_defaults", {})
@@ -714,7 +751,7 @@ def _extract_typeddict_fields(obj: type) -> list[FieldInfo]:
     rather than showing a default value (which would be semantically incorrect).
     """
     try:
-        annotations = typing.get_type_hints(obj, include_extras=True)
+        annotations = _resolve_type_hints(obj)
     except (NameError, AttributeError, TypeError):
         annotations = inspect.get_annotations(obj)
     required = getattr(obj, "__required_keys__", set())
@@ -801,7 +838,7 @@ def _augment_docstring_with_annotated_descriptions(
     """
     if resolved_hints is None:
         try:
-            resolved = typing.get_type_hints(func, include_extras=True)
+            resolved = _resolve_type_hints(func)
         except (NameError, AttributeError, TypeError):
             resolved = None
     else:
@@ -961,7 +998,7 @@ def _extract_plain_class_fields(obj: type) -> list[FieldInfo]:
     # (from `from __future__ import annotations`) and preserve Annotated metadata.
     # Fall back to raw __annotations__ if resolution fails (e.g. forward refs).
     try:
-        resolved_hints = typing.get_type_hints(obj, include_extras=True)
+        resolved_hints = _resolve_type_hints(obj)
     except (NameError, AttributeError, TypeError):
         resolved_hints = None
 
@@ -1078,8 +1115,7 @@ def _extract_plain_class_fields(obj: type) -> list[FieldInfo]:
             seen_names.add(field.name)
 
     # 4. Extract @property and @cached_property descriptors across the MRO
-    from nooa.agentdoc._metadata import get_field_metadata
-    from nooa.agentdoc._visibility import is_hidden_field
+    from nooa.agentdoc._visibility import explicit_field_visibility, is_hidden_field
 
     for klass in reversed(obj.__mro__):
         if klass is object:
@@ -1093,7 +1129,8 @@ def _extract_plain_class_fields(obj: type) -> list[FieldInfo]:
                 continue
             # spec(hidden=False) explicitly unhides — overrides @hidden markers.
             # spec(hidden=True) and annotation-based hiding are checked via is_hidden_field.
-            explicitly_unhidden = get_field_metadata(obj, name).get("hidden") is False
+            # An unhide declared on a base class holds for its subclasses too.
+            explicitly_unhidden = explicit_field_visibility(obj, name) is False
             if not explicitly_unhidden:
                 if is_hidden_field(obj, name):
                     continue
@@ -1573,7 +1610,9 @@ def _extract_methods(obj: type) -> list[CallableInfo]:
     source_order: dict[str, int] = {}
     idx = 0
     for klass in obj.__mro__:
-        for name, value in klass.__dict__.items():
+        # Attribute lookup on lazy values (e.g. Pydantic validators) can rebuild
+        # the class while we inspect it. Preserve this pass's definition order.
+        for name, value in list(klass.__dict__.items()):
             try:
                 qualname = getattr(value, "__qualname__", None) or f"{klass.__qualname__}.{name}"
             except Exception:

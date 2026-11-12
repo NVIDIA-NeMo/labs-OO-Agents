@@ -8,6 +8,7 @@ from typing import Any
 from nooa.context_blocks import EventBase, Role
 from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.context_view import Block, CacheBoundary, ContextItem
+from nooa.decisions.media import reject_nested_media
 
 
 def decision_context_from_items(
@@ -44,8 +45,23 @@ def decision_context_from_items(
 
 
 def _decision_event_payload(event: EventBase) -> dict[str, Any]:
-    """Serialize one view-selected event, without applying another visibility filter."""
+    """Serialize one view-selected event, without applying another visibility filter.
+
+    Only fields shown in ``repr`` are included; fields with ``repr=False`` hold
+    internal or storage data and are left out.
+
+    Raises:
+        TypeError: If a model-visible field contains a Media object.
+    """
     public_fields = {name for name, field in type(event).model_fields.items() if field.repr}
+    # Check for Media before calling model_dump: a custom serializer could
+    # turn a nested Image into text. Fields with repr=False are not checked
+    # because they are not sent to the model.
+    for name in public_fields:
+        try:
+            reject_nested_media(getattr(event, name))
+        except TypeError as exc:
+            raise TypeError(f"Decision event {event.event_type!r} field {name!r}: {exc}") from exc
     data = event.model_dump(mode="python", include=public_fields, exclude_none=True)
     replay_content = getattr(event, "replay_content", None)
     if not data and isinstance(replay_content, str):

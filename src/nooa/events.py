@@ -410,15 +410,14 @@ class AfterAgentCall(EventBase):  # type: ignore[misc]
     )
 
 
-class TuiSessionResumed(EventBase):  # type: ignore[misc]
-    """Emitted once after a TUI agent is reconstituted from a snapshot.
+class SessionResumed(EventBase):  # type: ignore[misc]
+    """Emitted once after a host starts or resumes an agent's session.
 
-    Fired after ``restore_latest_snapshot()`` completes (both the ``-c``
-    startup resume in ``bootstrap`` and the ``/session resume`` command), before
-    the first turn runs — so the agent's snapshot-backed state (``self.v``,
-    todos, ...) is already in place. Skills can subscribe via
-    ``event_manager.on("TuiSessionResumed", handler)`` to run post-restore setup
-    (e.g. ``agent_mesh`` reconnecting and reclaiming its handle).
+    The host fires it after restoring the latest snapshot, before the first
+    turn runs, so the agent's snapshot-backed state (``self.v``, ...) is
+    already in place. Skills can subscribe via
+    ``event_manager.on("SessionResumed", handler)`` to run post-restore setup
+    (e.g. reconnect and reclaim a handle).
 
     Always emitted on session startup/resume; ``restored`` distinguishes an
     actual snapshot restore (True) from a fresh session with nothing to restore
@@ -437,15 +436,14 @@ class TuiSessionResumed(EventBase):  # type: ignore[misc]
     ]
 
 
-class TuiSessionCleared(EventBase):  # type: ignore[misc]
-    """Emitted once after a TUI agent's working state is reset by ``/clear``.
+class SessionCleared(EventBase):  # type: ignore[misc]
+    """Emitted once after a host resets an agent's working state for a fresh session.
 
-    Fired at the end of ``_reset_agent_working_state()`` — after todos, vars,
-    user context blocks, and the shell have been reset, with the agent in its
-    clean post-clear state. The symmetric counterpart to ``TuiSessionResumed``:
-    skills subscribe via ``event_manager.on("TuiSessionCleared", handler)`` to
-    re-initialize session-scoped state (caches, connections, ...) for the fresh
-    session.
+    The host fires it once the reset is done (vars, user context blocks and
+    tools reset), with the agent in its clean post-clear state. The
+    counterpart to ``SessionResumed``: skills subscribe via
+    ``event_manager.on("SessionCleared", handler)`` to re-initialize
+    session-scoped state (caches, connections, ...) for the fresh session.
 
     Uses Role.RUNTIME_EVENT — never recorded in conversation events, never in
     LLM context.
@@ -720,8 +718,8 @@ Event = (
     | Summary
     | BeforeTurn
     | AfterTurn
-    | TuiSessionResumed
-    | TuiSessionCleared
+    | SessionResumed
+    | SessionCleared
     | SystemPrompt
     | TextOnlyReply
     | LoopGuardTriggered
