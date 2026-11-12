@@ -16,7 +16,9 @@ prompt (``Agent._resolve_system_prompt``).
   written, then the resulting string is cut the same way.
 
 A small ``str``, number, ``None``, bool, list, tuple or dict renders as
-``str(value)`` did.
+``str(value)`` did. To insert a value's ``str()`` text instead of its
+snapshot notation (a ``Path`` as ``/workspace/repo`` rather than
+``PosixPath('/workspace/repo')``), write ``{str(expr)}`` or ``{expr!s}``.
 """
 
 from __future__ import annotations
