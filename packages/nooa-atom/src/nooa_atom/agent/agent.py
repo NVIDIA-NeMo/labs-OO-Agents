@@ -771,8 +771,8 @@ class AtomAgent(
         if isinstance(current, TodoList):
             return
         # An earlier session's TodoManager keeps its items, ids, notes and active item.
-        self.todo = TodoList(manager=current) if isinstance(current, TodoManager) else TodoList()
-        self.skills.register("nemo.todo", self.todo)
+        todo = TodoList(manager=current) if isinstance(current, TodoManager) else TodoList()
+        self.skills.register("nemo.todo", todo)
 
     @hidden
     @no_trace
