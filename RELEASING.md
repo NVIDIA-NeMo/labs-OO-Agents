@@ -1,6 +1,6 @@
 # Releasing
 
-`nooa`, `nooa-cli`, `nooa-acp`, `nooa-memory`, and `nooa-bench` release together from one
+`nooa`, `nooa-cli`, `nooa-acp`, `nooa-memory`, `nooa-bench`, and `nooa-atom` release together from one
 commit. The version comes from the Git tag: on `v0.0.10` the distributions are
 `0.0.10`; between tags they are development versions.
 
@@ -23,9 +23,18 @@ The strict gate performs:
 
 1. Ruff lint and formatting, SPDX checks, unit tests, and explicit OS sandbox
    containment tests.
-2. Builds all five wheels and source distributions under a temporary local tag,
+2. Builds all six wheels and source distributions under a temporary local tag,
    verifies their versions, and smoke-tests imports and `nooa --version` in a
-   clean environment.
+   clean environment. In a separate core-only environment, installs the built
+   `nooa` wheel from outside the checkout with freshly resolved PyPI dependencies
+   (no lockfile, workspace constraints, or optional extras), then runs quickstarts
+   01–03 against the real LLM: basic generation, structured outputs, and Python
+   tools. A separate release harness validates the examples' printed results:
+   nonempty feedback text, a populated typed analysis, and the expected inventory
+   outcome with a finite cost. The quickstart files run unchanged. A failed
+   result check, example, dependency install, or timeout blocks the
+   release. The examples use the quickstart helper's NVIDIA inference route and
+   the protected inference key; no internal model adapter is installed.
 3. Runs the full capability suite for the candidate and previous release, fresh
    and back-to-back: four gate models, three runs, full data, no response cache.
 4. Writes private results, traces, distributions, checksums, a JSON manifest,
@@ -57,7 +66,7 @@ release or uploads to PyPI.
 
 Publishing is the single human approval. `.github/workflows/publish.yml` listens
 for `release: published` and automatically rebuilds, smoke-tests, and uploads
-all five packages to PyPI using Trusted Publishing. Despite their names, the
+all six packages to PyPI using Trusted Publishing. Despite their names, the
 current `pypi-*` GitHub Environments have no configured reviewer protection, so
 there is no second approval after **Publish release**.
 
@@ -68,6 +77,10 @@ GitLab retains the release evidence for 90 days. Start with `job-summary.md` and
 toolchain identity, check outcomes, capability scope/results, distribution
 checksums, and draft identity. Raw `.noo-eval.jsonl` files and traces are private
 artifacts and must not be copied into the public draft.
+
+`quickstart-smoke/` records the fresh environment's resolved package versions,
+the example source hashes and outcomes, and per-command logs. The manifest's
+`quickstart_smoke` entry is updated as each example completes, including failures.
 
 Hard-gate failure or capability-infrastructure failure before draft creation
 creates no draft. Fix the problem and start a new pipeline with the same tag
@@ -107,6 +120,11 @@ the existing PyPI OIDC identities.
 If the private controller is unavailable, a trusted maintainer may run the
 public script from a clean, current `main` checkout:
 
+Export `NVIDIA_INFERENCE_API_KEY` or `NVIDIA_INTERNAL_API_KEY` first. The fresh-wheel
+quickstarts make live calls even with `--skip-capability`, `--checks-only`, or
+`--dry-run`; those options do not skip the quickstart gate. A `.env` file alone
+does not satisfy this preflight check.
+
 ```bash
 uv run python scripts/make_release.py v0.0.10
 ```
@@ -121,8 +139,8 @@ GitHub draft UI.
 
 Each project needs a publisher configured for owner `NVIDIA-NeMo`, repository
 `labs-OO-Agents`, workflow `publish.yml`, and its distinct environment:
-`pypi-nooa`, `pypi-nooa-cli`, `pypi-nooa-acp`, `pypi-nooa-memory`, or
-`pypi-nooa-bench`. Repeat
+`pypi-nooa`, `pypi-nooa-cli`, `pypi-nooa-acp`, `pypi-nooa-memory`,
+`pypi-nooa-bench`, or `pypi-nooa-atom`. Repeat
 with `testpypi-*` environments on TestPyPI.
 
 Every `uses:` entry in `publish.yml` must remain compatible with the NVIDIA

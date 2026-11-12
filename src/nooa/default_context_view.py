@@ -3,6 +3,7 @@
 """Default context policy implemented against public framework interfaces."""
 
 import ast
+import inspect
 import logging
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
@@ -127,7 +128,10 @@ def resolve_agent_system_prompt(agent: "Agent") -> str:
     """Resolve the nearest agent class docstring as a prompt template."""
     import string
 
-    prompt = next((cls.__doc__ for cls in type(agent).__mro__ if cls.__doc__), "")
+    # cleandoc: Python 3.13+ strips docstring indentation at compile time and
+    # 3.12 keeps it, so the raw ``__doc__`` would make the prompt depend on the
+    # interpreter version.
+    prompt = next((inspect.cleandoc(cls.__doc__) for cls in type(agent).__mro__ if cls.__doc__), "")
     if not prompt or "{" not in prompt:
         return prompt
 
@@ -382,6 +386,9 @@ class ManagedContextView(ContextView["Agent"]):
 
     block_order: tuple[str, ...] | None = None
     state: bool = True
+    # Whether the strategy can run code, so the model can follow the events
+    # API guidance (``print(doc(self.events))``). A view property, not an option.
+    events_api: bool = True
 
     def __init__(self, *, state: bool = True) -> None:
         self.state = state
@@ -407,7 +414,9 @@ class ManagedContextView(ContextView["Agent"]):
 
         builders = []
         if isinstance(owner, Agent):
-            builders = [system_prompt_block, agent_interface_block, events_api_block]
+            builders = [system_prompt_block, agent_interface_block]
+            if self.events_api:
+                builders.append(events_api_block)
             if self.state:
                 builders.append(agent_state_block)
         blocks = [block for build in builders if (block := await build(owner, call)) is not None]
@@ -477,7 +486,12 @@ async def _sandbox_block(strategy: Any, runtime: Any) -> dict[str, Context]:
 
 
 class PredictView(ManagedContextView):
-    """Structured-answer instructions, agent context, and active history."""
+    """Structured-answer instructions, agent context, and active history.
+
+    There is no REPL, so the view leaves out the events API guidance.
+    """
+
+    events_api = False
 
     async def instruction_blocks(self, owner: "Agent", call: "CurrentCall") -> Mapping[str, Any]:
         assert call.strategy is not None
@@ -487,6 +501,8 @@ class PredictView(ManagedContextView):
 
 class PurePythonView(PredictView):
     """Python-only execution instructions, agent context, and active history."""
+
+    events_api = True
 
 
 class CodeActV2View(CodeActView):

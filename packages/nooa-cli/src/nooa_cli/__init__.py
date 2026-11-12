@@ -19,6 +19,9 @@ Shell completion:
     eval "$(_NOOA_COMPLETE=zsh_source nooa)"     # zsh
 """
 
+import os
+import sys
+
 import click
 
 from .commands import discover_commands
@@ -72,6 +75,56 @@ for _name, _cmd in discover_commands():
 oo.add_command(completion)
 
 
+# Same policy and wording as nooa._platform, checked here without importing
+# nooa so the CLI stays lazy (packages/nooa-cli/tests/test_cli_platform_check.py keeps them equal).
+_SKIP_PLATFORM_CHECK_ENV = "NOOA_SKIP_PLATFORM_CHECK"
+_UNSUPPORTED_PLATFORM_MESSAGE = (
+    "nooa does not support native Windows; use WSL 2 "
+    "(https://learn.microsoft.com/windows/wsl/install). "
+    f"Setting the {_SKIP_PLATFORM_CHECK_ENV} environment variable to 1 skips this check: "
+    "the pure-Python core and `nooa connect` are tested on native Windows; "
+    "other features may work but are unsupported."
+)
+
+
+def _refuse_unsupported_platform() -> None:
+    """Exit with one clean line on native Windows unless the user opted in."""
+    if sys.platform != "win32":
+        return
+    if os.environ.get(_SKIP_PLATFORM_CHECK_ENV, "").strip().lower() in {"1", "true", "yes"}:
+        return
+    raise SystemExit(f"Error: {_UNSUPPORTED_PLATFORM_MESSAGE}")
+
+
+def _is_utf8(stream) -> bool:
+    encoding = getattr(stream, "encoding", None) or ""
+    return encoding.lower().replace("-", "").replace("_", "") == "utf8"
+
+
+def _use_utf8_output() -> None:
+    """Use UTF-8 for redirected output and piped input on native Windows.
+
+    Redirected stdout/stderr and piped stdin use the ANSI code page there (for
+    example cp1252), which cannot encode the CLI's check marks and arrows and
+    would crash the command midway. Consoles already use UTF-8, so this changes
+    nothing there.
+    """
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and not _is_utf8(stream) and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    stdin = sys.stdin
+    try:
+        piped = stdin is not None and not stdin.isatty()
+    except (OSError, ValueError):
+        piped = False
+    if piped and not _is_utf8(stdin) and hasattr(stdin, "reconfigure"):
+        stdin.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main():
     """Entry point for console_scripts: nooa <subcommand>."""
+    _refuse_unsupported_platform()
+    _use_utf8_output()
     oo()

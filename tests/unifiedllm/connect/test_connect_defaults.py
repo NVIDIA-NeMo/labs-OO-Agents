@@ -67,7 +67,7 @@ def test_plan_separates_recommendation_from_ceiling(ceiling, recommended, expect
         "test",
         "model",
         "chat",
-        "https://api.test/v1",
+        "https://openrouter.ai/api/v1",
         "",
         catalogue={
             "id": "model",

@@ -50,8 +50,7 @@ class Secrets(BaseModel):
 class ResolvedConfig(BaseModel):
     """Everything the three config files resolve to, as typed objects.
 
-    - ``models`` — alias → :class:`ModelConfig` (from ``llm_config.yaml`` +
-      bundled defaults).
+    - ``models`` — alias → :class:`ModelConfig` (from the ``llm_config.yaml`` layers).
     - ``secrets`` — :class:`Secrets`; values are ``SecretStr`` (masked on
       print/dump; ``.get_secret_value()`` for plaintext).
     - ``settings`` — merged ``settings.yaml`` mapping. Left as a dict because

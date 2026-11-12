@@ -14,7 +14,7 @@ from .client import (
     create_mcp_client,
 )
 from .oauth import OAuthConfig, OAuthHandler, OAuthToken, handle_mcp_oauth
-from .tool import MCPManager, MCPTool, MCPToolSpec
+from .tool import MCPManager, MCPTool, MCPToolError, MCPToolSpec
 
 __all__ = [
     # Client
@@ -30,6 +30,7 @@ __all__ = [
     "handle_mcp_oauth",
     # Tool
     "MCPTool",
+    "MCPToolError",
     "MCPManager",
     "MCPToolSpec",
 ]

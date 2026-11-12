@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from nooa.runtime.context_manager import ContextManager
     from nooa.runtime.event_manager import EventManager
     from nooa.runtime.events import EventsApi
+    from nooa.runtime.execution_namespace import ExecutionNamespace
     from nooa.storage.manager import StorageManager
     from nooa.unifiedllm import UnifiedLLM
 
@@ -91,7 +92,7 @@ class Agent(metaclass=AgentMeta):
     - Structured instances (dataclasses, Pydantic, custom classes) render as `ClassName(field=value, ...)`; a trailing `...` means fields were elided:
         Config(name='foo', enabled=True, ...)
     - The variable itself is **not** truncated — index/iterate it directly to operate on the full data.
-    - `<truncated>...</truncated>` in captured stdout/stderr is **not recoverable**.
+    - Output cut to fit is wrapped in `<truncated-output>`...`</truncated-output>`: it says the cut part is **not recoverable**, or, when file-backed capture is on, names the file with the full output.
     """
 
     # Agent instances should never be serialized as nested values inside other objects.
@@ -474,6 +475,21 @@ class Agent(metaclass=AgentMeta):
     def decision_model(self) -> "UnifiedDecisionModel | None":
         """Return the decision model configured for this agent, if any."""
         return self._decision_model
+
+    @no_trace
+    @hidden
+    def execution_namespace_for(self, call: Any) -> "ExecutionNamespace":
+        """Hook: the owned namespace this method call's cells run in.
+
+        CodeAct's in-process backend calls it once per call (``call`` is the
+        :class:`~nooa.strategies.current_call.CurrentCall`). The default is a
+        fresh :class:`~nooa.runtime.execution_namespace.ExecutionNamespace` per
+        call (the call's arguments and the runtime names are reserved); override
+        it to share one namespace across calls.
+        """
+        from nooa.runtime.execution_namespace import default_execution_namespace
+
+        return default_execution_namespace(call)
 
     def __setattr__(self, name: str, value: Any) -> None:
         from nooa.runtime.method_guard import guard_dynamic_method

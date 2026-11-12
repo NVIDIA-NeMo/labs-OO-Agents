@@ -29,16 +29,16 @@ DIR_NAME = ".nooa"
 
 
 def find_project_root() -> Path:
-    """Walk up from this file to find the project root (where pyproject.toml lives).
+    """Find the nearest project root by walking up from the working directory.
 
-    Falls back to ``Path.cwd()`` if no ``pyproject.toml`` is found (e.g. when
-    the package is installed into site-packages rather than run from source).
+    Include the working directory itself and fall back to it when no
+    ``pyproject.toml`` is found, independently of the library's installation path.
     """
-    current = Path(__file__).resolve()
-    for parent in current.parents:
+    current = Path.cwd().resolve()
+    for parent in (current, *current.parents):
         if (parent / "pyproject.toml").exists():
             return parent
-    return Path.cwd()
+    return current
 
 
 def get_user_dir(*parts: str) -> Path:

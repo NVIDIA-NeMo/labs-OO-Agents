@@ -200,6 +200,29 @@ class EventManager:
 
         return str(event.id)
 
+    def record_batch(self, events: list[EventBase]) -> list[str]:
+        """Atomically append fresh durable events, without observer delivery.
+
+        This explicit recorder path is for mandatory ledger transitions.
+        A backend without atomic append support fails rather than degrading
+        to partial single-event writes. Runtime events and summaries are not
+        accepted. Tags are assigned with the model's own setter before storage;
+        a failing setter fails the batch with nothing stored and every tag
+        reset to None. Use add() for ordinary context/observer events.
+        """
+        if any(
+            not isinstance(event, EventBase)
+            or event._role == Role.RUNTIME_EVENT
+            or isinstance(event, Summary)
+            for event in events
+        ):
+            raise ValueError("record_batch requires fresh durable non-summary events")
+        append = getattr(self._backend, "append_batch", None)
+        if append is None:
+            raise TypeError("backend does not support atomic batch recording")
+        # The backend validates the whole batch once, under its own lock.
+        return append(events)
+
     def register_event_type(self, cls: type[EventBase]) -> None:
         """Register a custom EventBase subclass for deserialization.
 
@@ -322,13 +345,13 @@ class EventManager:
         for handler in list(self._handlers[event_type]):
             try:
                 handler(event)
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 logger.warning("Event handler %r raised", handler, exc_info=True)
 
         for handler in list(self._handlers["*"]):
             try:
                 handler(event)
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 logger.warning("Wildcard handler %r raised", handler, exc_info=True)
 
     # === Middleware (intercept) ===
@@ -803,7 +826,7 @@ class EventManager:
         except ValueError as e:
             raise ValueError(
                 f"Invalid tag format '{tag}': tags must be numeric (e.g., '5') "
-                f"or ranges (e.g., '2..40')"
+                f"or ranges (e.g., '2..40'); use the number N from <sys tag=\"N\">"
             ) from e
 
     def _parse_tag_end(self, tag: str) -> int:
@@ -819,7 +842,7 @@ class EventManager:
         except ValueError as e:
             raise ValueError(
                 f"Invalid tag format '{tag}': tags must be numeric (e.g., '5') "
-                f"or ranges (e.g., '2..40')"
+                f"or ranges (e.g., '2..40'); use the number N from <sys tag=\"N\">"
             ) from e
 
     def _validate_tag(self, tag: str) -> None:

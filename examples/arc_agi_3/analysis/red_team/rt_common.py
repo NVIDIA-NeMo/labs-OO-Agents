@@ -176,7 +176,7 @@ RULE3_FOREIGN = {
 # was meant to remove). Used as an umbrella signal.
 ESCAPE_TOOL_CALL = re.compile(
     r"\bself\.(shell\.(run|cwd|popen|exec)|repo\.\w+|pyp\.\w+|web\.\w+|mcp\.\w+"
-    r"|tui_config\.\w+|libwriting\.\w+)"
+    r"|tui_config\.\w+|skill_writing\.\w+)"
 )
 
 RULES = {

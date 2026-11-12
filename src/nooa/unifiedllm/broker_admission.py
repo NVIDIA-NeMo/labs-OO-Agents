@@ -17,6 +17,7 @@ import contextlib
 import hmac
 import ipaddress
 import json
+import math
 import secrets
 import socket
 import threading
@@ -35,13 +36,15 @@ from nooa.unifiedllm.admission import (
     AdmissionUnavailableError,
     _named_group_identity,
     _validated_limit,
+    _validated_positive_option,
     _validated_timeout,
 )
 
-_PROTOCOL_VERSION = 2
+_PROTOCOL_VERSION = 3
 _MAX_MESSAGE_BYTES = 16 * 1024
 _IDLE_CONNECTION_SECONDS = 1.0
 _WRITER_CLOSE_TIMEOUT_SECONDS = 0.5
+_FEEDBACK_TIMEOUT_SECONDS = 1.0
 
 
 def _validated_loopback_host(host: str) -> str:
@@ -73,10 +76,16 @@ class BrokerAdmissionConfig:
     max_in_flight: int
     max_calls: int | None
     queue_timeout: float | None
+    requests_per_second: float | None = None
+    max_cooldown: float | None = None
 
     def __post_init__(self) -> None:
         """Prevent controller credentials from being sent over a non-loopback socket."""
         _validated_loopback_host(self.host)
+        rate = _validated_positive_option(self.requests_per_second, "requests_per_second")
+        if rate is not None and not math.isfinite(1 / rate):
+            raise ValueError("requests_per_second must have a finite admission interval")
+        _validated_positive_option(self.max_cooldown, "max_cooldown")
 
     def controller(self) -> BrokerAdmissionController:
         """Create an independent controller client for the current process."""
@@ -106,7 +115,15 @@ class _BrokerWaiter:
 
 
 class _BrokerState:
-    def __init__(self, *, group: str, max_in_flight: int, max_calls: int | None):
+    def __init__(
+        self,
+        *,
+        group: str,
+        max_in_flight: int,
+        max_calls: int | None,
+        requests_per_second: float | None = None,
+        max_cooldown: float | None = None,
+    ):
         self.group = group
         self.max_in_flight = max_in_flight
         self.max_calls = max_calls
@@ -115,11 +132,21 @@ class _BrokerState:
         self.admitted_calls = 0
         self.reserved_calls = 0
         self.waiters: deque[_BrokerWaiter] = deque()
+        self._interval = 1 / requests_per_second if requests_per_second is not None else 0.0
+        self._max_cooldown = max_cooldown
+        self._not_before = 0.0
+        self._wake: asyncio.TimerHandle | None = None
+        self._closed = False
 
     def enqueue(self, ticket: str) -> _BrokerWaiter:
         """Append one FIFO waiter and offer any currently available capacity."""
         loop = asyncio.get_running_loop()
-        queued = bool(self.waiters) or self.active >= self.max_in_flight
+        queued = (
+            bool(self.waiters)
+            or self.active >= self.max_in_flight
+            or loop.time() < self._not_before
+            or bool(self._interval and self.reserved_calls)
+        )
         waiter = _BrokerWaiter(
             ticket=ticket,
             queued_at=time.perf_counter(),
@@ -155,6 +182,12 @@ class _BrokerState:
             raise RuntimeError("Admission broker reservation accounting underflow")
         self.reserved_calls -= 1
         self.admitted_calls += 1
+        if self._interval:
+            # Space confirmed admissions as well as offers. A slow handshake must not
+            # allow later offers to accumulate and dispatch as a burst when it finishes.
+            self._not_before = max(
+                self._not_before, asyncio.get_running_loop().time() + self._interval
+            )
         confirmation = {"status": "confirmed", "admitted_calls": self.admitted_calls}
         self._offer_available()
         return confirmation
@@ -167,6 +200,11 @@ class _BrokerState:
             self.reserved_calls -= 1
 
     def _offer_available(self) -> None:
+        if self._wake is not None:
+            self._wake.cancel()
+            self._wake = None
+        if self._closed:
+            return
         while self.waiters:
             waiter = self.waiters[0]
             if self.max_calls is not None and self.admitted_calls >= self.max_calls:
@@ -192,6 +230,12 @@ class _BrokerState:
                 return
             if self.active >= self.max_in_flight:
                 return
+            if self._interval and self.reserved_calls:
+                return
+            loop = asyncio.get_running_loop()
+            if loop.time() < self._not_before:
+                self._wake = loop.call_at(self._not_before, self._offer_available)
+                return
 
             self.waiters.popleft()
             if waiter.state != "queued":
@@ -200,6 +244,10 @@ class _BrokerState:
             self.active += 1
             self.peak_active = max(self.peak_active, self.active)
             self.reserved_calls += 1
+            if self._interval:
+                # Offers consume a pacing interval even if the client disappears before
+                # acknowledgement. Returning concurrency cannot refund elapsed traffic.
+                self._not_before = loop.time() + self._interval
             wait_s = time.perf_counter() - waiter.queued_at
             queued = waiter.queued or wait_s >= 0.001
             waiter.future.set_result(
@@ -211,6 +259,26 @@ class _BrokerState:
                     "admitted_calls": self.admitted_calls,
                 }
             )
+
+    def cooldown(self, delay_s: float) -> None:
+        """Extend the shared admission pause while keeping its duration bounded."""
+        delay = _validated_positive_option(delay_s, "delay_s")
+        if delay is None:
+            raise TypeError("delay_s must be a positive finite number")
+        if self._max_cooldown is None:
+            return
+        self._not_before = max(
+            self._not_before,
+            asyncio.get_running_loop().time() + min(delay, self._max_cooldown),
+        )
+        self._offer_available()
+
+    def close(self) -> None:
+        """Prevent new offers and cancel the broker's pending pacing wakeup."""
+        self._closed = True
+        if self._wake is not None:
+            self._wake.cancel()
+            self._wake = None
 
     def snapshot(self) -> BrokerAdmissionSnapshot:
         return BrokerAdmissionSnapshot(
@@ -335,16 +403,35 @@ class _AdmissionBrokerServer:
                 # Explicit release and EOF are equivalent. EOF also covers an abrupt child-process
                 # exit and makes the grant a crash-safe lease. A well-formed release keeps the
                 # connection alive for the controller's next attempt.
-                released = await reader.readline()
-                if not released or len(released) > _MAX_MESSAGE_BYTES:
-                    return
-                if json.loads(released).get("status") != "release":
-                    return
+                while True:
+                    released = await reader.readline()
+                    if not released or len(released) > _MAX_MESSAGE_BYTES:
+                        return
+                    command = json.loads(released)
+                    if not isinstance(command, dict):
+                        return
+                    if command.get("status") == "cooldown":
+                        delay = _validated_positive_option(command.get("delay_s"), "delay_s")
+                        if delay is None:
+                            raise TypeError("delay_s must be a positive finite number")
+                        self.state.cooldown(delay)
+                        await self._write(writer, {"status": "cooldown_applied"})
+                        continue
+                    if command.get("status") != "release":
+                        return
+                    break
                 self.state.disconnect(waiter)
                 waiter = None
         except asyncio.CancelledError:
             raise
-        except (BrokenPipeError, ConnectionResetError, json.JSONDecodeError, OSError, ValueError):
+        except (
+            BrokenPipeError,
+            ConnectionResetError,
+            json.JSONDecodeError,
+            OSError,
+            TypeError,
+            ValueError,
+        ):
             pass
         finally:
             if waiter is not None:
@@ -417,6 +504,7 @@ class _AdmissionBrokerServer:
         self._thread = None
 
     async def _shutdown(self) -> None:
+        self.state.close()
         server = self._server
         self._server = None
         if server is not None:
@@ -435,7 +523,16 @@ class _AdmissionBrokerServer:
 
 
 class _BrokerAdmissionPermit:
-    __slots__ = ("_controller", "_loop", "_reader", "_release_lock", "_released", "_writer")
+    __slots__ = (
+        "_controller",
+        "_feedback_in_progress",
+        "_feedback_lock",
+        "_loop",
+        "_reader",
+        "_release_lock",
+        "_released",
+        "_writer",
+    )
 
     def __init__(
         self,
@@ -450,13 +547,77 @@ class _BrokerAdmissionPermit:
         self._loop = loop
         self._released = False
         self._release_lock = threading.Lock()
+        self._feedback_lock = asyncio.Lock()
+        self._feedback_in_progress = False
 
     def release(self) -> None:
         with self._release_lock:
             if self._released:
                 return
             self._released = True
+            if self._feedback_in_progress:
+                # Feedback owns the reader until its acknowledgement. A concurrent
+                # release cannot reuse this socket with an unread protocol response.
+                self._controller._close_connection_on_owner_loop(
+                    _IdleBrokerConnection(self._loop, self._reader, self._writer)
+                )
+                return
         self._controller._release_connection(self._reader, self._writer, self._loop)
+
+    async def cooldown(self, delay_s: float) -> None:
+        """Report a bounded shared cooldown before returning this lease."""
+        with self._release_lock:
+            if self._released:
+                return
+        delay = _validated_positive_option(delay_s, "delay_s")
+        if delay is None:
+            raise TypeError("delay_s must be a positive finite number")
+        if self._controller.max_cooldown is None:
+            return
+        if asyncio.get_running_loop() is not self._loop:
+            raise AdmissionUnavailableError(
+                "Admission cooldown must run on the permit's event loop"
+            )
+        async with self._feedback_lock:
+            with self._release_lock:
+                if self._released:
+                    return
+                self._feedback_in_progress = True
+            try:
+                async with asyncio.timeout(_FEEDBACK_TIMEOUT_SECONDS):
+                    self._writer.write(
+                        json.dumps(
+                            {
+                                "status": "cooldown",
+                                "delay_s": min(delay, self._controller.max_cooldown),
+                            }
+                        ).encode()
+                        + b"\n"
+                    )
+                    await self._writer.drain()
+                    raw = await self._reader.readline()
+                    if not raw or len(raw) > _MAX_MESSAGE_BYTES:
+                        raise AdmissionUnavailableError(
+                            "Admission broker closed before confirming cooldown"
+                        )
+                    response = json.loads(raw)
+                    if (
+                        not isinstance(response, dict)
+                        or response.get("status") != "cooldown_applied"
+                    ):
+                        raise AdmissionUnavailableError("Admission broker did not confirm cooldown")
+            except BaseException as error:
+                with self._release_lock:
+                    self._released = True
+                self._controller._close_connection_on_owner_loop(
+                    _IdleBrokerConnection(self._loop, self._reader, self._writer)
+                )
+                if isinstance(error, (OSError, TimeoutError, ValueError)):
+                    raise AdmissionUnavailableError("Admission cooldown feedback failed") from error
+                raise
+            finally:
+                with self._release_lock:
+                    self._feedback_in_progress = False
 
 
 @dataclass(slots=True)
@@ -473,6 +634,7 @@ class BrokerAdmissionController:
     def __init__(self, config: BrokerAdmissionConfig):
         self.config = config
         self.queue_timeout = _validated_timeout(config.queue_timeout)
+        self.max_cooldown = _validated_positive_option(config.max_cooldown, "max_cooldown")
         self._idle: deque[_IdleBrokerConnection] = deque()
         self._idle_lock = threading.Lock()
         self._closed = False
@@ -763,6 +925,8 @@ class AdmissionBroker:
         group: str = "application",
         host: str = "127.0.0.1",
         port: int = 0,
+        requests_per_second: float | None = None,
+        max_cooldown: float | None = None,
     ):
         limit = _validated_limit(max_in_flight)
         assert limit is not None
@@ -776,6 +940,12 @@ class AdmissionBroker:
 
         self.max_in_flight = limit
         self.max_calls = max_calls
+        self.requests_per_second = _validated_positive_option(
+            requests_per_second, "requests_per_second"
+        )
+        if self.requests_per_second is not None and not math.isfinite(1 / self.requests_per_second):
+            raise ValueError("requests_per_second must have a finite admission interval")
+        self.max_cooldown = _validated_positive_option(max_cooldown, "max_cooldown")
         self.group = validated_group
         self.host = _validated_loopback_host(host)
         self.port = port
@@ -793,6 +963,8 @@ class AdmissionBroker:
                 group=self.group,
                 max_in_flight=self.max_in_flight,
                 max_calls=self.max_calls,
+                requests_per_second=self.requests_per_second,
+                max_cooldown=self.max_cooldown,
             ),
             auth_token=auth_token,
         )
@@ -816,6 +988,8 @@ class AdmissionBroker:
             max_in_flight=self.max_in_flight,
             max_calls=self.max_calls,
             queue_timeout=_validated_timeout(queue_timeout),
+            requests_per_second=self.requests_per_second,
+            max_cooldown=self.max_cooldown,
         )
 
     def controller(self, *, queue_timeout: float | None = None) -> BrokerAdmissionController:

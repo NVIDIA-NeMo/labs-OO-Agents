@@ -995,8 +995,6 @@ class TestMediaCapturePILAndMatplotlib:
 
     def test_try_pil_to_content_block_with_pil_image(self):
         """When PIL is available and obj is a PIL Image, returns image_url block."""
-        import importlib
-
         import nooa.runtime.media_capture as mc
 
         # Create a mock PIL Image class and instance
@@ -1013,12 +1011,13 @@ class TestMediaCapturePILAndMatplotlib:
         mock_pil_module = MagicMock()
         mock_pil_module.Image.Image = pil_cls
 
+        # The function imports PIL when called, so patching sys.modules is
+        # enough. Do not importlib.reload(mc): that makes a new
+        # _media_buffer_var and show(), while capture_scope and the actor keep
+        # the old ContextVar, so later show() calls in the same process print
+        # "called outside execution context" and capture nothing.
         with patch.dict(sys.modules, {"PIL": mock_pil_module, "PIL.Image": mock_pil_module.Image}):
-            importlib.reload(mc)
             result = mc._try_pil_to_content_block(obj)
-
-        # Reload to restore unpatched module state
-        importlib.reload(mc)
 
         assert result is not None
         assert result["type"] == "image_url"

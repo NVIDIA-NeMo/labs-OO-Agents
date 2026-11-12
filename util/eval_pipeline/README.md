@@ -4,9 +4,15 @@ A flexible evaluation framework for nooa agents. Use it from **Python** or via *
 
 ## Installation
 
+`eval_pipeline` is a `uv` workspace member and part of the `dev` dependency
+group. From the repo root, run:
+
 ```bash
-pip install -e ./util/eval_pipeline
+uv sync --group dev
 ```
+
+This installs it editable alongside the other workspace packages and development
+tools. No separate installation step is needed.
 
 ---
 

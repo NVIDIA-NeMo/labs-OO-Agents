@@ -19,6 +19,12 @@ from __future__ import annotations
 from nooa_cli.tools.repo_tools import RepoTools
 
 from nooa import hidden as _hidden
+
+# The core TaskResult, re-exported: bench results and the Atom agent's child
+# results are one class. Visible to generated cells.
+from nooa.errors import hints as _hints
+from nooa.interactive import TaskResult
+from nooa.tools import shell_tools as _shell_tools
 from nooa.tools.method_writing_lib import MethodWriting
 from nooa.tools.shell_tools import ShellTools
 
@@ -28,8 +34,6 @@ with _hidden:
     import logging
     import os
     from typing import TYPE_CHECKING, Annotated, Any
-
-    from pydantic import BaseModel, Field
 
     from nooa import Agent, Context, no_trace, strategy
     from nooa.agentdoc import doc, spec
@@ -92,40 +96,6 @@ _SOLVE_CONTEXT = {
         prefix=True,
     ),
 }
-
-
-class TaskResult(BaseModel):
-    """Structured result the agent must return when finishing a task."""
-
-    solution_description: str = Field(
-        description="What you did and why it solves the problem. Describe root cause and fix."
-    )
-    evidence: str = Field(
-        description=(
-            "Concrete evidence that the task is done: what tests passed, "
-            "what output was produced, what behavior changed. Not a guess -- "
-            "cite the actual results you observed."
-        )
-    )
-    how_to_verify: str = Field(
-        title="How to Verify",
-        description=(
-            "How a verifier can confirm correctness: concrete checks or steps and their "
-            "expected results. Include commands when appropriate; a shell command is not required."
-        ),
-    )
-    report: str = Field(
-        default="",
-        description="Concise human-readable report that a parent or runner shows inline.",
-    )
-    value: str = Field(
-        default="",
-        description=(
-            "The exact output the task asks for, if any, with nothing added: no label, "
-            "explanation or formatting. It is delivered verbatim, whitespace included. "
-            "Leave empty when the task only asks for actions."
-        ),
-    )
 
 
 @_hidden
@@ -307,3 +277,7 @@ class BenchAgent(
         in ``value`` and keep any explanation in the other fields.
         """
         ...
+
+
+# A blocked subprocess/os.system: use self.shell (installed in _install_python_tools).
+_hints.register_hint(_hints.RUN_COMMAND, _shell_tools.SHELL_RUN_HINT, owner=BenchAgent)

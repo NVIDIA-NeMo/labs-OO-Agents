@@ -102,11 +102,36 @@ async def test_failed_interface_is_not_offered_but_other_interfaces_are_checked(
         assert record["elapsed_seconds"] >= 0
         assert record["request_shape"] == {
             "api_style": "responses",
-            "timeout_seconds": 30,
+            "timeout_seconds": connect.INTERFACE_DISCOVERY_TIMEOUT,
             "output_tokens": DISCOVERY,
             "store": False,
             "include": ["reasoning.encrypted_content"],
         }
+
+
+@pytest.mark.asyncio
+async def test_account_404_is_flagged_without_keeping_the_body(monkeypatch):
+    """NVIDIA Build answers 404 "Not found for account" for a model the account cannot use."""
+
+    async def post(self, url, **kwargs):
+        if url.endswith("chat/completions"):
+            return httpx.Response(
+                404,
+                json={
+                    "status": 404,
+                    "title": "Not Found",
+                    "detail": "Function 'f-123': Not found for account 'acct-private-42'",
+                },
+            )
+        return httpx.Response(404, text="plain missing route")
+
+    mock_post(monkeypatch, post)
+    _, result = await check()
+    chat = result.results["chat"].entry["provenance"]["probes"]["routing"]
+    other = result.results["responses"].entry["provenance"]["probes"]["routing"]
+    assert chat["status_code"] == 404 and chat["unavailable_for_account"] is True
+    assert other["status_code"] == 404 and "unavailable_for_account" not in other
+    assert "acct-private-42" not in repr(result) and "f-123" not in repr(result)
 
 
 @pytest.mark.asyncio

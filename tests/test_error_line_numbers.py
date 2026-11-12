@@ -162,6 +162,22 @@ e = c.get("foo")
         assert "<unknown>" not in formatted
 
     @pytest.mark.asyncio
+    async def test_validated_syntax_error_identifies_cell(self, test_agent):
+        """Validation errors returned by the runtime identify the cell and line."""
+        from nooa.errors import RestrictedCodeError
+
+        code = "first = 1\nsecond = 2\nvalue = (1 + 2"
+
+        result = await test_agent.runtime.execute_code(
+            code, execution_count=42, wrap_in_function=True
+        )
+
+        assert isinstance(result.error, RestrictedCodeError)
+        message = str(result.error)
+        assert "Cell In[42], line 3" in message, f"Expected cell and line, got:\n{message}"
+        assert "<unknown>" not in message, f"Cell location missing:\n{message}"
+
+    @pytest.mark.asyncio
     async def test_syntax_error_line_number(self, test_agent):
         """Syntax errors should also have correct line numbers."""
         code = """\

@@ -99,7 +99,19 @@ def _make_headless_app():
                 pass
             _write_executor.shutdown(wait=True)
 
-    app = fastapi.FastAPI(title="Eval OTLP Backend", lifespan=lifespan)
+    # The receiver shares the application's OTel provider. Tracing its ingest
+    # requests feeds exported spans back into the same pipeline indefinitely.
+    app = fastapi.FastAPI(
+        title="Eval OTLP Backend",
+        lifespan=lifespan,
+        telemetry={
+            "tracing": False,
+            "operation_spans": False,
+            "metrics": False,
+            "logs": False,
+            "auto_configure": False,
+        },
+    )
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],

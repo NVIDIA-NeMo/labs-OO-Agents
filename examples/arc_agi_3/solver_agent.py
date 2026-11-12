@@ -195,7 +195,7 @@ _CELL_BANNED_ATTRS = frozenset(
         "pyp",
         "web",
         "mcp",
-        "libwriting",
+        "skill_writing",
         "tui_config",
         # denylist-bypass gadgets
         "__subclasses__",
