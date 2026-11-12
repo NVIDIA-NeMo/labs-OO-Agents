@@ -341,7 +341,7 @@ def encode_text(text: str) -> bytes:
     A lone surrogate from ``surrogateescape`` decoding becomes its original
     byte; any other lone surrogate is written as the text ``\\udXXX``. This
     is how a bytes ``TextStream`` and ``cut(unit="bytes")`` encode a
-    ``str``, and how a chars stream writes its spill file.
+    ``str``, and how a chars stream writes its overflow file.
     """
     try:
         return text.encode("utf-8", errors="surrogateescape")

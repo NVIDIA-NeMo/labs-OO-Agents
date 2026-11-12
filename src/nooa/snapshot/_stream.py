@@ -7,8 +7,8 @@ incrementally, so the whole output is never held in memory. It reads no
 live objects and does not import the capture layers; it shares only the
 nodes (``_model``) and the UTF-8 cut points (``_codec``).
 
-Each ``TextStream`` bounds its own spill file (``_spill``: ``SpillTarget``,
-``SpillDir``).
+Each ``TextStream`` bounds its own overflow file (``nooa.overflow``:
+``OverflowFile``, ``OverflowDir``).
 """
 
 from __future__ import annotations
@@ -17,9 +17,10 @@ import collections
 import logging
 from typing import Literal
 
+from nooa.overflow import OverflowFile
+from nooa.overflow._overflow import OverflowWriter
 from nooa.snapshot._codec import complete_prefix, encode_text, safe_end, safe_start
-from nooa.snapshot._model import Spill, Text
-from nooa.snapshot._spill import SpillTarget, _SpillFile
+from nooa.snapshot._model import Overflow, Text
 
 __all__ = ["TextStream"]
 
@@ -27,16 +28,16 @@ _log = logging.getLogger(__name__)
 
 
 class TextStream:
-    """One output stream as a bounded ``Text``: head, rolling tail, exact count, optional spill file.
+    """One output stream as a bounded ``Text``: head, rolling tail, exact count, optional overflow file.
 
-    ``TextStream(*, unit, head, tail, spill=None)``, all keyword-only:
+    ``TextStream(*, unit, head, tail, overflow=None)``, all keyword-only:
 
     - ``unit``: ``"chars"`` (``write`` takes ``str``) or ``"bytes"``
       (``write`` takes ``bytes``, ``bytearray``, ``memoryview`` or ``str``,
       which is encoded as UTF-8).
     - ``head``: the units kept from the start.
     - ``tail``: the units kept from the end (a rolling window).
-    - ``spill`` (default ``None``): a ``SpillTarget`` to also write the
+    - ``overflow`` (default ``None``): an ``OverflowFile`` to also write the
       whole output to a file while the stream runs; ``None``: memory only.
 
     Methods: ``write(data)``, ``snapshot()``, ``close()``.
@@ -48,26 +49,26 @@ class TextStream:
       between writes, whatever was written. During one ``write`` it may
       also need memory proportional to that chunk (a ``bytearray`` or
       ``memoryview`` is copied to ``bytes``, a ``str`` written to a bytes
-      stream or to a spilling chars stream is encoded), released when the
+      stream or to a chars stream with a file is encoded), released when the
       call returns. ``write`` is O(len(data)).
     - Exact accounting: ``Text.length`` counts every unit written, and
       ``Text.omitted`` every unit not kept.
     - UTF-8-safe cuts: a bytes stream keeps the raw bytes, and a cut
       ``Text`` of it starts and ends on code point boundaries. Bytes are
       never decoded here; a chars stream keeps its ``str`` as written.
-    - The spill file holds the first ``SpillTarget.max_bytes`` bytes of the
+    - The overflow file holds the first ``OverflowFile.max_bytes`` bytes of the
       output (``Text.full``; a chars stream's file is cut on a code point
       boundary, so it is valid UTF-8); a file error never raises (see
-      ``SpillTarget``).
+      ``OverflowFile``).
 
     Threads: one writer. ``snapshot()`` only reads memory (and flushes
-    the spill file) but is not synchronised with ``write``: call it from
+    the overflow file) but is not synchronised with ``write``: call it from
     the writer's thread, or serialise it with writes.
     There is no lock.
 
     Raises ``ValueError`` for an unknown ``unit``, a negative ``head`` or
-    ``tail``, or a negative ``spill.max_bytes``, and ``FileExistsError``
-    when ``spill.path`` (outside a ``SpillDir``) already exists.
+    ``tail``, or a negative ``overflow.max_bytes``, and ``FileExistsError``
+    when ``overflow.path`` (outside an ``OverflowDir``) already exists.
 
     >>> from nooa.snapshot import TextStream, render_output
     >>> stream = TextStream(unit="bytes", head=4, tail=4)
@@ -91,54 +92,54 @@ class TextStream:
         unit: Literal["chars", "bytes"],
         head: int,
         tail: int,
-        spill: SpillTarget | None = None,
+        overflow: OverflowFile | None = None,
     ) -> None:
         if unit not in ("chars", "bytes"):
             raise ValueError(f"unit must be 'chars' or 'bytes', got {unit!r}")
         if head < 0 or tail < 0:
             raise ValueError("head and tail must be non-negative")
-        if spill is not None and spill.max_bytes < 0:
-            raise ValueError("spill max_bytes must be non-negative")
+        if overflow is not None and overflow.max_bytes < 0:
+            raise ValueError("overflow max_bytes must be non-negative")
         self.unit: Literal["chars", "bytes"] = unit
         self.head = head
         self.tail = tail
-        self._spill_max = spill.max_bytes if spill is not None else 0
+        self._file_max = overflow.max_bytes if overflow is not None else 0
         self._total = 0  # units written
         self._window = _Window(head, tail, b"" if unit == "bytes" else "")
         self._closed: Text | None = None
-        self._file: _SpillFile | None = None  # the open spill file, if any
+        self._file: OverflowWriter | None = None  # the open overflow file, if any
         self._path: str | None = None  # its path, for ``Text.full``
-        self._spill_failed = False
+        self._file_failed = False
         self._kept = 0  # bytes written to the file
         self._produced = 0  # bytes produced
-        if spill is not None:
-            self._file = _SpillFile.open(spill)
+        if overflow is not None:
+            self._file = overflow.open()
             if self._file is None:
-                self._spill_failed = True
+                self._file_failed = True
             else:
-                self._path, self._spill_max = self._file.path, self._file.max_bytes
+                self._path, self._file_max = self._file.path, self._file.max_bytes
 
-    # --- spilling ---------------------------------------------------------
+    # --- the overflow file ---------------------------------------------------------
 
     def _fail(self) -> None:
-        """Give up the spill file after a file error: remove it and keep memory only (``Text.full`` is ``None``)."""
-        self._spill_failed = True
+        """Give up the overflow file after a file error: remove it and keep memory only (``Text.full`` is ``None``)."""
+        self._file_failed = True
         file, self._file = self._file, None
         if file is not None:
             file.finish(delete=True)
 
-    def _spill(self, data: bytes) -> None:
-        """Count ``data`` as produced and write what fits of it to the spill file.
+    def _to_file(self, data: bytes) -> None:
+        """Count ``data`` as produced and write what fits of it to the overflow file.
 
         The file keeps a prefix of the output, at most ``max_bytes``; a chars
         stream's prefix ends on a code point boundary. A write error is
-        logged and ends spilling (``_fail``); it never raises.
+        logged and ends the file (``_fail``); it never raises.
         """
         self._produced += len(data)
-        spill = self._file
-        if spill is None or spill.file is None:
+        writer = self._file
+        if writer is None or writer.file is None:
             return
-        room = self._spill_max - self._kept
+        room = self._file_max - self._kept
         if room <= 0:
             return
         part = data
@@ -147,24 +148,22 @@ class TextStream:
             # point that does not fit whole, and takes nothing after it (the
             # file is a prefix of the output).
             part = data[: safe_end(data, room)] if self.unit == "chars" else data[:room]
-            self._spill_max = self._kept + len(part)
+            self._file_max = self._kept + len(part)
         try:
-            spill.file.write(part)
+            self._kept += writer.write(part)
         except OSError:
-            _log.warning("could not write the spill file; keeping memory only", exc_info=True)
+            _log.warning("could not write the overflow file; keeping memory only", exc_info=True)
             self._fail()
-            return
-        self._kept += len(part)
 
     def _flush(self) -> None:
-        """Push buffered spill bytes to the file, so it holds what ``Spill.kept`` says."""
-        spill = self._file
-        if spill is None or spill.file is None:
+        """Push buffered bytes to the overflow file, so it holds what ``Overflow.kept`` says."""
+        writer = self._file
+        if writer is None or writer.file is None:
             return
         try:
-            spill.file.flush()
+            writer.file.flush()
         except OSError:
-            _log.warning("could not flush the spill file; keeping memory only", exc_info=True)
+            _log.warning("could not flush the overflow file; keeping memory only", exc_info=True)
             self._fail()
 
     # --- writing ----------------------------------------------------------
@@ -175,15 +174,15 @@ class TextStream:
         Afterwards the stream retains at most ``head + tail`` units. While it
         runs, the call may hold one more copy of ``data`` (a ``bytes`` copy of a
         ``bytearray`` / ``memoryview``, or the UTF-8 encoding of a ``str`` for a
-        bytes stream or a spill file).
+        bytes stream or an overflow file).
 
             A chars stream takes ``str`` only and raises ``TypeError`` for
             anything else (write raw output to a bytes stream, which keeps it as
             written). A bytes stream takes ``bytes``, ``bytearray`` or
             ``memoryview`` (its raw bytes) and raises ``TypeError`` for anything
             else but ``str``; a ``str`` is encoded as UTF-8 (surrogate escapes as
-            their raw bytes, a lone surrogate as ``\\udXXXX`` text). While a spill file is active,
-            ``data`` is also written to it, up to ``SpillTarget.max_bytes``
+            their raw bytes, a lone surrogate as ``\\udXXXX`` text). While an overflow file is active,
+            ``data`` is also written to it, up to ``OverflowFile.max_bytes``
             (a chars stream encodes it as a bytes stream would). Raises
             ``ValueError`` after ``close()``.
         """
@@ -199,24 +198,24 @@ class TextStream:
                     f"a bytes TextStream takes bytes, bytearray, memoryview or str, "
                     f"not {type(data).__name__}"
                 )
-            self._spill(data)
+            self._to_file(data)
         elif not isinstance(data, str):
             raise TypeError(
                 f"a chars TextStream takes str, not {type(data).__name__}; "
                 "write bytes to a bytes stream"
             )
         elif self._file is not None:
-            self._spill(encode_text(data))
+            self._to_file(encode_text(data))
         self._total += len(data)
         self._window.write(data)
 
     # --- describing -------------------------------------------------------
 
-    def _full(self, cut: bool) -> Spill | None:
-        """The ``Spill`` for ``Text.full``: only for a ``cut`` text whose spill file is still good."""
-        if not cut or self._path is None or self._spill_failed:
+    def _full(self, cut: bool) -> Overflow | None:
+        """The ``Overflow`` for ``Text.full``: only for a ``cut`` text whose overflow file is still good."""
+        if not cut or self._path is None or self._file_failed:
             return None
-        return Spill(self._path, self._kept, self._produced)
+        return Overflow(self._path, self._kept, self._produced)
 
     def _text(self) -> Text:
         """What memory holds of the whole stream, as a ``Text`` (reads only)."""
@@ -241,7 +240,7 @@ class TextStream:
         """The whole stream so far, as a ``Text``; once closed, the final one.
 
         Callable at any time while the stream runs. It first flushes the
-        spill file, so ``Text.full.kept`` bytes are on disk.
+        overflow file, so ``Text.full.kept`` bytes are on disk.
         """
         if self._closed is not None:
             return self._closed
@@ -251,22 +250,22 @@ class TextStream:
     def close(self) -> Text:
         """Finish the stream and return the final ``Text``; later calls return the same one.
 
-        Closes the spill file and deletes it when the ``Text`` is complete.
+        Closes the overflow file and deletes it when the ``Text`` is complete.
         After ``close()``, ``write`` raises ``ValueError``; ``snapshot()``
         still works.
         """
         if self._closed is not None:
             return self._closed
-        spill = self._file
-        if spill is not None and spill.file is not None:
+        writer = self._file
+        if writer is not None and writer.file is not None:
             try:
-                spill.file.close()
+                writer.file.close()
             except OSError:
                 self._fail()
         text = self._text()
-        spill, self._file = self._file, None
-        if spill is not None:
-            spill.finish(delete=text.complete)
+        writer, self._file = self._file, None
+        if writer is not None:
+            writer.finish(delete=text.complete)
         self._closed = text
         return text
 

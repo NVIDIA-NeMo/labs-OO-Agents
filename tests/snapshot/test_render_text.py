@@ -15,10 +15,10 @@ from nooa.agentdoc import pformat
 from nooa.snapshot import (
     Limits,
     Object,
+    Overflow,
     Ref,
     Scalar,
     Sequence,
-    Spill,
     Text,
     TextStream,
     Unavailable,
@@ -32,7 +32,7 @@ from tests.snapshot._trace import _attributes
 # --- render_output -------------------------------------------------------------------
 
 
-def _cut(unit: str = "bytes", full: Spill | None = None, reason: Any = "max_length") -> Text:
+def _cut(unit: str = "bytes", full: Overflow | None = None, reason: Any = "max_length") -> Text:
     head, tail = (b"HEAD", b"TAIL") if unit == "bytes" else ("HEAD", "TAIL")
     return Text(
         head=head,
@@ -52,7 +52,7 @@ def test_render_output_complete_passes_through() -> None:
 
 
 def test_render_output_full_output() -> None:
-    text = _cut(full=Spill("/tmp/out", 1_234_575, 1_234_575))
+    text = _cut(full=Overflow("/tmp/out", 1_234_575, 1_234_575))
 
     assert render_output(text) == (
         "HEAD\n[... 1,234,567 bytes omitted; full output: /tmp/out]\nTAIL"
@@ -60,7 +60,7 @@ def test_render_output_full_output() -> None:
 
 
 def test_render_output_file_limit() -> None:
-    text = _cut(full=Spill("/tmp/out", 65_536, 1_234_575))
+    text = _cut(full=Overflow("/tmp/out", 65_536, 1_234_575))
 
     assert render_output(text) == (
         "HEAD\n[... 1,234,567 bytes omitted; /tmp/out holds the first 65,536 of 1,234,575 bytes]"

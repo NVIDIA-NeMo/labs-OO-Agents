@@ -36,7 +36,7 @@ def cut(
     tail=tail)`` returns after one ``write(data)`` and ``close()``: complete
     when ``data`` fits in ``head + tail``; else cut with reason
     ``"max_length"``, a bytes cut on whole code points (so it may keep
-    fewer than ``head`` / ``tail`` bytes). Nothing is spilled (``full`` is
+    fewer than ``head`` / ``tail`` bytes). Nothing goes to a file (``full`` is
     ``None``). Render it with ``render_output`` (or ``render_python``).
 
     Raises ``ValueError`` for a negative ``head`` or ``tail`` or an unknown
@@ -98,7 +98,7 @@ def merge(a: Text, b: Text, head: int, tail: int) -> Text:
     cut keeps whole code points and never moves across the joint of two
     inputs' parts. ``reason``: ``None`` when everything fits, else the
     first input's reason, or ``"max_length"``. ``full``: ``b.full`` when
-    both inputs spilled to the same path, else ``None``.
+    both inputs wrote the same overflow file, else ``None``.
 
     Raises ``ValueError`` when the units differ or ``head`` / ``tail`` is
     negative.

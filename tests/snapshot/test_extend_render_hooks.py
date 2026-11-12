@@ -15,10 +15,10 @@ from nooa.snapshot import (
     Limits,
     Mapping,
     Object,
+    Overflow,
     PythonRenderer,
     Sequence,
     Snapshot,
-    Spill,
     Text,
     capture,
     render_json,
@@ -185,15 +185,15 @@ _BUDGETS = (1, 2, 5, 17, 60, 300, 5_000, sys.maxsize)
 
 
 def test_render_trace_is_render_json_and_its_attributes() -> None:
-    spilled = Text(
+    with_file = Text(
         head="h",
         tail="",
         length=9,
         unit="chars",
         reason="max_length",
-        full=Spill("/tmp/full.txt", 9, 9),
+        full=Overflow("/tmp/full.txt", 9, 9),
     )
-    node = Sequence("list", 2, (_thing(s="x" * 1_000), spilled))
+    node = Sequence("list", 2, (_thing(s="x" * 1_000), with_file))
 
     text, attributes = render_trace(node, direction="output", max_chars=60)
     assert text == render_json(node, max_chars=60)
@@ -217,7 +217,7 @@ def test_render_trace_on_random_trees() -> None:
             )
 
 
-def _every_spill(node: Snapshot) -> list[str]:
+def _every_file(node: Snapshot) -> list[str]:
     """Reference walk: every ``Text.full`` path, depth first (items, then tail), once each."""
     found: list[str] = []
     stack = [node]
@@ -235,27 +235,27 @@ def _every_spill(node: Snapshot) -> list[str]:
     return found
 
 
-def test_spill_paths_do_not_depend_on_the_budget() -> None:
-    # Spill files collected in their own walk equal those the JSON walk collected
+def test_overflow_paths_do_not_depend_on_the_budget() -> None:
+    # Overflow files collected in their own walk equal those the JSON walk collected
     # (cut items, tails, wrappers), for every budget, order included.
-    with_spills = 0
+    with_files = 0
     for seed in range(3_000):
         tree = random_tree(random.Random(seed))
-        expected = tuple(_every_spill(tree))
-        with_spills += bool(expected)
+        expected = tuple(_every_file(tree))
+        with_files += bool(expected)
         for max_chars in (1, 40, sys.maxsize):
             attributes = render_trace(tree, direction="output", max_chars=max_chars)[1]
             assert attributes.get("nooa.output.preview.full_output", ()) == expected
-    assert with_spills > 1_000  # the corpus exercises spills
+    assert with_files > 1_000  # the corpus exercises overflow files
 
 
 def test_render_trace_matches_its_golden_digests() -> None:
-    # Golden digests of render_trace's text and attributes, and of the spill files,
+    # Golden digests of render_trace's text and attributes, and of the overflow files,
     # on 1,000 random trees: any change to the trace preview notation shows up here.
     import hashlib
     import json
 
-    previews, spills = hashlib.sha256(), hashlib.sha256()
+    previews, files = hashlib.sha256(), hashlib.sha256()
     for seed in range(1_000):
         tree = random_tree(random.Random(seed))
         for max_chars in (1, 5, 60, 5_000, sys.maxsize):
@@ -265,10 +265,8 @@ def test_render_trace_matches_its_golden_digests() -> None:
                 for key, value in attributes.items()
             )
             previews.update(json.dumps([text, items]).encode())
-        spills.update(json.dumps(_every_spill(tree)).encode())
+        files.update(json.dumps(_every_file(tree)).encode())
     assert previews.hexdigest() == (
-        "87876bc0374a01c62587a7a5b1f9b73f7e5d495236eaaab54d42660efcaef29b"
+        "81c79d0b7e3fb82c91c7e468e8c0b49eddb8926f337d0cbcafe1aae7cec3c2fd"
     )
-    assert spills.hexdigest() == (
-        "491b778daee0693ee827461c465dc95713144be2353602d5fa2c660135ab0468"
-    )
+    assert files.hexdigest() == ("96e3f384395e50e459e7fda10cefd6727c795fab81b086f521f0e830cb8c6b06")

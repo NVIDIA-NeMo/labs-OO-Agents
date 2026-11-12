@@ -227,7 +227,8 @@ Two limits worth knowing:
 Never write a new way to truncate, preview or cap a value or output. Use
 `nooa.snapshot` (see `docs/snapshot-model.md`): `capture` + `render_python` /
 `render_json` / `render_trace` for values, `TextStream` + `render_output` for
-output streams. Each public name's docstring documents it (`print(doc(...))`).
+output streams. The whole output goes to files only through `nooa.overflow`
+(`OverflowDir`, see `docs/overflow.md`). Each public name's docstring documents it (`print(doc(...))`).
 
 If your code limits size for another reason (rejecting an oversized request,
 paginating a query, a protocol limit), mark the line with the reason:

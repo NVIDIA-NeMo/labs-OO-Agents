@@ -74,11 +74,11 @@ class CaptureConfig(BaseModel):
         bool,
         Field(
             description=(
-                "When True, stdout/stderr capture also spills the full output to a "
+                "When True, stdout/stderr capture also writes the full output to a "
                 "file (up to 64 MiB) while still truncating the in-memory "
                 "representation; the path is in the cut line so the LLM can read it. "
-                "The file comes from the session's SpillDir "
-                "(nooa.runtime.output_capture.capture_spill) when one is set, else a "
+                "The file comes from the session's OverflowDir "
+                "(nooa.runtime.output_capture.capture_overflow) when one is set, else a "
                 "temp file kept when the output was cut."
             ),
         ),

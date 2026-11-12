@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import random
 
-from nooa.snapshot import Spill, Text, merge
+from nooa.snapshot import Overflow, Text, merge
 from nooa.snapshot._codec import safe_end, safe_start
 
 _BYTES = (
@@ -83,7 +83,7 @@ def _random_text(rng: random.Random, unit: str) -> Text:
     def part() -> str | bytes:
         return empty.join(rng.choice(frags) for _ in range(rng.randrange(0, 5)))  # type: ignore[arg-type]
 
-    full = rng.choice((None, None, Spill("/tmp/a", 4, 9), Spill("/tmp/b", 9, 9)))
+    full = rng.choice((None, None, Overflow("/tmp/a", 4, 9), Overflow("/tmp/b", 9, 9)))
     if rng.random() < 0.5:
         whole = part()
         return Text(head=whole, length=len(whole), unit=unit, full=full)  # type: ignore[arg-type]

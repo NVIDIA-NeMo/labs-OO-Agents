@@ -16,11 +16,11 @@ from nooa.snapshot import (
     Limits,
     Mapping,
     Object,
+    Overflow,
     Reason,
     Ref,
     Scalar,
     Sequence,
-    Spill,
     Text,
     Unavailable,
     capture,
@@ -42,8 +42,8 @@ def test_reason_names() -> None:
     )
 
 
-def test_public_api_has_no_opaque_node_or_spill_reasons() -> None:
-    # Spill state is read from ``Text.full``, not from a reason or a field; an
+def test_public_api_has_no_opaque_node_or_overflow_reasons() -> None:
+    # Overflow state is read from ``Text.full``, not from a reason or a field; an
     # uninspected value is ``Unavailable("opaque")``, not a node type of its own.
     assert not hasattr(nooa.snapshot, "Opaque")
     assert "Opaque" not in nooa.snapshot.__all__
@@ -84,7 +84,7 @@ def test_nodes_are_frozen_and_hashable() -> None:
         length=1,
         unit="chars",
         reason=None,
-        full=Spill("/tmp/x", 1, 1),
+        full=Overflow("/tmp/x", 1, 1),
     )
     with pytest.raises(dataclasses.FrozenInstanceError):
         text.head = "b"  # type: ignore[misc]
@@ -95,7 +95,7 @@ def test_nodes_are_frozen_and_hashable() -> None:
             length=1,
             unit="chars",
             reason=None,
-            full=Spill("/tmp/x", 1, 1),
+            full=Overflow("/tmp/x", 1, 1),
         )
     )
 
@@ -167,6 +167,6 @@ def test_random_trees_are_consistent() -> None:
                 stack += [child for _name, child in node.fields]
 
 
-def test_spill_cut() -> None:
-    assert Spill("/tmp/x", 10, 20).cut
-    assert not Spill("/tmp/x", 20, 20).cut
+def test_overflow_cut() -> None:
+    assert Overflow("/tmp/x", 10, 20).cut
+    assert not Overflow("/tmp/x", 20, 20).cut
