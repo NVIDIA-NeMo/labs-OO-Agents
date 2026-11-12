@@ -203,8 +203,11 @@ async def test_reflection_command_and_persistence(tmp_path):
         return await reflection.reflection_command(args)
 
     status = await command()
-    assert status.startswith("Reflection: off\nBlocks on: say\n")
-    assert "Triggers: every 20 turns, every 60 minutes, at 50% context; at least 5" in status
+    assert status.startswith("**Reflection is off**\n\n- **Blocks on:** say\n")
+    assert (
+        "- **Triggers:** every 20 turns, every 60 minutes, at 50% context (at least 5 turns apart)"
+        in status
+    )
     assert "Reflection is on (saved to" in await command("on")
     assert reflection.enabled()
     assert "[on ] say  Say it." in await command("config")
@@ -296,7 +299,7 @@ async def test_the_factory_activates_the_skill_with_the_core_blocks(tmp_path):
         assert "nemo.reflection" not in agent.skills.activated()  # not in the model's prompt
         assert "reflection" in {c.name for c in root.commands()}
         reply = (await root.invoke_command("reflection", "")).text
-        assert reply.startswith("Reflection: on\n")
+        assert reply.startswith("**Reflection is on**\n")
     finally:
         await registry.close_all()
 
@@ -379,7 +382,9 @@ async def test_the_saved_choice_and_reflection_survive_a_restart(tmp_path):
         agent = loaded._agent
         assert isinstance(agent.reflection, Reflection) and not agent.reflection.enabled()
         assert agent.reflection.config.enabled is False  # the saved choice stuck
-        assert (await loaded.invoke_command("reflection", "")).text.startswith("Reflection: off")
+        assert (await loaded.invoke_command("reflection", "")).text.startswith(
+            "**Reflection is off**"
+        )
         updates = []
         loaded.subscribe(updates.append)
         assert "Reflection is on" in (await loaded.invoke_command("reflection", "on")).text

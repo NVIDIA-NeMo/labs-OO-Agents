@@ -289,14 +289,17 @@ class Reflection(Skill):
             f"every {c.every_minutes:g} minutes" if c.every_minutes else "",
             f"at {c.context_fraction:.0%} context" if c.context_fraction else "",
         ]
+        when = ", ".join(t for t in triggers if t) or "never"
         return "\n".join(
             [
-                f"Reflection: {'on' if self.enabled() else 'off'}",
-                f"Blocks on: {', '.join(on) or 'none'}",
-                f"Triggers: {', '.join(t for t in triggers if t) or 'none'}; "
-                f"at least {c.min_gap_turns} turns apart",
-                f"Since the last: {self.turns} turns, {self._minutes():.0f} minutes",
-                "Change blocks with /reflection config; triggers in atom.reflection.",
+                f"**Reflection is {'on' if self.enabled() else 'off'}**",
+                "",
+                f"- **Blocks on:** {', '.join(on) or 'none'}",
+                f"- **Triggers:** {when} (at least {c.min_gap_turns} turns apart)",
+                f"- **Since the last:** {self.turns} turns, {self._minutes():.0f} minutes",
+                "",
+                "Switch blocks with `/reflection config BLOCK on|off`; "
+                "change triggers under `atom.reflection` in `.nooa/settings.yaml`.",
             ]
         )
 
