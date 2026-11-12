@@ -939,33 +939,18 @@ def _token_counter_messages(
     return view
 
 
-def _update_token_calibration(
+def _estimate_raw_input_tokens(
     model: str,
     messages: Sequence[dict[str, Any] | LLMResponse | CacheBoundary],
-    usage: LLMUsage,
     tools: list[dict[str, Any]] | None = None,
     *,
     instructions: str | None = None,
-) -> None:
-    """Update token calibration from an API response's usage data.
+) -> int | None:
+    """Uncalibrated legacy estimate over projected wire input, best effort.
 
-    The recorded ratio is ``actual / estimated`` where ``actual`` is the API's
-    reported ``prompt_tokens``. For the ratio to reflect the model tokenizer's
-    real skew (and not a *coverage* gap), ``estimated`` must count the SAME
-    request the API billed:
-
-    * **messages-mode** ``token_counter`` (not a per-message text sum) so the
-      chat-template / role framing the API charges is included, and
-    * the **tool/function schemas** that were sent (``tools``) — for an agent
-      with a large tool surface these are a big, fixed per-call cost that the
-      API bills in ``prompt_tokens``. Omitting them (the old behavior, which
-      summed only message text) made ``estimated`` far smaller than ``actual``
-      and inflated the ratio (observed ~2.7x), which then scaled every
-      displayed/triggering token count up by that bogus factor.
+    The tokenizer fallback deliberately remains the existing text-only fallback;
+    an exact wire projection is not a claim of exact provider tokenization.
     """
-    actual = usage.input_tokens
-    if actual <= 0:
-        return
     # Responses lifts the leading system prompt out of input. It is still
     # billed input, so include it in the estimate without copying history.
     message_list = list(messages)
@@ -1000,9 +985,45 @@ def _update_token_calibration(
                             estimated += litellm.token_counter(
                                 model=model, text=part.get("text", "")
                             )
-        _token_calibration.update(model, estimated, actual)
+        return estimated
     except Exception:
         logger.debug("token calibration skipped (estimate failed)", exc_info=True)
+        return None
+
+
+def _update_token_calibration(
+    model: str,
+    messages: Sequence[dict[str, Any] | LLMResponse | CacheBoundary],
+    usage: LLMUsage,
+    tools: list[dict[str, Any]] | None = None,
+    *,
+    instructions: str | None = None,
+) -> None:
+    """Update token calibration from an API response's usage data.
+
+    The recorded ratio is ``actual / estimated`` where ``actual`` is the API's
+    reported ``prompt_tokens``. For the ratio to reflect the model tokenizer's
+    real skew (and not a *coverage* gap), ``estimated`` must count the SAME
+    request the API billed:
+
+    * **messages-mode** ``token_counter`` (not a per-message text sum) so the
+      chat-template / role framing the API charges is included, and
+    * the **tool/function schemas** that were sent (``tools``) — for an agent
+      with a large tool surface these are a big, fixed per-call cost that the
+      API bills in ``prompt_tokens``. Omitting them (the old behavior, which
+      summed only message text) made ``estimated`` far smaller than ``actual``
+      and inflated the ratio (observed ~2.7x), which then scaled every
+      displayed/triggering token count up by that bogus factor.
+    """
+    actual = usage.input_tokens
+    if actual <= 0:
+        return
+    estimated = _estimate_raw_input_tokens(model, messages, tools, instructions=instructions)
+    if estimated is not None:
+        try:
+            _token_calibration.update(model, estimated, actual)
+        except Exception:
+            logger.debug("token calibration skipped (estimate failed)", exc_info=True)
 
 
 class UnifiedLLM(ABC):

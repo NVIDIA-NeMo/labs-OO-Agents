@@ -19,6 +19,8 @@ import litellm
 from nooa.llm_types import CacheBoundary, LLMResponse
 from nooa.unifiedllm import replay_state, response_parts
 from nooa.unifiedllm import unifiedllm as _core
+from nooa.unifiedllm._observations import _observe_attempt
+from nooa.unifiedllm.adapters._numeric_usage import _numeric_usage
 from nooa.unifiedllm.adapters.base import Capabilities
 from nooa.unifiedllm.adapters.litellm_chat import (
     client_capabilities,
@@ -501,16 +503,42 @@ class LiteLLMResponsesAdapter:
 
     def send_sync(self, request: LLMRequest) -> LLMResponse:
         """One sync attempt for a strict request; no retries."""
-        prepared = self.prepare(request, self._call_config(request), is_async=False)
-        raw_response = self.transmit_sync(prepared)
-        return _parse_reply(
-            lambda: self.parse(prepared, raw_response, self._finish(prepared, raw_response))
-        )
+        with _observe_attempt() as observation:
+            prepared = self.prepare(request, self._call_config(request), is_async=False)
+            if observation is not None:
+                observation.projected(
+                    _core._estimate_raw_input_tokens(
+                        prepared.effective_model,
+                        prepared.input_messages,
+                        tools=prepared.api_params.get("tools"),
+                        instructions=prepared.api_params.get("instructions"),
+                    )
+                )
+                observation.transmitting()
+            raw_response = self.transmit_sync(prepared)
+            if observation is not None:
+                observation.delivered(_numeric_usage(raw_response))
+            return _parse_reply(
+                lambda: self.parse(prepared, raw_response, self._finish(prepared, raw_response))
+            )
 
     async def send(self, request: LLMRequest) -> LLMResponse:
         """One async attempt for a strict request; no retries."""
-        prepared = self.prepare(request, self._call_config(request), is_async=True)
-        raw_response = await self.transmit(prepared)
-        return _parse_reply(
-            lambda: self.parse(prepared, raw_response, self._finish(prepared, raw_response))
-        )
+        with _observe_attempt() as observation:
+            prepared = self.prepare(request, self._call_config(request), is_async=True)
+            if observation is not None:
+                observation.projected(
+                    _core._estimate_raw_input_tokens(
+                        prepared.effective_model,
+                        prepared.input_messages,
+                        tools=prepared.api_params.get("tools"),
+                        instructions=prepared.api_params.get("instructions"),
+                    )
+                )
+                observation.transmitting()
+            raw_response = await self.transmit(prepared)
+            if observation is not None:
+                observation.delivered(_numeric_usage(raw_response))
+            return _parse_reply(
+                lambda: self.parse(prepared, raw_response, self._finish(prepared, raw_response))
+            )

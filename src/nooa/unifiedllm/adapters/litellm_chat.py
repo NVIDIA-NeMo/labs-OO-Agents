@@ -18,6 +18,8 @@ import litellm
 
 from nooa.llm_types import AssistantReasoning, LLMResponse
 from nooa.unifiedllm import replay_state
+from nooa.unifiedllm._observations import _observe_attempt
+from nooa.unifiedllm.adapters._numeric_usage import _numeric_usage
 from nooa.unifiedllm.adapters.base import Capabilities
 from nooa.unifiedllm.cache_policy import add_session_affinity_header
 from nooa.unifiedllm.errors import _parse_reply
@@ -33,6 +35,7 @@ from nooa.unifiedllm.unifiedllm import (
     _check_native_output_request,
     _collect_async,
     _collect_sync,
+    _estimate_raw_input_tokens,
     _extract_reasoning_and_usage,
     _extract_xml_tool_calls,
     _finish_reason_for_tool_calls,
@@ -596,14 +599,42 @@ class LiteLLMChatAdapter:
 
     def send_sync(self, request: LLMRequest) -> LLMResponse:
         """One sync attempt for a strict request; no retries."""
-        call_config, native_output = self._settings(request)
-        prepared = self.prepare(request, call_config, native_output=native_output, is_async=False)
-        raw_response = self.transmit_sync(prepared)
-        return _parse_reply(lambda: self._finish(prepared, raw_response))
+        with _observe_attempt() as observation:
+            call_config, native_output = self._settings(request)
+            prepared = self.prepare(
+                request, call_config, native_output=native_output, is_async=False
+            )
+            if observation is not None:
+                observation.projected(
+                    _estimate_raw_input_tokens(
+                        prepared.effective_model,
+                        prepared.prepared_messages,
+                        tools=prepared.api_params.get("tools"),
+                    )
+                )
+                observation.transmitting()
+            raw_response = self.transmit_sync(prepared)
+            if observation is not None:
+                observation.delivered(_numeric_usage(raw_response))
+            return _parse_reply(lambda: self._finish(prepared, raw_response))
 
     async def send(self, request: LLMRequest) -> LLMResponse:
         """One async attempt for a strict request; no retries."""
-        call_config, native_output = self._settings(request)
-        prepared = self.prepare(request, call_config, native_output=native_output, is_async=True)
-        raw_response = await self.transmit(prepared)
-        return _parse_reply(lambda: self._finish(prepared, raw_response))
+        with _observe_attempt() as observation:
+            call_config, native_output = self._settings(request)
+            prepared = self.prepare(
+                request, call_config, native_output=native_output, is_async=True
+            )
+            if observation is not None:
+                observation.projected(
+                    _estimate_raw_input_tokens(
+                        prepared.effective_model,
+                        prepared.prepared_messages,
+                        tools=prepared.api_params.get("tools"),
+                    )
+                )
+                observation.transmitting()
+            raw_response = await self.transmit(prepared)
+            if observation is not None:
+                observation.delivered(_numeric_usage(raw_response))
+            return _parse_reply(lambda: self._finish(prepared, raw_response))
