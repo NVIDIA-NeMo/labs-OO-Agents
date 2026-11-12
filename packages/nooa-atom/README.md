@@ -353,11 +353,10 @@ Now and then a root session asks its agent to tidy up: an ordinary message on
 the agent's `system_messages` queue (source `reflection`) that the agent
 handles in a normal turn. It is independent of `experimental_done_reflection`.
 The `nemo.reflection` skill (`nooa_atom.skills.reflection`) owns it. After a
-turn ends with `Done` or `Waiting`, a reflection is due when `min_gap_turns`
-turns passed since the last one and `every_turns` turns or `every_minutes`
-minutes passed or the context window is `context_fraction` full. The turn
-that answers a reflection does not count, and a due reflection waits while a
-prompt is still waiting on work. The message reports the agent's state: the
+turn ends with `Done` or `Waiting`, a reflection is due once both
+`min_cells` code cells ran and `min_minutes` minutes passed since the last
+one. Counting starts again after the turn that answers a reflection, and a
+due reflection waits while a prompt is still waiting on work. The message reports the agent's state: the
 context fill, the retained Python variables, the open todos and `self.v`.
 `/reflection` shows the state, `/reflection on|off` turns it on or off (and
 clears a `SessionOptions(reflection=...)` override), `/reflection config
@@ -368,10 +367,8 @@ clears a `SessionOptions(reflection=...)` override), `/reflection config
 atom:
   reflection:
     enabled: null          # null: on for ACP hosts, off elsewhere (Gym, nooa-bench)
-    every_turns: 20        # null turns a trigger off
-    every_minutes: 60
-    min_gap_turns: 5
-    context_fraction: 0.5
+    min_cells: 50          # code cells since the last reflection
+    min_minutes: 60        # minutes since the last reflection; both must pass
     blocks: {}             # name: false switches a block off
 ```
 

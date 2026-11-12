@@ -54,10 +54,12 @@ def skill(agent=None, clock=None, host="acp", override=None, **config):
     return reflection
 
 
-def run(reflection, kinds, waiting=False):
-    """Settle turns of these kinds; return what was posted."""
+def run(reflection, kinds, waiting=False, cells=1):
+    """Settle turns of these kinds, each after ``cells`` code cells; return what was posted."""
     posted = []
     for kind in kinds:
+        for _ in range(cells):
+            reflection._count_cell(None)
         reflection.after_turn(kind, waiting=waiting, post=posted.append)
     return posted
 
@@ -68,35 +70,50 @@ def run(reflection, kinds, waiting=False):
 def test_defaults():
     assert ReflectionConfig().model_dump() == {
         "enabled": None,
-        "every_turns": 20,
-        "every_minutes": 60.0,
-        "min_gap_turns": 5,
-        "context_fraction": 0.5,
+        "min_cells": 50,
+        "min_minutes": 60.0,
         "blocks": {},
     }
 
 
-def test_triggers_and_the_minimum_gap():
-    assert len(run(skill(every_turns=3, min_gap_turns=0), ["done"] * 3)) == 1
+def test_both_gaps_must_pass():
     clock = Clock()
-    timed = skill(clock=clock, every_turns=None, min_gap_turns=2)
+    reflection = skill(clock=clock, min_cells=3, min_minutes=60)
+    assert run(reflection, ["done"] * 5) == []  # enough cells, not enough time
     clock.now = 3600
-    assert run(timed, ["done"]) == [] and len(run(timed, ["waiting"])) == 1
+    assert len(run(reflection, ["done"])) == 1
+    clock = Clock()
+    reflection = skill(clock=clock, min_cells=50, min_minutes=60)
+    clock.now = 7200
+    assert run(reflection, ["done"] * 3, cells=10) == []  # enough time, 30 cells
+    assert len(run(reflection, ["done"] * 2, cells=10)) == 1  # 50 cells
+    # Only Done and Waiting turns check; context fill is not a trigger.
+    assert run(skill(min_cells=0, min_minutes=0), ["need_input", "error", "cancelled"]) == []
     stats = ContextWindowStats(
-        context_blocks_count=1, events_count=1, prompt_tokens=60, model_context_window=100
+        context_blocks_count=1, events_count=1, prompt_tokens=90, model_context_window=100
     )
-    full = skill(fake_agent(stats), every_turns=None, every_minutes=None, min_gap_turns=2)
-    assert run(full, ["done"]) == [] and len(run(full, ["done"])) == 1
-    # Only Done and Waiting count; a trigger set to None is off.
-    assert run(skill(every_turns=1, min_gap_turns=0), ["need_input", "error", "cancelled"]) == []
-    assert (
-        run(skill(every_turns=None, every_minutes=None, context_fraction=None), ["done"] * 30) == []
-    )
+    assert run(skill(fake_agent(stats), min_minutes=0), ["done"] * 10) == []
+
+
+def test_cells_are_counted_from_the_agents_events():
+    from nooa.events import PythonOutput
+    from nooa.runtime.event_manager import EventManager
+
+    agent = fake_agent()
+    agent.event_manager = EventManager()
+    reflection = skill(agent)
+    output = PythonOutput(tool_call_id="t", execution_status="complete", execution_count=1)
+    agent.event_manager._emit(output)
+    agent.event_manager._emit(output)
+    assert reflection.cells == 2
+    reflection.detach()
+    agent.event_manager._emit(output)
+    assert reflection.cells == 2
 
 
 def test_while_off_nothing_counts():
-    reflection = skill(host="headless", every_turns=2, min_gap_turns=0)
-    assert run(reflection, ["done"] * 5) == [] and reflection.turns == 0
+    reflection = skill(host="headless", min_cells=2, min_minutes=0)
+    assert run(reflection, ["done"] * 5) == [] and reflection.cells == 0
     reflection.config.enabled = True
     assert run(reflection, ["done"]) == [] and len(run(reflection, ["done"])) == 1
 
@@ -117,14 +134,14 @@ def test_enabled_by_host_setting_and_session_override(host, enabled, override, e
 
 
 def test_a_the_turn_answering_a_reflection_does_not_count():
-    reflection = skill(every_turns=1, min_gap_turns=0)
+    reflection = skill(min_cells=1, min_minutes=0)
     assert len(run(reflection, ["done"])) == 1
-    assert run(reflection, ["done"]) == [] and reflection.turns == 0  # the reflection's turn
+    assert run(reflection, ["done"]) == [] and reflection.cells == 0  # the reflection's turn
     assert len(run(reflection, ["done"])) == 1  # the next real turn
 
 
 def test_c_a_due_reflection_waits_while_a_prompt_is_waiting():
-    reflection = skill(every_turns=1, min_gap_turns=0)
+    reflection = skill(min_cells=1, min_minutes=0)
     assert run(reflection, ["waiting", "waiting"], waiting=True) == []
     assert len(run(reflection, ["done"])) == 1
 
@@ -205,8 +222,8 @@ async def test_reflection_command_and_persistence(tmp_path):
     status = await command()
     assert status.startswith("**Reflection is off**\n\n- **Blocks on:** say\n")
     assert (
-        "- **Runs:** every 20 turns, every 60 minutes or when the context passes 50%"
-        " (at most once every 5 turns)" in status
+        "- **Runs:** after a turn, once 50 code cells and 60 minutes have both passed"
+        " since the last one" in status
     )
     assert "Reflection is on (saved to" in await command("on")
     assert reflection.enabled()
@@ -217,7 +234,7 @@ async def test_reflection_command_and_persistence(tmp_path):
     assert (await command("sideways")) == module.USAGE
     saved = AtomOptions.load(tmp_path).reflection
     assert (saved.enabled, saved.blocks) == (True, {"say": False})
-    assert "every_turns" not in settings_path("project", workspace=tmp_path).read_text()
+    assert "min_cells" not in settings_path("project", workspace=tmp_path).read_text()
 
 
 async def test_d_a_failed_save_changes_nothing(tmp_path, monkeypatch):
@@ -252,7 +269,7 @@ def quick_factory(**config):
     def factory(options, storage):
         agent = create_session_agent(options, storage)
         reflection = agent.reflection
-        reflection.config = reflection.config.model_copy(update={"min_gap_turns": 0, **config})
+        reflection.config = reflection.config.model_copy(update={"min_minutes": 0, **config})
         return agent
 
     return factory
@@ -315,7 +332,7 @@ async def test_a_due_reflection_is_an_ordinary_item_and_an_idle_session_stays_id
             done("two"),
             done("tidied"),
         ],
-        every_turns=1,
+        min_cells=0,
     )
     try:
         assert (await root.prompt("one")).explanation == "one"
@@ -343,7 +360,7 @@ async def test_c_a_waiting_prompt_gets_its_own_result_before_any_reflection(tmp_
             done("job finished"),
             done("tidied"),
         ],
-        every_turns=1,
+        min_cells=0,
     )
     try:
         assert (await root.prompt("start the job")).explanation == "job finished"
@@ -359,7 +376,7 @@ async def test_c_a_waiting_prompt_gets_its_own_result_before_any_reflection(tmp_
 
 
 async def test_the_saved_choice_and_reflection_survive_a_restart(tmp_path):
-    registry, root, llm, updates = await make_root(tmp_path, [done("one")], every_turns=1)
+    registry, root, llm, updates = await make_root(tmp_path, [done("one")], min_cells=0)
     try:
         assert (await root.invoke_command("reflection", "off")).text.startswith("Reflection is off")
         assert AtomOptions.load(tmp_path).reflection.enabled is False
@@ -374,7 +391,7 @@ async def test_the_saved_choice_and_reflection_survive_a_restart(tmp_path):
 
     # A new process: a new registry loads the session from disk (built by the factory).
     registry = SessionRegistry(
-        SessionStore(tmp_path / "sessions"), agent_factory=quick_factory(every_turns=1)
+        SessionStore(tmp_path / "sessions"), agent_factory=quick_factory(min_cells=0)
     )
     llm = CellLLM([done("two"), done("tidied")])
     try:
@@ -399,7 +416,7 @@ async def test_the_saved_choice_and_reflection_survive_a_restart(tmp_path):
 
 async def test_headless_and_child_sessions_do_not_reflect(tmp_path):
     registry, root, llm, updates = await make_root(
-        tmp_path, [done("a"), done("b")], host="headless", every_turns=1
+        tmp_path, [done("a"), done("b")], host="headless", min_cells=0
     )
     try:
         for text in ("a", "b"):
@@ -411,32 +428,15 @@ async def test_headless_and_child_sessions_do_not_reflect(tmp_path):
         await registry.close_all()
 
 
-def _held_context(fill):
-    from types import SimpleNamespace
-
-    from nooa_atom.skills.reflection import Reflection, ReflectionConfig
-
-    r = Reflection(ReflectionConfig(), host="acp", clock=lambda: 0.0)
-    r.blocks["rename"] = "rename"
-    r._agent = SimpleNamespace(context_stats=SimpleNamespace(overall_utilization=fill))
-    return r
-
-
-def test_context_trigger_fires_once_per_crossing():
-    """Context held at 60%: the context trigger fires once; then only the turn trigger."""
-    r = _held_context(0.6)
-    posts = []
-    for turn in range(1, 61):
-        r.after_turn("done", waiting=False, post=lambda _t, turn=turn: posts.append(turn))
-    assert posts == [5, 26, 47]
-
-
-def test_context_trigger_rearms_after_dropping_below_the_threshold():
-    """After compaction brings usage under the threshold, the next crossing fires again."""
-    r = _held_context(0.6)
-    posts = []
-    fills = [0.6] * 6 + [0.4] * 3 + [0.6] * 6
-    for turn, fill in enumerate(fills, start=1):
-        r._agent.context_stats.overall_utilization = fill
-        r.after_turn("done", waiting=False, post=lambda _t, turn=turn: posts.append(turn))
-    assert posts == [5, 11]
+async def test_real_cells_count_toward_a_reflection(tmp_path):
+    """Each code cell of a real turn counts; two cells reach ``min_cells=2``."""
+    registry, root, llm, updates = await make_root(
+        tmp_path, [cell("x = 1"), done("one"), done("tidied")], min_cells=2
+    )
+    try:
+        assert (await root.prompt("one")).explanation == "one"
+        await idle(root)
+        assert turn_channels(updates) == [["user_messages"], ["system_messages"]]
+        assert len(llm.calls) == 3
+    finally:
+        await registry.close_all()

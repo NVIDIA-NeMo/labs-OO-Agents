@@ -45,20 +45,17 @@ class ReflectionConfig(BaseModel):
     """The ``atom.reflection`` settings.
 
     ``enabled``: ``None`` is on for ACP hosts, off elsewhere. A reflection is
-    due after a ``Done`` or ``Waiting`` turn when ``min_gap_turns`` turns
-    passed since the last one and ``every_turns`` turns or ``every_minutes``
-    minutes passed or the context window is ``context_fraction`` full
-    (``None`` turns a trigger off). ``blocks`` switches blocks off (or on) by
-    name; a block it does not name is on.
+    due after a ``Done`` or ``Waiting`` turn once both ``min_cells`` code
+    cells ran and ``min_minutes`` minutes passed since the last one.
+    ``blocks`` switches blocks off (or on) by name; a block it does not name
+    is on.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool | None = None
-    every_turns: int | None = Field(default=20, ge=1)
-    every_minutes: float | None = Field(default=60.0, gt=0)
-    min_gap_turns: int = Field(default=5, ge=0)
-    context_fraction: float | None = Field(default=0.5, gt=0)
+    min_cells: int = Field(default=50, ge=0)
+    min_minutes: float = Field(default=60.0, ge=0)
     blocks: dict[str, bool] = Field(default_factory=dict)
 
 
@@ -157,7 +154,7 @@ class Reflection(Skill):
         self.override = override
         self._clock = clock
         self._answering = False  # posted one: the next turn answers it
-        self._context_armed = True  # the context trigger fires once per crossing
+        self._unsubscribe: Callable[[], None] | None = None
         self._restart()
 
     @hidden
@@ -169,23 +166,32 @@ class Reflection(Skill):
         return self.host in INTERACTIVE_HOSTS
 
     def _restart(self) -> None:
-        self.turns = 0
+        self.cells = 0
         self.anchor = self._clock()
+
+    def _count_cell(self, _event: object) -> None:
+        self.cells += 1
+
+    @hidden
+    def attach(self, agent: Any) -> None:
+        """Count the agent's code cells (one ``PythonOutput`` event each)."""
+        super().attach(agent)
+        manager = getattr(agent, "event_manager", None)
+        # ``is not None``: an EventManager with no events is falsy (it has a length).
+        self._unsubscribe = (
+            manager.on("PythonOutput", self._count_cell) if manager is not None else None
+        )
+
+    @hidden
+    def detach(self) -> None:
+        if self._unsubscribe is not None:
+            self._unsubscribe()
+            self._unsubscribe = None
+        super().detach()
 
     def _due(self) -> bool:
         c = self.config
-        stats = getattr(self._agent, "context_stats", None)
-        fill = getattr(stats, "overall_utilization", None)
-        full = c.context_fraction is not None and fill is not None and fill >= c.context_fraction
-        if not full:
-            self._context_armed = True  # below the threshold: the next crossing counts
-        if self.turns < c.min_gap_turns:
-            return False
-        return (
-            (c.every_turns is not None and self.turns >= c.every_turns)
-            or (c.every_minutes is not None and self._minutes() >= c.every_minutes)
-            or (full and self._context_armed)
-        )
+        return self.cells >= c.min_cells and self._minutes() >= c.min_minutes
 
     def _minutes(self) -> float:
         return max(0.0, self._clock() - self.anchor) / 60
@@ -198,19 +204,18 @@ class Reflection(Skill):
         ``waiting`` a due reflection waits too. Errors are logged, never raised.
         """
         try:
-            if self._answering:
+            if self._answering:  # the cleanup turn: count from its end
                 self._answering = False
+                self._restart()
                 return
             if not self.enabled():
                 self._restart()
                 return
             if kind not in ("done", "waiting"):
                 return
-            self.turns += 1
             if waiting or not self._due():
                 return
             self._restart()
-            self._context_armed = False  # until the context drops below the threshold
             text = self.message()
             if text:
                 post(text)
@@ -292,28 +297,18 @@ class Reflection(Skill):
     def _status(self) -> str:
         c = self.config
         on = [name for name in self.blocks if c.blocks.get(name, True)]
-        times = [
-            f"every {c.every_turns} turns" if c.every_turns else "",
-            f"every {c.every_minutes:g} minutes" if c.every_minutes else "",
-            f"when the context passes {c.context_fraction:.0%}" if c.context_fraction else "",
-        ]
-        times = [t for t in times if t]
-        when = (
-            (", ".join(times[:-1]) + " or " + times[-1])
-            if len(times) > 1
-            else (times or ["never"])[0]
-        )
         return "\n".join(
             [
                 f"**Reflection is {'on' if self.enabled() else 'off'}**",
                 "",
                 f"- **Blocks on:** {', '.join(on) or 'none'}",
-                f"- **Runs:** {when} (at most once every {c.min_gap_turns} turns)",
-                f"- **Since the last one:** {self.turns} turns, {self._minutes():.0f} minutes",
+                f"- **Runs:** after a turn, once {c.min_cells} code cells and "
+                f"{c.min_minutes:g} minutes have both passed since the last one",
+                f"- **Since the last one:** {self.cells} cells, {self._minutes():.0f} minutes",
                 "",
                 "To switch a block on or off: `/reflection config BLOCK on|off`. "
-                "To change how often it runs, edit the `reflection` section under `atom:` "
-                "in your workspace's `.nooa/settings.yaml`.",
+                "To change how often it runs, edit `min_cells` or `min_minutes` in the "
+                "`reflection` section under `atom:` in your workspace's `.nooa/settings.yaml`.",
             ]
         )
 
