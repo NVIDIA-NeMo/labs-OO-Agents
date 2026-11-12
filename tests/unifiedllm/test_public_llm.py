@@ -61,13 +61,6 @@ async def run(llm, request, is_async):
         ({"tools": [TOOL]}, Capabilities(tools=False), "bad_request"),
         ({"tool_choice": "missing"}, Capabilities(), "bad_request"),
         ({"tool_choice": "required"}, Capabilities(), "bad_request"),
-        ({"tool_choice": {"type": "function"}}, Capabilities(), "bad_request"),
-        ({"reasoning_level": "high"}, Capabilities(reasoning_levels=()), "bad_request"),
-        ({"reasoning_level": "high"}, Capabilities(reasoning_levels=("low",)), "bad_request"),
-        ({"max_output_tokens": 0}, Capabilities(), "bad_request"),
-        ({"max_output_tokens": -1}, Capabilities(), "bad_request"),
-        ({"max_output_tokens": 51}, Capabilities(max_output_tokens=50), "output_limit"),
-        ({"max_output_tokens": 100}, Capabilities(context_window=100), "output_limit"),
         ({"tools": [object()]}, Capabilities(), "bad_request"),
         ({"messages": [object()]}, Capabilities(), "bad_request"),
         ({"output_type": int}, Capabilities(), "bad_request"),
@@ -90,16 +83,12 @@ async def test_wrong_call_type_is_typed(is_async):
 
 
 @MODE
-async def test_unknown_facts_and_changing_reply_cap(is_async):
+async def test_unknown_facts_and_four_field_custom_request(is_async):
     adapter = StrictAdapter(Capabilities(tools=None))
     llm = LLM(adapter)
-    for cap in (1, 900):
-        await run(
-            llm,
-            LLMRequest(tools=[TOOL], reasoning_level="unverified", max_output_tokens=cap),
-            is_async,
-        )
-    assert [req.max_output_tokens for req in adapter.seen] == [1, 900]
+    for choice in ("auto", "none"):
+        await run(llm, LLMRequest(tools=[TOOL], tool_choice=choice), is_async)
+    assert [req.tool_choice for req in adapter.seen] == ["auto", "none"]
     assert llm.capabilities.tools is None
     assert llm.capabilities.reasoning_levels is None
     assert llm.capabilities.context_window is None
@@ -182,14 +171,11 @@ def test_facts_snapshot_and_invalid_configuration():
 
 @MODE
 @pytest.mark.parametrize("ceiling", [10, 20])
-async def test_independent_route_ceilings_accept_a_usable_request(is_async, ceiling):
+async def test_independent_route_ceilings_are_facts_not_request_fields(is_async, ceiling):
     adapter = StrictAdapter(Capabilities(context_window=10, max_output_tokens=ceiling))
     llm = LLM(adapter)
-    assert await run(llm, LLMRequest(max_output_tokens=3), is_async) is REPLY
+    assert await run(llm, LLMRequest(), is_async) is REPLY
     assert llm.capabilities.max_output_tokens == ceiling
-    with pytest.raises(LLMFailure) as caught:
-        await run(llm, LLMRequest(max_output_tokens=10), is_async)
-    assert caught.value.kind == "output_limit"
     assert len(adapter.seen) == 1
 
 

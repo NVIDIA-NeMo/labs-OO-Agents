@@ -23,7 +23,6 @@ from nooa.unifiedllm.adapters._numeric_usage import _numeric_usage
 from nooa.unifiedllm.adapters.base import Capabilities
 from nooa.unifiedllm.cache_policy import add_session_affinity_header
 from nooa.unifiedllm.errors import _parse_reply
-from nooa.unifiedllm.limits import REPLY_CAP_KEYS
 from nooa.unifiedllm.media_inputs import filter_media_messages
 from nooa.unifiedllm.request import LLMRequest
 from nooa.unifiedllm.structured_output import anthropic_output_format
@@ -35,6 +34,7 @@ from nooa.unifiedllm.unifiedllm import (
     _check_native_output_request,
     _collect_async,
     _collect_sync,
+    _estimate_projected_input_tokens,
     _estimate_raw_input_tokens,
     _extract_reasoning_and_usage,
     _extract_xml_tool_calls,
@@ -67,24 +67,8 @@ def client_capabilities(client: "UnifiedLLM") -> Capabilities:
 
 
 def request_options(request: LLMRequest, options: Mapping[str, Any]) -> dict[str, Any]:
-    """Translate neutral request fields into adapter-local call settings.
-
-    The request's reply cap is added only when no reply-cap spelling is in the
-    options or their ``extra_body``; a second spelling would be rejected.
-    """
-    merged = dict(options)
-    if request.tool_choice != "auto":
-        merged.setdefault("tool_choice", request.tool_choice)
-    if request.reasoning_level is not None:
-        merged.setdefault("reasoning_level", request.reasoning_level)
-    extra = merged.get("extra_body")
-    if (
-        request.max_output_tokens is not None
-        and not REPLY_CAP_KEYS & merged.keys()
-        and not (isinstance(extra, Mapping) and REPLY_CAP_KEYS & extra.keys())
-    ):
-        merged["max_tokens"] = request.max_output_tokens
-    return merged
+    """Translate content only; legacy views retain their full private options."""
+    return {**options, "tool_choice": request.tool_choice}
 
 
 # Tool choices that are not tool names; any other str names a tool.
@@ -382,6 +366,21 @@ class LiteLLMChatAdapter:
         self._route_calibration_record = None
         self._route_calibration_identity = object()
 
+    def _numeric_participation(self):
+        """Exact built-ins only: inherited participation never bypasses send overrides."""
+        if (
+            type(self) is not LiteLLMChatAdapter
+            or self._legacy_options is not None
+            or "send" in self.__dict__
+            or "send_sync" in self.__dict__
+        ):
+            return None
+        from nooa.unifiedllm._route_calibration import _CalibrationAdapter
+
+        from ._calibration import _route_calibration
+
+        return _CalibrationAdapter(self, _route_calibration(self))
+
     @property
     def capabilities(self) -> Capabilities:
         """The capabilities the client declares."""
@@ -523,7 +522,7 @@ class LiteLLMChatAdapter:
         ):
             return _collect_sync(litellm.completion(**prepared.api_params))
 
-    async def transmit(self, prepared: PreparedChatCall) -> Any:
+    async def transmit(self, prepared: PreparedChatCall, *, _wire_owner=None) -> Any:
         """One async provider attempt under admission and the request deadline."""
 
         async def provider_call():
@@ -536,6 +535,7 @@ class LiteLLMChatAdapter:
         return await _run_async_provider_call(
             provider_call,
             request_timeout=self._client._http_config.request_timeout,
+            _wire_owner=_wire_owner,
         )
 
     def parse(self, prepared: PreparedChatCall, raw_response: Any) -> LLMResponse:
@@ -605,7 +605,7 @@ class LiteLLMChatAdapter:
         return self._send_sync(request)
 
     def _send_sync(
-        self, request: LLMRequest, *, _owner: _ObservationOwner | None = None
+        self, request: LLMRequest, *, _owner: _ObservationOwner | None = None, _decision=None
     ) -> LLMResponse:
         """Explicit shell participation applies only to this exact send."""
         with _observe_attempt(_owner) as observation:
@@ -614,13 +614,26 @@ class LiteLLMChatAdapter:
                 request, call_config, native_output=native_output, is_async=False
             )
             if observation is not None:
-                observation.projected(
-                    _estimate_raw_input_tokens(
+                if _decision is not None:
+                    estimated, quality = _estimate_projected_input_tokens(
                         prepared.effective_model,
                         prepared.prepared_messages,
                         tools=prepared.api_params.get("tools"),
                     )
-                )
+                    observation.projected(estimated)
+                    from ._prepared_limits import _apply_decision
+
+                    _apply_decision(
+                        prepared.api_params, estimated, quality, _decision, responses=False
+                    )
+                else:
+                    observation.projected(
+                        _estimate_raw_input_tokens(
+                            prepared.effective_model,
+                            prepared.prepared_messages,
+                            tools=prepared.api_params.get("tools"),
+                        )
+                    )
                 observation.transmitting()
             raw_response = self.transmit_sync(prepared)
             if observation is not None:
@@ -634,7 +647,12 @@ class LiteLLMChatAdapter:
         return await self._send(request)
 
     async def _send(
-        self, request: LLMRequest, *, _owner: _ObservationOwner | None = None
+        self,
+        request: LLMRequest,
+        *,
+        _owner: _ObservationOwner | None = None,
+        _decision=None,
+        _wire_owner=None,
     ) -> LLMResponse:
         """Explicit shell participation applies only to this exact send."""
         with _observe_attempt(_owner) as observation:
@@ -643,15 +661,32 @@ class LiteLLMChatAdapter:
                 request, call_config, native_output=native_output, is_async=True
             )
             if observation is not None:
-                observation.projected(
-                    _estimate_raw_input_tokens(
+                if _decision is not None:
+                    estimated, quality = _estimate_projected_input_tokens(
                         prepared.effective_model,
                         prepared.prepared_messages,
                         tools=prepared.api_params.get("tools"),
                     )
-                )
+                    observation.projected(estimated)
+                    from ._prepared_limits import _apply_decision
+
+                    _apply_decision(
+                        prepared.api_params, estimated, quality, _decision, responses=False
+                    )
+                else:
+                    observation.projected(
+                        _estimate_raw_input_tokens(
+                            prepared.effective_model,
+                            prepared.prepared_messages,
+                            tools=prepared.api_params.get("tools"),
+                        )
+                    )
                 observation.transmitting()
-            raw_response = await self.transmit(prepared)
+            raw_response = await (
+                self.transmit(prepared)
+                if _wire_owner is None
+                else self.transmit(prepared, _wire_owner=_wire_owner)
+            )
             if observation is not None:
                 observation.delivered(_numeric_usage(raw_response))
             return _parse_reply(

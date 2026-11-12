@@ -10,6 +10,7 @@ count the failure message reports, in the same change that removed the code.
 Move provider code into an adapter instead of raising the baseline.
 """
 
+import ast
 import re
 from pathlib import Path
 
@@ -65,3 +66,70 @@ def test_patterns_find_known_references():
     _, by_pattern, _ = count_references()
     assert by_pattern["litellm import"] > 0
     assert by_pattern["get_llm_provider"] > 0
+
+
+def test_neutral_shell_transitive_dependencies_have_no_concrete_imports():
+    """Walk first-party imports, including function-local/private dependencies.
+
+    Package facade exports are not runtime routing dependencies: resolve explicit
+    imported modules, not unrelated legacy exports from nooa.unifiedllm.__init__.
+    Pure adapters.base/schema are allowed; concrete clients/providers are not.
+    """
+    source = SRC.parent
+    pending = [
+        "nooa.unifiedllm." + name
+        for name in (
+            "llm",
+            "logical",
+            "execution",
+            "_route_calibration",
+            "_observations",
+        )
+    ]
+    visited = set()
+    forbidden = []
+    concrete_names = {
+        "CompletionClient",
+        "ResponsesClient",
+        "UnifiedLLM",
+        "LiteLLMChatAdapter",
+        "LiteLLMResponsesAdapter",
+    }
+    while pending:
+        module = pending.pop()
+        if module in visited:
+            continue
+        path = source.joinpath(*module.split(".")).with_suffix(".py")
+        if not path.exists():
+            path = source.joinpath(*module.split("."), "__init__.py")
+        if not path.exists():
+            continue
+        visited.add(module)
+        package = module if path.name == "__init__.py" else module.rpartition(".")[0]
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            targets = []
+            if isinstance(node, ast.Import):
+                targets = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                prefix = (
+                    ".".join(package.split(".")[: len(package.split(".")) - node.level + 1])
+                    if node.level
+                    else ""
+                )
+                base = ".".join(part for part in (prefix, node.module) if part)
+                targets = [base] if node.module else [base + "." + a.name for a in node.names]
+                for alias in node.names:
+                    if alias.name in concrete_names:
+                        forbidden.append((module, node.lineno, alias.name))
+            for target in targets:
+                if (
+                    target.split(".")[0] in {"litellm", "openai", "anthropic", "google"}
+                    or target == "nooa.unifiedllm.unifiedllm"
+                    or target.startswith("nooa.unifiedllm.adapters.litellm")
+                ):
+                    forbidden.append((module, node.lineno, target))
+                if target.startswith("nooa.") and target != "nooa.unifiedllm":
+                    pending.append(target)
+    assert "nooa.unifiedllm._route_calibration" in visited
+    assert "nooa.media_interfaces" in visited
+    assert not forbidden, f"Concrete imports reachable from neutral shell: {forbidden}"

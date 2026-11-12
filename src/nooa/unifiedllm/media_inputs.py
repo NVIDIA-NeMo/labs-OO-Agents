@@ -295,6 +295,6 @@ def check_replayed_native_media(
             "Cannot remove disabled media from opaque assistant state; "
             "supply a portable assistant turn instead."
         )
-    from nooa.media_policy import reject_unsupported_media
+    from nooa.media_interfaces import reject_unsupported_media
 
     reject_unsupported_media([native], interface)

@@ -273,7 +273,7 @@ async def test_changed_root_does_not_change_prior_view(family, unknown, isolated
         await client.aclose()
 
 
-def test_sdk_expired_id_is_ambiguous_not_reused():
+def test_sdk_expired_id_receives_fresh_association_not_old_token():
     class SDK:
         pass
 
@@ -282,4 +282,6 @@ def test_sdk_expired_id_is_ambiguous_not_reused():
     del dead
     current = SDK()
     routes._sdk_ids[id(current)] = (reference, b"old-token")
-    assert routes._sdk_identity(current) is False
+    key = routes._sdk_identity(current)
+    assert key is not False and key != b"old-token".hex()
+    assert routes._sdk_identity(current) == key

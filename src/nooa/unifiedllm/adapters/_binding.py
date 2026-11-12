@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Private, same-route settings views. Not a loader API or Adapter extension."""
+"""Private, same-route settings views used by the public loader."""
 
 import copy
 from collections.abc import Mapping
@@ -192,8 +192,7 @@ def _bind_adapter(
     clears the inherited value, reasoning None disables the selected level (but
     retains native defaults), and structured_output_mode=None resets to generic
     output. Native blocks replace whole blocks, using existing precedence/conflict
-    checks. Transitional explicit request reasoning/caps still override the view.
-    No arbitrary adapter/client subclass can be derived safely here.
+    checks. No arbitrary adapter/client subclass can be derived safely here.
     """
     from nooa.unifiedllm.unifiedllm import CompletionClient, ResponsesClient
 

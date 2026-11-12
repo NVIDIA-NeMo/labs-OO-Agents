@@ -18,55 +18,42 @@ import hmac
 import json
 import secrets
 import weakref
-from dataclasses import dataclass, field
-from threading import Lock
+from threading import RLock
 from urllib.parse import urlsplit
 
+from nooa.unifiedllm._route_calibration import _RouteCalibration
 from nooa.unifiedllm.route_identity import normalize_endpoint
 
-
-@dataclass(eq=False)
-class _RouteCalibration:
-    """Numeric EMA state. Seeding counts as a baseline, not a new observation."""
-
-    _ratio: float
-    _alpha: float
-    _lock: Lock = field(default_factory=Lock, repr=False)
-
-    def ratio(self) -> float:
-        return self._ratio
-
-    def calibrate(self, estimated: int) -> int:
-        return int(estimated * self._ratio)
-
-    def update(self, estimated: int, actual: int) -> None:
-        """Private shell observation hook; never updates the legacy singleton."""
-        if estimated <= 0 or actual <= 0:
-            return
-        observed = actual / estimated
-        with self._lock:  # Numeric-only critical section, no I/O or callbacks.
-            self._ratio = self._alpha * observed + (1 - self._alpha) * self._ratio
-
-
 _KEY = secrets.token_bytes(32)
-_records: dict[bytes | tuple[object, bytes], _RouteCalibration] = {}
+_records = weakref.WeakValueDictionary()
 # Separate opaque SDK identity table; weak references never clone/own clients.
 _sdk_ids: dict[int, tuple[weakref.ReferenceType, bytes]] = {}
+
+
+_sdk_lock = RLock()
 
 
 def _sdk_identity(sdk):
     if sdk is None:
         return None
+    identity = id(sdk)
+
+    def forget(reference):
+        with _sdk_lock:
+            entry = _sdk_ids.get(identity)
+            if entry is not None and entry[0] is reference:
+                _sdk_ids.pop(identity)
+
     try:
-        reference = weakref.ref(sdk)
+        reference = weakref.ref(sdk, forget)
     except TypeError:
         return False  # Cannot safely associate this opaque object across roots.
-    entry = _sdk_ids.setdefault(id(sdk), (reference, secrets.token_bytes(32)))
-    if entry[0]() is not sdk:
-        # Recycled ids are ambiguous. Isolate rather than risk sharing an old
-        # record or racing token replacement across threads.
-        return False
-    return entry[1].hex()
+    with _sdk_lock:
+        entry = _sdk_ids.get(identity)
+        if entry is None or entry[0]() is not sdk:
+            entry = (reference, secrets.token_bytes(32))
+            _sdk_ids[identity] = entry
+        return entry[1].hex()
 
 
 def _route_key(adapter):

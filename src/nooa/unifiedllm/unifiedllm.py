@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import copy
-import inspect
 import json
 import logging
 import math
@@ -200,12 +199,19 @@ class _ClientHttp:
         # The per-client httpx clients. These are what carry this client's
         # connection-pool limits (incl. max_keepalive_connections) + timeouts.
         # transport is left as httpx's default so ``limits`` actually applies.
-        self.httpx_async: httpx.AsyncClient = httpx.AsyncClient(
-            limits=self.limits, timeout=self._timeout, **hardening
-        )
         self.httpx_sync: httpx.Client = httpx.Client(
             limits=self.limits, timeout=self._timeout, **hardening
         )
+        try:
+            self.httpx_async: httpx.AsyncClient = httpx.AsyncClient(
+                limits=self.limits, timeout=self._timeout, **hardening
+            )
+        except BaseException:
+            try:
+                self.httpx_sync.close()
+            except BaseException:
+                pass  # Preserve the AsyncClient construction error.
+            raise
 
         # litellm wrappers, filled in by _build_* below.
         self.async_client: Any = None
@@ -319,7 +325,11 @@ class _ClientHttp:
     @classmethod
     def for_completion(cls, model: str, config: dict[str, Any], http_config: HttpConfig):
         inst = cls(model, config, http_config)
-        inst._build_completion_wrappers(model, config)
+        try:
+            inst._build_completion_wrappers(model, config)
+        except BaseException:
+            inst._close_on_failure()
+            raise
         return inst
 
     @classmethod
@@ -327,21 +337,34 @@ class _ClientHttp:
         inst = cls(model, config, http_config)
         # The Responses API always accepts the handler wrappers, regardless of
         # provider.
-        inst._build_handler_wrappers()
+        try:
+            inst._build_handler_wrappers()
+        except BaseException:
+            inst._close_on_failure()
+            raise
         return inst
+
+    def _close_on_failure(self):
+        """Dispose partially built wrappers without losing the original failure."""
+        try:
+            self.close()
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(self.aclose())
+            else:
+                task = loop.create_task(self.aclose())
+                task.add_done_callback(_consume_async_provider_result)
+        except BaseException:
+            pass  # Never replace the constructor's original failure.
 
     def close(self) -> None:
         """Close the sync HTTP resources owned by this client."""
         if self._sync_closed:
             return
         self._sync_closed = True
-        for oc in self._openai_clients:
-            close = getattr(oc, "close", None)
-            if close is not None and not inspect.iscoroutinefunction(close):
-                try:
-                    close()
-                except Exception:  # noqa: BLE001
-                    pass
+        # Owned SDK wrappers share this exact transport and own no additional
+        # resources. Closing both wrapper and HTTPX would close it twice.
         try:
             self.httpx_sync.close()
         except Exception:  # noqa: BLE001
@@ -351,14 +374,6 @@ class _ClientHttp:
         """Close both the sync and async HTTP resources owned by this client."""
         if not self._async_closed:
             self._async_closed = True
-            for oc in self._openai_clients:
-                close = getattr(oc, "close", None)
-                if close is None or not inspect.iscoroutinefunction(close):
-                    continue
-                try:
-                    await close()
-                except Exception:  # noqa: BLE001
-                    pass
             try:
                 await self.httpx_async.aclose()
             except Exception:  # noqa: BLE001
@@ -939,13 +954,18 @@ def _token_counter_messages(
     return view
 
 
-def _estimate_raw_input_tokens(
+def _estimate_raw_input_tokens(model, messages, tools=None, *, instructions=None):
+    """Legacy best-effort estimate, including the historical text fallback."""
+    return _estimate_projected_input_tokens(model, messages, tools, instructions=instructions)[0]
+
+
+def _estimate_projected_input_tokens(
     model: str,
     messages: Sequence[dict[str, Any] | LLMResponse | CacheBoundary],
     tools: list[dict[str, Any]] | None = None,
     *,
     instructions: str | None = None,
-) -> int | None:
+) -> tuple[int | None, str]:
     """Uncalibrated legacy estimate over projected wire input, best effort.
 
     The tokenizer fallback deliberately remains the existing text-only fallback;
@@ -960,6 +980,7 @@ def _estimate_raw_input_tokens(
     # response path. The whole estimate — primary AND fallback — is guarded.
     try:
         counted = _token_counter_messages(message_list)
+        quality = "full"
         try:
             estimated = litellm.token_counter(model=model, messages=counted)
             if tools:
@@ -974,6 +995,7 @@ def _estimate_raw_input_tokens(
         except Exception:
             # token_counter can reject some message/tool shapes; fall back to the
             # per-message text sum rather than skip calibration entirely.
+            quality = "text_fallback"
             estimated = 0
             for msg in counted:
                 content = msg.get("content")
@@ -985,10 +1007,10 @@ def _estimate_raw_input_tokens(
                             estimated += litellm.token_counter(
                                 model=model, text=part.get("text", "")
                             )
-        return estimated
+        return estimated, quality
     except Exception:
         logger.debug("token calibration skipped (estimate failed)", exc_info=True)
-        return None
+        return None, "unavailable"
 
 
 def _update_token_calibration(
@@ -1295,27 +1317,13 @@ class UnifiedLLM(ABC):
         from nooa.unifiedllm.request import LLMRequest
 
         tool_choice = kwargs.get("tool_choice", "auto")
-        if not isinstance(tool_choice, (str, dict)):
+        if not isinstance(tool_choice, str):
             tool_choice = "auto"
-        level = kwargs.get("reasoning_level", self.reasoning_level)
-        extra = kwargs.get("extra_body")
-        layers = [kwargs, extra if isinstance(extra, Mapping) else {}]
-        cap = next(
-            (
-                layer[k]
-                for layer in layers
-                for k in sorted(REPLY_CAP_KEYS)
-                if type(layer.get(k)) is int
-            ),
-            None,
-        )
         return LLMRequest(
             messages=messages,
             tools=tools or [],
             tool_choice=tool_choice,
             output_type=output_model,
-            reasoning_level=level if isinstance(level, str) else None,
-            max_output_tokens=cap,
         )
 
     def _dispatch_request(self, messages, tools, output_model, kwargs, managed):
@@ -1348,32 +1356,22 @@ class UnifiedLLM(ABC):
         sampling, affinity, timeout and native controls need a newly configured
         adapter and cannot be silently discarded here.
         """
-        neutral = REPLY_CAP_KEYS | {"tool_choice", "reasoning_level"}
-        unsupported = set(overrides) - neutral - {"extra_body"}
-        extra = overrides.get("extra_body") or {}
-        unsupported.update(set(extra) - REPLY_CAP_KEYS)
-        level = overrides.get("reasoning_level", self.reasoning_level)
-        patch = self._reasoning_config.settings(level) if level is not None else {}
-        # Selected reasoning settings are represented by the level, not a
-        # second native side channel. A reduced recovery with raw settings is
-        # intentionally unsupported for a third-party adapter.
+        neutral = {"tool_choice"}
         route = {"model", "api_key", "api_base", "base_url", "custom_llm_provider", "client"}
-        unsupported.update(set(call_config) - neutral - route - set(patch) - {"extra_body"})
-        unsupported.update(set(call_config.get("extra_body") or {}) - REPLY_CAP_KEYS)
+        unsupported = set(overrides) - neutral
+        unsupported.update(set(call_config) - neutral - route)
+        if self.reasoning_level is not None:
+            unsupported.add("reasoning_level")
         if unsupported:
             raise ValueError(
                 "Legacy setting(s) unsupported by a request-only adapter: "
                 + ", ".join(sorted(unsupported))
                 + "; configure the adapter instead"
             )
-        caps = [call_config[key] for key in REPLY_CAP_KEYS if call_config.get(key) is not None]
-        if len(caps) > 1 or any(type(cap) is not int or cap <= 0 for cap in caps):
-            raise ValueError("Request-only adapters require one positive integer reply token limit")
         choice = call_config.get("tool_choice", "auto")
         if not isinstance(choice, str):
             raise ValueError("Request-only adapters require a neutral string tool_choice")
-        request = self._llm_request(messages, tools, output_model, call_config)
-        return request.model_copy(update={"tool_choice": choice, "reasoning_level": level})
+        return self._llm_request(messages, tools, output_model, call_config)
 
     def _validate_cache_breakpoint_model(self, effective_model: str) -> None:
         """Reject applying a model-declared cache mapping to a call override."""
@@ -1715,32 +1713,49 @@ async def _run_async_provider_call[T](
     call: Callable[[], Coroutine[Any, Any, T]],
     *,
     request_timeout: float | None,
+    _wire_owner=None,
 ) -> T:
-    """Run one provider attempt, holding admission through its actual exit.
+    """Dispatch after admission; the actual shielded task owns wire resources.
 
-    Acquisition happens before the provider task is created, so cancelling a
-    queued caller cannot dispatch abandoned work.  Once dispatched, the
-    provider task owns the permit and releases it in ``finally``.  Shielding
-    keeps that accounting correct when the caller is cancelled while remote
-    work or a stream is still active.
-
-    ``request_timeout`` bounds the whole attempt, stream included. On expiry it
-    cancels the task and raises TimeoutError. None disables it.
+    Queued cancellation creates neither a task nor an extra pool lease. Once
+    dispatched, caller cancellation remains prompt while the provider retains
+    its admission permit and transport lease through streaming/actual exit.
     """
     admission_controller = _current_admission_controller()
-    if admission_controller is None:
-        return await _await_provider_task(asyncio.create_task(call()), request_timeout)
-
-    permit = await admission_controller.acquire(_record_admission_observation)
-    if permit is None:
-        return await _await_provider_task(asyncio.create_task(call()), request_timeout)
-
+    permit = (
+        await admission_controller.acquire(_record_admission_observation)
+        if admission_controller is not None
+        else None
+    )
+    acquired = False
     try:
-        task = asyncio.create_task(_run_admitted_attempt(call, permit))
-    except BaseException:
-        permit.release()
-        raise
+        if _wire_owner is not None:
+            _wire_owner.acquire()
+            acquired = True
 
+        started = False
+
+        async def owned_call():
+            nonlocal started
+            started = True
+            return await _run_admitted_attempt(call, permit) if permit is not None else await call()
+
+        def release_task_resources(completed):
+            # A done callback also covers cancellation before coroutine entry.
+            # Admission owns its normal finally; do not release it twice.
+            if not started and permit is not None:
+                permit.release()
+            if _wire_owner is not None:
+                _wire_owner.release()
+
+        task = asyncio.create_task(owned_call())
+        task.add_done_callback(release_task_resources)
+    except BaseException:
+        if permit is not None:
+            permit.release()
+        if acquired:
+            _wire_owner.release()
+        raise
     return await _await_provider_task(task, request_timeout)
 
 

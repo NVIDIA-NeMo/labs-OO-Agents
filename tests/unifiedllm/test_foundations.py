@@ -104,8 +104,6 @@ def test_request_fields_defaults_and_identity_are_unchanged():
         "tools",
         "tool_choice",
         "output_type",
-        "reasoning_level",
-        "max_output_tokens",
     ]
     assert get_args(LLMRequest.model_fields["tools"].annotation) == (Tool,)
     request = LLMRequest()
@@ -114,8 +112,6 @@ def test_request_fields_defaults_and_identity_are_unchanged():
         "tools": [],
         "tool_choice": "auto",
         "output_type": None,
-        "reasoning_level": None,
-        "max_output_tokens": None,
     }
     assert request.tools is not LLMRequest().tools
     history = [{"role": "user", "content": "hello"}]

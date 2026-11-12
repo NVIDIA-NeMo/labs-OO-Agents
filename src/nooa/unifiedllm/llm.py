@@ -11,6 +11,7 @@ wire attempt per send; the shell cannot discover hidden SDK retries.
 
 from collections.abc import Mapping
 from dataclasses import replace
+from threading import RLock
 from typing import Literal
 
 from pydantic import BaseModel
@@ -56,6 +57,12 @@ def _snapshot_capabilities(facts: Capabilities) -> Capabilities:
             raise LLMFailure(FailureKind.CONFIG, f"Capability {name} must be positive or unknown")
     # Independently advertised ceilings need not be ordered. Validate the
     # selected request budget below, rather than rejecting usable route facts.
+    if (
+        type(facts) is Capabilities
+        and type(facts.media_kinds) is frozenset
+        and (facts.reasoning_levels is None or type(facts.reasoning_levels) is tuple)
+    ):
+        return facts  # Already immutable, still defensively validated above.
     return replace(facts, media_kinds=media, reasoning_levels=levels)
 
 
@@ -85,7 +92,8 @@ class LLM:
 
     Unknown capability facts are not refusals. To switch routes, construct a new
     LLM with the new adapter; there are no per-call route overrides. Requests
-    retain stored history and native response identities. No loader changes yet.
+    retain stored history and native response identities. Loader views own leases;
+    directly supplied adapters remain borrowed.
     """
 
     def __init__(
@@ -99,6 +107,9 @@ class LLM:
             raise LLMFailure(FailureKind.CONFIG, "on_unsupported_media must be note or error")
         if retry_config is not None and not isinstance(retry_config, RetryConfig):
             raise LLMFailure(FailureKind.CONFIG, "retry_config must be RetryConfig or None")
+        self._view_lock = RLock()
+        self._lease = None
+        self._closed = False
         self._adapter = adapter
         try:
             facts = adapter.capabilities
@@ -147,22 +158,6 @@ class LLM:
         facts = self.capabilities
         if facts.tools is False and (request.tools or choice not in ("auto", "none")):
             raise LLMFailure(FailureKind.BAD_REQUEST, "This route does not support tools")
-        if (
-            request.reasoning_level is not None
-            and facts.reasoning_levels is not None
-            and request.reasoning_level not in facts.reasoning_levels
-        ):
-            raise LLMFailure(FailureKind.BAD_REQUEST, "Unsupported reasoning level on this route")
-        cap = request.max_output_tokens
-        if cap is not None:
-            if type(cap) is not int or cap <= 0:
-                raise LLMFailure(FailureKind.BAD_REQUEST, "max_output_tokens must be positive")
-            if facts.max_output_tokens is not None and cap > facts.max_output_tokens:
-                raise LLMFailure(FailureKind.OUTPUT_LIMIT, "Reply cap exceeds this route's ceiling")
-            if facts.context_window is not None and cap >= facts.context_window:
-                raise LLMFailure(FailureKind.OUTPUT_LIMIT, "Reply cap leaves no room for input")
-        # Tokenized context size and wire-specific media count/size checks remain
-        # adapter concerns until the shared estimator/limit policy is integrated.
         if self._media_policy == "error":
             for kind in _portable_media(request.messages):
                 if kind not in facts.media_kinds:
@@ -174,26 +169,82 @@ class LLM:
         messages = filter_media_messages(request.messages, tuple(facts.media_kinds))
         return request.model_copy(update={"messages": messages})
 
+    def _acquire(self):
+        with self._view_lock:
+            if self._closed:
+                raise LLMFailure(FailureKind.CONFIG, "LLM view is closed")
+            lease = self._lease
+            if lease is not None:
+                lease.acquire()
+            return lease
+
+    def close(self):
+        """Release this view, not other live views or in-flight calls.
+
+        Inside a running event loop use aclose to await final async disposal.
+        Directly supplied adapters and caller-supplied SDKs remain borrowed.
+        """
+        with self._view_lock:
+            if not self._closed:
+                self._closed = True
+                if self._lease is not None:
+                    self._lease.release()
+
+    async def aclose(self):
+        """Idempotently release this view, awaiting final owned pool disposal."""
+        with self._view_lock:
+            if not self._closed:
+                self._closed = True
+                if self._lease is not None:
+                    self._lease.release()
+            lease = self._lease
+        if lease is not None:
+            await lease.join_disposal()
+
+    def __enter__(self):
+        if self._closed:
+            raise LLMFailure(FailureKind.CONFIG, "LLM view is closed")
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    async def __aenter__(self):
+        return self.__enter__()
+
+    async def __aexit__(self, *args):
+        await self.aclose()
+
     def call(self, request: LLMRequest) -> LLMResponse:
         """Validate a request-local view and run the common logical executor."""
-        return logical_sync(
-            lambda: self._prepare(request),
-            lambda prepared: execute_sync(
-                _calibration_adapter(self.adapter),
-                prepared,
-                self._retry_config,
-                check_empty=check_empty_response,
-            ),
-        )
+        lease = self._acquire()
+        try:
+            return logical_sync(
+                lambda: self._prepare(request),
+                lambda prepared: execute_sync(
+                    _calibration_adapter(self.adapter),
+                    prepared,
+                    self._retry_config,
+                    check_empty=check_empty_response,
+                ),
+            )
+        finally:
+            if lease is not None:
+                lease.release()
 
     async def acall(self, request: LLMRequest) -> LLMResponse:
         """Async call, sharing preflight, retry ownership and cancellation semantics."""
-        return await logical_async(
-            lambda: self._prepare(request),
-            lambda prepared: execute_async(
-                _calibration_adapter(self.adapter),
-                prepared,
-                self._retry_config,
-                check_empty=check_empty_response,
-            ),
-        )
+        lease = self._acquire()
+        try:
+            return await logical_async(
+                lambda: self._prepare(request),
+                lambda prepared: execute_async(
+                    _calibration_adapter(self.adapter, lease),
+                    prepared,
+                    self._retry_config,
+                    check_empty=check_empty_response,
+                ),
+            )
+        finally:
+            if lease is not None:
+                await lease.release_async()

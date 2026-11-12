@@ -347,6 +347,21 @@ class LiteLLMResponsesAdapter:
         self._route_calibration_record = None
         self._route_calibration_identity = object()
 
+    def _numeric_participation(self):
+        """Exact built-ins only: inherited participation never bypasses send overrides."""
+        if (
+            type(self) is not LiteLLMResponsesAdapter
+            or self._legacy_options is not None
+            or "send" in self.__dict__
+            or "send_sync" in self.__dict__
+        ):
+            return None
+        from nooa.unifiedllm._route_calibration import _CalibrationAdapter
+
+        from ._calibration import _route_calibration
+
+        return _CalibrationAdapter(self, _route_calibration(self))
+
     @property
     def capabilities(self) -> Capabilities:
         """The capabilities the client declares."""
@@ -438,7 +453,7 @@ class LiteLLMResponsesAdapter:
         """One sync provider attempt; no retries."""
         return cast("litellm.ResponsesAPIResponse", litellm.responses(**prepared.api_params))
 
-    async def transmit(self, prepared: PreparedResponsesCall) -> Any:
+    async def transmit(self, prepared: PreparedResponsesCall, *, _wire_owner=None) -> Any:
         """One async provider attempt under admission and the request deadline."""
 
         async def call_provider():
@@ -450,6 +465,7 @@ class LiteLLMResponsesAdapter:
         return await _run_async_provider_call(
             call_provider,
             request_timeout=self._client._http_config.request_timeout,
+            _wire_owner=_wire_owner,
         )
 
     def parse(self, prepared: PreparedResponsesCall, raw_response: Any, usage: Any) -> LLMResponse:
@@ -508,20 +524,34 @@ class LiteLLMResponsesAdapter:
         return self._send_sync(request)
 
     def _send_sync(
-        self, request: LLMRequest, *, _owner: _ObservationOwner | None = None
+        self, request: LLMRequest, *, _owner: _ObservationOwner | None = None, _decision=None
     ) -> LLMResponse:
         """Explicit shell participation applies only to this exact send."""
         with _observe_attempt(_owner) as observation:
             prepared = self.prepare(request, self._call_config(request), is_async=False)
             if observation is not None:
-                observation.projected(
-                    _core._estimate_raw_input_tokens(
+                if _decision is not None:
+                    estimated, quality = _core._estimate_projected_input_tokens(
                         prepared.effective_model,
                         prepared.input_messages,
                         tools=prepared.api_params.get("tools"),
                         instructions=prepared.api_params.get("instructions"),
                     )
-                )
+                    observation.projected(estimated)
+                    from ._prepared_limits import _apply_decision
+
+                    _apply_decision(
+                        prepared.api_params, estimated, quality, _decision, responses=True
+                    )
+                else:
+                    observation.projected(
+                        _core._estimate_raw_input_tokens(
+                            prepared.effective_model,
+                            prepared.input_messages,
+                            tools=prepared.api_params.get("tools"),
+                            instructions=prepared.api_params.get("instructions"),
+                        )
+                    )
                 observation.transmitting()
             raw_response = self.transmit_sync(prepared)
             if observation is not None:
@@ -539,22 +569,45 @@ class LiteLLMResponsesAdapter:
         return await self._send(request)
 
     async def _send(
-        self, request: LLMRequest, *, _owner: _ObservationOwner | None = None
+        self,
+        request: LLMRequest,
+        *,
+        _owner: _ObservationOwner | None = None,
+        _decision=None,
+        _wire_owner=None,
     ) -> LLMResponse:
         """Explicit shell participation applies only to this exact send."""
         with _observe_attempt(_owner) as observation:
             prepared = self.prepare(request, self._call_config(request), is_async=True)
             if observation is not None:
-                observation.projected(
-                    _core._estimate_raw_input_tokens(
+                if _decision is not None:
+                    estimated, quality = _core._estimate_projected_input_tokens(
                         prepared.effective_model,
                         prepared.input_messages,
                         tools=prepared.api_params.get("tools"),
                         instructions=prepared.api_params.get("instructions"),
                     )
-                )
+                    observation.projected(estimated)
+                    from ._prepared_limits import _apply_decision
+
+                    _apply_decision(
+                        prepared.api_params, estimated, quality, _decision, responses=True
+                    )
+                else:
+                    observation.projected(
+                        _core._estimate_raw_input_tokens(
+                            prepared.effective_model,
+                            prepared.input_messages,
+                            tools=prepared.api_params.get("tools"),
+                            instructions=prepared.api_params.get("instructions"),
+                        )
+                    )
                 observation.transmitting()
-            raw_response = await self.transmit(prepared)
+            raw_response = await (
+                self.transmit(prepared)
+                if _wire_owner is None
+                else self.transmit(prepared, _wire_owner=_wire_owner)
+            )
             if observation is not None:
                 observation.delivered(_numeric_usage(raw_response))
             return _parse_reply(

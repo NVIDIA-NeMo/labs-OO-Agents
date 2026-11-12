@@ -17,20 +17,14 @@ class LLMRequest(BaseModel):
     so earlier LLMResponse objects are passed back unchanged. Model, endpoint,
     key and provider settings never go here; they belong to the client.
 
-    While the clients still accept LiteLLM keyword arguments, ``tool_choice``,
-    ``reasoning_level`` and ``max_output_tokens`` record what the call asked
-    for; wire-only settings live on a call-local configured legacy adapter.
+    Settings are fixed at load. Unknown and removed settings are rejected.
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
+    model_config = ConfigDict(arbitrary_types_allowed=True, extra="forbid")
 
     messages: SkipValidation[list[dict[str, Any] | LLMResponse | CacheBoundary]] = Field(
         default_factory=list
     )
     tools: SkipValidation[list[Tool]] = Field(default_factory=list)
-    # A str other than the literals names a tool. A mapping is LiteLLM's own
-    # tool_choice form, accepted until callers stop passing it.
-    tool_choice: Literal["auto", "required", "none"] | str | dict[str, Any] = "auto"
+    tool_choice: Literal["auto", "required", "none"] | str = "auto"
     output_type: SkipValidation[type[BaseModel] | None] = None
-    reasoning_level: str | None = None
-    max_output_tokens: int | None = None

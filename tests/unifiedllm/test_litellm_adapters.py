@@ -191,8 +191,7 @@ def test_client_builds_request_from_call(monkeypatch, calls):
     assert request.messages is MESSAGES
     assert request.tools == [TOOL]
     assert request.tool_choice == "required"
-    assert request.reasoning_level == "low"
-    assert request.max_output_tokens == 50
+    assert set(type(request).model_fields) == {"messages", "tools", "tool_choice", "output_type"}
     client.close()
 
 
@@ -205,11 +204,11 @@ def test_client_builds_request_from_call(monkeypatch, calls):
         {"extra_body": {"max_tokens": 512}},
     ],
 )
-def test_option_reply_cap_wins_over_the_request_cap(calls, make, options):
-    """A cap in the options, under any spelling, keeps the request's cap off the wire."""
+def test_legacy_option_reply_cap_is_preserved(calls, make, options):
+    """A cap in the private options survives the four-field content request."""
     client = make()
     adapter = configure_legacy_adapter(client._adapter, options)
-    adapter.send_sync(LLMRequest(messages=MESSAGES, max_output_tokens=256))
+    adapter.send_sync(LLMRequest(messages=MESSAGES))
     [body] = [json.loads(call) for call in calls]
     caps = {
         k: v
@@ -222,9 +221,11 @@ def test_option_reply_cap_wins_over_the_request_cap(calls, make, options):
 
 
 @pytest.mark.parametrize("make", [chat_client, responses_client])
-def test_request_reply_cap_fills_in_when_options_have_none(calls, make):
+def test_bound_reply_cap_fills_in_when_options_have_none(calls, make):
+    from nooa.unifiedllm.adapters._binding import _bind_adapter
+
     client = make()
-    client._adapter.send_sync(LLMRequest(messages=MESSAGES, max_output_tokens=256))
+    _bind_adapter(client._adapter, max_output_tokens=256).send_sync(LLMRequest(messages=MESSAGES))
     [body] = [json.loads(call) for call in calls]
     assert 256 in (body.get("max_tokens"), body.get("max_output_tokens"))
     client.close()
@@ -286,7 +287,7 @@ async def test_client_dispatches_through_a_protocol_only_adapter(make):
     class Output(BaseModel):
         answer: str
 
-    options = {"tool_choice": "required", "reasoning_level": "low", "max_tokens": 50}
+    options = {"tool_choice": "required"}
     with pytest.raises(ValueError, match="unsupported.*temperature"):
         client.call(MESSAGES, [TOOL], temperature=0)
     with pytest.raises(ValueError, match="unsupported.*temperature"):
@@ -298,8 +299,12 @@ async def test_client_dispatches_through_a_protocol_only_adapter(make):
     for request in adapter.seen:
         assert request.messages is MESSAGES and request.tools == [TOOL]
         assert request.tool_choice == "required"
-        assert request.reasoning_level == "low"
-        assert request.max_output_tokens == 50
+        assert set(type(request).model_fields) == {
+            "messages",
+            "tools",
+            "tool_choice",
+            "output_type",
+        }
         assert request.output_type is Output
     await client.aclose()
 
@@ -398,28 +403,23 @@ async def test_strict_adapter_rejects_wire_settings_before_dispatch(make, overri
 
 @pytest.mark.parametrize("make", [chat_client, responses_client])
 @pytest.mark.asyncio
-async def test_strict_adapter_inherits_neutral_defaults_and_cap_precedence(make):
+async def test_strict_adapter_rejects_inherited_settings_instead_of_dropping(make):
     client = make(
         tool_choice="required",
         extra_body={"max_tokens": 80},
         reasoning_levels={"low": {"reasoning_effort": "low", "max_tokens": 40}},
         reasoning_level="low",
     )
-    adapter = ProtocolOnlyAdapter([_turn("ok")] * 4)
+    adapter = ProtocolOnlyAdapter([])
     client._adapter = adapter
-    client.call(MESSAGES, [TOOL])
-    await client.acall(MESSAGES, [TOOL])
-    client.call(MESSAGES, [TOOL], reasoning_level=None, tool_choice="auto", max_output_tokens=20)
-    await client.acall(
-        MESSAGES, [TOOL], reasoning_level=None, tool_choice="none", extra_body={"max_tokens": 30}
-    )
-    assert [(r.tool_choice, r.reasoning_level, r.max_output_tokens) for r in adapter.seen] == [
-        ("required", "low", 40),
-        ("required", "low", 40),
-        ("auto", None, 20),
-        ("none", None, 30),
-    ]
-    await client.aclose()
+    try:
+        with pytest.raises(ValueError, match="unsupported.*(extra_body|reasoning)"):
+            client.call(MESSAGES, [TOOL])
+        with pytest.raises(ValueError, match="unsupported.*(extra_body|reasoning)"):
+            await client.acall(MESSAGES, [TOOL])
+        assert adapter.seen == []
+    finally:
+        await client.aclose()
 
 
 @pytest.mark.parametrize("make", [chat_client, responses_client])
@@ -529,7 +529,7 @@ async def test_legacy_reasoning_cap_and_recovery_preserve_exact_settings(calls, 
 def test_strict_adapter_does_not_silently_drop_invalid_caps(make, cap):
     client = make()
     client._adapter = ProtocolOnlyAdapter([])
-    with pytest.raises(ValueError, match="positive integer reply token limit"):
+    with pytest.raises(ValueError, match="unsupported.*max_tokens"):
         client.call(MESSAGES, max_tokens=cap)
     assert client._adapter.seen == []
     client.close()

@@ -383,9 +383,13 @@ async def test_absent_or_zero_estimate_no_fabricated_update(
     client = make_client(family)
     module = "nooa.unifiedllm.adapters.litellm_" + family
     if family == "chat":
-        monkeypatch.setattr(module + "._estimate_raw_input_tokens", lambda *args, **kw: estimate)
+        monkeypatch.setattr(
+            module + "._estimate_projected_input_tokens", lambda *args, **kw: (estimate, "full")
+        )
     else:
-        monkeypatch.setattr(core, "_estimate_raw_input_tokens", lambda *args, **kw: estimate)
+        monkeypatch.setattr(
+            core, "_estimate_projected_input_tokens", lambda *args, **kw: (estimate, "full")
+        )
     stub_provider(monkeypatch, family, lambda **kwargs: raw_reply(family))
     try:
         await call(LLM(client._adapter), LLMRequest(messages=MESSAGES), is_async)
@@ -404,7 +408,7 @@ async def test_preflight_does_not_seed_or_observe(family, is_async, calibration)
         assert client._adapter._route_calibration_record is None
         with _collect_observations() as collector:
             with pytest.raises(LLMFailure):
-                await call(llm, LLMRequest(messages=MESSAGES, max_output_tokens=-1), is_async)
+                await call(llm, LLMRequest(messages=MESSAGES, tool_choice="missing"), is_async)
             assert collector.records == ()
         assert routes._records == {} and client._adapter._route_calibration_record is None
         assert updates == legacy.updates == estimates == []
@@ -444,3 +448,44 @@ async def test_nested_unrelated_route_keeps_legacy_authority(
     finally:
         await client.aclose()
         await other.aclose()
+
+
+@FAMILIES
+@MODES
+@pytest.mark.parametrize("override", ["subclass", "instance"])
+async def test_private_participation_never_bypasses_custom_send(
+    family, is_async, override, calibration
+):
+    client = make_client(family)
+    seen = []
+
+    def send_sync(request):
+        seen.append(request)
+        return LLMResponse(usage=LLMUsage(input_tokens=9))
+
+    async def send(request):
+        return send_sync(request)
+
+    adapter = client._adapter
+    if override == "subclass":
+
+        class Custom(type(adapter)):
+            def send_sync(self, request):
+                return send_sync(request)
+
+            async def send(self, request):
+                return await send(request)
+
+        adapter = Custom(client)
+    else:
+        adapter.send_sync = send_sync
+        adapter.send = send
+    legacy, updates, estimates = calibration
+    try:
+        with _collect_observations() as collector:
+            result = await call(LLM(adapter), LLMRequest(messages=MESSAGES), is_async)
+        assert result.usage.input_tokens == 9 and len(seen) == 1
+        assert collector.records == ()
+        assert updates == legacy.updates == estimates == []
+    finally:
+        await client.aclose()

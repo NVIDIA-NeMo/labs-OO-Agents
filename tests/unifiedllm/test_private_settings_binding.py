@@ -171,9 +171,9 @@ async def test_unset_none_and_reasoning_precedence(family, capture):
         assert seen[1]["max_output_tokens"] is None
         bound = _bind_adapter(client._adapter, reasoning_level="low")
         client._reasoning_config.levels["high"]["reasoning_effort"] = "mutated"
-        bound.send_sync(LLMRequest(reasoning_level="high", max_output_tokens=23))
+        _bind_adapter(bound, reasoning_level="high", max_output_tokens=23).send_sync(LLMRequest())
         assert seen[-1]["reasoning_effort"] == "high"
-        assert seen[-1]["max_tokens" if family is CompletionClient else "max_output_tokens"] == 23
+        assert seen[-1]["max_output_tokens"] == 23
         before = len(seen)
         for options in (
             {"reasoning_level": "bogus"},
@@ -334,7 +334,7 @@ async def test_reasoning_nested_defaults_and_unknown_validation(family, capture)
         client._reasoning_config.levels["low"]["reasoning"]["summary"].append("changed")
         bound.send_sync(LLMRequest())
         assert seen[-1]["reasoning"]["summary"] == ["keep"]
-        bound.send_sync(LLMRequest(reasoning_level="low"))
+        _bind_adapter(bound, reasoning_level="low").send_sync(LLMRequest())
         assert seen[-1]["reasoning"]["summary"] == ["keep"]
     finally:
         await client.aclose()
@@ -467,14 +467,16 @@ async def test_reasoning_selection_provenance(family, is_async, native_defaults,
         direct_high = _bind_adapter(client._adapter, reasoning_level="high")
         rebound_high = _bind_adapter(low, reasoning_level="high")
         assert config(rebound_high, LLMRequest()) == config(direct_high, LLMRequest())
-        assert config(low, LLMRequest(reasoning_level="high")) == config(direct_high, LLMRequest())
+        assert config(_bind_adapter(low, reasoning_level="high"), LLMRequest()) == config(
+            direct_high, LLMRequest()
+        )
         assert "thinking" not in config(rebound_high, LLMRequest())
         for adapter, request in (
             (reset, LLMRequest()),
             (reset_direct, LLMRequest()),
             (rebound_high, LLMRequest()),
             (direct_high, LLMRequest()),
-            (low, LLMRequest(reasoning_level="high", max_output_tokens=23)),
+            (_bind_adapter(low, reasoning_level="high", max_output_tokens=23), LLMRequest()),
             (inherited, LLMRequest()),
         ):
             await send(adapter, request)
@@ -489,7 +491,7 @@ async def test_reasoning_selection_provenance(family, is_async, native_defaults,
         assert seen[4].get("extra_body", {}).get("thinking") == raw.get("extra_body", {}).get(
             "thinking"
         )
-        assert seen[4]["max_tokens" if family is CompletionClient else "max_output_tokens"] == 23
+        assert seen[4]["max_output_tokens"] == 23
         for conflict in (
             {"reasoning_effort": "low"},
             {"extra_body": {"reasoning_effort": "low"}},
@@ -537,9 +539,9 @@ async def test_identity_carriers_rejected_before_real_wire(family, is_async, mon
         neutral = _bind_adapter(client._adapter)
         with pytest.raises(ValueError, match="route/identity"):
             if is_async:
-                await neutral.send(LLMRequest(reasoning_level="unsafe"))
+                await _bind_adapter(neutral, reasoning_level="unsafe").send(request)
             else:
-                neutral.send_sync(LLMRequest(reasoning_level="unsafe"))
+                _bind_adapter(neutral, reasoning_level="unsafe").send_sync(request)
         assert not attempts
         rejected = [
             {"extra_headers": {header: "override"}}

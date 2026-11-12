@@ -23,6 +23,19 @@ per-call selection overrides it; explicit `reasoning_level=None` uses the raw
 base configuration for that call. `reasoning_default` is metadata only: declaring
 it does not add parameters, change costs or override existing provider settings.
 
+For the public shell, select effort at load time instead:
+
+```python
+from nooa.unifiedllm import LLMRequest, load_llm
+
+async with load_llm("gpt-5.6-sol", reasoning_level="high") as llm:
+    response = await llm.acall(LLMRequest(messages=messages))
+```
+
+`LLMRequest` carries content only; per-request settings in the example above are
+for the legacy client. See [public LLM loading](public-llm.md) for frozen settings,
+shared pools, disposal and estimated-context-fit limits.
+
 ## Registry declarations
 
 ```yaml

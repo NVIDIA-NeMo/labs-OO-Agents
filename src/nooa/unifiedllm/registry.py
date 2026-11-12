@@ -405,27 +405,48 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
 SUPPORTED_ADAPTERS = ("litellm",)
 
 
-def load_llm(name: str, **overrides) -> UnifiedLLM:
-    """Load the LLM for a registry entry (or a LiteLLM model name).
+def load_llm(name: str, *, on_unsupported_media="note", **overrides):
+    """Load a public LLM with immutable settings, without provider I/O.
 
-    The adapter is ``overrides["adapter"]``, else the entry's optional
-    ``adapter:`` field, else ``litellm``. Only ``litellm`` is supported now;
-    any other value raises ValueError. The adapter choice is removed before
-    the client is built, so it never reaches the provider. Everything else is
-    as in :func:`get_llm_client`, including ``overrides``.
+    Sampling, reasoning_level, max_output_tokens and timeout belong here, not
+    on LLMRequest. Omitted settings inherit registry defaults; explicit None
+    clears them. Explicit same-route loads share leased pools, facts and EMA.
+    get_llm_client/client_from_config remain the legacy compatibility factories.
     """
-    config = get_registry_config(name)
-    adapter = overrides.pop("adapter", None)
-    if adapter is None:
-        adapter = config.get("adapter")
-    if adapter is None:
-        adapter = "litellm"
+    from .adapters._loader import _load_public
+    from .adapters.legacy import snapshot_options
+
+    ensure_loaded()
+    with _registry_lock:
+        config = snapshot_options(MODELS.get(name, {}))
+    adapter = overrides.pop("adapter", None) or config.get("adapter") or "litellm"
     if adapter not in SUPPORTED_ADAPTERS:
         raise ValueError(
             f"Model alias {name!r} has unsupported adapter {adapter!r}; "
             f"supported: {', '.join(SUPPORTED_ADAPTERS)}"
         )
-    return get_llm_client(name, **overrides)
+    from .adapters._binding import _UNSET
+
+    overrides = {key: value for key, value in overrides.items() if value is not _UNSET}
+    client_type = overrides.pop("client_type", None)
+    if (client_type or config.get("client_type", "completion")) == "decision":
+        raise TypeError("Decision aliases cannot be used as an LLM; use get_decision_model")
+    params, config, selected = _resolve_client_config(
+        name, config, client_type=client_type, **overrides
+    )
+    from .limits import REPLY_CAP_KEYS
+    from .reasoning import _replace_reply_cap
+
+    supplied = {key: value for key, value in overrides.items() if value is not _UNSET}
+    _replace_reply_cap(params, supplied)
+    for key in REPLY_CAP_KEYS & supplied.keys():
+        params[key] = supplied[key]
+    extra = supplied.get("extra_body")
+    if isinstance(extra, dict) and REPLY_CAP_KEYS & extra.keys():
+        params.setdefault("extra_body", {}).update(
+            {key: extra[key] for key in REPLY_CAP_KEYS & extra.keys()}
+        )
+    return _load_public(name, params, config, selected, on_unsupported_media, supplied)
 
 
 def get_decision_model(name: str, **overrides) -> UnifiedDecisionModel:
@@ -456,12 +477,36 @@ def get_decision_model(name: str, **overrides) -> UnifiedDecisionModel:
 def client_from_config(
     name: str, config: dict[str, Any], *, client_type: str | None = None, **overrides
 ) -> UnifiedLLM | UnifiedDecisionModel:
+    """Build a legacy client from an unsaved entry (Connect/runtime compatibility)."""
+    resolved = _resolve_client_config(name, config, client_type=client_type, **overrides)
+    if not isinstance(resolved, tuple):
+        return resolved  # Decision compatibility path.
+    params, config, selected = resolved
+    return _construct_llm_client(params, config, selected)
+
+
+def _construct_llm_client(params, config, selected_client_type):
+    from nooa.unifiedllm import CompletionClient, ResponsesClient
+
+    client = (
+        ResponsesClient(**params)
+        if selected_client_type == "responses"
+        else CompletionClient(**params)
+    )
+    client._registry_config = config
+    client._registry_context_route = (client.model, dict(client.config), selected_client_type)
+    return client
+
+
+def _resolve_client_config(
+    name: str, config: dict[str, Any], *, client_type: str | None = None, **overrides
+) -> UnifiedLLM | UnifiedDecisionModel:
     """Build a client from a registry entry without registering or saving it.
 
     Model lookup and onboarding share this construction path so a checked
     entry has the same defaults and routing when an agent loads it later.
     """
-    from nooa.unifiedllm import CompletionClient, ResponsesClient, RetryConfig
+    from nooa.unifiedllm import RetryConfig
 
     config = dict(config)
 
@@ -588,6 +633,8 @@ def client_from_config(
         "base_url",
         "custom_llm_provider",
         "max_tokens",
+        "max_output_tokens",
+        "max_completion_tokens",
         "reasoning",
         "thinking",
         "reasoning_effort",
@@ -710,14 +757,4 @@ def client_from_config(
             name,
         )
 
-    # Select client class: explicit param > YAML config > default
-    client = (
-        ResponsesClient(**params)
-        if selected_client_type == "responses"
-        else CompletionClient(**params)
-    )
-    # Keep the entry's settings on the client so later context-window lookups
-    # can check they still describe the client's actual route.
-    client._registry_config = config
-    client._registry_context_route = (client.model, dict(client.config), selected_client_type)
-    return client
+    return params, config, selected_client_type
