@@ -37,7 +37,11 @@ from nooa.events import (
     PythonOutput,
     Task,
 )
-from nooa.runtime.execution_namespace import ExecutionNamespace, call_execution_namespace
+from nooa.runtime.execution_namespace import (
+    ExecutionNamespace,
+    call_execution_namespace,
+    write_back_session_locals,
+)
 from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.runtime.sandbox.errors import SandboxExecutionError
 from nooa.strategies.base import RuntimeServices
@@ -88,6 +92,8 @@ class GenerationSession:
     session_locals: dict[str, Any] = field(default_factory=dict)
     # The namespace the cells run in (CurrentCall.execution_namespace).
     execution_namespace: ExecutionNamespace | None = None
+    # The call's arguments: user names in the namespace, never written back.
+    argument_names: frozenset[str] = frozenset()
     task_event_id: str = ""
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
 
@@ -251,15 +257,26 @@ class PurePythonStrategy(CompositeStrategy):
 
     @staticmethod
     def _sync_session_locals(call: "CurrentCall", session: "GenerationSession") -> None:
-        """Write the names cells bound back to the caller's ``session_locals`` seed."""
+        """Write the names cells bound back to the caller's ``session_locals`` seed.
+
+        The call's arguments never reach it; a caller key named like one keeps its value.
+        """
         if call.session_locals is None or session.execution_namespace is None:
             return
-        call.session_locals.clear()
-        call.session_locals.update(session.execution_namespace.user_values())
+        write_back_session_locals(
+            session.execution_namespace, call.session_locals, call_names=session.argument_names
+        )
 
     async def execute(self, runtime: RuntimeServices, call: "CurrentCall") -> Any:
-        """Run the loop with every cell in the call's owned namespace (as CodeAct)."""
-        namespace = call_execution_namespace(runtime.agent, call)
+        """Run the loop with every cell in the call's owned namespace (as CodeAct).
+
+        The method's arguments are ordinary names there, like a function's
+        locals: a cell can read, rebind and delete them.
+        """
+        call.arguments_are_user_names = True
+        namespace = call_execution_namespace(
+            runtime.agent, call, arguments=self._call_arguments(runtime, call)
+        )
         call.execution_namespace = namespace
         with namespace.enter({}):
             return await self._run_loop(runtime, call, namespace)
@@ -269,6 +286,7 @@ class PurePythonStrategy(CompositeStrategy):
     ) -> Any:
         session = self._initialize_session(call, runtime)
         session.execution_namespace = namespace
+        session.argument_names = frozenset(self._call_arguments(runtime, call))
         # The cells' globals (seeded with the caller's session_locals).
         session.session_locals = namespace.globals
         call.execution_locals = namespace.globals
@@ -906,10 +924,12 @@ class PurePythonStrategy(CompositeStrategy):
         def emit_message(text: str) -> None:
             runtime.event_manager.add(Message(content=str(text)), record=False)
 
-        builtins: dict[str, Any] = {
-            "message": emit_message,
-        }
+        return {"message": emit_message, **self._call_arguments(runtime, call)}
 
+    @staticmethod
+    def _call_arguments(runtime: RuntimeServices, call: "CurrentCall") -> dict[str, Any]:
+        """The method's arguments by parameter name (positional ones mapped by the signature)."""
+        arguments: dict[str, Any] = {}
         method = getattr(runtime.agent, call.method_name, None)
         if method and callable(method):
             try:
@@ -917,15 +937,14 @@ class PurePythonStrategy(CompositeStrategy):
                 param_names = [p for p in sig.parameters.keys() if p != "self"]
                 for i, name in enumerate(param_names):
                     if i < len(call.args):
-                        builtins[name] = call.args[i]
+                        arguments[name] = call.args[i]
             except (ValueError, TypeError):
                 pass
 
-        # Always inject call kwargs (CurrentCall.from_method maps positional
+        # Always include call kwargs (CurrentCall.from_method maps positional
         # args to names, so this covers Skill methods and agent methods alike).
-        builtins.update(call.kwargs)
-
-        return builtins
+        arguments.update(call.kwargs)
+        return arguments
 
     # ── Post-response cleanup (PurePython) ─────────────────────
     # Intercept point: strategy-specific response transforms.

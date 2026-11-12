@@ -9,6 +9,7 @@ import linecache
 import pytest
 
 from nooa import Agent, strategy
+from nooa.runtime.execution_namespace import RUNTIME_NAMES, ExecutionNamespace
 from nooa.runtime.sandbox.cell_core import run_cell_source
 from nooa.strategies import PredictStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse
@@ -35,19 +36,20 @@ async def test_strategy_helper_source_across_cells(backend, prefix, body, monkey
     )
     namespace = {"strategy": strategy, "PredictStrategy": PredictStrategy, "fake": fake}
     agent = Agent(llm=fake) if backend == "actor" else None
+    owned = ExecutionNamespace(reserved=RUNTIME_NAMES)
 
     async def execute(code, execution_count):
-        """Run a cell with the selected backend and persist its locals."""
+        """Run a cell with the selected backend; its namespace persists its names."""
         if agent is None:
             return await run_cell_source(code, namespace, execution_count=execution_count)
-        result = await agent.runtime.execute_code(
-            code,
-            builtins=namespace,
-            wrap_in_function=True,
-            execution_count=execution_count,
-        )
-        namespace.update(result.captured_locals)
-        return result
+        with owned.enter({}):
+            return await agent.runtime.execute_code(
+                code,
+                builtins=namespace,
+                wrap_in_function=True,
+                execution_count=execution_count,
+                execution_namespace=owned,
+            )
 
     first = await execute(
         prefix

@@ -50,11 +50,23 @@ from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
 _NOOA_PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 _FRAMEWORK_PATH_PARTS = {"site-packages", "dist-packages"}
 
-# User code filename pattern - matches "Cell In[N]" format
-_CELL_PATTERN = re.compile(r"^Cell In\[\d+\]$")
+# User code filename pattern - matches "Cell In[N]", optionally with the
+# in-process namespace suffix ("Cell In[N] [ns:<identity>:<cell>]").
+_CELL_PATTERN = re.compile(r"^Cell In\[\d+\](?: \[ns:[0-9a-f]+:\d+\])?$")
+# The namespace suffix keeps each in-process cell's linecache entry distinct;
+# the model sees the IPython name only.
+_NAMESPACE_SUFFIX = re.compile(r"(Cell In\[\d+\]) \[ns:[0-9a-f]+:\d+\]")
 
-# Internal wrapper function names to replace with <module>
-_WRAPPER_NAMES = ("__repl_wrapper__", "__wrapper__")
+# Internal wrapper function names to replace with <module>: the sandbox
+# worker's ``__repl_wrapper__`` and the in-process cell engine's
+# ``_nooa_ns_cell_<hex>`` (``nooa.runtime.execution_namespace``).
+_WRAPPER_NAMES = ("__repl_wrapper__",)
+_ENGINE_WRAPPER_PREFIX = "_nooa_ns_cell_"
+_ENGINE_WRAPPER = re.compile(r"\bin _nooa_ns_cell_[0-9a-f]+\b")
+
+
+def _is_wrapper_name(name: str) -> bool:
+    return name in _WRAPPER_NAMES or name.startswith(_ENGINE_WRAPPER_PREFIX)
 
 
 # ---------------------------------------------------------------------------
@@ -578,11 +590,16 @@ def _replace_wrapper_names(text: str) -> str:
 
     Transforms:
         in __repl_wrapper__ → in <module>
-        in __wrapper__ → in <module>
+        in _nooa_ns_cell_<hex> → in <module>
     """
     for name in _WRAPPER_NAMES:
         text = text.replace(f"in {name}", "in <module>")
-    return text
+    return _ENGINE_WRAPPER.sub("in <module>", text)
+
+
+def _strip_namespace_suffix(text: str) -> str:
+    """``Cell In[3] [ns:<identity>:2]`` → ``Cell In[3]``."""
+    return _NAMESPACE_SUFFIX.sub(r"\1", text)
 
 
 def _looks_like_embedded_heredoc(line: str) -> bool:
@@ -683,7 +700,7 @@ def _wrapper_cell_filename(
     traceback_cursor = error.__traceback__
     while traceback_cursor is not None:
         frame_code = traceback_cursor.tb_frame.f_code
-        if frame_code.co_name in _WRAPPER_NAMES and _CELL_PATTERN.match(frame_code.co_filename):
+        if _is_wrapper_name(frame_code.co_name) and _CELL_PATTERN.match(frame_code.co_filename):
             return frame_code.co_filename
         traceback_cursor = traceback_cursor.tb_next
 
@@ -829,10 +846,12 @@ class IPythonErrorFormatter:
     Formats errors to match IPython output:
     - Uses "Cell In[N], line X" format (stripping File "..." wrapper)
     - Adjusts line numbers to account for wrapper code offset
-    - Replaces internal wrapper names with <module>
+    - Replaces internal wrapper names with <module> and drops the in-process
+      ``[ns:...]`` filename suffix
     - Filters out framework tracebacks, showing only user code
     - Preserves Python's native syntax/runtime source markers
-    - Source lines shown automatically (via linecache registration in actor.py)
+    - Source lines shown automatically (the cell engine registers each cell
+      with linecache)
     """
 
     def format(
@@ -918,7 +937,7 @@ class IPythonErrorFormatter:
         formatted = _strip_file_prefix(formatted)
 
         # Adjust line numbers for wrapper offset
-        formatted = _adjust_line_numbers(formatted, line_offset)
+        formatted = _strip_namespace_suffix(_adjust_line_numbers(formatted, line_offset))
 
         # The first hint that applies, as in Atom's cell-error hints.
         hint = _maybe_heredoc_hint(error) or _maybe_quote_hint(error)
@@ -937,7 +956,7 @@ class IPythonErrorFormatter:
             cell_only=current_cell is None,
             cell_filename=current_cell,
         )
-        return _replace_wrapper_names(formatted).rstrip()
+        return _strip_namespace_suffix(_replace_wrapper_names(formatted)).rstrip()
 
 
 # Default formatter instance
@@ -958,16 +977,18 @@ def format_error_for_llm(
     - Syntax errors retain Python's source marker when available
     - Validation errors show clean messages without tracebacks
     - Runtime errors filter to user code frames only
-    - Line numbers are adjusted to account for wrapper code
-    - Internal wrapper function names are replaced with <module>
-    - Source code lines are shown (via linecache registration in actor.py)
+    - Line numbers are adjusted to account for wrapper code (sandbox only)
+    - Internal wrapper function names are replaced with <module>, and the
+      in-process ``Cell In[N] [ns:...]`` filename is shown as ``Cell In[N]``
+    - Source code lines are shown (the cell engine registers each cell with linecache)
 
     Args:
         error: The exception to format.
         code: Optional source code (used for syntax errors if text is missing).
         line_offset: Number of wrapper lines to subtract from line numbers.
-            This compensates for lines added by the async wrapper (e.g.,
-            "async def __repl_wrapper__():", "try:", etc.).
+            This compensates for the header lines the sandbox worker's async
+            wrapper adds (``async def __repl_wrapper__():``...); in-process
+            cells have none (0).
         max_error: Maximum retained diagnostic characters. ``None`` uses the
             framework default.
         tail_chars: Characters reserved for the retained tail. ``None`` uses

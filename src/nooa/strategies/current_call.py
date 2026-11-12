@@ -235,6 +235,9 @@ class CurrentCall:
     # strategies without one); never copied into snapshot/user state. Last so main's
     # positional constructor order above stays unchanged.
     execution_namespace: ExecutionNamespace | None = None
+    # PurePython: the arguments are ordinary user names in the namespace (a cell
+    # can rebind or delete them); CodeAct reserves them (False).
+    arguments_are_user_names: bool = False
 
     def __hash__(self) -> int:
         """Hash by id for use in sets/dicts."""

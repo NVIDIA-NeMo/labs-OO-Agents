@@ -64,7 +64,11 @@ from nooa.events import (
     Task,
     TextOnlyReply,
 )
-from nooa.runtime.execution_namespace import ExecutionNamespace, call_execution_namespace
+from nooa.runtime.execution_namespace import (
+    ExecutionNamespace,
+    call_execution_namespace,
+    write_back_session_locals,
+)
 from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.runtime.hooks import call_after_hook, call_before_hook
 from nooa.runtime.sandbox.errors import SandboxExecutionError
@@ -1026,12 +1030,12 @@ Standard Python builtins and agent instance (`self`) are available."""
     def _sync_session_locals(call: "CurrentCall", session: "CodeActSession") -> None:
         """Write the names cells bound back to the caller's ``session_locals`` seed.
 
-        The sandbox worker keeps its own namespace: the caller's dict stays as given.
+        The sandbox worker keeps its own namespace: the caller's dict stays as
+        given. A caller key named like a reserved name (an argument) keeps its value.
         """
         if call.session_locals is None or session.execution_namespace is None:
             return
-        call.session_locals.clear()
-        call.session_locals.update(session.execution_namespace.user_values())
+        write_back_session_locals(session.execution_namespace, call.session_locals)
 
     def _create_sandbox_executor(
         self, runtime: RuntimeServices, call: "CurrentCall", builtins: dict[str, Any]
@@ -1140,6 +1144,10 @@ Standard Python builtins and agent instance (`self`) are available."""
         if session.execution_namespace is not None:
             # The cells' globals (seeded with the caller's session_locals).
             session.session_locals = session.execution_namespace.globals
+        elif call.session_locals is not None:
+            # Sandbox: the worker owns the cells' namespace; the parent-side
+            # lookups (tool names, a return_result variable name) read the seed.
+            session.session_locals.update(call.session_locals)
         # Expose this live dictionary to dynamic context renderers. Unlike
         # call.session_locals, this also receives names defined by model cells.
         call.execution_locals = session.session_locals

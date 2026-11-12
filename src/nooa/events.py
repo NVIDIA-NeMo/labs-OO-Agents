@@ -744,7 +744,10 @@ class ExecutionResult(BaseModel):
     )
     captured_locals: dict[str, Any] = Field(
         default_factory=dict,
-        description="Local variables captured for REPL-style persistence",
+        description=(
+            "Kept for compatibility, always empty from the runtime: in-process cells bind "
+            "into their ExecutionNamespace (read its globals), and a sandbox worker keeps its own"
+        ),
         exclude=True,
     )
     images: list[dict[str, Any]] = Field(
@@ -754,7 +757,10 @@ class ExecutionResult(BaseModel):
     )
     wrapper_line_offset: int = Field(
         default=0,
-        description="Number of wrapper lines before user code (for traceback adjustment)",
+        description=(
+            "Number of wrapper lines before user code (for traceback adjustment); "
+            "sandbox only, 0 in-process"
+        ),
     )
     cancelled: bool = Field(
         default=False,

@@ -15,7 +15,6 @@ pure_python.py missing: 59-61, 105-106, 147, 236-238, 243, 274-288, 304-340, 467
 """
 
 import json
-import re
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1629,12 +1628,13 @@ class TestPurePythonHelperMethodErrors:
     """Tests for helper method binding errors."""
 
     @pytest.mark.asyncio
-    async def test_helper_method_with_same_name_rejected(self):
-        """Helper method with same name as target is rejected (lines 708-717).
+    async def test_helper_named_like_the_target_does_not_replace_the_method(self):
+        """A cell function named like the target is a namespace name, not a method.
 
-        Note: When LLM wraps entire code in target method function def, the body
-        is extracted first. Rejection only fires when a separate helper function
-        is defined with the same name as the target alongside other statements.
+        When the LLM wraps the entire code in the target method's def, the body is
+        extracted first. A separate function of that name next to other
+        statements is not extracted: the cell binds it in the call's namespace
+        (nothing rejects it) and the agent's method is untouched.
         """
 
         class TestAgent(Agent, llm=_TEST_LLM):
@@ -1643,22 +1643,17 @@ class TestPurePythonHelperMethodErrors:
                 """Compute."""
                 ...
 
-        # Define a compute helper with the SAME name alongside other code.
-        # The cell defines 'compute' as a helper (separate from target body)
-        # and reject it because it conflicts with the method being implemented.
-        # Note: pure function definitions without 'self' as first arg won't trigger
-        # the rejection; we need async def compute(self) as a standalone helper.
+        # A compute function next to a plain statement (which prevents extraction).
         fake_llm = FakeLLMClient(
             scripted_responses=[
-                # This defines a compute function as a separate helper (not wrapping),
-                # alongside a non-self call that prevents extraction.
-                _resp("x = 1\nasync def compute(self):\n    return 99"),  # rejected
+                _resp("x = 1\nasync def compute(self):\n    return 99"),
                 _resp("return 42"),
             ]
         )
         agent = TestAgent(llm=fake_llm)
         result = await agent.compute()
         assert result == 42
+        assert "compute" not in vars(agent)
 
 
 # ---------------------------------------------------------------------------
@@ -2807,6 +2802,22 @@ class TestCodeActExecutePrefillStep:
         assert output.execution_count == 1
 
     @pytest.mark.asyncio
+    async def test_prefill_bindings_reach_the_next_cell(self):
+        """A pre-ellipsis prefill cell binds into the call's namespace; the next cell reads it."""
+
+        class PrefillAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActStrategy(config=CodeActConfig()))
+            async def compute(self) -> int:
+                """Compute."""
+                prefilled = 42  # noqa: F841 - the pre-ellipsis prefill cell binds it
+                ...
+
+        llm = FakeLLMClient(
+            scripted_responses=[_resp("", tool_calls=[_tool_call("return_result(prefilled + 1)")])]
+        )
+        assert await PrefillAgent(llm=llm).compute() == 43
+
+    @pytest.mark.asyncio
     async def test_execute_prefill_steps_use_distinct_execution_counts(self):
         """Prefill execution, diagnostics, and output events share unique cell numbers."""
         from nooa.events import ExecutionResult, PythonOutput
@@ -3012,7 +3023,7 @@ class TestPurePythonExecutionError:
         assert failed.execution_count == 1
         assert failed.stdout == "before failure\n"
         assert failed.stderr == "warning\n"
-        assert "Cell In[1] [ns:" in failed.error and "], line 5" in failed.error
+        assert "Cell In[1], line 5, in <module>" in failed.error and "[ns:" not in failed.error
         assert "text.index('missing')" in failed.error
         assert failed.error.endswith("ValueError: substring not found")
         assert succeeded.execution_count == 2
@@ -4292,8 +4303,8 @@ class TestCodeActInlineReturnResultWithError:
             for event in agent.event_manager.values()
             if isinstance(event, PythonOutput) and event.tool_call_id == "c1"
         )
-        # Owned-namespace cells are named "Cell In[1] [ns:<identity>:1]".
-        assert re.search(r"Cell In\[1\]( \[ns:\w+:1\])?, line 1", failed_output.error)
+        # The model sees the IPython cell name, not the namespace-qualified filename.
+        assert "Cell In[1], line 1, in <module>" in failed_output.error
         assert "x = 1/0" in failed_output.error
         assert "ZeroDivisionError: division by zero" in failed_output.error
         assert "Execution error" not in failed_output.stderr

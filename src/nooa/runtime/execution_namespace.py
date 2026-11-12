@@ -56,6 +56,8 @@ RUNTIME_NAMES = frozenset(
 # them (the output goes to whatever cell runs in the caller's context, else to
 # the process's stdout). ``self`` keeps resolving too; the others belong to a call.
 OUTPUT_NAMES = frozenset({"print", "pprint", "show"})
+# What a call keeps once it ended: the only runtime names that keep working.
+AFTERLIFE_NAMES = OUTPUT_NAMES | {"self"}
 
 
 def framework_name_allowed(name: str, reserved: frozenset[str]) -> bool:
@@ -399,6 +401,8 @@ class _RuntimeBuiltins(dict):
             calls = _calls.get()
             for call in reversed(calls):
                 if call.owner is self.owner:
+                    # A task that inherited this call keeps its originating
+                    # call's bindings, also after the call ended.
                     if name in call.values:
                         return call.values[name]
                     break
@@ -431,25 +435,61 @@ def _discard_sources(entries: dict[str, tuple]) -> None:
 
 
 def default_execution_namespace(call: Any) -> ExecutionNamespace:
-    """A fresh namespace for one call: its arguments and the runtime names are reserved."""
-    return ExecutionNamespace(reserved=RUNTIME_NAMES | frozenset(call.kwargs))
+    """A fresh namespace for one call; the runtime names are reserved.
+
+    The call's arguments are reserved too (CodeAct), unless the strategy made
+    them ordinary user names (``call.arguments_are_user_names``, PurePython).
+    """
+    arguments = (
+        frozenset() if getattr(call, "arguments_are_user_names", False) else frozenset(call.kwargs)
+    )
+    return ExecutionNamespace(reserved=RUNTIME_NAMES | arguments)
 
 
-def call_execution_namespace(agent: Any, call: Any) -> ExecutionNamespace:
+def call_execution_namespace(
+    agent: Any, call: Any, *, arguments: Mapping[str, Any] | None = None
+) -> ExecutionNamespace:
     """The namespace a call's in-process cells run in, seeded with its ``session_locals``.
 
     ``agent.execution_namespace_for(call)`` picks it (an object that is not an
     Agent, or a hook returning None, gets :func:`default_execution_namespace`).
+    ``arguments`` (PurePython) are seeded after the caller's seed, as user
+    names a cell can rebind or delete; an argument wins over a same-named seed.
+    Protected names (reserved runtime names, ``__builtins__``, the engine's
+    internals) are never seeded.
     """
     selector = getattr(agent, "execution_namespace_for", None)
     namespace = selector(call) if selector is not None else None
     if namespace is None:
         namespace = default_execution_namespace(call)
-    for name, value in (call.session_locals or {}).items():
-        if name not in namespace.reserved:
-            namespace.globals[name] = value
-            namespace.user_names.add(name)
+    for values in (call.session_locals or {}, arguments or {}):
+        for name, value in values.items():
+            if framework_name_allowed(name, namespace.reserved):
+                namespace.globals[name] = value
+                namespace.user_names.add(name)
     return namespace
+
+
+def write_back_session_locals(
+    namespace: ExecutionNamespace,
+    session_locals: dict[str, Any],
+    *,
+    call_names: frozenset[str] = frozenset(),
+) -> None:
+    """Write the namespace's user names back to the caller's ``session_locals``.
+
+    A caller key the call shadowed (a protected name, or one of ``call_names``,
+    e.g. the call's arguments) keeps the caller's value; ``call_names`` never
+    reach the caller. Every other key follows the namespace: a cell's
+    rebinding updates it and a cell's ``del`` removes it.
+    """
+    values = namespace.user_values()
+    for name in list(session_locals):
+        if name in call_names or not framework_name_allowed(name, namespace.reserved):
+            continue
+        if name not in values:
+            del session_locals[name]
+    session_locals.update((name, value) for name, value in values.items() if name not in call_names)
 
 
 class ExecutionNamespace:
@@ -592,7 +632,9 @@ class ExecutionNamespace:
 
             bound["return_result"] = authorized_return
         call.values = bound
-        self._last_values = bound
+        self._last_values = {
+            name: value for name, value in bound.items() if name in AFTERLIFE_NAMES
+        }
 
     @contextmanager
     def executing_cell(self):
@@ -625,7 +667,10 @@ class ExecutionNamespace:
         """
         call = self._foreground
         context = call.cell_context if call is not None and call.active else None
-        if call is not None and context is not None:
+        # A caller with a call of its own (another namespace's cell) keeps its
+        # output; only a thread or executor without one joins this cell.
+        caller_has_call = any(other.active for other in _calls.get())
+        if call is not None and context is not None and not caller_has_call:
             if name not in call.values:
                 raise RuntimeError(f"Runtime name {name!r} has no originating call context")
             value = call.values[name]
@@ -633,7 +678,12 @@ class ExecutionNamespace:
                 return _in_context(context, value)
             return value
         values = call.values if call is not None and call.active else self._last_values
-        if name in values and (name in OUTPUT_NAMES or name == "self"):
+        return self._after_call(name, values)
+
+    @staticmethod
+    def _after_call(name: str, values: Mapping[str, Any]) -> Any:
+        """``name`` used outside its call: only the output names and ``self`` resolve."""
+        if name in AFTERLIFE_NAMES and name in values:
             return values[name]
         if name == "print":
             return builtins.print
@@ -647,12 +697,6 @@ class ExecutionNamespace:
     def user_values(self) -> dict[str, Any]:
         """The names cells (or a caller's seed) bound, not the seeded runtime."""
         return {name: self.globals[name] for name in self.user_names if name in self.globals}
-
-    def bound_since(self, epoch: int) -> dict[str, Any]:
-        """The current values of names a cell after ``epoch`` bound (and still binds)."""
-        return {
-            n: self.globals[n] for n, e in self._bound_in.items() if e > epoch and n in self.globals
-        }
 
     def inventory(self) -> dict[str, Any]:
         """Bounded names/types only, newest binding first; no repr, deep walks or callbacks."""

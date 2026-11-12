@@ -9,12 +9,27 @@ to follow semantic versioning.
 - In-process cells have one execution path: `PurePythonStrategy` now runs its
   cells in the call's owned `ExecutionNamespace` like CodeAct
   (`call_execution_namespace(agent, call)`), and `ActorRuntime.execute_code`
-  no longer has the copy path (locals wrapper, `session_locals` copy-in/out,
-  helper pre-compilation). A direct `execute_code` call without a namespace
-  runs in a fresh one; `ExecutionResult.captured_locals` is the names the cell
-  bound and `wrapper_line_offset` is 0. Method arguments are runtime names a
-  PurePython cell reads but cannot reassign (as in CodeAct). The sandbox
-  backend is unchanged: its worker keeps one owned namespace per session.
+  no longer copies session state into and out of every cell (locals wrapper,
+  helper pre-compilation). `_session_locals` still seeds the call's namespace
+  and is written back when the call ends; the call's arguments are never
+  written back, and a caller key named like an argument keeps its value. A
+  direct `execute_code` call without a namespace runs in a fresh one (pass an
+  `ExecutionNamespace` to keep what a cell binds). In-process,
+  `ExecutionResult.captured_locals` is no longer filled (read the namespace's
+  globals) and `wrapper_line_offset` is 0. A cell always runs as an async body,
+  so `execute_code(wrap_in_function=False)` now accepts a top-level `return`;
+  the flag only adds the implicit return of a final expression. PurePython
+  method arguments are ordinary names a cell can rebind or delete (seeded each
+  call); CodeAct keeps reserving them. A helper that outlives its cell (in a
+  thread or executor, another call's cell, or with no cell running) keeps
+  `print`, `pprint`, `show` and `self` instead of raising: output goes to the
+  cell running in the caller's context, else to the process's stdout. Other
+  runtime names (`return_result`, `_call`, arguments) raise there (an asyncio
+  task created in a cell keeps its originating call's names), and once a call
+  ends the namespace keeps only those four of its runtime names. Tracebacks
+  shown to the model name in-process cells `Cell In[N], line L, in <module>`
+  (no internal wrapper name or namespace id), for CodeAct too. The sandbox backend is unchanged: its worker keeps one owned
+  namespace per session.
 
 - `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
   publishes a runtime event when a job finishes (the job's handle state and

@@ -219,3 +219,78 @@ class TestPurePythonSessionLocalsInjection:
         await agent.compute(_session_locals=stack)
         assert "my_var" in stack
         assert stack["my_var"] == 123
+
+
+class TestPurePythonArguments:
+    """PurePython method arguments are ordinary names a cell can rebind (like locals)."""
+
+    @staticmethod
+    def _agent(codes: list[str]):
+        class ArgAgent(Agent, llm=_TEST_LLM):
+            @strategy(PurePythonStrategy(max_retries=1))
+            async def go(self, text: str) -> str:
+                """Process {text}."""
+                ...
+
+        return ArgAgent(llm=FakeLLMClient.with_code_responses(codes))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("code", "expected"),
+        [
+            ("text = text.strip()\nreturn text", "Hi"),
+            ("text += '!'\nreturn text", " Hi !"),
+            ("del text\nreturn 'gone'", "gone"),
+            ("def f():\n    global text\n    text = 'helper'\nf()\nreturn text", "helper"),
+        ],
+    )
+    async def test_a_cell_rebinds_or_deletes_an_argument(self, code, expected):
+        assert await self._agent([code]).go(text=" Hi ") == expected
+
+    @pytest.mark.asyncio
+    async def test_a_rebound_argument_persists_across_cells(self):
+        agent = self._agent(["text = text.upper()\nprint(text)", "return text + '?'"])
+        assert await agent.go(text="hi") == "HI?"
+
+    @pytest.mark.asyncio
+    async def test_arguments_never_reach_the_callers_session_locals(self):
+        stack: dict[str, Any] = {"y": 5}
+        agent = self._agent(["text = text * 2\nz = y + 1\nreturn text"])
+        assert await agent.go(text="a", _session_locals=stack) == "aa"
+        assert stack == {"y": 5, "z": 6}
+
+    @pytest.mark.asyncio
+    async def test_the_argument_wins_inside_the_call_and_the_callers_key_survives(self):
+        stack: dict[str, Any] = {"text": "seeded", "other": 1}
+        agent = self._agent(["text = text + '!'\nreturn text"])
+        assert await agent.go(text="arg", _session_locals=stack) == "arg!"
+        assert stack == {"text": "seeded", "other": 1}
+
+    @pytest.mark.asyncio
+    async def test_a_cell_that_deletes_a_seeded_name_removes_it(self):
+        stack: dict[str, Any] = {"gone": 1, "kept": 2}
+        agent = self._agent(["del gone\nreturn text"])
+        assert await agent.go(text="t", _session_locals=stack) == "t"
+        assert stack == {"kept": 2}
+
+
+class TestCodeActSessionLocalsCollision:
+    """CodeAct keeps reserving its arguments; the caller's same-named key survives."""
+
+    @pytest.mark.asyncio
+    async def test_a_seed_named_like_an_argument_survives_the_call(self):
+        class SeedAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActStrategy(config=CodeActConfig()))
+            async def compute(self, x: int) -> int:
+                """Return x + y."""
+                ...
+
+        llm = FakeLLMClient(
+            scripted_responses=[
+                _resp("", tool_calls=[_tool_call("total = x + y")]),
+                _resp("", tool_calls=[_return_result(result="total")]),
+            ]
+        )
+        stack: dict[str, Any] = {"x": 99, "y": 5}
+        assert await SeedAgent(llm=llm).compute(x=1, _session_locals=stack) == 6
+        assert stack == {"x": 99, "y": 5, "total": 6}
