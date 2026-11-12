@@ -107,7 +107,8 @@ async def test_write_back_skips_names_an_earlier_call_bound_in_a_shared_namespac
 
     def meanwhile():
         stack["stale"] = "set by someone else"
-        return "made = 2\nreturn x"
+        # An assignment that never runs is not a change either.
+        return "if False:\n    stale = 'unused'\nmade = 2\nreturn x"
 
     assert await _agent([meanwhile], namespace=shared).go(x=3, _session_locals=stack) == 3
     assert stack == {"stale": "set by someone else", "made": 2}
@@ -123,3 +124,56 @@ async def test_deleting_a_none_seed_the_caller_already_removed_does_not_raise():
 
     assert await _agent([meanwhile]).go(x=4, _session_locals=stack) == 4
     assert stack == {}
+
+
+@pytest.mark.asyncio
+async def test_a_helper_rebinding_a_seed_via_global_writes_back():
+    """A ``global`` write inside a helper is a change of the call (round 4)."""
+    stack: dict[str, Any] = {"counter": 0}
+    code = "def bump():\n    global counter\n    counter = 1\n\nbump()\nreturn x"
+    assert await _agent([lambda: code]).go(x=1, _session_locals=stack) == 1
+    assert stack["counter"] == 1 and set(stack) == {"counter", "bump"}
+
+
+@pytest.mark.asyncio
+async def test_a_helper_from_an_earlier_call_rebinding_a_seed_writes_back():
+    """A helper defined by an earlier call in a shared namespace writes this call's seed."""
+    shared = ExecutionNamespace(reserved=RUNTIME_NAMES)
+    first: dict[str, Any] = {}
+    helper = "def bump():\n    global counter, made\n    counter = counter + 1\n    made = 'helper'\nreturn x"
+    assert await _agent([lambda: helper], namespace=shared).go(x=1, _session_locals=first) == 1
+    assert set(first) == {"bump"}
+    stack: dict[str, Any] = {"counter": 10, "other": 5}
+    assert (
+        await _agent([lambda: "bump()\nreturn x"], namespace=shared).go(x=2, _session_locals=stack)
+        == 2
+    )
+    assert stack == {"counter": 11, "made": "helper", "other": 5}
+
+
+@pytest.mark.asyncio
+async def test_a_write_without_binding_syntax_writes_back():
+    """A namespace write no cell spells out (``globals()[...]``, exec) is still a change.
+
+    Generated code may not call ``globals()``/``exec``, so the step writes the
+    namespace's globals directly while the call runs, as such a write would.
+    """
+    shared = ExecutionNamespace(reserved=RUNTIME_NAMES)
+    stack: dict[str, Any] = {"seed": 1, "kept": 2}
+
+    def meanwhile():
+        shared.globals["seed"] = 2
+        shared.globals["fresh"] = 3
+        del shared.globals["kept"]
+        return "return x"
+
+    assert await _agent([meanwhile], namespace=shared).go(x=1, _session_locals=stack) == 1
+    assert stack == {"seed": 2, "fresh": 3}
+
+
+@pytest.mark.asyncio
+async def test_a_helper_deleting_a_seed_via_global_deletes_it():
+    stack: dict[str, Any] = {"gone": 1, "kept": 2}
+    code = "def drop():\n    global gone\n    del gone\n\ndrop()\nreturn x"
+    assert await _agent([lambda: code]).go(x=1, _session_locals=stack) == 1
+    assert set(stack) == {"kept", "drop"} and stack["kept"] == 2

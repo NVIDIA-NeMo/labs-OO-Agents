@@ -241,8 +241,9 @@ class CurrentCall:
     # What the call took from ``session_locals`` into its namespace (set by
     # ``enter_call_namespace``): write-back deletes or keeps only these keys.
     seeded_locals: dict[str, Any] = field(default_factory=dict)
-    # The namespace epoch at entry: write-back takes only names cells bound after it.
-    namespace_epoch: int = 0
+    # The namespace's user values at entry (identity snapshot): write-back takes
+    # only names whose object changed since, or that are new.
+    namespace_before: dict[str, Any] = field(default_factory=dict)
 
     def __hash__(self) -> int:
         """Hash by id for use in sets/dicts."""

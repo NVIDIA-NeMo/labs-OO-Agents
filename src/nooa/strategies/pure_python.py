@@ -268,7 +268,7 @@ class PurePythonStrategy(CompositeStrategy):
             call.session_locals,
             seeded=call.seeded_locals,
             call_names=session.argument_names,
-            since=call.namespace_epoch,
+            before=call.namespace_before,
         )
 
     async def execute(self, runtime: RuntimeServices, call: "CurrentCall") -> Any:

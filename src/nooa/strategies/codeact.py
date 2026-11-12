@@ -1039,7 +1039,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             session.execution_namespace,
             call.session_locals,
             seeded=call.seeded_locals,
-            since=call.namespace_epoch,
+            before=call.namespace_before,
         )
 
     def _create_sandbox_executor(
