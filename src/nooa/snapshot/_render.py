@@ -718,9 +718,9 @@ def render_output(snapshot: Snapshot) -> str:
     in the output notation. No length limit: it prints what the node kept.
     Raises ``TypeError`` when ``snapshot`` is not a snapshot node.
 
-    >>> from nooa.snapshot import Spill, Text, render_output
+    >>> from nooa.snapshot import Overflow, Text, render_output
     >>> text = Text(head="ab", tail="yz", length=10, unit="chars", reason="max_length",
-    ...             full=Spill("/tmp/out.txt", 10, 10))
+    ...             full=Overflow("/tmp/out.txt", 10, 10))
     >>> print(render_output(text))
     ab
     [... 6 chars omitted; full output: /tmp/out.txt]
@@ -766,8 +766,8 @@ class _Report:
         self.path_chars += len(path)
 
 
-def _spill_paths(node: Snapshot, found: list[str]) -> list[str]:
-    """Every spill file path in ``node``'s tree, depth first (heads, tails, fields), once each.
+def _overflow_paths(node: Snapshot, found: list[str]) -> list[str]:
+    """Every overflow file path in ``node``'s tree, depth first (heads, tails, fields), once each.
 
     Appends to ``found`` and returns it.
     """
@@ -776,13 +776,13 @@ def _spill_paths(node: Snapshot, found: list[str]) -> list[str]:
             found.append(node.full.path)
     elif type(node) is Sequence:
         for child in node.head + node.tail:
-            _spill_paths(child, found)
+            _overflow_paths(child, found)
     elif type(node) is Mapping:
         for _key, child in node.head + node.tail:
-            _spill_paths(child, found)
+            _overflow_paths(child, found)
     elif type(node) is Object:
         for _name, child in node.fields:
-            _spill_paths(child, found)
+            _overflow_paths(child, found)
     return found
 
 
@@ -1047,7 +1047,7 @@ def render_json(snapshot: Snapshot, *, max_chars: int) -> str:
 
 
 def _attributes(direction: str, report: _Report, snapshot: Snapshot) -> dict[str, Any]:
-    """The ``render_trace`` span attributes of ``report``, plus the spill files of ``snapshot`` (see ``render_trace``)."""
+    """The ``render_trace`` span attributes of ``report``, plus the overflow files of ``snapshot`` (see ``render_trace``)."""
     prefix = f"nooa.{direction}.preview"
     attributes: dict[str, Any] = {
         f"{prefix}.version": PREVIEW_VERSION,
@@ -1057,9 +1057,9 @@ def _attributes(direction: str, report: _Report, snapshot: Snapshot) -> dict[str
         attributes[f"{prefix}.paths"] = tuple(report.paths)
     if report.reasons:
         attributes[f"{prefix}.reasons"] = tuple(sorted(report.reasons))
-    spills = _spill_paths(snapshot, [])
-    if spills:
-        attributes[f"{prefix}.full_output"] = tuple(spills)
+    files = _overflow_paths(snapshot, [])
+    if files:
+        attributes[f"{prefix}.full_output"] = tuple(files)
     return attributes
 
 
@@ -1084,8 +1084,8 @@ def render_trace(
       the incomplete nodes, a tuple of at most 32 paths and 2,048
       characters, else ``("",)`` (the root);
     - ``{prefix}.reasons``: when incomplete, the sorted, unique reasons;
-    - ``{prefix}.full_output``: when any ``Text`` in the snapshot spilled,
-      the spill file paths, depth first, whatever the text shows.
+    - ``{prefix}.full_output``: when any ``Text`` in the snapshot has an
+      overflow file, those file paths, depth first, whatever the text shows.
 
     ``incomplete`` covers the whole tree: it is true when any node was cut,
     by capture or by this rendering, even when the root node is complete.

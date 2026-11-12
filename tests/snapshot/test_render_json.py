@@ -15,8 +15,8 @@ from pydantic import BaseModel
 from nooa.snapshot import (
     Limits,
     Mapping,
+    Overflow,
     Scalar,
-    Spill,
     Text,
     Unavailable,
     capture,
@@ -176,15 +176,15 @@ def test_trace_attributes_reasons_are_sorted_and_unique() -> None:
 
 
 def test_trace_attributes_full_output() -> None:
-    spilled = Text(
+    with_file = Text(
         head=b"h",
         tail=b"t",
         length=100,
         unit="bytes",
         reason="max_length",
-        full=Spill("/tmp/a", 100, 100),
+        full=Overflow("/tmp/a", 100, 100),
     )
-    snapshot = Mapping("dict", 2, (("stdout", spilled), ("again", spilled)))
+    snapshot = Mapping("dict", 2, (("stdout", with_file), ("again", with_file)))
 
     attributes = _attributes("output", snapshot)
 

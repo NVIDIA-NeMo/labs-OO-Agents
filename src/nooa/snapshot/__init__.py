@@ -6,7 +6,7 @@ A snapshot is a small frozen tree of nodes (``Scalar``, ``Text``,
 ``Sequence``, ``Mapping``, ``Object``, ``Unavailable``, ``Ref``; their
 union is ``Snapshot``). It holds no live objects. Every node says whether it
 is complete and, if not, why (``Reason``); a ``Text`` also says how much was
-left out and where the whole content is (``Spill``).
+left out and where the whole content is (``Overflow``).
 
 Producers:
 
@@ -19,7 +19,8 @@ Producers:
   ``object_like`` or ``text_like``. ``capture_fields(**fields)`` captures
   named parts (a call's arguments) so that every part survives.
 - ``TextStream``: output that arrives over time, with an optional
-  ``SpillTarget`` file; ``SpillDir`` bounds the files of many streams;
+  overflow file (``nooa.overflow``: ``OverflowFile``; ``OverflowDir`` bounds
+  the files of many streams);
   ``merge`` joins two ``Text``s (progress batches).
 - ``cut(data, head=, tail=)``: a string or bytes that is already whole.
 
@@ -49,12 +50,12 @@ from nooa.snapshot._capture import (
 from nooa.snapshot._model import (
     Mapping,
     Object,
+    Overflow,
     Reason,
     Ref,
     Scalar,
     Sequence,
     Snapshot,
-    Spill,
     Text,
     Unavailable,
 )
@@ -65,7 +66,6 @@ from nooa.snapshot._render import (
     render_python,
     render_trace,
 )
-from nooa.snapshot._spill import SpillDir, SpillTarget
 from nooa.snapshot._stream import TextStream
 from nooa.snapshot._text import cut, merge
 
@@ -78,10 +78,8 @@ __all__ = [
     "Ref",
     "Scalar",
     "Sequence",
+    "Overflow",
     "Snapshot",
-    "Spill",
-    "SpillDir",
-    "SpillTarget",
     "Text",
     "TextStream",
     "Unavailable",

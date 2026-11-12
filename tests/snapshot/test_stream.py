@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""TextStream, SpillTarget and merge: bounded memory, UTF-8 cuts, spill files, deltas."""
+"""TextStream, OverflowFile and merge: bounded memory, UTF-8 cuts, overflow files, deltas."""
 
 from __future__ import annotations
 
@@ -10,7 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from nooa.snapshot import Spill, SpillTarget, Text, TextStream, merge, render_output
+from nooa.overflow import OverflowFile
+from nooa.snapshot import Overflow, Text, TextStream, merge, render_output
 
 
 def _stream(unit: str = "bytes", head: int = 4, tail: int = 4, **kwargs) -> TextStream:
@@ -158,12 +159,12 @@ def test_invalid_arguments() -> None:
         TextStream(unit="chars", head=-1, tail=1)
 
 
-# --- spilling ----------------------------------------------------------------------
+# --- overflow files --------------------------------------------------------------
 
 
-def test_spill_file_holds_everything(tmp_path: Path) -> None:
+def test_overflow_file_holds_everything(tmp_path: Path) -> None:
     path = tmp_path / "out.log"
-    stream = TextStream(unit="bytes", head=3, tail=3, spill=SpillTarget(path=str(path)))
+    stream = TextStream(unit="bytes", head=3, tail=3, overflow=OverflowFile(path=str(path)))
     stream.write(b"0123456789")
     running = stream.snapshot()
     stream.write(b"abcdef")
@@ -171,23 +172,23 @@ def test_spill_file_holds_everything(tmp_path: Path) -> None:
     text = stream.close()
 
     assert path.read_bytes() == b"0123456789abcdef"
-    assert running.full == Spill(str(path), 10, 10)
-    assert text.full == Spill(str(path), 16, 16)
+    assert running.full == Overflow(str(path), 10, 10)
+    assert text.full == Overflow(str(path), 16, 16)
     assert text.reason == "max_length"
     assert render_output(text) == f"012\n[... 10 bytes omitted; full output: {path}]\ndef"
 
 
-def test_spill_max_bytes_cuts_the_file(tmp_path: Path) -> None:
+def test_overflow_max_bytes_cuts_the_file(tmp_path: Path) -> None:
     path = tmp_path / "out.log"
     stream = TextStream(
-        unit="bytes", head=2, tail=2, spill=SpillTarget(path=str(path), max_bytes=5)
+        unit="bytes", head=2, tail=2, overflow=OverflowFile(path=str(path), max_bytes=5)
     )
     stream.write(b"0123456789" * 1000)
 
     text = stream.close()
 
     assert path.read_bytes() == b"01234"
-    assert text.full == Spill(str(path), 5, 10_000)
+    assert text.full == Overflow(str(path), 5, 10_000)
     assert text.full.cut  # the file is cut: ``full`` says so, not the reason
     assert text.reason == "max_length"
     assert render_output(text) == (
@@ -195,22 +196,22 @@ def test_spill_max_bytes_cuts_the_file(tmp_path: Path) -> None:
     )
 
 
-def test_chars_stream_spills_utf8(tmp_path: Path) -> None:
+def test_chars_stream_writes_utf8_to_its_file(tmp_path: Path) -> None:
     path = tmp_path / "out.txt"
-    stream = TextStream(unit="chars", head=1, tail=1, spill=SpillTarget(path=str(path)))
+    stream = TextStream(unit="chars", head=1, tail=1, overflow=OverflowFile(path=str(path)))
     stream.write("é€😀")
 
     text = stream.close()
 
     assert path.read_text(encoding="utf-8") == "é€😀"
-    assert text.full == Spill(str(path), 9, 9)
+    assert text.full == Overflow(str(path), 9, 9)
     assert text.length == 3 and text.omitted == 1
 
 
-def test_chars_spill_cut_lands_on_a_code_point(tmp_path: Path) -> None:
+def test_chars_overflow_cut_lands_on_a_code_point(tmp_path: Path) -> None:
     # max_bytes=3 keeps b"\xc3\xa9", never a split code point such as b"\xc3\xa9\xc3".
     path = tmp_path / "s2.txt"
-    stream = _stream("chars", 1, 1, spill=SpillTarget(path=str(path), max_bytes=3))
+    stream = _stream("chars", 1, 1, overflow=OverflowFile(path=str(path), max_bytes=3))
     stream.write("ééé")
     stream.write("x")  # fits the byte left, but the file is a prefix: not written
 
@@ -218,14 +219,16 @@ def test_chars_spill_cut_lands_on_a_code_point(tmp_path: Path) -> None:
 
     assert path.read_bytes() == "é".encode()
     assert path.read_text(encoding="utf-8") == "é"
-    assert text.full == Spill(str(path), 2, 7)
+    assert text.full == Overflow(str(path), 2, 7)
     assert text.full.cut
 
 
 @pytest.mark.parametrize("max_bytes", range(10))
-def test_chars_spill_file_is_valid_utf8_for_any_max_bytes(tmp_path: Path, max_bytes: int) -> None:
+def test_chars_overflow_file_is_valid_utf8_for_any_max_bytes(
+    tmp_path: Path, max_bytes: int
+) -> None:
     path = tmp_path / "out.txt"
-    stream = _stream("chars", 1, 1, spill=SpillTarget(path=str(path), max_bytes=max_bytes))
+    stream = _stream("chars", 1, 1, overflow=OverflowFile(path=str(path), max_bytes=max_bytes))
     for part in ("a", "é€", "😀", "b"):
         stream.write(part)
 
@@ -237,33 +240,33 @@ def test_chars_spill_file_is_valid_utf8_for_any_max_bytes(tmp_path: Path, max_by
     assert text.full is not None and text.full.kept == len(written) <= max_bytes
 
 
-def test_existing_spill_path_is_refused_not_truncated(tmp_path: Path) -> None:
+def test_existing_overflow_path_is_refused_not_truncated(tmp_path: Path) -> None:
     # An existing file is refused with FileExistsError and left as it was.
     path = tmp_path / "precious.txt"
     path.write_text("precious")
 
     with pytest.raises(FileExistsError):
-        _stream("chars", 10, 10, spill=SpillTarget(path=str(path), max_bytes=100))
+        _stream("chars", 10, 10, overflow=OverflowFile(path=str(path), max_bytes=100))
 
     assert path.read_text() == "precious"
 
 
-def test_existing_symlink_spill_path_is_refused(tmp_path: Path) -> None:
+def test_existing_symlink_overflow_path_is_refused(tmp_path: Path) -> None:
     target = tmp_path / "elsewhere.txt"
     target.write_text("kept")
     link = tmp_path / "out.txt"
     link.symlink_to(target)
 
     with pytest.raises(FileExistsError):
-        _stream("bytes", spill=SpillTarget(path=str(link)))
+        _stream("bytes", overflow=OverflowFile(path=str(link)))
 
     assert target.read_text() == "kept" and link.is_symlink()
 
 
 @pytest.mark.parametrize("named", [True, False])
-def test_standalone_spill_file_is_private(tmp_path: Path, named: bool) -> None:
-    spill = SpillTarget(path=str(tmp_path / "out.txt")) if named else SpillTarget()
-    stream = _stream("bytes", 1, 1, spill=spill)
+def test_standalone_overflow_file_is_private(tmp_path: Path, named: bool) -> None:
+    file = OverflowFile(path=str(tmp_path / "out.txt")) if named else OverflowFile()
+    stream = _stream("bytes", 1, 1, overflow=file)
     stream.write(b"abc")
 
     full = stream.close().full
@@ -274,9 +277,9 @@ def test_standalone_spill_file_is_private(tmp_path: Path, named: bool) -> None:
         os.unlink(full.path)
 
 
-def test_uncut_stream_deletes_its_spill_file(tmp_path: Path) -> None:
+def test_uncut_stream_deletes_its_overflow_file(tmp_path: Path) -> None:
     path = tmp_path / "out.log"
-    stream = TextStream(unit="bytes", head=10, tail=10, spill=SpillTarget(path=str(path)))
+    stream = TextStream(unit="bytes", head=10, tail=10, overflow=OverflowFile(path=str(path)))
     stream.write(b"small")
 
     text = stream.close()
@@ -285,8 +288,8 @@ def test_uncut_stream_deletes_its_spill_file(tmp_path: Path) -> None:
     assert text.full is None and text.complete
 
 
-def test_temp_spill_file_by_default() -> None:
-    stream = TextStream(unit="bytes", head=1, tail=1, spill=SpillTarget())
+def test_temp_overflow_file_by_default() -> None:
+    stream = TextStream(unit="bytes", head=1, tail=1, overflow=OverflowFile())
     stream.write(b"abcdef")
 
     text = stream.close()
@@ -298,9 +301,9 @@ def test_temp_spill_file_by_default() -> None:
         os.unlink(text.full.path)
 
 
-def test_spill_open_failure_falls_back_to_memory(tmp_path: Path) -> None:
+def test_overflow_open_failure_falls_back_to_memory(tmp_path: Path) -> None:
     missing = tmp_path / "no" / "such" / "dir" / "out.log"
-    stream = TextStream(unit="bytes", head=2, tail=2, spill=SpillTarget(path=str(missing)))
+    stream = TextStream(unit="bytes", head=2, tail=2, overflow=OverflowFile(path=str(missing)))
     stream.write(b"abcdefgh")
 
     text = stream.close()
@@ -310,9 +313,9 @@ def test_spill_open_failure_falls_back_to_memory(tmp_path: Path) -> None:
     assert render_output(text) == "ab\n[... 4 bytes omitted; full output not kept]\ngh"
 
 
-def test_spill_write_failure_falls_back_to_memory(tmp_path: Path) -> None:
+def test_overflow_write_failure_falls_back_to_memory(tmp_path: Path) -> None:
     path = tmp_path / "out.log"
-    stream = TextStream(unit="bytes", head=2, tail=2, spill=SpillTarget(path=str(path)))
+    stream = TextStream(unit="bytes", head=2, tail=2, overflow=OverflowFile(path=str(path)))
 
     class Broken:
         def write(self, data: bytes) -> int:
@@ -332,16 +335,16 @@ def test_spill_write_failure_falls_back_to_memory(tmp_path: Path) -> None:
     assert (text.head, text.tail, text.length) == (b"ab", b"gh", 8)
 
 
-def test_chars_lone_surrogate_without_spill_does_not_raise() -> None:
+def test_chars_lone_surrogate_without_a_file_does_not_raise() -> None:
     stream = _stream("chars", head=10, tail=10)
     stream.write("a\ud800b")
 
     assert stream.close() == Text(head="a\ud800b", tail="", length=3, unit="chars", reason=None)
 
 
-def test_chars_lone_surrogate_spills_backslash_escaped(tmp_path: Path) -> None:
+def test_chars_lone_surrogate_written_backslash_escaped(tmp_path: Path) -> None:
     path = tmp_path / "out.log"
-    stream = TextStream(unit="chars", head=1, tail=1, spill=SpillTarget(path=str(path)))
+    stream = TextStream(unit="chars", head=1, tail=1, overflow=OverflowFile(path=str(path)))
     stream.write("a\ud800b")
 
     text = stream.close()
@@ -358,7 +361,7 @@ def test_bytes_stream_accepts_str_with_lone_surrogate() -> None:
 
 def test_running_snapshot_matches_the_file_on_disk(tmp_path: Path) -> None:
     path = tmp_path / "out.log"
-    stream = TextStream(unit="bytes", head=10, tail=10, spill=SpillTarget(path=str(path)))
+    stream = TextStream(unit="bytes", head=10, tail=10, overflow=OverflowFile(path=str(path)))
     stream.write(b"y" * 100)
 
     text = stream.snapshot()
@@ -369,9 +372,9 @@ def test_running_snapshot_matches_the_file_on_disk(tmp_path: Path) -> None:
     stream.close()
 
 
-def test_spill_flush_failure_falls_back_to_memory(tmp_path: Path) -> None:
+def test_overflow_flush_failure_falls_back_to_memory(tmp_path: Path) -> None:
     path = tmp_path / "out.log"
-    stream = TextStream(unit="bytes", head=2, tail=2, spill=SpillTarget(path=str(path)))
+    stream = TextStream(unit="bytes", head=2, tail=2, overflow=OverflowFile(path=str(path)))
     stream.write(b"abcdefgh")
     assert stream._file is not None
     real = stream._file.file

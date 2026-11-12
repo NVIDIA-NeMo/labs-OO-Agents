@@ -4,7 +4,7 @@
 
 The public node classes (``Scalar``, ``Text``, ``Sequence``, ``Mapping``,
 ``Object``, ``Unavailable``, ``Ref``), their union ``Snapshot``, the
-``Reason`` names and ``Spill``. This module imports nothing else from the
+``Reason`` names and ``Overflow``. This module imports nothing else from the
 package, so producers (``_walk``, ``_stream``) and renderers (``_render``)
 share it without depending on each other.
 
@@ -27,7 +27,7 @@ __all__ = [
     "Scalar",
     "Sequence",
     "Snapshot",
-    "Spill",
+    "Overflow",
     "Text",
     "Unavailable",
 ]
@@ -62,13 +62,13 @@ Reason = Literal[
 - ``"error"``: a shape accessor raised, or returned something its shape
   cannot use.
 
-Whether a spill file holds the whole content is not a reason: ``Text.full``
+Whether an overflow file holds the whole content is not a reason: ``Text.full``
 says it. A reason is local to its node: a parent of a cut node may have none.
 """
 
 
 @dataclass(frozen=True)
-class Spill:
+class Overflow:
     """Where the whole content of a ``Text`` was written: ``Text.full``.
 
     Fields:
@@ -82,7 +82,7 @@ class Spill:
     bytes for a bytes stream.
     """
 
-    path: str  # the spill file
+    path: str  # the overflow file
     kept: int  # bytes written to the file, from the start
     total: int  # bytes the stream produced
 
@@ -131,8 +131,8 @@ class Text:
       cut: ``"max_length"`` (a limit or a stream's ``head`` / ``tail``) or
       ``"max_nodes"`` (capture had no inspection work left; nothing kept).
       ``merge`` keeps the first reason of its inputs.
-    - ``full``: the ``Spill`` file holding the whole content, or ``None``
-      when nothing was spilled (no spill requested, or the file could not be
+    - ``full``: the ``Overflow`` file holding the whole content, or ``None``
+      when nothing went to a file (no file requested, or the file could not be
       written). ``full.cut``: the file holds only the first ``full.kept``
       bytes.
 
@@ -158,7 +158,7 @@ class Text:
     length: int
     unit: Literal["chars", "bytes"]
     reason: Reason | None = None
-    full: Spill | None = None
+    full: Overflow | None = None
 
     def __post_init__(self) -> None:
         """Check the fields (see the class docstring) and default ``tail`` to an empty part of ``head``'s type."""
