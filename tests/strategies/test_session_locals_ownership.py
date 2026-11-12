@@ -177,3 +177,13 @@ async def test_a_helper_deleting_a_seed_via_global_deletes_it():
     code = "def drop():\n    global gone\n    del gone\n\ndrop()\nreturn x"
     assert await _agent([lambda: code]).go(x=1, _session_locals=stack) == 1
     assert set(stack) == {"kept", "drop"} and stack["kept"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_rebound_seeded_dunder_writes_back():
+    """A seeded dunder (``__version__``) is the caller's name: rebinding it is a change (round 5)."""
+    stack: dict[str, Any] = {"__version__": "1"}
+    code = "__version__ = '2'\nx2: int = 3\nreturn x"
+    assert await _agent([lambda: code]).go(x=1, _session_locals=stack) == 1
+    assert stack["__version__"] == "2"
+    assert "__annotations__" not in stack

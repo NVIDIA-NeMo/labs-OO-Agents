@@ -482,7 +482,11 @@ def enter_call_namespace(
                     namespace.user_names.add(name)
         # The call's changes are what differs from this at write-back (the
         # namespace is the call's alone until it exits: entry refuses another).
-        call.namespace_before = namespace.user_globals()
+        # Seeded dunders (e.g. ``__version__``) are the caller's names too.
+        call.namespace_before = {
+            **namespace.user_globals(),
+            **{name: namespace.globals[name] for name in seeds if name in namespace.globals},
+        }
         yield namespace
 
 
@@ -749,14 +753,19 @@ class ExecutionNamespace:
         }
 
     def changed_since(self, before: Mapping[str, Any]) -> dict[str, Any]:
-        """The user globals whose object is not the one in ``before``, or new since.
+        """The user globals (and names in ``before``) whose object is not the one in ``before``, or new since.
 
         The environment :meth:`initialize` seeded (modules, tools) is not a change
         while it holds the seeded object.
         """
         environment = self._environment
+        current = self.user_globals()
+        # A name in ``before`` that user_globals skips (a seeded dunder) is compared too.
+        for name in before:
+            if name not in current and name in self.globals:
+                current[name] = self.globals[name]
         changed = {}
-        for name, value in self.user_globals().items():
+        for name, value in current.items():
             if name in before:
                 if before[name] is not value:
                     changed[name] = value
