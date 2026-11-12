@@ -1,4 +1,4 @@
-# One snapshot model for values, output streams and spilled files
+# One snapshot model for values, output streams and overflow files
 
 This page is the contract of `nooa.snapshot`. The docstring of every public name is its documentation: `help(name)` or `nooa.agentdoc.doc(name)` shows it.
 
@@ -21,7 +21,7 @@ A snapshot is a frozen tree of nodes. It holds no live objects. Every node has `
 | Node | Stands for |
 |---|---|
 | `Scalar` | a complete `None`, `bool`, `int`, finite `float` or short `bytes` |
-| `Text` | a string, bytes or a stream: kept head and tail in their own unit, `length`, `omitted`, and `full` (a `Spill`) |
+| `Text` | a string, bytes or a stream: kept head and tail in their own unit, `length`, `omitted`, and `full` (an `Overflow`) |
 | `Sequence` | a list, tuple, set, standard container or `array_like` value: kept `head` and `tail` items, original `length` |
 | `Mapping` | a dict, standard mapping, `mapping_like` value or `capture_fields` wrapper: kept `head` and `tail` entries (keys: JSON scalars, or a small node for any other key), original `length` |
 | `Object` | a Pydantic model, dataclass, namedtuple, plain object, standard type, shape with fields or bounded `repr`: kept fields in order, optional `kind` |
@@ -36,13 +36,12 @@ Everything is importable from `nooa.snapshot`; see each docstring for arguments,
 |---|---|
 | `Scalar`, `Text`, `Sequence`, `Mapping`, `Object`, `Unavailable`, `Ref` | the snapshot nodes (table above) |
 | `Snapshot`, `Reason` | the union of the nodes; the reason names |
-| `Spill` | where a `Text`'s whole content was written |
+| `Overflow` | where a `Text`'s whole content was written (path, kept, total) |
 | `capture`, `Limits` | a bounded snapshot of a finished value, and its shared budget |
 | `capture.register`, `capture.unregister` | describe another type with a shape (process-wide, by class identity) |
 | `array_like`, `ndarray_like`, `mapping_like`, `object_like`, `text_like` | the five shapes `capture.register` takes |
 | `capture_fields` | a call's arguments captured together, so every named part survives, at least in short form |
-| `TextStream`, `SpillTarget` | output that arrives over time, and its optional spill file |
-| `SpillDir` | a folder of spill files for many streams: at most `max_files` of `file_bytes` each, the oldest closed evicted |
+| `TextStream` | output that arrives over time, with an optional overflow file (`TextStream(overflow=OverflowFile(...))`) |
 | `cut` | a string or bytes already whole, as a `Text` keeping its first `head` and last `tail` units (what a one-write `TextStream` gives) |
 | `merge` | join two `Text`s of the same unit (progress batches) |
 | `render_output` | command output: `HEAD`, `[... N bytes omitted; full output: PATH]`, `TAIL` |
@@ -62,9 +61,9 @@ Everything is importable from `nooa.snapshot`; see each docstring for arguments,
 - **Model-facing precedence.** A shape, then declared structure (Pydantic, dataclasses), then the standard types, then (with `fallback="repr"` only) the class's own `__repr__`, bounded, then public attributes, then the plain `repr` fallback. Traces skip the `__repr__` step and never run `repr`.
 - **Standard types and plain objects are native.** Sets, ranges, complex numbers, dates and times, `Decimal`, `UUID`, paths, patterns, exceptions, enum members, namedtuples, `Counter`/`OrderedDict`/`defaultdict`, functions, classes and modules become nodes, and `render_python` prints them in their familiar notation. An int too long to keep shows its digit count (`int(200,001 digits)`), never converted to decimal. A plain object shows its public instance attributes; a cut one also says how many it has (`... of 1,000,000 attributes`).
 - **Fail closed.** The field readers (Pydantic, dataclasses, plain objects) never read hidden fields. A field whose visibility can't be read is left out, and the object gets reason `unreadable`. One unresolvable annotation (a name imported only under `TYPE_CHECKING`) costs only its own field. This holds for capture's own readers; a shape accessor or an opted-in `repr` shows whatever its code chooses, private data included, so a caller that must not show private data uses the default `"opaque"` fallback and registers no shape that reads it.
-- **Bounded size, time and memory.** `Limits` bounds a capture. `max_chars` (canonical JSON) and `max_nodes` (work) are one budget for the whole capture; `max_depth`, `max_items` and `max_string` cap each value separately (`max_items=2` keeps two items of every list, not two in all). `tail_share` keeps both ends of a cut string, list or dict in that ratio, whichever limit cuts it; at its default 0.0 a capture keeps a head only. These bound capture's own work; the time and memory of a shape accessor or an opted-in `repr` are not bounded, only what is kept of their result. A `TextStream` retains at most `head + tail` units between writes; one `write` may also hold a copy or the UTF-8 encoding of its chunk while it runs. Its spill file holds at most `SpillTarget.max_bytes` bytes. A `SpillTarget(path=...)` that already exists is refused with `FileExistsError`, never truncated; a new file is created exclusively, mode 0600.
-- **Shared spill budget.** A `SpillDir` holds at most `max_files` files of at most `file_bytes` each (so at most `max_files * file_bytes` bytes), in a private `tempfile.mkdtemp` folder (removed whole on `close()` or at exit) or a given one (only the names it created are removed, never through a symlink). When it needs room it deletes the oldest closed files, never an open stream's file (`target()` returns `None` when even that is not enough), so a `Text.full` path from an earlier stream can stop existing; opening it then fails with `FileNotFoundError`, which is how a reader can tell the full output is gone.
+- **Bounded size, time and memory.** `Limits` bounds a capture. `max_chars` (canonical JSON) and `max_nodes` (work) are one budget for the whole capture; `max_depth`, `max_items` and `max_string` cap each value separately (`max_items=2` keeps two items of every list, not two in all). `tail_share` keeps both ends of a cut string, list or dict in that ratio, whichever limit cuts it; at its default 0.0 a capture keeps a head only. These bound capture's own work; the time and memory of a shape accessor or an opted-in `repr` are not bounded, only what is kept of their result. A `TextStream` retains at most `head + tail` units between writes; one `write` may also hold a copy or the UTF-8 encoding of its chunk while it runs. Its overflow file holds at most `OverflowFile.max_bytes` bytes. An `OverflowFile(path=...)` that already exists is refused with `FileExistsError`, never truncated; a new file is created exclusively, mode 0600.
+- **Shared file budget.** The overflow files live in `nooa.overflow` (see [overflow.md](overflow.md)), which `nooa.snapshot` imports and which imports nothing from it. An `OverflowDir` holds at most `max_files` files of at most `file_bytes` each and deletes the oldest closed files to make room, never an open stream's file, so a `Text.full` path from an earlier stream can stop existing; opening it then fails with `FileNotFoundError`, which is how a reader can tell the full output is gone.
 - **Exact accounting.** `Text.length == len(head) + len(tail) + omitted`, in the text's own unit. `render_json(capture(v, limits), max_chars=limits.max_chars)` cuts nothing further: capture already stops a mapping with reason `key` at a key that collides with an earlier one in JSON (`1` and `"1"`), keeping the first, so capture, `render_json` and `render_trace` agree.
-- **UTF-8-safe cuts.** Bytes stay bytes until rendered, and every bytes cut lands on a code point boundary. A chars stream's spill file is cut on a code point boundary too, so it is always valid UTF-8, and `Spill.kept` counts the bytes written.
+- **UTF-8-safe cuts.** Bytes stay bytes until rendered, and every bytes cut lands on a code point boundary. A chars stream's overflow file is cut on a code point boundary too, so it is always valid UTF-8, and `Overflow.kept` counts the bytes written.
 - **Trace previews say what they cut.** `render_trace` gives the preview text plus span attributes saying whether it is complete, which paths were cut and why.
 - **Rendering never fails** because of a hook. Only `render_json` bounds its output; the text renderers format what capture bounded.
