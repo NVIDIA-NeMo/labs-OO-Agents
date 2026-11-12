@@ -253,7 +253,7 @@ class TestMultipleExecutions:
 
         print(f"\n=== Execution 3: Formatted error ===\n{formatted}")
         print(f"\n=== Wrapper line offset: {result3.wrapper_line_offset} ===")
-        print(f"\n=== Names bound so far: {sorted(namespace.user_values())} ===")
+        print(f"\n=== Names bound so far: {sorted(namespace.user_names)} ===")
 
         # The error should still report line 30
         assert "line 30" in formatted, f"Expected 'line 30' in error, got:\n{formatted}"
@@ -327,7 +327,7 @@ class TestOffsetClearing:
             result = await _cell(test_agent, namespace, code, execution_count=i)
             assert result.error is None
 
-        print(f"After 10 executions, {len(namespace.user_values())} globals")
+        print(f"After 10 executions, {len(namespace.user_names)} globals")
 
         # Now execution 11 with error on a specific line
         error_code = """\

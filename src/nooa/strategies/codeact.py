@@ -1026,22 +1026,6 @@ Standard Python builtins and agent instance (`self`) are available."""
         """
         ...
 
-    @staticmethod
-    def _sync_session_locals(call: "CurrentCall", session: "CodeActSession") -> None:
-        """Write the names cells bound back to the caller's ``session_locals`` seed.
-
-        The sandbox worker keeps its own namespace: the caller's dict stays as
-        given. A caller key named like a reserved name (an argument) keeps its value.
-        """
-        if call.session_locals is None or session.execution_namespace is None:
-            return
-        write_back_session_locals(
-            session.execution_namespace,
-            call.session_locals,
-            seeded=call.seeded_locals,
-            before=call.namespace_before,
-        )
-
     def _create_sandbox_executor(
         self, runtime: RuntimeServices, call: "CurrentCall", builtins: dict[str, Any]
     ) -> Any:
@@ -1353,7 +1337,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     if result.completed:
                         turn_state.success = True
                         turn_state.is_final = True
-                        self._sync_session_locals(call, session)
+                        write_back_session_locals(call)
                         return result.final_value
                     continue
 
@@ -1408,7 +1392,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         if validation_error is None:
                             turn_state.success = True
                             turn_state.is_final = True
-                            self._sync_session_locals(call, session)
+                            write_back_session_locals(call)
                             return validated
                         runtime.event_manager.add(_text_only_correction(context, validation_error))
                     elif action.kind == "retry":
@@ -1430,7 +1414,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         if result.completed:
                             turn_state.success = True
                             turn_state.is_final = True
-                            self._sync_session_locals(call, session)
+                            write_back_session_locals(call)
                             return result.final_value
                     else:
                         raise ValueError(f"Unknown text-only action: {action.kind!r}")
@@ -1477,7 +1461,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             ),
             record=False,
         )
-        self._sync_session_locals(call, session)
+        write_back_session_locals(call)
         raise session.build_failure_error()
 
     def _translate_tool_call_to_code(

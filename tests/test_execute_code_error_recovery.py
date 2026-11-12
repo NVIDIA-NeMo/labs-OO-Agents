@@ -17,7 +17,8 @@ async def _execute(runtime, code, **kwargs):
     namespace = ExecutionNamespace(reserved=RUNTIME_NAMES)
     with namespace.enter({}):
         result = await runtime.execute_code(code, execution_namespace=namespace, **kwargs)
-    return result, namespace.user_values()
+    bound = namespace.user_names
+    return result, {name: namespace.globals[name] for name in bound if name in namespace.globals}
 
 
 @pytest.mark.asyncio

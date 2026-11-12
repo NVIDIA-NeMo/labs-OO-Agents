@@ -250,5 +250,5 @@ def test_session_locals_never_overwrite_the_namespace_internals():
     with enter_call_namespace(object(), call) as ns:
         assert ns.globals["__builtins__"] is not None
         assert ns.globals["_nooa_ns_delete"] == ns.delete_global
-        assert ns.user_values() == {"kept": 1}
+        assert ns.user_names == {"kept"} and ns.globals["kept"] == 1
     assert call.seeded_locals == {"kept": 1}
