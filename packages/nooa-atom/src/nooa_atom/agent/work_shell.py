@@ -23,30 +23,31 @@ that external harness owns (and must clean up) the background processes.
 
 A command's stdout and stderr are each read through a pipe into a bounded
 ``nooa.snapshot.TextStream`` (bytes): the first 256 KiB and the last 768 KiB
-stay in memory, and the whole stream is spilled to a file, up to the output
-limit. A ``CommandResult`` carries each stream in ``render_output``'s notation
+stay in memory, and the whole stream also goes to an overflow file
+(``nooa.overflow``), up to the output limit. A ``CommandResult`` carries each stream in ``render_output``'s notation
 (whole up to 1 MiB, else ``HEAD``, one ``[... N bytes omitted; ...]`` line
 that names the file, ``TAIL``) and the file path when the text was cut (short
 output keeps no file).
 
-Retention of those files: a ``SpillDir`` keeps at most 20 files (the newest)
-and deletes the oldest closed files when it needs room, so a path in an
-earlier result may no longer exist (opening it raises ``FileNotFoundError``);
-the in-memory head and tail of every result are unaffected.
+Retention of those files: an ``OverflowDir`` keeps at most 20 files (the
+newest) and deletes the oldest closed files when it needs room, so a path in
+an earlier result may no longer exist (opening it raises
+``FileNotFoundError``); the in-memory head and tail of every result are
+unaffected. Files are deleted only when their folder closes, by that cap, or
+at interpreter exit, never when an object is garbage collected.
 
-- In an agent session (a Shell started under an owner): one ``SpillDir`` per
-  agent, ``ShellOwner.spill_dir()``, shared by every spill source of that
-  agent: its Shells' direct runs, the commands inside its launched jobs and
-  its cell output. The 20-file cap is per agent, whatever produced the
+- In an agent session (a Shell started under an owner): one ``OverflowDir``
+  per agent, ``ShellOwner.overflow_dir()``, shared by every output source of
+  that agent: its Shells' direct runs, the commands inside its launched jobs
+  and its cell output. The 20-file cap is per agent, whatever produced the
   files; each file holds up to ``min(max_output, 64 MiB)`` bytes. Its files
   outlive a closed or dropped Shell and its jobs, and go when the session
   (the owner) closes.
-- Without an agent (plain library use): one ``SpillDir`` per Shell for its
-  direct runs (files of up to ``max_output`` bytes), removed when that Shell
-  closes (``aclose``, ``async with`` exit); a Shell dropped unclosed keeps
-  them while any result naming them is alive. Commands a Shell runs inside a
-  launched job share one ``SpillDir`` per Shell and job, in the job's scratch
-  directory, removed when the job is pruned or its manager closes.
+- Without an agent (plain library use): one private ``OverflowDir`` per Shell
+  (files of up to ``max_output`` bytes) for its direct runs and the commands
+  it runs inside launched jobs, removed when that Shell closes (``aclose``,
+  ``async with`` exit, its job's end for a launched Shell). A Shell dropped
+  unclosed keeps them until interpreter exit.
 """
 
 from __future__ import annotations
@@ -69,12 +70,12 @@ from typing import Annotated, Any, Literal
 
 from nooa import hidden
 from nooa.agentdoc import spec
+from nooa.overflow import OverflowDir, OverflowFile
 from nooa.runtime.cell_deadline import deadline_cancel
-from nooa.snapshot import SpillDir, SpillTarget, Text, TextStream, render_output
+from nooa.snapshot import Text, TextStream, render_output
 from nooa.tools import BashSession
 from nooa_atom.agent.metrics import atom_metrics
 from nooa_atom.agent.work_manager import (
-    _current,
     _progress_sink,
     current_name,
     describe,
@@ -151,7 +152,7 @@ class CommandResult:
 
     ``stdout``/``stderr``: whole up to 1 MiB, else head+tail around a
     ``[... N bytes omitted; ...]`` line; ``*_path``: that file (to 64 MiB),
-    kept until the session closes (outside one: its job or Shell) or evicted.
+    kept until the session closes (outside one: its Shell) or evicted.
     """
 
     returncode: int
@@ -166,14 +167,14 @@ class CommandResult:
 
 
 class _Capture:
-    """One stream as a bounded ``TextStream`` (bytes): head and tail in memory, the rest spilled.
+    """One stream as a bounded ``TextStream`` (bytes): head and tail in memory, all of it in a file.
 
-    ``target``: the stream's spill file (a ``SpillDir`` target), or ``None``
-    to keep memory only.
+    ``file``: the stream's overflow file (from an ``OverflowDir``), or
+    ``None`` to keep memory only.
     """
 
-    def __init__(self, target: SpillTarget | None) -> None:
-        self.stream = TextStream(unit="bytes", head=_HEAD_BYTES, tail=_TAIL_BYTES, spill=target)
+    def __init__(self, file: OverflowFile | None) -> None:
+        self.stream = TextStream(unit="bytes", head=_HEAD_BYTES, tail=_TAIL_BYTES, overflow=file)
         self.progress: Any = None  # a managed job's preview stream (work_progress)
 
     def feed(self, chunk: bytes) -> None:
@@ -190,7 +191,7 @@ class _Capture:
                 self.progress.feed(b"", final=True)
 
     def text(self, *, final: bool) -> Text:
-        """The stream so far (``final``: closed, its spill file kept only if cut)."""
+        """The stream so far (``final``: closed, its file kept only if cut)."""
         return self.stream.close() if final else self.stream.snapshot()
 
     def close(self) -> None:
@@ -199,57 +200,33 @@ class _Capture:
 
 
 def _summary(text: Text) -> tuple[str, str | None]:
-    """A stream's text in ``render_output``'s notation, and its spill path if it was cut."""
+    """A stream's text in ``render_output``'s notation, and its file path if it was cut."""
     full = text.full
     return render_output(text), (full.path if full is not None and not text.complete else None)
 
 
-_SPILL_FILES = 20
-"""How many spill files one folder keeps (the newest)."""
+_OVERFLOW_FILES = 20
+"""How many overflow files one folder keeps (the newest)."""
 
 
-def _spill_folder(path: str, per_file: int) -> SpillDir:
-    """A spill folder of ``_SPILL_FILES`` files, each up to ``per_file`` bytes (today's per-capture cap)."""
-    return SpillDir(path, max_files=_SPILL_FILES, file_bytes=per_file)
+def _new_overflow_dir(per_file: int) -> OverflowDir:
+    """A private ``OverflowDir`` of ``_OVERFLOW_FILES`` files, each up to ``per_file`` bytes (the per-capture cap)."""
+    return OverflowDir(max_files=_OVERFLOW_FILES, file_bytes=max(per_file, 0))
 
 
-_kept_spills: weakref.WeakKeyDictionary[object, list[SpillDir]] = weakref.WeakKeyDictionary()
-"""Spill folders kept alive by whatever owns their directory.
+def _captures(folder: OverflowDir | None, limit: int) -> tuple[_Capture, _Capture]:
+    """stdout's and stderr's captures, each with a file in ``folder`` (at most ``limit`` bytes)."""
 
-A ``SpillDir`` deletes the files it created when it is collected, but its
-files must last as long as their directory: a Shell's own output directory
-(while a result names it). The key is that directory's owner.
-"""
-
-
-def _keep(owner: object, spills: SpillDir) -> SpillDir:
-    """``spills``, kept alive as long as ``owner`` is (see ``_kept_spills``)."""
-    _kept_spills.setdefault(owner, []).append(spills)
-    return spills
-
-
-_job_spills: weakref.WeakKeyDictionary[object, dict[object, SpillDir]] = weakref.WeakKeyDictionary()
-"""Outside an agent session: each job's spill folders, one per Shell (keyed by its ``_spill_key``).
-
-A launched command's files live in its job's scratch directory, so the job
-keeps their folder alive until it is pruned; every command a Shell runs in
-that job shares the one folder and its 20-file budget.
-"""
-
-
-def _captures(spills: SpillDir | None, limit: int) -> tuple[_Capture, _Capture]:
-    """stdout's and stderr's captures, each spilling into ``spills`` (files of at most ``limit`` bytes)."""
-
-    def target() -> SpillTarget | None:
-        if spills is None or limit <= 0:
+    def file() -> OverflowFile | None:
+        if folder is None or limit <= 0:
             return None
-        spill = spills.target()
-        if spill is not None and limit < spill.max_bytes:
+        new = folder.file()
+        if new is not None and limit < new.max_bytes:
             # A folder shared by Shells with different limits (an agent's): this Shell's own.
-            spill = dataclasses.replace(spill, max_bytes=limit)
-        return spill
+            new = dataclasses.replace(new, max_bytes=limit)
+        return new
 
-    return _Capture(target()), _Capture(target())
+    return _Capture(file()), _Capture(file())
 
 
 def _result(
@@ -258,10 +235,6 @@ def _result(
     stdout, stdout_path = _summary(out.text(final=final[0]))
     stderr, stderr_path = _summary(err.text(final=final[1]))
     return CommandResult(code, timed_out, stdout, stderr, cwd, stdout_path, stderr_path)
-
-
-def _release(_directory: object) -> None:
-    """Nothing: a finalizer that only held ``_directory`` until its result went."""
 
 
 def _start_time(pid: int) -> str | None:
@@ -391,33 +364,22 @@ class ShellOwner:
     def __init__(self) -> None:
         self._shells: weakref.WeakSet[Shell] = weakref.WeakSet()
         self._closed = False
-        # The agent's spill files (``spill_dir``): they outlive a dropped Shell
-        # and go when the owner closes.
-        self._output: tempfile.TemporaryDirectory[str] | None = None
-        self._spills: SpillDir | None = None  # every spill of the agent (``spill_dir``)
+        self._overflow: OverflowDir | None = None  # the agent's output files (``overflow_dir``)
 
-    def _output_dir(self) -> Path | None:
-        """A new directory for one Shell's direct-run output (None once closed)."""
+    def overflow_dir(self) -> OverflowDir | None:
+        """The agent's one ``OverflowDir`` (20 files, up to 64 MiB each); None once closed.
+
+        Shared by every output source of the agent: cell output, its Shells'
+        direct runs and the commands of its launched jobs, so the 20-file cap
+        is per agent. Its files go when the owner closes (or at interpreter
+        exit); the folder keeps the newest, so an older path may no longer
+        exist (``FileNotFoundError``).
+        """
         if self._closed:
             return None
-        if self._output is None:
-            self._output = tempfile.TemporaryDirectory(prefix="nooa-shells-")
-        return Path(tempfile.mkdtemp(prefix="shell-", dir=self._output.name))
-
-    def spill_dir(self) -> SpillDir | None:
-        """The agent's one spill folder (20 files, up to 64 MiB each); None once closed.
-
-        Shared by every spill source of the agent: cell output, its Shells'
-        direct runs and the commands of its launched jobs, so the 20-file cap
-        is per agent. Its files go when the owner closes; the folder keeps the
-        newest, so an older path may no longer exist (``FileNotFoundError``).
-        """
-        if self._spills is None:
-            directory = self._output_dir()
-            if directory is None:
-                return None
-            self._spills = _spill_folder(str(directory), _MAX_OUTPUT_BYTES)
-        return self._spills
+        if self._overflow is None:
+            self._overflow = _new_overflow_dir(_MAX_OUTPUT_BYTES)
+        return self._overflow
 
     def adopt(self, shell: Shell) -> None:
         if self._closed:  # closing is terminal: no bash starts under a closed owner
@@ -433,12 +395,9 @@ class ShellOwner:
         shells = list(self._shells)
         self._shells.clear()
         results = await asyncio.gather(*(s.aclose() for s in shells), return_exceptions=True)
-        spills, self._spills = self._spills, None
-        if spills is not None:
-            spills.close()
-        output, self._output = self._output, None
-        if output is not None:  # also the output of Shells dropped unclosed
-            output.cleanup()
+        overflow, self._overflow = self._overflow, None
+        if overflow is not None:  # also the output of Shells dropped unclosed
+            overflow.close()
         errors = [r for r in results if isinstance(r, BaseException)]
         if errors:
             raise errors[0]
@@ -496,14 +455,10 @@ class Shell:
         self._bash: tuple[int, str | None] | None = None  # pid and start time of bash
         self._own_dir: tempfile.TemporaryDirectory[str] | None = None
         self._owner: ShellOwner | None = None  # who adopted it at its last start
-        # Without an owner, direct runs' capture files: the Shell's own directory
-        # (aclose, or garbage once neither the Shell nor a result naming it is
-        # alive). Under an owner they go in the agent's folder (``spill_dir``).
-        self._output: tempfile.TemporaryDirectory[str] | None = None
-        # Direct runs' spill folder, inside ``_output``: one per bash session (aclose ends it).
-        self._spills: SpillDir | None = None
-        # Its folder in a job's directory (``_job_spills``): one per Shell and job.
-        self._spill_key = object()
+        # Without an owner, the capture files of its direct runs and launched
+        # commands: one private folder, closed by aclose (or at exit). Under an
+        # owner they go in the agent's folder (``overflow_dir``).
+        self._overflow: OverflowDir | None = None
         self._lingering: set[asyncio.Task[None]] = set()
         self._count = itertools.count(1)
         self._note = ""
@@ -694,10 +649,9 @@ class Shell:
             session, self._session = self._session, None
             pumps, self._lingering = self._lingering, set()
             own_dir, self._own_dir = self._own_dir, None
-            output, self._output = self._output, None
-            spills, self._spills = self._spills, None
+            overflow, self._overflow = self._overflow, None
             closing = self._closing = asyncio.ensure_future(
-                self._cleanup(start, session, pumps, own_dir, output, spills)
+                self._cleanup(start, session, pumps, own_dir, overflow)
             )
         await asyncio.shield(closing)
 
@@ -707,22 +661,19 @@ class Shell:
         session: BashSession | None,
         pumps: set[asyncio.Task[None]],
         own_dir: tempfile.TemporaryDirectory[str] | None,
-        output: tempfile.TemporaryDirectory[str] | None = None,
-        spills: SpillDir | None = None,
+        overflow: OverflowDir | None = None,
     ) -> None:
         for pump in pumps:
             pump.cancel()
         await asyncio.gather(*pumps, return_exceptions=True)
-        if spills is not None:
-            spills.close()  # its files; the folder itself goes with ``output``
+        if overflow is not None:
+            overflow.close()
         if start is not None:
             await asyncio.gather(start, return_exceptions=True)  # it closes what it started
         if session is not None:
             await session.close()
         if own_dir is not None:
             own_dir.cleanup()
-        if output is not None:
-            output.cleanup()
 
     async def _closed(self) -> None:
         """Wait for a close under way to finish (its outcome is the closers')."""
@@ -739,49 +690,21 @@ class Shell:
     def _bash_alive(self) -> bool:
         return self._bash is not None and _start_time(self._bash[0]) == self._bash[1]
 
-    def _output_path(self) -> Path:
-        """Where a direct run's captures go (see ``_output``), made on first use."""
-        if self._output is None:
-            self._output = tempfile.TemporaryDirectory(prefix="nooa-shell-out-")
-        return Path(self._output.name)
-
-    def _spill_dir(self, job_directory: Path | None) -> SpillDir:
-        """The spill folder of a command's captures (20 files, each up to ``max_output`` bytes).
+    def _overflow_dir(self) -> OverflowDir:
+        """The ``OverflowDir`` of a command's captures (20 files, each up to ``max_output`` bytes).
 
         Started under an agent session (an owner): the session's one folder,
         shared with every Shell, job and cell of that agent (files up to
-        ``min(max_output, 64 MiB)``), until the session closes. Otherwise a
-        launched command's files go in one folder per Shell in its job's
-        directory (kept while the job is listed); a direct run's in this
-        Shell's one folder, in its output directory (see ``_output``), until
-        the Shell closes.
+        ``min(max_output, 64 MiB)``), until the session closes. Otherwise this
+        Shell's one private folder, for its direct runs and its commands in
+        launched jobs alike, until the Shell closes.
         """
         owner = self._owner
-        if owner is not None and (shared := owner.spill_dir()) is not None:
+        if owner is not None and (shared := owner.overflow_dir()) is not None:
             return shared
-        if job_directory is not None:
-            job = _current.get()
-            if job is None:  # a job directory without its job: nothing would keep a shared folder
-                return _spill_folder(str(job_directory), self._max_output)
-            folders = _job_spills.setdefault(job, {})
-            spills = folders.get(self._spill_key)
-            if spills is None:
-                spills = folders[self._spill_key] = _spill_folder(
-                    str(job_directory), self._max_output
-                )
-            return spills
-        if self._spills is None:
-            directory = self._output_path()
-            self._spills = _keep(self._output, _spill_folder(str(directory), self._max_output))
-        return self._spills
-
-    def _retain(self, result: CommandResult) -> None:
-        """Keep a direct run's cut captures (a stream's close deletes an uncut one's file)."""
-        output = self._output
-        if output is not None and (result.stdout_path or result.stderr_path):
-            # No owner: the result holds the directory, so dropping the Shell
-            # unclosed does not remove files a live result names.
-            weakref.finalize(result, _release, output)
+        if self._overflow is None:
+            self._overflow = _new_overflow_dir(self._max_output)
+        return self._overflow
 
     async def _send_locked(
         self, command: str, stdin: str | None, timeout: float, generation: int
@@ -791,13 +714,13 @@ class Shell:
         # A preceding queued command may have changed cwd. Report it only once
         # this command owns the shell, not when its coroutine was submitted.
         describe(f"$ {command} · cwd {session.cwd}")
-        directory = kept = job_dir()  # output files are kept only in a job's directory
+        directory = job_dir()  # the FIFOs and pid file: a job's directory, else the Shell's own
         if directory is None:
             if self._own_dir is None:
                 self._own_dir = tempfile.TemporaryDirectory(prefix="nooa-shell-")
             directory = Path(self._own_dir.name)
         stem = f"cmd-{next(self._count)}"
-        out, err = _captures(self._spill_dir(kept), self._max_output)
+        out, err = _captures(self._overflow_dir(), self._max_output)
         fifos = [directory / f"{stem}.out.fifo", directory / f"{stem}.err.fifo"]
         source = "/dev/null"
         if stdin is not None:  # a file, written before the command starts
@@ -889,8 +812,6 @@ class Shell:
             # job still writes to is read as it is now, and closed when it ends.
             final = (pumps[0][0].done(), pumps[1][0].done())
             result = _result(code, timed_out, out, err, str(session.cwd), final=final)
-            if kept is None:
-                self._retain(result)
         finally:
             if progress is not None:
                 progress.close()
@@ -899,7 +820,7 @@ class Shell:
                 if pump.done():
                     transport.close()
                     capture.close()
-                else:  # a background job still writes: bounded by head, tail and the spill cap
+                else:  # a background job still writes: bounded by head, tail and the file cap
                     self._lingering.add(pump)
                     pump.add_done_callback(
                         lambda _t, tr=transport, cap=capture: (tr.close(), cap.close())

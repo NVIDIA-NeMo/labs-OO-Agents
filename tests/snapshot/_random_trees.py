@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Random snapshot trees for render checks: every node type, tails, wrappers and spills."""
+"""Random snapshot trees for render checks: every node type, tails, wrappers and overflow files."""
 
 from __future__ import annotations
 
@@ -9,20 +9,20 @@ import random
 from nooa.snapshot import (
     Mapping,
     Object,
+    Overflow,
     Ref,
     Scalar,
     Sequence,
     Snapshot,
-    Spill,
     Text,
     Unavailable,
 )
 
-SPILLS = tuple(f"/tmp/spill-{n}.txt" for n in range(6))
+FILES = tuple(f"/tmp/out-{n}.txt" for n in range(6))
 
 
 def random_text(rng: random.Random) -> Text:
-    """A complete or cut ``Text`` (chars or bytes), sometimes with a spill file."""
+    """A complete or cut ``Text`` (chars or bytes), sometimes with an overflow file."""
     unit = rng.choice(("chars", "bytes"))
     head = "".join(rng.choice('ab\u00e9\u20ac\n"') for _ in range(rng.randint(0, 12)))
     tail = "".join(rng.choice("xy\u00e9") for _ in range(rng.randint(0, 6)))
@@ -38,7 +38,7 @@ def random_text(rng: random.Random) -> Text:
     full = None
     if rng.random() < 0.5:
         total = length
-        full = Spill(rng.choice(SPILLS), rng.choice((total, total // 2)), total)
+        full = Overflow(rng.choice(FILES), rng.choice((total, total // 2)), total)
     return Text(
         head=head_kept,
         tail=tail_kept,

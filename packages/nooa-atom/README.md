@@ -293,7 +293,7 @@ stop the command. Timeout returns a `CommandResult` with return code 124 and
 
 A cell's printed stdout over 50,000 characters (stderr over 2,000) keeps its
 head and tail around one `[... N chars omitted; full output: <path>]` line; the
-whole output is in the session's spill folder until the session closes (the
+whole output is in the session's overflow folder until the session closes (the
 folder keeps the newest files, so an older path may be gone). When no file could
 be kept the line ends `full output not kept]`, followed by a hint to write large
 output to a file and read it with `self.files.read(path)`. A cell error over

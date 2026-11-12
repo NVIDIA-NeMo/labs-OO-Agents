@@ -5,32 +5,39 @@
 ``CaptureBuffer`` holds ``execute_code``'s
 streams. It keeps the head and the tail (``CaptureConfig.max_stdout`` /
 ``max_stderr`` characters together, ``CaptureConfig.tail`` of them, or half,
-from the end) and, when ``CaptureConfig.file_backed`` is set, spills the
-whole stream to a file. ``getvalue()`` is ``render_output`` of the stream::
+from the end) and, when ``CaptureConfig.file_backed`` is set, also writes the
+whole stream to an overflow file (``nooa.overflow``). ``getvalue()`` is ``render_output`` of the stream::
 
     HEAD
     [... N chars omitted; full output: PATH]
     TAIL
 
-The spill file comes from the ``SpillDir`` in ``capture_spill`` when a
+The file comes from the ``OverflowDir`` in ``capture_overflow`` when a
 session set one (Atom sets its own: the files then follow the session's
 lifetime, and the folder keeps the newest, so an older path may no longer
-exist), else from a standalone ``SpillTarget()`` (a temporary file kept
+exist), else from a standalone ``OverflowFile()`` (a temporary file kept
 when the output was cut).
+
+``capture_overflow`` is a context variable, not a parameter, because the
+capture is made inside the core cell execution (``nooa.runtime.actor``) from
+the static ``CaptureConfig``, which knows nothing of a session; a session
+sets it for its cells next to the other cell context (``shell_owner``, the
+working directory).
 """
 
 from __future__ import annotations
 
 import contextvars
 
-from nooa.snapshot import SpillDir, SpillTarget, Text, TextStream, render_output
+from nooa.overflow import OverflowDir, OverflowFile
+from nooa.snapshot import Text, TextStream, render_output
 
-__all__ = ["CaptureBuffer", "capture_spill"]
+__all__ = ["CaptureBuffer", "capture_overflow"]
 
-capture_spill: contextvars.ContextVar[SpillDir | None] = contextvars.ContextVar(
-    "nooa_capture_spill", default=None
+capture_overflow: contextvars.ContextVar[OverflowDir | None] = contextvars.ContextVar(
+    "nooa_capture_overflow", default=None
 )
-"""The ``SpillDir`` a file-backed cell capture spills into (a session sets it); None: a temp file."""
+"""The ``OverflowDir`` a file-backed cell capture writes into (a session sets it); None: a temp file."""
 
 
 class CaptureBuffer:
@@ -41,7 +48,7 @@ class CaptureBuffer:
     - ``limit``: the characters kept (head and tail together).
     - ``tail_chars``: the characters of those kept from the end; ``None``:
       half (``limit // 2``).
-    - ``file_backed``: also spill the whole stream to a file (see the module).
+    - ``file_backed``: also write the whole stream to a file (see the module).
     - ``unrecoverable_hint``: a sentence put after the cut line when the
       output was cut and no file keeps it.
 
@@ -59,12 +66,12 @@ class CaptureBuffer:
         unrecoverable_hint: str | None = None,
     ) -> None:
         tail = tail_chars if tail_chars is not None else limit // 2
-        spill: SpillTarget | None = None
+        file: OverflowFile | None = None
         if file_backed:
-            spills = capture_spill.get()
-            spill = spills.target() if spills is not None else SpillTarget()
+            folder = capture_overflow.get()
+            file = folder.file() if folder is not None else OverflowFile()
         self._hint = unrecoverable_hint
-        self._stream = TextStream(unit="chars", head=limit - tail, tail=tail, spill=spill)
+        self._stream = TextStream(unit="chars", head=limit - tail, tail=tail, overflow=file)
 
     def write(self, s: str) -> int:
         """Append ``s``; returns ``len(s)``. Raises ``TypeError`` for a non-``str``."""
@@ -110,12 +117,12 @@ class CaptureBuffer:
 
     @property
     def file_path(self) -> str | None:
-        """The spill file while the stream is cut, else ``None``."""
+        """The overflow file while the stream is cut, else ``None``."""
         full = self._stream.snapshot().full
         return full.path if full is not None else None
 
     def close(self) -> None:
-        """End the stream; its spill file stays only when the output was cut."""
+        """End the stream; its overflow file stays only when the output was cut."""
         self._stream.close()
 
     def isatty(self) -> bool:

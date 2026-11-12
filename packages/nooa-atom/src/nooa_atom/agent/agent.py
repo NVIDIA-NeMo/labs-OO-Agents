@@ -30,7 +30,7 @@ from nooa.agentdoc import doc, spec
 from nooa.errors import hints as _hints
 from nooa.interactive import Done, NeedInput, Waiting
 from nooa.runtime.execution_namespace import ExecutionNamespace
-from nooa.runtime.output_capture import capture_spill
+from nooa.runtime.output_capture import capture_overflow
 from nooa.strategies import CodeActV2, PredictStrategy  # noqa: F401
 from nooa_atom.agent.work_manager import Job, JobEvent, Throttle, WorkManager
 from nooa_atom.agent.work_shell import CommandResult, Shell
@@ -209,7 +209,7 @@ def _module_not_found_hint(agent: Any, error: BaseException, formatted: str) -> 
     )
 
 
-# After the cut line of a cell print no file keeps (capture config; Atom spills by default).
+# After the cut line of a cell print no file keeps (capture config; Atom keeps a file by default).
 _CUT_PRINT_HINT = "Write large output to a file and read it with self.files.read(path)."
 
 
@@ -357,8 +357,8 @@ class AtomCodeAct(CodeActV2):
         owner = getattr(runtime.agent, "_shells", None)
         if owner is not None:  # the session closes the Shells its cells start
             work_shell.shell_owner.set(owner)
-            # Cell output spills into the session's folder: kept until it closes.
-            capture_spill.set(owner.spill_dir())
+            # Cell output goes to the session's folder: kept until it closes.
+            capture_overflow.set(owner.overflow_dir())
         return super()._build_builtins(runtime, call)
 
 

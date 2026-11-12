@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""One spill folder per agent: Shell runs, the commands of its jobs and cell output share 20 files."""
+"""One overflow folder per agent: Shell runs, the commands of its jobs and cell output share 20 files."""
 
 import asyncio
 import json
@@ -39,7 +39,7 @@ Path(OUT).write_text(json.dumps({{"job": job_paths, "direct": direct}}))
 """
 
 
-async def test_one_agent_keeps_at_most_20_spill_files_across_jobs_runs_and_cells(
+async def test_one_agent_keeps_at_most_20_overflow_files_across_jobs_runs_and_cells(
     tmp_path, sessions_dir
 ):
     models = AtomModels()
@@ -48,7 +48,9 @@ async def test_one_agent_keeps_at_most_20_spill_files_across_jobs_runs_and_cells
     out = workspace / "paths.json"
     work = f"OUT = {str(out)!r}\n" + _WORK
     models.scripts[None] = [
-        cell("print('h' * 30_000 + 'm' * 10_000 + 't' * 30_000)"),  # the agent's first spill file
+        cell(
+            "print('h' * 30_000 + 'm' * 10_000 + 't' * 30_000)"
+        ),  # the agent's first overflow file
         cell(work),  # then 28 Shell files: 24 from 12 commands in one job, 4 from direct runs
         cell("return_result(Done(explanation='ok'))"),
     ]
@@ -66,7 +68,7 @@ async def test_one_agent_keeps_at_most_20_spill_files_across_jobs_runs_and_cells
         paths = json.loads(out.read_text())
         job, direct = paths["job"], paths["direct"]
         assert len(job) == 24 and len(direct) == 4 and all(job + direct)
-        made = [cell_path, *job, *direct]  # 29 spill files, oldest first
+        made = [cell_path, *job, *direct]  # 29 overflow files, oldest first
         folder = Path(cell_path).parent
         assert {Path(p).parent for p in made} == {folder}  # one folder for the whole agent
         kept = sorted(folder.glob("nooa-output-*"))

@@ -23,7 +23,7 @@ to follow semantic versioning.
   merges (`[... N bytes omitted; full output not kept]` instead of
   `[... progress omitted ...]`), cell stdout/stderr
   (`nooa.runtime.output_capture.CaptureBuffer`: `[... N chars omitted; ...]`
-  instead of the `<truncated-output>` envelope; Atom spills them to the
+  instead of the `<truncated-output>` envelope; Atom writes them to the
   session's folder), job output tails and the core bash tool. Prefill string
   cuts render through `render_python` (same text). Cell errors (and the
   sandbox's error messages), pyp's stderr and `truncating_pformat(max_chars=)`
@@ -43,15 +43,18 @@ to follow semantic versioning.
   bytes); (b) the cut is UTF-8-safe: the head ends on a code point boundary,
   so no replacement character appears there (the omitted count then includes
   the trimmed bytes: 151,425 instead of 151,424 bytes for 400,000 `漢`).
-- Spill files are bounded per agent: in an Atom session one `SpillDir` (20
-  files of up to 64 MiB, newest kept) holds every spill of that agent: its
-  `Shell`s' direct runs, the commands inside its launched jobs and its cell
-  output, each file capped at its `Shell`'s `max_output`. Its files last until
-  the session closes (closing a `Shell` or pruning a job no longer removes
-  them); an evicted path raises `FileNotFoundError`. A `Shell` used outside an
-  agent keeps one folder for its direct runs and one per job for its launched
-  commands (before, every command in a job had its own folder, so the 20-file
-  cap never bound).
+- Output files are bounded per agent and live in a new standalone package,
+  `nooa.overflow` (`OverflowDir`, `OverflowFile`; see `docs/overflow.md`): in
+  an Atom session one `OverflowDir` (20 files of up to 64 MiB, newest kept)
+  holds every output file of that agent: its `Shell`s' direct runs, the
+  commands inside its launched jobs and its cell output, each file capped at
+  its `Shell`'s `max_output`. Its files last until the session closes (closing
+  a `Shell` or pruning a job no longer removes them); an evicted path raises
+  `FileNotFoundError`. A `Shell` used outside an agent keeps one private
+  folder for its direct runs and its launched commands, removed when the
+  `Shell` closes (before, every command in a job had its own folder, so the
+  20-file cap never bound). Files are never deleted by garbage collection: a
+  `Shell` dropped unclosed keeps its files until interpreter exit.
 
 - `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
   publishes a runtime event when a job finishes (the job's handle state and
