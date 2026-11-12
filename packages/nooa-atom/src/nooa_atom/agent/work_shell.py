@@ -29,17 +29,24 @@ limit. A ``CommandResult`` carries each stream in ``render_output``'s notation
 that names the file, ``TAIL``) and the file path when the text was cut (short
 output keeps no file).
 
-Retention of those files: one ``SpillDir`` (at most 20 files of 64 MiB each) per
-bash session holds a direct run's files; it keeps the newest and deletes the
-oldest closed files when it needs room, so a path in an earlier result may no
-longer exist (opening it raises ``FileNotFoundError``). A launched command's
-files are in its job's scratch directory and are removed when the job is
-pruned or its manager closes. A direct ``run``'s are removed when that Shell
-closes (``aclose``, ``async with`` exit) or, for a Shell started under an
-owner, when the owner closes: under an owner they outlive a dropped Shell
-(``r = await Shell().run(...)`` in a cell keeps ``r.stdout_path`` until the
-session ends). A Shell with no owner that is dropped unclosed keeps them while
-any result naming them is alive.
+Retention of those files: a ``SpillDir`` keeps at most 20 files (the newest)
+and deletes the oldest closed files when it needs room, so a path in an
+earlier result may no longer exist (opening it raises ``FileNotFoundError``);
+the in-memory head and tail of every result are unaffected.
+
+- In an agent session (a Shell started under an owner): one ``SpillDir`` per
+  agent, ``ShellOwner.spill_dir()``, shared by every spill source of that
+  agent: its Shells' direct runs, the commands inside its launched jobs and
+  its cell output. The 20-file cap is per agent, whatever produced the
+  files; each file holds up to ``min(max_output, 64 MiB)`` bytes. Its files
+  outlive a closed or dropped Shell and its jobs, and go when the session
+  (the owner) closes.
+- Without an agent (plain library use): one ``SpillDir`` per Shell for its
+  direct runs (files of up to ``max_output`` bytes), removed when that Shell
+  closes (``aclose``, ``async with`` exit); a Shell dropped unclosed keeps
+  them while any result naming them is alive. Commands a Shell runs inside a
+  launched job share one ``SpillDir`` per Shell and job, in the job's scratch
+  directory, removed when the job is pruned or its manager closes.
 """
 
 from __future__ import annotations
@@ -47,11 +54,11 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import dataclasses
 import itertools
 import math
 import os
 import shlex
-import shutil
 import signal
 import sys
 import tempfile
@@ -144,8 +151,7 @@ class CommandResult:
 
     ``stdout``/``stderr``: whole up to 1 MiB, else head+tail around a
     ``[... N bytes omitted; ...]`` line; ``*_path``: that file (to 64 MiB),
-    kept while the job is listed (direct ``run``: until its Shell/session
-    closes) or evicted.
+    kept until the session closes (outside one: its job or Shell) or evicted.
     """
 
     returncode: int
@@ -211,9 +217,8 @@ _kept_spills: weakref.WeakKeyDictionary[object, list[SpillDir]] = weakref.WeakKe
 """Spill folders kept alive by whatever owns their directory.
 
 A ``SpillDir`` deletes the files it created when it is collected, but its
-files must last as long as their directory: a job's scratch directory (until
-the job is pruned), a Shell's own output directory (while a result names it)
-or its owner's (until the owner closes). The key is that directory's owner.
+files must last as long as their directory: a Shell's own output directory
+(while a result names it). The key is that directory's owner.
 """
 
 
@@ -223,13 +228,26 @@ def _keep(owner: object, spills: SpillDir) -> SpillDir:
     return spills
 
 
+_job_spills: weakref.WeakKeyDictionary[object, dict[object, SpillDir]] = weakref.WeakKeyDictionary()
+"""Outside an agent session: each job's spill folders, one per Shell (keyed by its ``_spill_key``).
+
+A launched command's files live in its job's scratch directory, so the job
+keeps their folder alive until it is pruned; every command a Shell runs in
+that job shares the one folder and its 20-file budget.
+"""
+
+
 def _captures(spills: SpillDir | None, limit: int) -> tuple[_Capture, _Capture]:
-    """stdout's and stderr's captures, each spilling into ``spills`` (files of ``limit`` bytes)."""
+    """stdout's and stderr's captures, each spilling into ``spills`` (files of at most ``limit`` bytes)."""
 
     def target() -> SpillTarget | None:
         if spills is None or limit <= 0:
             return None
-        return spills.target()
+        spill = spills.target()
+        if spill is not None and limit < spill.max_bytes:
+            # A folder shared by Shells with different limits (an agent's): this Shell's own.
+            spill = dataclasses.replace(spill, max_bytes=limit)
+        return spill
 
     return _Capture(target()), _Capture(target())
 
@@ -373,10 +391,10 @@ class ShellOwner:
     def __init__(self) -> None:
         self._shells: weakref.WeakSet[Shell] = weakref.WeakSet()
         self._closed = False
-        # Direct runs' output files of its Shells: they outlive a dropped Shell
+        # The agent's spill files (``spill_dir``): they outlive a dropped Shell
         # and go when the owner closes.
         self._output: tempfile.TemporaryDirectory[str] | None = None
-        self._spills: SpillDir | None = None  # cell output (``spill_dir``)
+        self._spills: SpillDir | None = None  # every spill of the agent (``spill_dir``)
 
     def _output_dir(self) -> Path | None:
         """A new directory for one Shell's direct-run output (None once closed)."""
@@ -387,10 +405,12 @@ class ShellOwner:
         return Path(tempfile.mkdtemp(prefix="shell-", dir=self._output.name))
 
     def spill_dir(self) -> SpillDir | None:
-        """The session's spill folder for cell output (20 files, up to 64 MiB each); None once closed.
+        """The agent's one spill folder (20 files, up to 64 MiB each); None once closed.
 
-        Its files go when the owner closes; the folder keeps the newest, so an
-        older cell's path may no longer exist.
+        Shared by every spill source of the agent: cell output, its Shells'
+        direct runs and the commands of its launched jobs, so the 20-file cap
+        is per agent. Its files go when the owner closes; the folder keeps the
+        newest, so an older path may no longer exist (``FileNotFoundError``).
         """
         if self._spills is None:
             directory = self._output_dir()
@@ -476,12 +496,14 @@ class Shell:
         self._bash: tuple[int, str | None] | None = None  # pid and start time of bash
         self._own_dir: tempfile.TemporaryDirectory[str] | None = None
         self._owner: ShellOwner | None = None  # who adopted it at its last start
-        # Direct runs' capture files: a directory in the owner's (removed by
-        # aclose or the owner), else the Shell's own (aclose, or garbage once
-        # neither the Shell nor a result naming it is alive).
-        self._output: Path | tempfile.TemporaryDirectory[str] | None = None
+        # Without an owner, direct runs' capture files: the Shell's own directory
+        # (aclose, or garbage once neither the Shell nor a result naming it is
+        # alive). Under an owner they go in the agent's folder (``spill_dir``).
+        self._output: tempfile.TemporaryDirectory[str] | None = None
         # Direct runs' spill folder, inside ``_output``: one per bash session (aclose ends it).
         self._spills: SpillDir | None = None
+        # Its folder in a job's directory (``_job_spills``): one per Shell and job.
+        self._spill_key = object()
         self._lingering: set[asyncio.Task[None]] = set()
         self._count = itertools.count(1)
         self._note = ""
@@ -685,7 +707,7 @@ class Shell:
         session: BashSession | None,
         pumps: set[asyncio.Task[None]],
         own_dir: tempfile.TemporaryDirectory[str] | None,
-        output: Path | tempfile.TemporaryDirectory[str] | None = None,
+        output: tempfile.TemporaryDirectory[str] | None = None,
         spills: SpillDir | None = None,
     ) -> None:
         for pump in pumps:
@@ -699,9 +721,7 @@ class Shell:
             await session.close()
         if own_dir is not None:
             own_dir.cleanup()
-        if isinstance(output, Path):
-            shutil.rmtree(output, ignore_errors=True)
-        elif output is not None:
+        if output is not None:
             output.cleanup()
 
     async def _closed(self) -> None:
@@ -722,35 +742,43 @@ class Shell:
     def _output_path(self) -> Path:
         """Where a direct run's captures go (see ``_output``), made on first use."""
         if self._output is None:
-            owned = self._owner._output_dir() if self._owner is not None else None
-            self._output = owned or tempfile.TemporaryDirectory(prefix="nooa-shell-out-")
-        output = self._output
-        return output if isinstance(output, Path) else Path(output.name)
+            self._output = tempfile.TemporaryDirectory(prefix="nooa-shell-out-")
+        return Path(self._output.name)
 
     def _spill_dir(self, job_directory: Path | None) -> SpillDir:
         """The spill folder of a command's captures (20 files, each up to ``max_output`` bytes).
 
-        A launched command's files go in its job's directory (kept while the
-        job is listed); a direct run's in this Shell's one folder, in its
-        output directory (see ``_output``), until the Shell or its owner closes.
+        Started under an agent session (an owner): the session's one folder,
+        shared with every Shell, job and cell of that agent (files up to
+        ``min(max_output, 64 MiB)``), until the session closes. Otherwise a
+        launched command's files go in one folder per Shell in its job's
+        directory (kept while the job is listed); a direct run's in this
+        Shell's one folder, in its output directory (see ``_output``), until
+        the Shell closes.
         """
+        owner = self._owner
+        if owner is not None and (shared := owner.spill_dir()) is not None:
+            return shared
         if job_directory is not None:
-            spills = _spill_folder(str(job_directory), self._max_output)
             job = _current.get()
-            return spills if job is None else _keep(job, spills)
+            if job is None:  # a job directory without its job: nothing would keep a shared folder
+                return _spill_folder(str(job_directory), self._max_output)
+            folders = _job_spills.setdefault(job, {})
+            spills = folders.get(self._spill_key)
+            if spills is None:
+                spills = folders[self._spill_key] = _spill_folder(
+                    str(job_directory), self._max_output
+                )
+            return spills
         if self._spills is None:
-            spills = _spill_folder(str(self._output_path()), self._max_output)
-            output = self._output
-            owner = output if isinstance(output, tempfile.TemporaryDirectory) else self._owner
-            self._spills = spills if owner is None else _keep(owner, spills)
+            directory = self._output_path()
+            self._spills = _keep(self._output, _spill_folder(str(directory), self._max_output))
         return self._spills
 
     def _retain(self, result: CommandResult) -> None:
         """Keep a direct run's cut captures (a stream's close deletes an uncut one's file)."""
         output = self._output
-        if isinstance(output, tempfile.TemporaryDirectory) and (
-            result.stdout_path or result.stderr_path
-        ):
+        if output is not None and (result.stdout_path or result.stderr_path):
             # No owner: the result holds the directory, so dropping the Shell
             # unclosed does not remove files a live result names.
             weakref.finalize(result, _release, output)

@@ -140,6 +140,33 @@ async def test_direct_run_output_limit_marker():
     assert not Path(r.stdout_path).exists()
 
 
+async def test_a_small_output_limit_still_returns_an_output_under_1_mib_whole():
+    """Intended change (#578): the in-memory head and tail do not depend on max_output."""
+    sh = Shell(max_output=1000)
+    try:
+        r = await sh.run("head -c 900000 /dev/zero | tr '\\0' a")
+        assert r.stdout == "a" * 900_000  # before: a 1,000-byte head, a cut line, the tail
+        assert r.stdout_path is None
+    finally:
+        await sh.aclose()
+
+
+async def test_the_head_cut_is_utf8_safe():
+    """Intended change (#578): the head ends on a code point boundary, no replacement character."""
+    sh = Shell()
+    try:
+        # 1,200,000 bytes of 3-byte characters: 262,144 is not a multiple of 3.
+        r = await sh.run('python3 -c "import sys; sys.stdout.write(chr(0x6f22) * 400000)"')
+        assert "\ufffd" not in r.stdout
+        head, line, tail = r.stdout.split("\n")
+        assert head == "\u6f22" * (262_144 // 3) and tail == "\u6f22" * (786_432 // 3)
+        # The trimmed byte of the head counts as omitted: 151,425, not 151,424.
+        assert line == f"[... 151,425 bytes omitted; full output: {r.stdout_path}]"
+        assert Path(r.stdout_path).read_text() == "\u6f22" * 400_000
+    finally:
+        await sh.aclose()
+
+
 async def test_output_limit_under_the_summary_size_is_reported():
     sh = Shell(max_output=1000)
     small = await sh.run("head -c 2000 /dev/zero | tr '\\0' a")
@@ -189,7 +216,8 @@ async def test_dropped_owned_shell_keeps_files_until_the_owner_closes():
     assert not path.exists()
 
 
-async def test_owned_shell_aclose_removes_its_files():
+async def test_owned_shell_files_last_until_the_owner_closes():
+    """Under an owner the files are the agent's (one SpillDir per agent): closing the Shell keeps them."""
     from nooa_atom.agent.work_shell import ShellOwner, shell_owner
 
     owner = ShellOwner()
@@ -199,10 +227,11 @@ async def test_owned_shell_aclose_removes_its_files():
         r = await sh.run("seq 1 300000")
     finally:
         shell_owner.reset(token)
-    assert Path(r.stdout_path).exists()
+    assert Path(r.stdout_path).parent == Path(owner.spill_dir().path)
     await sh.aclose()
-    assert not Path(r.stdout_path).exists()
+    assert Path(r.stdout_path).exists()
     await owner.aclose()
+    assert not Path(r.stdout_path).exists()
 
 
 async def test_one_shot_cancel_kills_process_group(manager, tmp_path):
@@ -1391,6 +1420,30 @@ async def test_direct_runs_share_one_spill_folder_that_keeps_the_newest(tmp_path
         assert all(Path(p).exists() for p in paths[-18:])
     finally:
         await sh.aclose()
+    assert not any(Path(p).exists() for p in paths)
+
+
+async def test_commands_in_one_job_share_one_spill_folder(manager, tmp_path):
+    """Without an agent: a Shell's commands inside one job share one 20-file SpillDir."""
+    big = "head -c 1100000 /dev/zero | tr '\\0' a; head -c 1100000 /dev/zero | tr '\\0' b >&2"
+
+    async def commands() -> list[str]:
+        paths = []
+        async with Shell(max_output=1000) as sh:
+            for _ in range(12):
+                r = await sh.run(big)
+                paths += [r.stdout_path, r.stderr_path]
+        return paths
+
+    paths = await manager.launch(commands(), name="commands")
+    folder = Path(paths[0]).parent
+    assert folder.is_relative_to(tmp_path / "scratch")  # the job's scratch dir
+    assert {Path(p).parent for p in paths} == {folder}
+    assert sorted(folder.glob("nooa-output-*")) == sorted(Path(p) for p in paths[4:])
+    for path in paths[:4]:  # 24 cut streams, 20 files: the 4 oldest went
+        with pytest.raises(FileNotFoundError):
+            open(path, "rb")  # noqa: SIM115
+    await manager.aclose()
     assert not any(Path(p).exists() for p in paths)
 
 

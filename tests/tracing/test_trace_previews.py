@@ -17,8 +17,8 @@ from nooa.snapshot import capture
 from nooa.tracing._hooks_impl import (
     _PREVIEW_LIMITS,
     _call_snapshot,
+    _code_result_snapshot,
     _error_message,
-    _execution_result_snapshot,
     _set_preview,
 )
 
@@ -112,7 +112,7 @@ def test_call_input_keeps_args_and_kwargs_on_overflow():
 
 
 def test_execution_result_keeps_every_key():
-    snapshot = _execution_result_snapshot(
+    snapshot = _code_result_snapshot(
         ExecutionResult(stdout="s" * 100_000, stderr="e" * 100_000, returned_value=[1] * 100_000)
     )
     span = _Span()
@@ -123,7 +123,7 @@ def test_execution_result_keeps_every_key():
 
 
 def test_execution_result_without_return_shows_null():
-    snapshot = _execution_result_snapshot(ExecutionResult(stdout="hi\n", stderr=""))
+    snapshot = _code_result_snapshot(ExecutionResult(stdout="hi\n", stderr=""))
     parsed = json.loads(_set_preview(_Span(), "output", snapshot))
     assert parsed == {"stdout": "hi\n", "stderr": "", "returned_value": None}
 
@@ -133,3 +133,99 @@ def test_error_message_keeps_both_ends():
     assert message.startswith("a" * 2_500) and message.endswith("b" * 2_500)
     assert "[... 1,000 chars omitted; full output not kept]" in message
     assert _error_message(ValueError("short")) == "short"
+
+
+# ---- hook-level: real spans through OpenInferenceHooks (review r7, #579) ----------
+
+
+def _hooks():
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from nooa.tracing._hooks_impl import OpenInferenceHooks
+
+    provider = TracerProvider()
+    exporter = InMemorySpanExporter()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    return OpenInferenceHooks(provider.get_tracer("test")), exporter
+
+
+class _Agent:
+    pass
+
+
+def _run_code(code, result):
+    hooks, exporter = _hooks()
+    agent = _Agent()
+    context = hooks.before_code_execution(agent=agent, code=code, execution_id="exec-1")
+    hooks.after_code_execution(
+        agent=agent,
+        code=code,
+        result=result,
+        exception=None,
+        context=context,
+        execution_id="exec-1",
+    )
+    (span,) = exporter.get_finished_spans()
+    return span
+
+
+def test_long_code_preview_is_cut_by_the_snapshot_and_says_so():
+    code = "#" + "x" * 10_000  # 10,001 chars: one over the code preview's string limit
+    span = _run_code(code, ExecutionResult(stdout="ok"))
+    attributes = span.attributes
+    parsed = json.loads(attributes[SpanAttributes.INPUT_VALUE])  # valid JSON
+    assert parsed == {"code": code[:10_000]}
+    assert attributes["code.length"] == 10_001
+    assert attributes["nooa.input.preview.incomplete"] is True
+    assert attributes["nooa.input.preview.paths"] == ("/code",)
+    assert attributes["nooa.input.preview.reasons"] == ("max_length",)
+    # The tool-call arguments are the same JSON.
+    assert json.loads(attributes["tool_call.function.arguments"]) == parsed
+
+
+def test_code_at_the_limit_is_complete():
+    code = "y" * 10_000
+    attributes = _run_code(code, ExecutionResult()).attributes
+    assert json.loads(attributes[SpanAttributes.INPUT_VALUE]) == {"code": code}
+    assert attributes["nooa.input.preview.incomplete"] is False
+
+
+def test_error_status_description_is_bounded():
+    from opentelemetry.trace import StatusCode
+
+    from nooa.tracing._hooks_impl import _record_error
+
+    hooks, exporter = _hooks()
+    with hooks.tracer.start_as_current_span("error") as span:
+        _record_error(span, ValueError("e" * 1_000_000))
+    (span,) = exporter.get_finished_spans()
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.status.description == span.attributes["error.message"]
+    assert len(span.status.description) < 5_100  # 5,000 kept plus the cut line
+    assert "chars omitted; full output not kept]" in span.status.description
+
+
+def test_a_result_like_object_is_captured_without_calling_its_properties():
+    calls = []
+
+    class LooksLikeAResult:
+        def __init__(self):
+            self.name = "plain data"
+
+        @property
+        def stdout(self):
+            calls.append("stdout")
+            raise RuntimeError("never read me")
+
+        @property
+        def returned_value(self):
+            calls.append("returned_value")
+            return 1
+
+    span = _run_code("value", LooksLikeAResult())
+    assert calls == []
+    # Present and valid JSON: an ordinary capture of its public attributes.
+    preview = json.loads(span.attributes[SpanAttributes.OUTPUT_VALUE])
+    assert "plain data" in json.dumps(preview) and "stdout" not in json.dumps(preview)

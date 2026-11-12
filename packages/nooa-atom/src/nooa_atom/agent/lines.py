@@ -3,8 +3,9 @@
 """Unbounded byte streams read line by line in bounded memory (job logs).
 
 - :class:`LineSplitter` — feed it byte chunks, get complete lines back, each
-  capped at ``max_line_chars`` with a ``[... N chars of this line omitted]``
-  marker; usable from polling code (e.g. following a file).
+  bounded to its first ``max_line_chars`` by a chars ``nooa.snapshot.TextStream``
+  and rendered by ``render_output``; usable from polling code (e.g. following
+  a file).
 - :func:`bounded_lines` — the same over an ``asyncio.StreamReader``, reading
   fixed-size chunks.
 """
@@ -13,23 +14,24 @@ import codecs
 from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING
 
+from nooa.snapshot import TextStream, render_output
+
 if TYPE_CHECKING:
     import asyncio
 
 
-_LINE_OMITTED = "[... {omitted:,} chars of this line omitted]"
-
-
 class LineSplitter:
-    """Split byte chunks into text lines, each capped at ``max_line_chars``.
+    """Split byte chunks into text lines, each bounded to its first ``max_line_chars``.
 
     ``feed(chunk)`` returns the lines the chunk completes (each ending in
-    ``"\\n"``); ``flush()`` returns the last unterminated line, if any. Only
-    the first ``max_line_chars`` characters of a line are kept; the rest is
-    counted and replaced by ``[... N chars of this line omitted]``, so memory
-    stays at one capped line plus the chunk being split. ``on_bytes``, if
-    given, receives every input byte, in order, one line piece at a time (e.g.
-    for a full log). Text is decoded as UTF-8 with replacement characters.
+    ``"\\n"``); ``flush()`` returns the last unterminated line, if any. Each
+    line is written to a chars ``nooa.snapshot.TextStream(head=max_line_chars,
+    tail=0)`` and returned as ``render_output`` of it: a line within the
+    limit is itself; a longer one is its first ``max_line_chars`` characters,
+    then, on its own line, ``[... N chars omitted; full output not kept]``.
+    Memory stays at one bounded line plus the chunk being split. ``on_bytes``,
+    if given, receives every input byte, in order, one line piece at a time
+    (e.g. for a full log). Text is decoded as UTF-8 with replacement characters.
     """
 
     def __init__(self, max_line_chars: int, on_bytes: Callable[[bytes], object] | None = None):
@@ -38,26 +40,19 @@ class LineSplitter:
         self._max = max_line_chars
         self._on_bytes = on_bytes
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-        self._kept: list[str] = []
-        self._kept_chars = 0
-        self._omitted = 0
+        self._line = self._new_line()
         self._started = False
 
+    def _new_line(self) -> TextStream:
+        return TextStream(unit="chars", head=self._max, tail=0)
+
     def _add(self, text: str) -> None:
-        room = self._max - self._kept_chars
-        if room > 0 and text:
-            piece = text[:room]
-            self._kept.append(piece)
-            self._kept_chars += len(piece)
-            self._omitted += len(text) - len(piece)
-        else:
-            self._omitted += len(text)
+        if text:
+            self._line.write(text)
 
     def _take(self, newline: str) -> str:
-        line = "".join(self._kept)
-        if self._omitted:
-            line += _LINE_OMITTED.format(omitted=self._omitted)
-        self._kept, self._kept_chars, self._omitted, self._started = [], 0, 0, False
+        line = render_output(self._line.close())
+        self._line, self._started = self._new_line(), False
         return line + newline
 
     def feed(self, data: bytes) -> list[str]:
