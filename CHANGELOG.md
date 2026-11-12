@@ -8,7 +8,7 @@ to follow semantic versioning.
 
 - In-process cells have one execution path: `PurePythonStrategy` now runs its
   cells in the call's owned `ExecutionNamespace` like CodeAct
-  (`call_execution_namespace(agent, call)`), and `ActorRuntime.execute_code`
+  (`enter_call_namespace(agent, call)`), and `ActorRuntime.execute_code`
   no longer copies session state into and out of every cell (locals wrapper,
   helper pre-compilation). `_session_locals` still seeds the call's namespace
   and is written back when the call ends; the call's arguments are never

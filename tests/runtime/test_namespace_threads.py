@@ -241,13 +241,14 @@ async def test_after_a_call_the_namespace_keeps_only_the_output_names_and_self()
 def test_session_locals_never_overwrite_the_namespace_internals():
     from types import SimpleNamespace
 
-    from nooa.runtime.execution_namespace import call_execution_namespace
+    from nooa.runtime.execution_namespace import enter_call_namespace
 
     call = SimpleNamespace(
         kwargs={},
         session_locals={"__builtins__": None, "_nooa_ns_delete": "x", "kept": 1},
     )
-    ns = call_execution_namespace(object(), call)
-    assert ns.globals["__builtins__"] is not None
-    assert ns.globals["_nooa_ns_delete"] == ns.delete_global
-    assert ns.user_values() == {"kept": 1}
+    with enter_call_namespace(object(), call) as ns:
+        assert ns.globals["__builtins__"] is not None
+        assert ns.globals["_nooa_ns_delete"] == ns.delete_global
+        assert ns.user_values() == {"kept": 1}
+    assert call.seeded_locals == {"kept": 1}

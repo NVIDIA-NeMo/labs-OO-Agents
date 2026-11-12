@@ -39,7 +39,7 @@ from nooa.events import (
 )
 from nooa.runtime.execution_namespace import (
     ExecutionNamespace,
-    call_execution_namespace,
+    enter_call_namespace,
     write_back_session_locals,
 )
 from nooa.runtime.harness_metrics import get_harness_metrics
@@ -264,7 +264,10 @@ class PurePythonStrategy(CompositeStrategy):
         if call.session_locals is None or session.execution_namespace is None:
             return
         write_back_session_locals(
-            session.execution_namespace, call.session_locals, call_names=session.argument_names
+            session.execution_namespace,
+            call.session_locals,
+            seeded=call.seeded_locals,
+            call_names=session.argument_names,
         )
 
     async def execute(self, runtime: RuntimeServices, call: "CurrentCall") -> Any:
@@ -274,11 +277,10 @@ class PurePythonStrategy(CompositeStrategy):
         locals: a cell can read, rebind and delete them.
         """
         call.arguments_are_user_names = True
-        namespace = call_execution_namespace(
+        with enter_call_namespace(
             runtime.agent, call, arguments=self._call_arguments(runtime, call)
-        )
-        call.execution_namespace = namespace
-        with namespace.enter({}):
+        ) as namespace:
+            call.execution_namespace = namespace
             return await self._run_loop(runtime, call, namespace)
 
     async def _run_loop(
@@ -362,6 +364,7 @@ class PurePythonStrategy(CompositeStrategy):
                     if session.api_errors_exhausted():
                         turn_final = True
                         turn_exception = "GenerationError"
+                        self._sync_session_locals(call, session)
                         raise GenerationError(
                             f"LLM request timed out after {session.max_retries} retries. "
                             f"Original error: {type(e).__name__}: {e}"
@@ -411,6 +414,7 @@ class PurePythonStrategy(CompositeStrategy):
                     if session.api_errors_exhausted():
                         turn_final = True
                         turn_exception = "GenerationError"
+                        self._sync_session_locals(call, session)
                         raise GenerationError(
                             f"LLM API error after {session.max_retries} retries. "
                             f"Original error: {error_name}: {e}"

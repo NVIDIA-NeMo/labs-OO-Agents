@@ -238,6 +238,9 @@ class CurrentCall:
     # PurePython: the arguments are ordinary user names in the namespace (a cell
     # can rebind or delete them); CodeAct reserves them (False).
     arguments_are_user_names: bool = False
+    # What the call took from ``session_locals`` into its namespace (set by
+    # ``enter_call_namespace``): write-back deletes or keeps only these keys.
+    seeded_locals: dict[str, Any] = field(default_factory=dict)
 
     def __hash__(self) -> int:
         """Hash by id for use in sets/dicts."""

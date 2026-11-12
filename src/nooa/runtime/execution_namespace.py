@@ -5,7 +5,7 @@
 Every in-process cell runs in an :class:`ExecutionNamespace`: it is the only
 in-process execution path of ``ActorRuntime.execute_code`` (a call without a
 namespace gets a fresh one for that cell). CodeAct and PurePython take theirs
-from :func:`call_execution_namespace`, i.e. ``Agent.execution_namespace_for(call)``:
+from :func:`enter_call_namespace`, i.e. ``Agent.execution_namespace_for(call)``:
 the default is a fresh namespace per call (:func:`default_execution_namespace`);
 an agent overrides the hook to share one across calls (Atom's ``handle`` keeps
 one per live session). Caller ``_session_locals`` seed the namespace as user
@@ -446,50 +446,66 @@ def default_execution_namespace(call: Any) -> ExecutionNamespace:
     return ExecutionNamespace(reserved=RUNTIME_NAMES | arguments)
 
 
-def call_execution_namespace(
+@contextmanager
+def enter_call_namespace(
     agent: Any, call: Any, *, arguments: Mapping[str, Any] | None = None
-) -> ExecutionNamespace:
-    """The namespace a call's in-process cells run in, seeded with its ``session_locals``.
+) -> Iterator[ExecutionNamespace]:
+    """Enter the namespace a call's in-process cells run in, then seed it.
 
     ``agent.execution_namespace_for(call)`` picks it (an object that is not an
     Agent, or a hook returning None, gets :func:`default_execution_namespace`).
-    ``arguments`` (PurePython) are seeded after the caller's seed, as user
-    names a cell can rebind or delete; an argument wins over a same-named seed.
-    Protected names (reserved runtime names, ``__builtins__``, the engine's
-    internals) are never seeded.
+    The namespace is entered first: one that another call occupies (a shared
+    namespace) raises before anything in it changes. Then the caller's
+    ``session_locals`` are seeded, and ``arguments`` (PurePython) after them, as
+    user names a cell can rebind or delete; an argument wins over a same-named
+    seed. Protected names (reserved runtime names, ``__builtins__``, the
+    engine's internals) are never seeded. ``call.seeded_locals`` records the
+    caller's seeds for :func:`write_back_session_locals`.
     """
     selector = getattr(agent, "execution_namespace_for", None)
     namespace = selector(call) if selector is not None else None
     if namespace is None:
         namespace = default_execution_namespace(call)
-    for values in (call.session_locals or {}, arguments or {}):
-        for name, value in values.items():
-            if framework_name_allowed(name, namespace.reserved):
-                namespace.globals[name] = value
-                namespace.user_names.add(name)
-    return namespace
+    with namespace.enter({}):
+        seeds = {
+            name: value
+            for name, value in (call.session_locals or {}).items()
+            if framework_name_allowed(name, namespace.reserved)
+        }
+        call.seeded_locals = seeds
+        for values in (seeds, arguments or {}):
+            for name, value in values.items():
+                if framework_name_allowed(name, namespace.reserved):
+                    namespace.globals[name] = value
+                    namespace.user_names.add(name)
+        yield namespace
 
 
 def write_back_session_locals(
     namespace: ExecutionNamespace,
     session_locals: dict[str, Any],
     *,
+    seeded: Mapping[str, Any],
     call_names: frozenset[str] = frozenset(),
 ) -> None:
-    """Write the namespace's user names back to the caller's ``session_locals``.
+    """Write what the call's cells changed back to the caller's ``session_locals``.
 
-    A caller key the call shadowed (a protected name, or one of ``call_names``,
-    e.g. the call's arguments) keeps the caller's value; ``call_names`` never
-    reach the caller. Every other key follows the namespace: a cell's
-    rebinding updates it and a cell's ``del`` removes it.
+    ``seeded`` is what the call took from ``session_locals`` (``call.seeded_locals``).
+    A name the cells rebound or bound updates the caller's key; a seeded name
+    the cells deleted is removed. A seed the cells left alone, and any key the
+    call never seeded (e.g. added by someone else while the call ran), keep the
+    caller's current value; so does a seed the caller changed meanwhile when
+    the cells deleted it. ``call_names`` (e.g. the call's arguments) never reach
+    the caller, and a caller key named like one keeps its value.
     """
     values = namespace.user_values()
-    for name in list(session_locals):
-        if name in call_names or not framework_name_allowed(name, namespace.reserved):
-            continue
-        if name not in values:
+    for name, seed in seeded.items():
+        if name not in call_names and name not in values and session_locals.get(name) is seed:
             del session_locals[name]
-    session_locals.update((name, value) for name, value in values.items() if name not in call_names)
+    for name, value in values.items():
+        if name in call_names or (name in seeded and value is seeded[name]):
+            continue
+        session_locals[name] = value
 
 
 class ExecutionNamespace:
