@@ -105,11 +105,14 @@ def todo_block(agent: Any) -> str | None:
     todos = [t for t in agent.todo.list_todos() if t.status != "done"]
     if not todos:
         return None
-    oldest = min(t.created_at for t in todos)  # "%Y-%m-%d %H:%M" sorts as text
-    days = (datetime.now() - datetime.strptime(oldest, "%Y-%m-%d %H:%M")).days
-    age = f"{days} days ago" if days > 1 else "1 day ago" if days == 1 else "today"
+    oldest = min(str(t.created_at) for t in todos)  # ISO-like text sorts by time
+    try:
+        days = (datetime.now() - datetime.fromisoformat(oldest)).days
+        age = f" ({days} days ago)" if days > 1 else " (1 day ago)" if days == 1 else " (today)"
+    except ValueError:  # an unexpected date format drops the age, not the block
+        age = ""
     return (
-        f"{len(todos)} open todos in `self.todo`, the oldest opened {oldest} ({age}). Complete "
+        f"{len(todos)} open todos in `self.todo`, the oldest opened {oldest}{age}. Complete "
         "finished items, delete stale ones, add new ones for work you've taken on, note what "
         "is blocked."
     )
@@ -154,6 +157,7 @@ class Reflection(Skill):
         self.override = override
         self._clock = clock
         self._answering = False  # posted one: the next turn answers it
+        self._context_armed = True  # the context trigger fires once per crossing
         self._restart()
 
     @hidden
@@ -170,14 +174,17 @@ class Reflection(Skill):
 
     def _due(self) -> bool:
         c = self.config
-        if self.turns < c.min_gap_turns:
-            return False
         stats = getattr(self._agent, "context_stats", None)
         fill = getattr(stats, "overall_utilization", None)
+        full = c.context_fraction is not None and fill is not None and fill >= c.context_fraction
+        if not full:
+            self._context_armed = True  # below the threshold: the next crossing counts
+        if self.turns < c.min_gap_turns:
+            return False
         return (
             (c.every_turns is not None and self.turns >= c.every_turns)
             or (c.every_minutes is not None and self._minutes() >= c.every_minutes)
-            or (c.context_fraction is not None and fill is not None and fill >= c.context_fraction)
+            or (full and self._context_armed)
         )
 
     def _minutes(self) -> float:
@@ -203,6 +210,7 @@ class Reflection(Skill):
             if waiting or not self._due():
                 return
             self._restart()
+            self._context_armed = False  # until the context drops below the threshold
             text = self.message()
             if text:
                 post(text)
@@ -287,7 +295,7 @@ class Reflection(Skill):
         times = [
             f"every {c.every_turns} turns" if c.every_turns else "",
             f"every {c.every_minutes:g} minutes" if c.every_minutes else "",
-            f"when the context is {c.context_fraction:.0%} full" if c.context_fraction else "",
+            f"when the context passes {c.context_fraction:.0%}" if c.context_fraction else "",
         ]
         times = [t for t in times if t]
         when = (

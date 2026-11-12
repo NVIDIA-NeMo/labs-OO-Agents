@@ -205,7 +205,7 @@ async def test_reflection_command_and_persistence(tmp_path):
     status = await command()
     assert status.startswith("**Reflection is off**\n\n- **Blocks on:** say\n")
     assert (
-        "- **Runs:** every 20 turns, every 60 minutes or when the context is 50% full"
+        "- **Runs:** every 20 turns, every 60 minutes or when the context passes 50%"
         " (at most once every 5 turns)" in status
     )
     assert "Reflection is on (saved to" in await command("on")
@@ -409,3 +409,34 @@ async def test_headless_and_child_sessions_do_not_reflect(tmp_path):
         assert not [u for u in updates if getattr(u, "source", None) == "reflection"]
     finally:
         await registry.close_all()
+
+
+def _held_context(fill):
+    from types import SimpleNamespace
+
+    from nooa_atom.skills.reflection import Reflection, ReflectionConfig
+
+    r = Reflection(ReflectionConfig(), host="acp", clock=lambda: 0.0)
+    r.blocks["rename"] = "rename"
+    r._agent = SimpleNamespace(context_stats=SimpleNamespace(overall_utilization=fill))
+    return r
+
+
+def test_context_trigger_fires_once_per_crossing():
+    """Context held at 60%: the context trigger fires once; then only the turn trigger."""
+    r = _held_context(0.6)
+    posts = []
+    for turn in range(1, 61):
+        r.after_turn("done", waiting=False, post=lambda _t, turn=turn: posts.append(turn))
+    assert posts == [5, 26, 47]
+
+
+def test_context_trigger_rearms_after_dropping_below_the_threshold():
+    """After compaction brings usage under the threshold, the next crossing fires again."""
+    r = _held_context(0.6)
+    posts = []
+    fills = [0.6] * 6 + [0.4] * 3 + [0.6] * 6
+    for turn, fill in enumerate(fills, start=1):
+        r._agent.context_stats.overall_utilization = fill
+        r.after_turn("done", waiting=False, post=lambda _t, turn=turn: posts.append(turn))
+    assert posts == [5, 11]
