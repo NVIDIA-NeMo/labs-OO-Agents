@@ -240,6 +240,20 @@ def test_chars_overflow_file_is_valid_utf8_for_any_max_bytes(
     assert text.full is not None and text.full.kept == len(written) <= max_bytes
 
 
+def test_chars_overflow_file_keeps_a_surrogate_escape_as_its_byte(tmp_path: Path) -> None:
+    # The documented exception to "UTF-8": a surrogateescape character is written as its
+    # original byte, so the file is not valid UTF-8.
+    path = tmp_path / "out.txt"
+    stream = _stream("chars", 0, 0, overflow=OverflowFile(path=str(path)))
+    stream.write("a" + chr(0xDCFF) + "b")
+
+    stream.close()
+
+    assert path.read_bytes() == b"a\xffb"
+    with pytest.raises(UnicodeDecodeError):
+        path.read_bytes().decode("utf-8")
+
+
 def test_existing_overflow_path_is_refused_not_truncated(tmp_path: Path) -> None:
     # An existing file is refused with FileExistsError and left as it was.
     path = tmp_path / "precious.txt"
