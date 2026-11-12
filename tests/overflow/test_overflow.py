@@ -23,8 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from nooa.overflow import OverflowDir, OverflowFile
-from nooa.overflow._overflow import OverflowWriter
+from nooa.overflow import OverflowDir, OverflowFile, OverflowWriter
 
 
 def _open(file: OverflowFile | None) -> OverflowWriter:
@@ -46,6 +45,15 @@ def _disk(folder: str) -> tuple[int, int]:
     """(files, bytes) of the regular files directly in ``folder``."""
     entries = [e for e in os.scandir(folder) if e.is_file(follow_symlinks=False)]
     return len(entries), sum(e.stat(follow_symlinks=False).st_size for e in entries)
+
+
+def test_the_writer_type_is_public() -> None:
+    import nooa.overflow
+
+    assert nooa.overflow.__all__ == ["OverflowDir", "OverflowFile", "OverflowWriter"]
+    writer = _open(OverflowFile())
+    assert isinstance(writer, OverflowWriter)
+    writer.finish(delete=True)
 
 
 def test_the_package_imports_nothing_else_from_nooa() -> None:

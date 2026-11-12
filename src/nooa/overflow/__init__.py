@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Output files: ``OverflowDir`` (a bounded folder of them) and ``OverflowFile`` (one of them).
+"""Output files: ``OverflowDir`` (a bounded folder of them), ``OverflowFile`` (one of them) and its ``OverflowWriter``.
 
 When a stream of output is too large to keep in memory, its whole content
 can also go to a file, an *overflow file*. This package owns those files.
@@ -15,10 +15,15 @@ Contract:
   written (or handed out and not yet written). When nothing can go,
   ``OverflowDir.file()`` returns ``None``: keep memory only.
 - **Safe files.** A private folder is made with ``tempfile.mkdtemp`` (mode
-  0700), each file with ``tempfile.mkstemp`` (exclusive, mode 0600). A
-  standalone ``OverflowFile(path=...)`` that already exists is refused
-  (``FileExistsError``), never truncated. Removal never follows a
-  symlink.
+  0700), each file exclusively with ``O_NOFOLLOW`` (mode 0600) relative to
+  the folder's held descriptor, and written through the descriptor it was
+  created with. A standalone ``OverflowFile(path=...)`` that already
+  exists is refused (``FileExistsError``), never truncated.
+- **Only what it created.** A delete first checks that the name still
+  names the file it created (device and inode), never follows a symlink,
+  and a private folder is removed only while its path names the folder it
+  made: a renamed folder, or a file or folder put in place of one of
+  ours, is left alone (logged). Platform fallbacks: ``_overflow``.
 - **Explicit lifetime.** Files are deleted only (a) when their writer
   finishes with complete output (``finish(delete=True)``), (b) by cap
   eviction, (c) when their ``OverflowDir`` is closed (``close()``, or the
@@ -32,7 +37,13 @@ Contract:
   deleted since (evicted or closed). Opening it raises
   ``FileNotFoundError``: that is how a reader tells the output is gone.
 - **Errors.** File errors in eviction, ``close()`` and exit cleanup are
-  logged, never raised.
+  logged, never raised. A file that could not be deleted stays counted
+  against the caps and is retried (next ``file()``, ``close()``, exit);
+  a ``close()`` that could not remove everything stays registered for the
+  exit cleanup.
+- **Processes.** Only the process that created a folder or file deletes
+  it: in a forked child, inherited folders are inert (``file()`` returns
+  ``None``) and the child's exit leaves the parent's files alone.
 - **Threads.** ``file()``, ``close()`` and writers finishing may run in any
   threads; the bookkeeping is locked.
 
@@ -49,6 +60,6 @@ system's temporary file cleanup eventually removes it.
 4
 """
 
-from nooa.overflow._overflow import OverflowDir, OverflowFile
+from nooa.overflow._overflow import OverflowDir, OverflowFile, OverflowWriter
 
-__all__ = ["OverflowDir", "OverflowFile"]
+__all__ = ["OverflowDir", "OverflowFile", "OverflowWriter"]
