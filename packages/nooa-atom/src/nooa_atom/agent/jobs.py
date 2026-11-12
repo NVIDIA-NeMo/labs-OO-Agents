@@ -51,10 +51,12 @@ __all__ = ["JobInfo", "JobUpdate", "JobsApi", "JobsLost", "Throttle"]
 
 JOBS_CHANNEL = "jobs"
 # Characters kept of stdout and, separately, of stderr on a run's done
-# update (the end of each stream); nothing more is kept anywhere.
+# update (the end of each stream); nothing more is kept anywhere. The tail is
+# of the line-framed output: each line already bounded to _LINE_CHARS.
 _TAIL_CHARS = 20_000
-# Longest delivered line (run progress, tail), in characters; the rest of the
-# line is replaced by a "[... N chars of this line omitted]" marker.
+# Longest delivered line (run progress, tail), in characters: a longer line is
+# its first _LINE_CHARS characters, then nooa.snapshot's render_output line
+# "[... N chars omitted; full output not kept]" (LineSplitter).
 _LINE_CHARS = 8_000
 # Bytes read from a pipe or a tailed file at a time.
 _CHUNK_BYTES = 64 * 1024
