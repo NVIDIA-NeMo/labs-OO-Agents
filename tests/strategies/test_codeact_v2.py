@@ -81,6 +81,51 @@ async def test_current_call_id_matches_events(strategy_type, tool_name):
         await agent.aclose()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "strategy_type,tool_name", [(CodeActStrategy, "execute_python"), (CodeActV2, "python_cell")]
+)
+async def test_helper_from_an_ended_call_prints_into_the_next_calls_cell(strategy_type, tool_name):
+    define = (
+        "def helper():\n"
+        "    print('from helper')\n"
+        "    return self is not None\n"
+        "self.saved['helper'] = helper\n"
+        "return_result(1)"
+    )
+    use = "return_result(self.saved['helper']())"
+
+    def cell(code: str, call_id: str) -> LLMResponse:
+        arguments = json.dumps({"code": code})
+        return LLMResponse(
+            tool_calls=[ToolCall(id=call_id, name=tool_name, arguments=arguments)],
+            finish_reason="tool_calls",
+        )
+
+    llm = FakeLLMClient(scripted_responses=[cell(define, "a"), cell(use, "b")])
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(strategy_type(config=CodeActConfig(prefill=None)))
+        async def define(self) -> int:
+            """Define the helper."""
+            ...
+
+        @strategy(strategy_type(config=CodeActConfig(prefill=None)))
+        async def use(self) -> bool:
+            """Use the helper."""
+            ...
+
+    agent = TestAgent()
+    agent.saved = {}
+    try:
+        assert await agent.define() == 1
+        assert await agent.use() is True
+        outputs = [event.stdout for event in agent.events.query(type="PythonOutput")]
+        assert outputs[-1] == "from helper\n", outputs
+    finally:
+        await agent.aclose()
+
+
 @pytest.mark.parametrize("replacement", [42, [1, 2], json])
 def test_cell_state_uses_rebound_input_type(replacement):
     from nooa.strategies.current_call import CurrentCall

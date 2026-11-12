@@ -4,6 +4,8 @@
 
 import asyncio
 
+import pytest
+
 from nooa import Agent
 from nooa.runtime.execution_namespace import RUNTIME_NAMES, ExecutionNamespace
 from nooa.unifiedllm import FakeLLMClient
@@ -68,7 +70,7 @@ async def test_thread_helpers_print_into_the_cell():
         await agent.aclose()
 
 
-async def test_a_thread_that_prints_after_its_cell_ended_gets_a_clear_error():
+async def test_a_thread_that_prints_after_its_cell_ended_prints_to_process_stdout(capfd):
     agent, ns = CellAgent(), ExecutionNamespace(reserved=RUNTIME_NAMES)
     start = """
 import threading
@@ -92,10 +94,52 @@ worker.start()
             await asyncio.to_thread(ns.globals["worker"].join, 5)
             second = await run(agent, ns, "return out", self=agent)
         assert second.error is None
-        [message] = second.returned_value
-        assert "after its cell ended" in message
-        assert "output would be lost" in message
+        assert second.returned_value == ["printed"]
         assert "too late" not in (first.stdout + second.stdout)
+        assert "too late" in capfd.readouterr().out
+    finally:
+        await agent.aclose()
+
+
+HELPER = """
+def helper(x):
+    print(f"helper {x}")
+    return self
+def finish():
+    return_result("too late")
+"""
+
+
+async def test_a_helper_from_an_ended_call_prints_into_the_cell_that_calls_it():
+    agent = CellAgent()
+    ns_a, ns_b = (
+        ExecutionNamespace(reserved=RUNTIME_NAMES),
+        ExecutionNamespace(reserved=RUNTIME_NAMES),
+    )
+    try:
+        with ns_a.enter({}):
+            defined = await run(agent, ns_a, HELPER, self=agent)
+        assert defined.error is None, defined.error
+        ns_b.globals["helper"] = ns_a.globals["helper"]
+        with ns_b.enter({}):
+            used = await run(agent, ns_b, "return helper(1)", self=agent)
+        assert used.error is None, used.error
+        assert used.stdout == "helper 1\n"
+        assert used.returned_value is agent
+    finally:
+        await agent.aclose()
+
+
+async def test_an_ended_cell_keeps_print_and_self_but_not_return_result(capfd):
+    agent, ns = CellAgent(), ExecutionNamespace(reserved=RUNTIME_NAMES)
+    try:
+        with ns.enter({}):
+            defined = await run(agent, ns, HELPER, self=agent)
+        assert defined.error is None, defined.error
+        assert ns.globals["helper"](2) is agent  # no cell running anywhere
+        assert "helper 2" in capfd.readouterr().out
+        with pytest.raises(RuntimeError, match="'return_result' belongs to a cell that has ended"):
+            ns.globals["finish"]()
     finally:
         await agent.aclose()
 

@@ -52,6 +52,10 @@ RUNTIME_NAMES = frozenset(
         "Out",
     }
 )
+# Runtime names that only write output: a helper that outlives its cell keeps
+# them (the output goes to whatever cell runs in the caller's context, else to
+# the process's stdout). ``self`` keeps resolving too; the others belong to a call.
+OUTPUT_NAMES = frozenset({"print", "pprint", "show"})
 
 
 def framework_name_allowed(name: str, reserved: frozenset[str]) -> bool:
@@ -476,6 +480,9 @@ class ExecutionNamespace:
         self._framework_names: set[str] = set()
         self.deleted_names: set[str] = set()
         self._foreground: CallBindings | None = None
+        # The last call's runtime bindings: what output names and ``self``
+        # resolve to once no cell of this namespace is running.
+        self._last_values: Mapping[str, Any] = {}
         self._initialized = False
         self.user_names: set[str] = set()
         # The cell number that last bound each name: inventory lists newest first.
@@ -585,6 +592,7 @@ class ExecutionNamespace:
 
             bound["return_result"] = authorized_return
         call.values = bound
+        self._last_values = bound
 
     @contextmanager
     def executing_cell(self):
@@ -602,29 +610,39 @@ class ExecutionNamespace:
             call.cell_context = None
 
     def _thread_fallback(self, name: str) -> Any:
-        """A runtime name used where no call context was inherited.
+        """A runtime name used where no call of this namespace is in context.
 
         ``loop.run_in_executor`` and ``threading.Thread`` do not copy
-        contextvars, so a helper a cell runs there sees no call. While that
-        cell runs, the name resolves to the foreground call's binding, and
+        contextvars, and a helper defined in one call can be used after its
+        cell ended (in another call's cell, or with no cell at all). While this
+        namespace's cell runs, the name resolves to that call's binding, and
         callables (``print``, ``pprint``, ``show``) run in the cell's context,
-        so their output is captured for that cell. After the cell has ended
-        the output would be lost, so this raises a clear error instead.
+        so their output is captured for that cell. Otherwise the output names
+        resolve to their last binding unchanged: output goes to the cell
+        running in the caller's context, if any, else to the process's stdout.
+        ``self`` resolves to the last bound agent. Every other runtime name
+        (``return_result``, call arguments...) belongs to a call and raises.
         """
         call = self._foreground
         context = call.cell_context if call is not None and call.active else None
-        if call is None or context is None:
-            raise RuntimeError(
-                f"Runtime name {name!r} was used from a thread or executor after its cell "
-                "ended; its output would be lost. Wait for thread and run_in_executor work "
-                "before the cell ends (or use asyncio.to_thread, which keeps the cell's context)."
-            )
-        if name not in call.values:
-            raise RuntimeError(f"Runtime name {name!r} has no originating call context")
-        value = call.values[name]
-        if name != "self" and callable(value):
-            return _in_context(context, value)
-        return value
+        if call is not None and context is not None:
+            if name not in call.values:
+                raise RuntimeError(f"Runtime name {name!r} has no originating call context")
+            value = call.values[name]
+            if name != "self" and callable(value):
+                return _in_context(context, value)
+            return value
+        values = call.values if call is not None and call.active else self._last_values
+        if name in values and (name in OUTPUT_NAMES or name == "self"):
+            return values[name]
+        if name == "print":
+            return builtins.print
+        raise RuntimeError(
+            f"Runtime name {name!r} belongs to a cell that has ended (or is not running): "
+            "only print, pprint, show and self keep working in a helper that outlives its "
+            "cell or runs in a thread or executor. Wait for thread and run_in_executor work "
+            "before the cell ends (or use asyncio.to_thread, which keeps the cell's context)."
+        )
 
     def user_values(self) -> dict[str, Any]:
         """The names cells (or a caller's seed) bound, not the seeded runtime."""
