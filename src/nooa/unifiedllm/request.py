@@ -7,7 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, SkipValidation
 
 from nooa.llm_types import CacheBoundary, LLMResponse
-from nooa.unifiedllm.unifiedllm import Tool
+from nooa.unifiedllm.tools import Tool
 
 
 class LLMRequest(BaseModel):

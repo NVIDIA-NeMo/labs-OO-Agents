@@ -27,7 +27,7 @@ from nooa.unifiedllm.broker_admission import (
     BrokerAdmissionSnapshot,
 )
 from nooa.unifiedllm.controlled import AdmissionControl
-from nooa.unifiedllm.errors import EmptyContentError, ReasoningReplayError
+from nooa.unifiedllm.errors import EmptyContentError, FailureKind, LLMFailure, ReasoningReplayError
 from nooa.unifiedllm.fake import (
     FakeLLMCall,
     FakeLLMClient,
@@ -52,13 +52,12 @@ from nooa.unifiedllm.retry import (
     with_retry,
 )
 from nooa.unifiedllm.retry_config import RetryConfig
+from nooa.unifiedllm.tools import Tool, create_tool_from_callable
 from nooa.unifiedllm.unifiedllm import (
     CompletionClient,
     ReasoningCompletionClient,
     ResponsesClient,
-    Tool,
     UnifiedLLM,
-    create_tool_from_callable,
     extract_and_parse_json,
 )
 
@@ -90,6 +89,8 @@ __all__ = [
     "AssistantText",
     "AssistantReasoning",
     "ReasoningReplayError",
+    "LLMFailure",
+    "FailureKind",
     # Admission control
     "AdmissionBroker",
     "AdmissionCallCapError",
