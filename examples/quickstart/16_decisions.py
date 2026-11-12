@@ -4,8 +4,9 @@
 
 OPENROUTER_API_KEY=... uv run python examples/quickstart/16_decisions.py
 
-Set DECISION_ENDPOINT to use a different decisions API, such as a gateway that
-adds credentials itself, and DECISION_MODEL to use a different model.
+Set DECISION_ENDPOINT to use a System One-compatible decisions API, such as a
+gateway that adds credentials itself, and DECISION_MODEL to use a different model.
+An unset or empty DECISION_ENDPOINT uses the default OpenRouter endpoint.
 """
 
 import asyncio
@@ -92,9 +93,22 @@ MESSAGES = [
 
 
 async def main() -> None:
+    """Print department choices, confidence, and urgency for the sample messages.
+
+    Use OpenRouter by default or a configured System One-compatible endpoint.
+    Exit with setup guidance if neither a nonempty endpoint nor an OpenRouter
+    API key is provided, and close the decision client's HTTP pool after use.
+    """
+    if not (os.getenv("OPENROUTER_API_KEY") or os.getenv("DECISION_ENDPOINT")):
+        raise SystemExit(
+            "This example needs a decisions endpoint. Run it as:\n"
+            "  OPENROUTER_API_KEY=... uv run python examples/quickstart/16_decisions.py\n"
+            "or set DECISION_ENDPOINT (and DECISION_MODEL) for another "
+            "System One-compatible decisions API."
+        )
     decision_model = DecisionClient(
         os.getenv("DECISION_MODEL", "typesafe/jev-1.13"),
-        endpoint=os.getenv("DECISION_ENDPOINT", "https://openrouter.ai/api/alpha/decisions"),
+        endpoint=os.getenv("DECISION_ENDPOINT") or "https://openrouter.ai/api/alpha/decisions",
         api_key=os.getenv("OPENROUTER_API_KEY"),
     )
     try:
