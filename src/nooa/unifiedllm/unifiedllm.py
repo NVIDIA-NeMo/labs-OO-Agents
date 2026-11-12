@@ -50,7 +50,8 @@ from .adapters.schema import (
     _strip_schema_noise as _strip_schema_noise,
 )
 from .admission import _current_admission_controller, _run_admitted_attempt
-from .errors import EmptyContentError, _aunwrap_parse_errors, _unwrap_parse_errors
+from .errors import EmptyContentError
+from .execution import execute_async, execute_sync
 from .http_config import HttpConfig
 from .limits import REPLY_CAP_KEYS, ContextLimits
 from .reasoning import ReasoningConfig, apply_reasoning_level
@@ -2228,39 +2229,19 @@ class CompletionClient(UnifiedLLM):
         output_model: type[BaseModel] | None = None,
         **kwargs,
     ) -> LLMResponse:
-        """
-        Sync version: Completion API uses standard message format, so no transformation needed.
-        Messages are passed directly to the API.
-
-        Each attempt is one ``adapter.send_sync``; retries, the empty-content
-        check, debug tracking and the usage metric stay here.
-
-        If retry_config.retry_on_empty_content is True, will retry when the model
-        returns empty content but has reasoning_content (common with some reasoning models).
-        """
+        """Prepare the legacy request and delegate shared sync attempt execution."""
         request, model, adapter = self._dispatch_request(
             messages, tools, output_model, kwargs, "messages"
         )
-        retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
-
-        def _make_call():
-            """One attempt; an empty reply with reasoning may raise for a retry."""
-            response = adapter.send_sync(request)
-            _raise_if_empty_content(response, retry_on_empty)
-            return response
-
-        # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
-        with _track_llm_call(model=model, endpoint=self.config.get("api_base")):
-            response = _unwrap_parse_errors(
-                lambda: (
-                    sync_retry(_make_call, config=self.retry_config)
-                    if self.retry_config
-                    else _make_call()
-                )
-            )
-        if response.usage:
-            _record_llm_metric("token_usage", response.usage)
-        return response
+        return execute_sync(
+            adapter,
+            request,
+            self.retry_config,
+            tracking=_track_llm_call(model=model, endpoint=self.config.get("api_base")),
+            check_empty=_raise_if_empty_content,
+            record_usage=lambda usage: _record_llm_metric("token_usage", usage),
+            retry=sync_retry,
+        )
 
     async def _acall_once(
         self,
@@ -2269,39 +2250,19 @@ class CompletionClient(UnifiedLLM):
         output_model: type[BaseModel] | None = None,
         **kwargs,
     ) -> LLMResponse:
-        """
-        Async version: Completion API uses standard message format, so no transformation needed.
-        Messages are passed directly to the API.
-
-        Each attempt is one ``await adapter.send``; retries, the empty-content
-        check, debug tracking and the usage metric stay here.
-
-        If retry_config.retry_on_empty_content is True, will retry when the model
-        returns empty content but has reasoning_content (common with some reasoning models).
-        """
+        """Prepare the legacy request and delegate shared async attempt execution."""
         request, model, adapter = self._dispatch_request(
             messages, tools, output_model, kwargs, "messages"
         )
-        retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
-
-        async def _make_call():
-            """One attempt; an empty reply with reasoning may raise for a retry."""
-            response = await adapter.send(request)
-            _raise_if_empty_content(response, retry_on_empty)
-            return response
-
-        # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
-        with _track_llm_call(model=model, endpoint=self.config.get("api_base")):
-            response = await _aunwrap_parse_errors(
-                lambda: (
-                    with_retry(_make_call, config=self.retry_config)
-                    if self.retry_config
-                    else _make_call()
-                )
-            )
-        if response.usage:
-            _record_llm_metric("token_usage", response.usage)
-        return response
+        return await execute_async(
+            adapter,
+            request,
+            self.retry_config,
+            tracking=_track_llm_call(model=model, endpoint=self.config.get("api_base")),
+            check_empty=_raise_if_empty_content,
+            record_usage=lambda usage: _record_llm_metric("token_usage", usage),
+            retry=with_retry,
+        )
 
 
 class ReasoningCompletionClient(CompletionClient):
@@ -2485,30 +2446,17 @@ class ResponsesClient(UnifiedLLM):
         output_model: type[BaseModel] | None = None,
         **kwargs,
     ) -> LLMResponse:
-        """
-        Sync version: Call LLM and parse response.
-
-        Accepts public message dictionaries and LLMResponse objects. Stored turns
-        are projected here; only leading system messages become `instructions`.
-        Each attempt is one ``adapter.send_sync``; retries and tracking stay here.
-        """
+        """Prepare the legacy request and delegate shared sync attempt execution."""
         request, model, adapter = self._dispatch_request(
             messages, tools, output_model, kwargs, "input"
         )
-
-        def _make_call():
-            """One attempt."""
-            return adapter.send_sync(request)
-
-        # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
-        with _track_llm_call(model=model, endpoint=self.config.get("api_base")):
-            return _unwrap_parse_errors(
-                lambda: (
-                    sync_retry(_make_call, config=self.retry_config)
-                    if self.retry_config
-                    else _make_call()
-                )
-            )
+        return execute_sync(
+            adapter,
+            request,
+            self.retry_config,
+            tracking=_track_llm_call(model=model, endpoint=self.config.get("api_base")),
+            retry=sync_retry,
+        )
 
     async def _acall_once(
         self,
@@ -2517,30 +2465,17 @@ class ResponsesClient(UnifiedLLM):
         output_model: type[BaseModel] | None = None,
         **kwargs,
     ) -> LLMResponse:
-        """
-        Async version: Call LLM and parse response.
-
-        Accepts public message dictionaries and LLMResponse objects. Stored turns
-        are projected here; only leading system messages become `instructions`.
-        Each attempt is one ``await adapter.send``; retries and tracking stay here.
-        """
+        """Prepare the legacy request and delegate shared async attempt execution."""
         request, model, adapter = self._dispatch_request(
             messages, tools, output_model, kwargs, "input"
         )
-
-        async def _make_call():
-            """One attempt."""
-            return await adapter.send(request)
-
-        # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
-        with _track_llm_call(model=model, endpoint=self.config.get("api_base")):
-            return await _aunwrap_parse_errors(
-                lambda: (
-                    with_retry(_make_call, config=self.retry_config)
-                    if self.retry_config
-                    else _make_call()
-                )
-            )
+        return await execute_async(
+            adapter,
+            request,
+            self.retry_config,
+            tracking=_track_llm_call(model=model, endpoint=self.config.get("api_base")),
+            retry=with_retry,
+        )
 
     def _prepare_input(
         self, messages, state_scope, model, native_encrypted_reasoning=False, *, media_inputs=None
