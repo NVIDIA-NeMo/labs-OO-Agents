@@ -210,8 +210,7 @@ class _Capture:
 
 def _summary(text: Text) -> tuple[str, str | None]:
     """A stream's text in ``render_output``'s notation, and its file path if it was cut."""
-    full = text.full
-    return render_output(text), (full.path if full is not None and not text.complete else None)
+    return render_output(text), text.full_path
 
 
 _OVERFLOW_FILES = 20
