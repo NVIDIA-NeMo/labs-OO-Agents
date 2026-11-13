@@ -1205,6 +1205,8 @@ class TestConcurrentAgentCallScopes:
         """
         import nooa.nemo_relay_middleware as nm
 
+        if nm._HAS_PROPAGATION:
+            pytest.skip("modern Relay uses public stack propagation APIs")
         assert getattr(nemo_relay, "_scope_stack_var", None) is not None, (
             "nemo_relay._scope_stack_var is gone — nemo_relay_agent_call_middleware "
             "can no longer isolate concurrent scopes; see its Concurrency docstring."
@@ -1229,7 +1231,13 @@ class TestConcurrentAgentCallScopes:
         with nemo_relay.scope.scope("concurrent-root", nemo_relay.ScopeType.Agent) as root:
             import nooa.nemo_relay_middleware as nm
 
-            token = nm._current_relay_scope.set((root, asyncio.current_task()))
+            token = nm._current_relay_scope.set(
+                (
+                    root,
+                    nemo_relay.capture_propagation_context() if nm._HAS_PROPAGATION else None,
+                    asyncio.current_task(),
+                )
+            )
             try:
                 # "first" finishes before "second", so a shared stack would pop
                 # out of order and raise.
@@ -1263,7 +1271,13 @@ class TestConcurrentAgentCallScopes:
         with nemo_relay.scope.scope("parent-root", nemo_relay.ScopeType.Agent) as root:
             import nooa.nemo_relay_middleware as nm
 
-            token = nm._current_relay_scope.set((root, asyncio.current_task()))
+            token = nm._current_relay_scope.set(
+                (
+                    root,
+                    nemo_relay.capture_propagation_context() if nm._HAS_PROPAGATION else None,
+                    asyncio.current_task(),
+                )
+            )
             try:
                 await asyncio.gather(one("left", 0.01), one("right", 0.03))
             finally:

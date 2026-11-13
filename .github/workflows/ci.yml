@@ -52,6 +52,13 @@ jobs:
       # heavier than a unit test. See #78.
       - name: Sandbox containment tests
         run: uv run pytest -q -m sandbox
+      # Keep the supported Relay 0.6 suite above, then check only scope
+      # propagation against the public APIs used by newer Relay integrations.
+      - name: Relay 0.11 scope propagation compatibility
+        run: |
+          uv pip install --python .venv/bin/python \
+            --exclude-newer-package nemo-relay=2026-10-29 "nemo-relay==0.11.0"
+          uv run --no-sync pytest -q tests/test_nemo_relay_propagation.py
 
   python-313-error-compat:
     runs-on: ubuntu-latest
