@@ -494,3 +494,62 @@ def test_a_client_without_auth_capabilities_is_not_a_terminal_client():
     # A client that leaves ``auth`` out gets the schema's plain-dict default.
     assert terminal_auth.supports_terminal_auth(ClientCapabilities()) is False
     assert terminal_auth.supports_terminal_auth(None) is False
+
+
+# ---- model sources ------------------------------------------------------------------
+
+
+class HubSource:
+    """An installed model source whose sign-in "sets up" ``hub-a``."""
+
+    id = "hub"
+    name = "Hub"
+    description = "Sign in to the hub"
+
+    def models(self, workspace):
+        return {"hub-a": {"model_name": "openai/hub-a", "api_base": "https://hub.test/v1"}}
+
+    def sign_in(self):
+        return "hub-a"
+
+
+@pytest.fixture
+def hub(monkeypatch):
+    from nooa_atom.workspace import model_sources
+
+    monkeypatch.setattr(model_sources, "_sources", [HubSource()])
+    yield
+    model_sources.reset_model_sources()
+
+
+async def test_authenticate_accepts_a_source_method(make_adapter, hub):
+    adapter = await make_adapter(ScriptedModels({None: []}), capabilities=TERMINAL)
+    await adapter.authenticate("nooa-source-hub")
+    with pytest.raises(RequestError) as failed:
+        await adapter.authenticate("nooa-source-other")
+    assert "nooa-source-hub" in str(failed.value.data)
+
+
+async def test_a_source_sign_in_switches_the_session_to_its_alias(
+    make_adapter, workspace, client, user_dir, hub, no_server
+):
+    from nooa_atom.acp.cli import command
+
+    factory = WorkspaceDefault()
+    _save_user_model(user_dir, "first")
+    adapter = await make_adapter(
+        ScriptedModels({None: []}), capabilities=TERMINAL, llm_factory=factory
+    )
+    new = await adapter.new_session(str(workspace))
+    # The source's models are listed below the configured ones.
+    assert _model_option(new.config_options) == ("first", ["first", "hub-a"])
+    with pytest.raises(RequestError):
+        await _connect_prompt(adapter, new.session_id)
+    # The client runs `nooa atom --sign-in hub` (the source's auth method).
+    result = click.testing.CliRunner().invoke(command, ["--sign-in", "hub"])
+    assert result.exit_code == 0, result.output
+    await adapter.authenticate("nooa-source-hub")
+    assert adapter.session(new.session_id).info.model == "hub-a"
+    text = "".join(client.texts(AgentMessageChunk, new.session_id))
+    assert "Saved model alias hub-a: openai/hub-a at https://hub.test/v1" in text
+    assert "This session uses it from now on." in text

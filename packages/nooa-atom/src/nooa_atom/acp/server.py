@@ -84,7 +84,7 @@ from nooa_atom.acp.protocol import (
 )
 from nooa_atom.acp.recover import COMMAND as RECOVER
 from nooa_atom.acp.recover import recover
-from nooa_atom.acp.terminal_auth import CONNECT_METHOD_ID, supports_terminal_auth
+from nooa_atom.acp.terminal_auth import auth_method_ids, is_auth_method, supports_terminal_auth
 from nooa_atom.acp.terminal_auth import consume_result as consume_connect_result
 from nooa_atom.acp.terminal_auth import describe_result as describe_connect_result
 from nooa_atom.agent.slash_commands import RESERVED_COMMAND_NAMES
@@ -381,7 +381,7 @@ class AtomACPAgent:
     # ---- authenticate --------------------------------------------------
 
     async def authenticate(self, method_id: str, **kwargs: Any) -> AuthenticateResponse:
-        """The client ran ``nooa atom --connect`` (the terminal method) and says so.
+        """The client ran a terminal method (``nooa atom --connect`` or ``--sign-in``) and says so.
 
         A fresh save switches the sessions this connection follows to the
         saved alias and resends their config options. With no session yet
@@ -389,9 +389,9 @@ class AtomACPAgent:
         ``session/load``, ``session/new`` or prompt that follows.
         """
         del kwargs
-        if method_id != CONNECT_METHOD_ID:
+        if not is_auth_method(method_id):
             raise RequestError.invalid_params(
-                {"methodId": method_id, "reason": f"Use {CONNECT_METHOD_ID!r}"}
+                {"methodId": method_id, "reason": f"Use one of {auth_method_ids()!r}"}
             )
         followed = [
             (session, self._bridges[session_id])

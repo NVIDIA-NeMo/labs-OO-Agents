@@ -7,6 +7,11 @@ based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- `nooa-atom`: model sources. An installed package can add models and an ACP
+  sign-in through the `nooa_atom.model_sources` entry point group: its models
+  are listed below the configuration files, and terminal-auth clients are
+  offered its sign-in (`nooa atom --sign-in ID`) next to `nooa connect`, which
+  is then named "Other models (nooa connect)".
 - `nooa-atom`: AtomAgent drops the core `<events_api>` guidance block (added on
   main for agents that expose `self.events`). `self.events` stays exposed, and
   Atom's `context_usage` block already names `self.events.collapse(...)` and

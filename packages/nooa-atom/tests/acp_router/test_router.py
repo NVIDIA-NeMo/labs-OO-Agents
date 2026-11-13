@@ -314,6 +314,28 @@ async def test_authenticate_with_the_connect_method_is_answered_by_the_router(ha
     assert harness.spawned == []
 
 
+async def test_authenticate_with_a_model_source_method_is_answered_by_the_router(
+    harness, monkeypatch
+):
+    from types import SimpleNamespace
+
+    from nooa_atom.workspace import model_sources
+
+    source = SimpleNamespace(
+        id="hub", name="Hub", description="d", models=lambda workspace: {}, sign_in=lambda: None
+    )
+    monkeypatch.setattr(model_sources, "_sources", [source])
+    try:
+        frame = await harness.call("authenticate", {"methodId": "nooa-source-hub"})
+        assert frame.message["result"] == {}
+        frame = await harness.call("authenticate", {"methodId": "nooa-source-lab"})
+        assert frame.message["error"]["code"] == -32602
+        assert "nooa-source-hub" in str(frame.message["error"]["data"])
+    finally:
+        model_sources.reset_model_sources()
+    assert harness.spawned == []
+
+
 async def test_session_list_is_answered_from_the_store_without_a_worker(harness):
     listed = _stored(harness, turns=1)
     _stored(harness)  # no messages: not listed

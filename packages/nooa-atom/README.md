@@ -377,6 +377,37 @@ checkpoint/cancellation behavior is retained. Tests against fake/local model ser
 are not a benchmark result, sealed dependency parity or raw-capture reconciliation.
 The separate HCB adapter is **not certified** by this native guard.
 
+## Model sources and ACP sign-in
+
+An ACP client that runs terminal auth (`clientCapabilities.auth.terminal`,
+for example Pool) is offered `nooa connect` as a sign-in: the client runs
+`nooa atom --connect` in a terminal, then reconnects, and the session
+switches to the model the wizard saved.
+
+An installed package can add a **model source**: models that Atom lists
+and can switch to, and one more sign-in choice in the client's picker. It
+declares an entry point in the `nooa_atom.model_sources` group:
+
+```toml
+[project.entry-points."nooa_atom.model_sources"]
+hub = "my_package.hub:source"
+```
+
+The entry point loads to an object (or a no-argument callable that returns
+one) with the fields of `nooa_atom.workspace.model_sources.ModelSource`:
+
+- `id`: stable, lowercase letters, digits and `-`;
+- `name` and `description`: shown in the sign-in picker;
+- `models(workspace)`: the source's entries by alias, in the
+  `llm_config.yaml` `models:` format. It is called often, so it must be fast
+  (cache what you fetch). The configuration files win for the same alias, and
+  a file `null` hides a source alias;
+- `sign_in()`: runs in a real terminal (`nooa atom --sign-in ID`) and may
+  prompt; it returns the alias to switch to, or `None` when nothing was set up.
+
+A source that fails to load or is not valid is logged and skipped, so Atom
+always starts.
+
 ## Skills and MCP servers
 
 The Atom agent reaches all its capabilities through one `SkillManager`,

@@ -7,9 +7,10 @@ the installed ``nooa`` package, not from the workspace a session works in.
 A session in workspace ``W`` also reads ``W/.nooa/llm_config.yaml``, the file
 ``nooa connect`` run in ``W`` writes. Priority, lowest first:
 
-1. the user file and the package's project file (core's chain);
-2. ``W/.nooa/llm_config.yaml``;
-3. the files in ``NEMO_OO_LLM_CONFIG`` (an explicit environment variable still wins).
+1. the models of installed model sources (``model_sources``);
+2. the user file and the package's project file (core's chain);
+3. ``W/.nooa/llm_config.yaml``;
+4. the files in ``NEMO_OO_LLM_CONFIG`` (an explicit environment variable still wins).
 
 The merged entries are kept per workspace and are never written into the
 process-wide ``nooa.unifiedllm.registry.MODELS``, so one process serving
@@ -30,8 +31,9 @@ logger = logging.getLogger(__name__)
 
 _ENV_VAR = "NEMO_OO_LLM_CONFIG"
 
-_cache: dict[Path, tuple[tuple[Any, ...], dict[str, dict[str, Any]]]] = {}
-"""By resolved workspace: the files' stamp and the merged entries read from them."""
+_cache: dict[Path, tuple[tuple[Any, ...], dict[str, dict[str, Any]], frozenset[str]]] = {}
+"""By resolved workspace: the files' stamp, the merged entries read from them
+and the aliases they remove with ``null``."""
 
 
 def workspace_config_file(workspace: Path) -> Path:
@@ -91,24 +93,39 @@ def workspace_models(workspace: Path) -> dict[str, dict[str, Any]]:
     """The merged model entries of ``workspace``, by alias.
 
     Merged as core's ``reload_registry`` does: a later file replaces an
-    alias's whole entry, and ``null`` removes it. Read again only when a
-    file was added, removed or changed since the last call.
+    alias's whole entry, and ``null`` removes it. The files are read again
+    only when one was added, removed or changed since the last call.
+
+    The models of installed sources come below the files: a file entry
+    replaces a source entry with the same alias, and a file ``null``
+    removes it. Source aliases follow the file aliases, so the first alias
+    (the default model) is a file's whenever a file has one.
     """
+    from nooa_atom.workspace.model_sources import source_models
+
     files = llm_config_files(workspace)
     stamp = _stamp(files)
     key = Path(workspace).resolve()
     cached = _cache.get(key)
-    if cached is not None and cached[0] == stamp:
-        return cached[1]
-    merged: dict[str, dict[str, Any]] = {}
-    for path in files:
-        for name, entry in _read_models(path).items():
-            if isinstance(entry, dict):
-                merged[name] = entry
-            else:
-                merged.pop(name, None)
-    _cache[key] = (stamp, merged)
-    return merged
+    if cached is None or cached[0] != stamp:
+        merged: dict[str, dict[str, Any]] = {}
+        removed: set[str] = set()
+        for path in files:
+            for name, entry in _read_models(path).items():
+                if isinstance(entry, dict):
+                    merged[name] = entry
+                    removed.discard(name)
+                else:
+                    merged.pop(name, None)
+                    removed.add(name)
+        cached = _cache[key] = (stamp, merged, frozenset(removed))
+    _, from_files, removed_by_files = cached
+    extra = {
+        name: entry
+        for name, entry in source_models(workspace).items()
+        if name not in from_files and name not in removed_by_files
+    }
+    return {**from_files, **extra} if extra else from_files
 
 
 def default_model(workspace: Path) -> str | None:

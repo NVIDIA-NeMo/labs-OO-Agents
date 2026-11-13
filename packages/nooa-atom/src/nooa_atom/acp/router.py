@@ -74,7 +74,7 @@ from nooa._platform import require_posix
 from nooa_atom.acp.framing import FRAME_LIMIT, Frame, encode, read_frame
 from nooa_atom.acp.listing import list_sessions
 from nooa_atom.acp.protocol import initialize_response
-from nooa_atom.acp.terminal_auth import CONNECT_METHOD_ID
+from nooa_atom.acp.terminal_auth import auth_method_ids, is_auth_method
 from nooa_atom.session.store import (
     InvalidSessionIdError,
     SessionNotFoundError,
@@ -443,20 +443,21 @@ class Router:
             self._fail(frame.id, RequestError.method_not_found(method))
 
     def _authenticate(self, frame: Frame) -> None:
-        """``authenticate`` after the client ran ``nooa atom --connect`` (terminal auth).
+        """``authenticate`` after the client ran a terminal auth method.
 
-        Nothing to do here: the wizard left its result in the user's
-        directory, and the worker that serves the next prompt, load or new
-        session takes it and switches that session to the saved model.
+        That is ``nooa atom --connect`` or a model source's ``--sign-in``.
+        Nothing to do here: it left its result in the user's directory, and
+        the worker that serves the next prompt, load or new session takes it
+        and switches that session to the saved model.
         """
         method_id = frame.params.get("methodId")
-        if method_id == CONNECT_METHOD_ID:
+        if is_auth_method(method_id):
             self._answer(frame, {})
         else:
             self._fail(
                 frame.id,
                 RequestError.invalid_params(
-                    {"methodId": method_id, "reason": f"Use {CONNECT_METHOD_ID!r}"}
+                    {"methodId": method_id, "reason": f"Use one of {auth_method_ids()!r}"}
                 ),
             )
 

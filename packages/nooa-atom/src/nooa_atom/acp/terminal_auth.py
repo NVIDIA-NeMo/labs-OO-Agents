@@ -16,6 +16,10 @@ again. Whichever request of a terminal-auth client first finds a fresh
 result (``/connect``, ``authenticate``, a prompt, ``session/load`` or
 ``session/new``) takes it and switches the session to the saved alias. The file holds the alias, the model name, the server (without
 credentials, query or fragment) and the time; never a key.
+
+An installed model source (``nooa_atom.workspace.model_sources``) adds one
+more method: ``nooa atom --sign-in SOURCE_ID`` runs that source's sign-in
+(:func:`run_terminal_sign_in`) and leaves the same kind of result.
 """
 
 from __future__ import annotations
@@ -31,20 +35,59 @@ from acp.schema import ClientCapabilities, TerminalAuthMethod
 
 CONNECT_METHOD_ID = "nooa-connect"
 CONNECT_ARG = "--connect"
+SIGN_IN_ARG = "--sign-in"
+SOURCE_METHOD_PREFIX = "nooa-source-"
 RESULT_FILE = "acp_connect_result.json"
 RESULT_MAX_AGE = 15 * 60
 """Seconds a saved result stays valid for the next ``/connect``."""
 
 
-def connect_auth_method() -> TerminalAuthMethod:
-    """The terminal method that relaunches the agent with ``--connect``."""
+def connect_auth_method(*, beside_sources: bool = False) -> TerminalAuthMethod:
+    """The terminal method that relaunches the agent with ``--connect``.
+
+    ``beside_sources``: model sources are offered too, so this one is named
+    for the models they do not cover.
+    """
     return TerminalAuthMethod(
         type="terminal",
         id=CONNECT_METHOD_ID,
-        name="Connect a model",
+        name="Other models (nooa connect)" if beside_sources else "Connect a model",
         description="Set up a model provider in a terminal",
         args=[CONNECT_ARG],
     )
+
+
+def source_method_id(source_id: str) -> str:
+    """The auth method id of the model source ``source_id``."""
+    return f"{SOURCE_METHOD_PREFIX}{source_id}"
+
+
+def auth_methods() -> list[TerminalAuthMethod]:
+    """The terminal methods to offer: ``nooa connect``, then one per installed model source."""
+    from nooa_atom.workspace.model_sources import model_sources
+
+    sources = model_sources()
+    methods = [
+        TerminalAuthMethod(
+            type="terminal",
+            id=source_method_id(source.id),
+            name=source.name,
+            description=source.description,
+            args=[SIGN_IN_ARG, source.id],
+        )
+        for source in sources
+    ]
+    return [connect_auth_method(beside_sources=bool(sources)), *methods]
+
+
+def auth_method_ids() -> list[str]:
+    """The ids of :func:`auth_methods`."""
+    return [method.id for method in auth_methods()]
+
+
+def is_auth_method(method_id: Any) -> bool:
+    """Whether ``method_id`` is one of the terminal methods this agent offers."""
+    return isinstance(method_id, str) and method_id in auth_method_ids()
 
 
 def supports_terminal_auth(capabilities: ClientCapabilities | None) -> bool:
@@ -190,15 +233,54 @@ def run_terminal_connect() -> int:
     return 0
 
 
+def run_terminal_sign_in(source_id: str) -> int:
+    """Run the sign-in of model source ``source_id`` here; 0 only when it set a model up.
+
+    Exits 2 for an unknown source and 1 when the sign-in set nothing up or
+    failed. Ctrl-C propagates.
+    """
+    import click
+
+    from nooa_atom.workspace.model_sources import find_source
+
+    clear_result()
+    source = find_source(source_id)
+    if source is None:
+        click.echo(f"No model source {source_id!r} is installed.", err=True)
+        return 2
+    try:
+        alias = source.sign_in()
+    except Exception as exc:
+        click.echo(f"{source.name} sign-in failed: {exc}", err=True)
+        return 1
+    if not alias or not isinstance(alias, str):
+        click.echo("Nothing was set up.", err=True)
+        return 1
+    try:
+        entry = source.models(Path.cwd()).get(alias)
+    except Exception:
+        entry = None
+    entry = entry if isinstance(entry, dict) else {}
+    write_result(alias, str(entry.get("model_name") or ""), str(entry.get("api_base") or ""))
+    click.echo("Return to the client; it reconnects with the new model.")
+    return 0
+
+
 __all__ = [
     "CONNECT_ARG",
     "CONNECT_METHOD_ID",
     "RESULT_MAX_AGE",
+    "SIGN_IN_ARG",
+    "auth_method_ids",
+    "auth_methods",
     "clear_result",
     "connect_auth_method",
     "consume_result",
     "describe_result",
+    "is_auth_method",
     "run_terminal_connect",
+    "run_terminal_sign_in",
+    "source_method_id",
     "supports_terminal_auth",
     "write_result",
 ]
