@@ -2,12 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Cell stdout/stderr capture through nooa.snapshot (PR 2b): notation, limits, overflow files."""
 
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from nooa.config.truncation_config import CaptureConfig
 from nooa.overflow import OverflowDir
+from nooa.runtime import output_capture
 from nooa.runtime.actor import _make_capture_buffer
 from nooa.runtime.output_capture import CaptureBuffer, capture_overflow
 
@@ -54,8 +56,9 @@ def test_unrecoverable_hint_follows_the_cut_line_only_without_a_file():
     )
 
 
-def test_file_backed_writes_into_the_session_folder(tmp_path):
-    with OverflowDir(str(tmp_path)) as folder:
+def test_file_backed_writes_into_the_session_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    with OverflowDir() as folder:
         token = capture_overflow.set(folder)
         try:
             buffer = _make_capture_buffer(20, CaptureConfig(tail=10, file_backed=True))
@@ -65,7 +68,7 @@ def test_file_backed_writes_into_the_session_folder(tmp_path):
         buffer.close()
         path = buffer.file_path
         assert path is not None and Path(path).parent == Path(folder.path)
-        assert Path(folder.path).parent == tmp_path  # a private folder made in the parent
+        assert Path(folder.path).parent == tmp_path  # a private folder in the temp directory
         assert buffer.getvalue() == (
             f"0123456789\n[... 80 chars omitted; full output: {path}]\n0123456789"
         )
@@ -73,9 +76,10 @@ def test_file_backed_writes_into_the_session_folder(tmp_path):
     assert not Path(path).exists()  # the folder's close deletes it
 
 
-def test_switch_off_writes_no_file_even_with_a_session_folder(tmp_path):
+def test_switch_off_writes_no_file_even_with_a_session_folder(tmp_path, monkeypatch):
     # TruncationConfig.overflow_files=False: memory only, whatever file_backed says.
-    with OverflowDir(str(tmp_path)) as folder:
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    with OverflowDir() as folder:
         token = capture_overflow.set(folder)
         try:
             buffer = _make_capture_buffer(
@@ -93,8 +97,7 @@ def test_switch_off_writes_no_file_even_with_a_session_folder(tmp_path):
 
 
 def test_switch_off_writes_no_temp_file_without_a_session_folder(tmp_path, monkeypatch):
-    import tempfile
-
+    monkeypatch.setattr(output_capture, "_own_folder", None)
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     buffer = _make_capture_buffer(10, CaptureConfig(tail=5, file_backed=True), overflow_files=False)
     buffer.write("y" * 50)
@@ -103,10 +106,12 @@ def test_switch_off_writes_no_temp_file_without_a_session_folder(tmp_path, monke
     assert list(tmp_path.iterdir()) == []
 
 
-def test_bad_sizes_give_the_folders_file_back(tmp_path):
+def test_bad_sizes_take_no_place_in_the_folder(tmp_path, monkeypatch):
     # model.md C2 (output_capture.py:72-74): the file was handed out before
     # TextStream checked its sizes, and kept its place for the folder's life.
-    with OverflowDir(str(tmp_path), max_files=1) as folder:
+    # Files now open only once a stream is cut, so a stream never made takes none.
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    with OverflowDir(max_files=1) as folder:
         token = capture_overflow.set(folder)
         try:
             with pytest.raises(ValueError):
@@ -114,7 +119,9 @@ def test_bad_sizes_give_the_folders_file_back(tmp_path):
         finally:
             capture_overflow.reset(token)
         assert list(Path(folder.path).iterdir()) == []
-        assert folder.file() is not None  # the one place is free again
+        writer = folder.open()  # the one place is free
+        assert writer is not None
+        writer.finish(delete=True)
 
 
 def test_file_backed_uncut_output_keeps_no_file():
@@ -124,16 +131,26 @@ def test_file_backed_uncut_output_keeps_no_file():
     assert buffer.getvalue() == "short" and buffer.file_path is None
 
 
-def test_file_backed_without_a_session_folder_uses_a_kept_temp_file():
+def test_file_backed_without_a_session_folder_uses_the_process_folder(tmp_path, monkeypatch):
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(output_capture, "_own_folder", None)
     buffer = _make_capture_buffer(10, CaptureConfig(tail=5, file_backed=True))
     buffer.write("y" * 50)
     buffer.close()
     path = buffer.file_path
+    folder = output_capture._own_folder
     try:
-        assert path is not None and f"full output: {path}]" in buffer.getvalue()
+        assert folder is not None and path is not None
+        assert Path(path).parent == Path(folder.path) and Path(folder.path).parent == tmp_path
+        assert f"full output: {path}]" in buffer.getvalue()
         assert Path(path).read_text() == "y" * 50
+        again = _make_capture_buffer(10, CaptureConfig(tail=5, file_backed=True))
+        again.write("z" * 50)
+        again.close()
+        assert Path(again.file_path).parent == Path(folder.path)  # one folder per process
     finally:
-        Path(path).unlink()
+        folder.close()
+    assert not Path(path).exists()
 
 
 def test_writes_after_close_are_ignored_and_non_str_rejected():

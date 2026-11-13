@@ -72,15 +72,15 @@ async def test_one_agent_keeps_at_most_20_overflow_files_across_jobs_runs_and_ce
         folder = Path(cell_path).parent
         assert {Path(p).parent for p in made} == {folder}  # one folder for the whole agent
         kept = sorted(folder.glob("nooa-output-*"))
-        # 20 files at most for the whole agent; while cell 2 ran, its own stdout and
-        # stderr captures held 2 of them (deleted uncut when it ended): 18 remain.
-        assert len(kept) == 18
+        # 20 files at most for the whole agent (cell 2's own captures, never cut,
+        # opened none: a stream opens its file only once it is cut).
+        assert len(kept) == 20
         # The oldest closed files went first, whatever made them: the cell's print,
-        # then the job's first 10 command outputs.
-        for path in made[:11]:
+        # then the job's first 8 command outputs.
+        for path in made[:9]:
             with pytest.raises(FileNotFoundError):
                 open(path, "rb")  # noqa: SIM115
-        assert sorted(Path(p) for p in made[11:]) == kept
+        assert sorted(Path(p) for p in made[9:]) == kept
         assert Path(job[-1]).stat().st_size == 1000  # each Shell keeps its own max_output
         assert Path(direct[-1]).stat().st_size == 1_100_000
     finally:

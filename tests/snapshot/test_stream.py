@@ -1,17 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""TextStream, OverflowFile and merge: bounded memory, UTF-8 cuts, overflow files, deltas."""
+"""TextStream and merge: bounded memory, UTF-8 cuts, overflow files, deltas."""
 
 from __future__ import annotations
 
 import os
 import random
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from nooa.overflow import OverflowFile
+from nooa.overflow import OverflowDir, OverflowWriter
 from nooa.snapshot import Overflow, Text, TextStream, merge, render_output
+from nooa.snapshot._codec import encode_text, safe_end
 
 
 def _stream(unit: str = "bytes", head: int = 4, tail: int = 4, **kwargs) -> TextStream:
@@ -162,15 +164,27 @@ def test_invalid_arguments() -> None:
 # --- overflow files --------------------------------------------------------------
 
 
-def test_overflow_file_holds_everything(tmp_path: Path) -> None:
-    path = tmp_path / "out.log"
-    stream = TextStream(unit="bytes", head=3, tail=3, overflow=OverflowFile(path=str(path)))
+@pytest.fixture
+def folder() -> Iterator[OverflowDir]:
+    with OverflowDir() as folder:
+        yield folder
+
+
+def _files(folder: OverflowDir) -> list[str]:
+    return os.listdir(folder.path)
+
+
+def test_overflow_file_holds_everything(folder: OverflowDir) -> None:
+    stream = TextStream(unit="bytes", head=3, tail=3, overflow=folder)
     stream.write(b"0123456789")
     running = stream.snapshot()
     stream.write(b"abcdef")
 
     text = stream.close()
 
+    assert text.full is not None
+    path = Path(text.full.path)
+    assert path.parent == Path(folder.path)
     assert path.read_bytes() == b"0123456789abcdef"
     assert running.full == Overflow(str(path), 10, 10)
     assert text.full == Overflow(str(path), 16, 16)
@@ -178,17 +192,16 @@ def test_overflow_file_holds_everything(tmp_path: Path) -> None:
     assert render_output(text) == f"012\n[... 10 bytes omitted; full output: {path}]\ndef"
 
 
-def test_overflow_max_bytes_cuts_the_file(tmp_path: Path) -> None:
-    path = tmp_path / "out.log"
-    stream = TextStream(
-        unit="bytes", head=2, tail=2, overflow=OverflowFile(path=str(path), max_bytes=5)
-    )
+def test_overflow_bytes_cuts_the_file(folder: OverflowDir) -> None:
+    stream = TextStream(unit="bytes", head=2, tail=2, overflow=folder, overflow_bytes=5)
     stream.write(b"0123456789" * 1000)
 
     text = stream.close()
 
-    assert path.read_bytes() == b"01234"
-    assert text.full == Overflow(str(path), 5, 10_000)
+    assert text.full is not None
+    path = text.full.path
+    assert Path(path).read_bytes() == b"01234"
+    assert text.full == Overflow(path, 5, 10_000)
     assert text.full.cut  # the file is cut: ``full`` says so, not the reason
     assert text.reason == "max_length"
     assert render_output(text) == (
@@ -196,27 +209,36 @@ def test_overflow_max_bytes_cuts_the_file(tmp_path: Path) -> None:
     )
 
 
-def test_chars_stream_writes_utf8_to_its_file(tmp_path: Path) -> None:
-    path = tmp_path / "out.txt"
-    stream = TextStream(unit="chars", head=1, tail=1, overflow=OverflowFile(path=str(path)))
+def test_overflow_bytes_never_exceeds_the_folders_file_bytes() -> None:
+    with OverflowDir(file_bytes=3) as folder:
+        stream = TextStream(unit="bytes", head=1, tail=1, overflow=folder, overflow_bytes=100)
+        stream.write(b"0123456789")
+        full = stream.close().full
+        assert full is not None and full.kept == 3
+
+
+def test_chars_stream_writes_utf8_to_its_file(folder: OverflowDir) -> None:
+    stream = TextStream(unit="chars", head=1, tail=1, overflow=folder)
     stream.write("é€😀")
 
     text = stream.close()
 
-    assert path.read_text(encoding="utf-8") == "é€😀"
-    assert text.full == Overflow(str(path), 9, 9)
+    assert text.full is not None
+    assert Path(text.full.path).read_text(encoding="utf-8") == "é€😀"
+    assert text.full == Overflow(text.full.path, 9, 9)
     assert text.length == 3 and text.omitted == 1
 
 
-def test_chars_overflow_cut_lands_on_a_code_point(tmp_path: Path) -> None:
-    # max_bytes=3 keeps b"\xc3\xa9", never a split code point such as b"\xc3\xa9\xc3".
-    path = tmp_path / "s2.txt"
-    stream = _stream("chars", 1, 1, overflow=OverflowFile(path=str(path), max_bytes=3))
+def test_chars_overflow_cut_lands_on_a_code_point(folder: OverflowDir) -> None:
+    # overflow_bytes=3 keeps b"\xc3\xa9", never a split code point such as b"\xc3\xa9\xc3".
+    stream = _stream("chars", 1, 1, overflow=folder, overflow_bytes=3)
     stream.write("ééé")
     stream.write("x")  # fits the byte left, but the file is a prefix: not written
 
     text = stream.close()
 
+    assert text.full is not None
+    path = Path(text.full.path)
     assert path.read_bytes() == "é".encode()
     assert path.read_text(encoding="utf-8") == "é"
     assert text.full == Overflow(str(path), 2, 7)
@@ -225,122 +247,139 @@ def test_chars_overflow_cut_lands_on_a_code_point(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("max_bytes", range(10))
 def test_chars_overflow_file_is_valid_utf8_for_any_max_bytes(
-    tmp_path: Path, max_bytes: int
+    folder: OverflowDir, max_bytes: int
 ) -> None:
-    path = tmp_path / "out.txt"
-    stream = _stream("chars", 1, 1, overflow=OverflowFile(path=str(path), max_bytes=max_bytes))
+    stream = _stream("chars", 1, 1, overflow=folder, overflow_bytes=max_bytes)
     for part in ("a", "é€", "😀", "b"):
         stream.write(part)
 
     text = stream.close()
 
-    written = path.read_bytes()
+    assert text.full is not None
+    written = Path(text.full.path).read_bytes()
     assert "aé€😀b".encode().startswith(written)
     written.decode("utf-8")
-    assert text.full is not None and text.full.kept == len(written) <= max_bytes
+    assert text.full.kept == len(written) <= max_bytes
 
 
-def test_chars_overflow_file_keeps_a_surrogate_escape_as_its_byte(tmp_path: Path) -> None:
+def test_chars_overflow_file_keeps_a_surrogate_escape_as_its_byte(folder: OverflowDir) -> None:
     # The documented exception to "UTF-8": a surrogateescape character is written as its
     # original byte, so the file is not valid UTF-8.
-    path = tmp_path / "out.txt"
-    stream = _stream("chars", 0, 0, overflow=OverflowFile(path=str(path)))
+    stream = _stream("chars", 0, 0, overflow=folder)
     stream.write("a" + chr(0xDCFF) + "b")
 
-    stream.close()
+    full = stream.close().full
 
-    assert path.read_bytes() == b"a\xffb"
+    assert full is not None
+    assert Path(full.path).read_bytes() == b"a\xffb"
     with pytest.raises(UnicodeDecodeError):
-        path.read_bytes().decode("utf-8")
+        Path(full.path).read_bytes().decode("utf-8")
 
 
-def test_existing_overflow_path_is_refused_not_truncated(tmp_path: Path) -> None:
-    # An existing file is refused with FileExistsError and left as it was.
-    path = tmp_path / "precious.txt"
-    path.write_text("precious")
-
-    with pytest.raises(FileExistsError):
-        _stream("chars", 10, 10, overflow=OverflowFile(path=str(path), max_bytes=100))
-
-    assert path.read_text() == "precious"
-
-
-def test_existing_symlink_overflow_path_is_refused(tmp_path: Path) -> None:
-    target = tmp_path / "elsewhere.txt"
-    target.write_text("kept")
-    link = tmp_path / "out.txt"
-    link.symlink_to(target)
-
-    with pytest.raises(FileExistsError):
-        _stream("bytes", overflow=OverflowFile(path=str(link)))
-
-    assert target.read_text() == "kept" and link.is_symlink()
-
-
-@pytest.mark.parametrize("named", [True, False])
-def test_standalone_overflow_file_is_private(tmp_path: Path, named: bool) -> None:
-    file = OverflowFile(path=str(tmp_path / "out.txt")) if named else OverflowFile()
-    stream = _stream("bytes", 1, 1, overflow=file)
+def test_a_streams_file_is_private(folder: OverflowDir) -> None:
+    stream = _stream("bytes", 1, 1, overflow=folder)
     stream.write(b"abc")
 
     full = stream.close().full
     assert full is not None
-    try:
-        assert os.stat(full.path).st_mode & 0o777 == 0o600
-    finally:
-        os.unlink(full.path)
+    assert os.stat(full.path).st_mode & 0o777 == 0o600
+    assert os.stat(folder.path).st_mode & 0o777 == 0o700
 
 
-def test_uncut_stream_deletes_its_overflow_file(tmp_path: Path) -> None:
-    path = tmp_path / "out.log"
-    stream = TextStream(unit="bytes", head=10, tail=10, overflow=OverflowFile(path=str(path)))
+def test_uncut_stream_makes_no_file(folder: OverflowDir) -> None:
+    # The file opens only once the output is cut: a complete output never touches disk.
+    stream = TextStream(unit="bytes", head=10, tail=10, overflow=folder)
     stream.write(b"small")
+    assert _files(folder) == []
+    stream.write(b"0" * 15)  # 20 bytes: still head + tail, still complete
 
     text = stream.close()
 
-    assert not path.exists()
     assert text.full is None and text.complete
+    assert _files(folder) == []
 
 
-def test_temp_overflow_file_by_default() -> None:
-    stream = TextStream(unit="bytes", head=1, tail=1, overflow=OverflowFile())
-    stream.write(b"abcdef")
+def test_the_file_opens_at_the_first_cut_with_everything_written_before() -> None:
+    with OverflowDir(max_files=1) as folder:
+        stream = TextStream(unit="bytes", head=2, tail=2, overflow=folder)
+        stream.write(b"ab")
+        stream.write(b"cd")
+        assert _files(folder) == [] and stream.snapshot().full is None
+        stream.write(b"e")  # cut now
+        (name,) = _files(folder)
+        assert (Path(folder.path) / name).read_bytes() == b"abcde"
+        assert stream.snapshot().full == Overflow(str(Path(folder.path) / name), 5, 5)
+        stream.close()
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_a_lazily_opened_chars_file_is_what_writing_from_the_start_gives(
+    folder: OverflowDir, seed: int
+) -> None:
+    # Each write is encoded on its own (encode_text), and a cut file ends at safe_end
+    # within the write it ends in: opening at the first cut must give the same bytes,
+    # with surrogate escapes, lone surrogates and multi-byte characters in any order.
+    rng = random.Random(seed)
+    alphabet = ["a", "é", "😀", "\udcc3", "\udc80", "\udcff", "\ud800", "\udfff"]
+    writes = [
+        "".join(rng.choice(alphabet) for _ in range(rng.randrange(0, 4)))
+        for _ in range(rng.randrange(1, 12))
+    ]
+    head, tail, cap = rng.randrange(0, 6), rng.randrange(0, 6), rng.randrange(0, 40)
+    stream = _stream("chars", head, tail, overflow=folder, overflow_bytes=cap)
+    expected, room, produced = b"", cap, 0  # writing every write from the start
+    for data in writes:
+        stream.write(data)
+        encoded = encode_text(data)
+        produced += len(encoded)
+        if room > 0:
+            part = encoded[: safe_end(encoded, room)] if len(encoded) > room else encoded
+            room = room - len(part) if len(encoded) <= room else 0
+            expected += part
 
     text = stream.close()
 
-    assert text.full is not None
-    try:
-        assert Path(text.full.path).read_bytes() == b"abcdef"
-    finally:
-        os.unlink(text.full.path)
+    if text.complete:
+        assert text.full is None and _files(folder) == []
+    else:
+        assert text.full is not None
+        assert Path(text.full.path).read_bytes() == expected
+        assert (text.full.kept, text.full.total) == (len(expected), produced)
 
 
-def test_overflow_open_failure_falls_back_to_memory(tmp_path: Path) -> None:
-    missing = tmp_path / "no" / "such" / "dir" / "out.log"
-    stream = TextStream(unit="bytes", head=2, tail=2, overflow=OverflowFile(path=str(missing)))
-    stream.write(b"abcdefgh")
+def test_overflow_without_a_file_falls_back_to_memory() -> None:
+    with OverflowDir(max_files=0) as folder:  # the folder gives no file
+        stream = TextStream(unit="bytes", head=2, tail=2, overflow=folder)
+        stream.write(b"abcdefgh")
 
-    text = stream.close()
+        text = stream.close()
 
     assert text.full is None  # no file: ``full`` says so, not the reason
     assert text.reason == "max_length"
     assert render_output(text) == "ab\n[... 4 bytes omitted; full output not kept]\ngh"
 
 
-def test_overflow_write_failure_falls_back_to_memory(tmp_path: Path) -> None:
-    path = tmp_path / "out.log"
-    stream = TextStream(unit="bytes", head=2, tail=2, overflow=OverflowFile(path=str(path)))
+def test_a_stream_of_a_closed_folder_keeps_memory_only() -> None:
+    folder = OverflowDir()
+    folder.close()
+    stream = TextStream(unit="bytes", head=2, tail=2, overflow=folder)
+    stream.write(b"abcdefgh")
+    assert stream.close().full is None
 
-    def broken(data: bytes) -> int:
+
+def test_overflow_write_failure_falls_back_to_memory(
+    folder: OverflowDir, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def broken(self: OverflowWriter, data: bytes) -> int:
         raise OSError("disk full")
 
-    assert stream._file is not None
-    stream._file.write = broken  # type: ignore[method-assign]
+    monkeypatch.setattr(OverflowWriter, "write", broken)
+    stream = TextStream(unit="bytes", head=2, tail=2, overflow=folder)
     stream.write(b"abcdefgh")
 
     text = stream.close()
     assert text.full is None and text.reason == "max_length"
-    assert not path.exists()  # the partial file is removed
+    assert _files(folder) == []  # the partial file is removed
     assert (text.head, text.tail, text.length) == (b"ab", b"gh", 8)
 
 
@@ -351,14 +390,14 @@ def test_chars_lone_surrogate_without_a_file_does_not_raise() -> None:
     assert stream.close() == Text(head="a\ud800b", tail="", length=3, unit="chars", reason=None)
 
 
-def test_chars_lone_surrogate_written_backslash_escaped(tmp_path: Path) -> None:
-    path = tmp_path / "out.log"
-    stream = TextStream(unit="chars", head=1, tail=1, overflow=OverflowFile(path=str(path)))
+def test_chars_lone_surrogate_written_backslash_escaped(folder: OverflowDir) -> None:
+    stream = TextStream(unit="chars", head=1, tail=1, overflow=folder)
     stream.write("a\ud800b")
 
     text = stream.close()
     assert (text.head, text.tail) == ("a", "b") and text.full is not None
-    assert path.read_bytes() == b"a\\ud800b" and text.full.kept == len(b"a\\ud800b")
+    assert Path(text.full.path).read_bytes() == b"a\\ud800b"
+    assert text.full.kept == len(b"a\\ud800b")
 
 
 def test_bytes_stream_accepts_str_with_lone_surrogate() -> None:
@@ -368,24 +407,22 @@ def test_bytes_stream_accepts_str_with_lone_surrogate() -> None:
     assert stream.close().head == b"a\\ud800b"
 
 
-def test_running_snapshot_matches_the_file_on_disk(tmp_path: Path) -> None:
-    path = tmp_path / "out.log"
-    stream = TextStream(unit="bytes", head=10, tail=10, overflow=OverflowFile(path=str(path)))
+def test_running_snapshot_matches_the_file_on_disk(folder: OverflowDir) -> None:
+    stream = TextStream(unit="bytes", head=10, tail=10, overflow=folder)
     stream.write(b"y" * 100)
 
     text = stream.snapshot()
-    assert text.full is not None and text.full.kept == 100 == os.path.getsize(path)
+    assert text.full is not None and text.full.kept == 100 == os.path.getsize(text.full.path)
     stream.write(b"z" * 7)
     text = stream.snapshot()
-    assert text.full is not None and text.full.kept == 107 == os.path.getsize(path)
+    assert text.full is not None and text.full.kept == 107 == os.path.getsize(text.full.path)
     stream.close()
 
 
 def test_overflow_close_failure_falls_back_to_memory(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    folder: OverflowDir, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    path = tmp_path / "out.log"
-    stream = TextStream(unit="bytes", head=2, tail=2, overflow=OverflowFile(path=str(path)))
+    stream = TextStream(unit="bytes", head=2, tail=2, overflow=folder)
     stream.write(b"abcdefgh")
     real_close = os.close
 
@@ -397,7 +434,7 @@ def test_overflow_close_failure_falls_back_to_memory(
     text = stream.close()
     monkeypatch.undo()
     assert text.full is None and text.reason == "max_length"
-    assert not path.exists()  # a file that did not close cleanly is not kept
+    assert _files(folder) == []  # a file that did not close cleanly is not kept
     assert (text.head, text.tail, text.length) == (b"ab", b"gh", 8)
 
 

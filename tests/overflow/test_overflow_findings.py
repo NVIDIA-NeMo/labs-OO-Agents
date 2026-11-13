@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""nooa.overflow: forks, the exit, failed closes, interrupts, eviction order and the writer API.
+"""nooa.overflow: forks, the exit, failed closes, interrupts, eviction order, platforms and the writer API.
 
 Each test replays a reviewer's probe: the scenario that broke the contract,
 and what the contract says must happen instead.
@@ -8,7 +8,6 @@ and what the contract says must happen instead.
 
 from __future__ import annotations
 
-import dataclasses
 import errno
 import json
 import logging
@@ -23,7 +22,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from nooa.overflow import OverflowDir, OverflowFile
+from nooa.overflow import OverflowDir
 
 if TYPE_CHECKING:
     from nooa.overflow import OverflowWriter
@@ -33,9 +32,8 @@ posix_only = pytest.mark.skipif(os.name != "posix", reason="POSIX resource limit
 _LOGGER = "nooa.overflow._overflow"
 
 
-def _open(file: OverflowFile | None) -> OverflowWriter:
-    assert file is not None
-    writer = file.open()
+def _open(folder: OverflowDir) -> OverflowWriter:
+    writer = folder.open()
     assert writer is not None
     return writer
 
@@ -72,7 +70,7 @@ def test_a_forked_writer_never_duplicates_bytes_or_breaks_the_cap(tmp_path: Path
         from nooa.overflow import OverflowDir
 
         folder = OverflowDir(file_bytes=5, max_files=1)
-        writer = folder.file().open()
+        writer = folder.open()
         writer.write(b"AB")
         pid = os.fork()
         if pid == 0:
@@ -100,7 +98,7 @@ def test_a_forked_child_never_waits_on_a_lock_held_at_the_fork(tmp_path: Path, l
         from nooa.overflow import _overflow as impl
 
         folder = OverflowDir(max_files=3)
-        writer = folder.file().open()
+        writer = folder.open()
         held = impl._live_lock if {lock!r} == "global" else (
             folder._folder.lock if hasattr(folder, "_folder") else folder._lock)
         ready, release = threading.Event(), threading.Event()
@@ -152,7 +150,7 @@ def test_the_exit_cleanup_never_runs_while_another_thread_holds_the_lock(tmp_pat
         from nooa.overflow import _overflow as impl
 
         folder = OverflowDir(max_files=2)
-        writer = folder.file().open()
+        writer = folder.open()
         writer.write(b"x")
         entered, resume = threading.Event(), threading.Event()
         real_unlink = os.unlink
@@ -188,7 +186,7 @@ def test_the_exit_cleanup_never_runs_while_another_thread_holds_the_lock(tmp_pat
 
 
 def test_a_file_created_during_the_exit_cleanup_is_not_left_behind(tmp_path: Path) -> None:
-    # fs_exit_probe: a daemon inside file() is paused just before it creates the
+    # fs_exit_probe: a daemon inside open() is paused just before it creates the
     # file; another exit handler resumes it after the overflow cleanup.
     code = """
         import atexit, json, os, threading
@@ -205,7 +203,7 @@ def test_a_file_created_during_the_exit_cleanup_is_not_left_behind(tmp_path: Pat
             return real_open(path, *args, **kwargs)
         os.open = slow_open
         result = []
-        worker = threading.Thread(target=lambda: result.append(folder.file()), daemon=True)
+        worker = threading.Thread(target=lambda: result.append(folder.open()), daemon=True)
         worker.start()
         entered.wait(10)
         def after_cleanup():
@@ -232,16 +230,15 @@ def test_an_owner_made_by_a_later_exit_handler_leaves_nothing(tmp_path: Path) ->
         def producer_registered_before_overflow_import():
             from nooa.overflow import OverflowDir
             owner = OverflowDir()
-            file = owner.file()  # during the exit: memory only
-            if file is not None:
-                writer = file.open()
+            writer = owner.open()  # during the exit: memory only
+            if writer is not None:
                 writer.write(b"late output")
                 writer.finish(delete=False)
-            print("LATE", file is None, flush=True)
+            print("LATE", writer is None, flush=True)
 
         from nooa.overflow import OverflowDir
         owner = OverflowDir()
-        writer = owner.file().open()
+        writer = owner.open()
         writer.write(b"ordinary output")
         writer.finish(delete=False)
         print("NORMAL", writer.path, flush=True)
@@ -267,7 +264,7 @@ def test_written_never_counts_bytes_that_did_not_reach_the_file(
     previous = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
     limits = resource.getrlimit(resource.RLIMIT_FSIZE)
     folder = OverflowDir(file_bytes=100)
-    writer = _open(folder.file())
+    writer = _open(folder)
     data = b"ABCDEF" if limit_before_write else b"abcdefghij"
     raised = None
     try:
@@ -302,7 +299,7 @@ def test_a_failed_close_is_logged_and_the_file_is_not_kept(
     # GLM #6 / contract S1: finish() swallowed the close error without a word and
     # kept the file as good.
     folder = OverflowDir(file_bytes=100)
-    writer = _open(folder.file())
+    writer = _open(folder)
     writer.write(b"output")
     real_close = os.close
 
@@ -317,7 +314,7 @@ def test_a_failed_close_is_logged_and_the_file_is_not_kept(
     assert kept is False
     assert any("could not close overflow file" in r.getMessage() for r in caplog.records)
     assert not os.path.exists(writer.path)  # not kept as if it were whole
-    assert folder.file() is not None  # and its place is free
+    assert folder.open() is not None  # and its place is free
     folder.close()
 
 
@@ -343,40 +340,15 @@ def test_an_interrupt_while_creating_a_file_leaves_nothing_untracked(
     monkeypatch.setattr(os, "open", interrupted_open)
     try:
         with pytest.raises(KeyboardInterrupt):
-            folder.file()
+            folder.open()
     finally:
         monkeypatch.undo()
         signal.signal(signal.SIGINT, previous)
     assert os.listdir(folder.path) == []  # nothing left untracked
-    assert folder.file() is not None
+    assert folder.open() is not None
     assert len(os.listdir(folder.path)) == 1  # the cap holds
     folder.close()
     assert not os.path.exists(folder.path)
-
-
-# --- the link to the folder is private --------------------------------------------------
-
-
-def test_the_folder_link_is_not_a_constructor_argument_or_a_field() -> None:
-    # model S1 / GLM #10, #18, #27 (probes_r9 P1): OverflowFile(_owner=...) and
-    # dataclasses.replace(file, path=None) made a file that claimed the folder but
-    # wrote 1000 bytes outside it; the folder's own place stayed in use.
-    folder = OverflowDir(max_files=1, file_bytes=4)
-    file = folder.file()
-    assert file is not None
-    assert [f.name for f in dataclasses.fields(OverflowFile)] == ["path", "max_bytes"]
-    with pytest.raises(TypeError):
-        OverflowFile(path=file.path, _owner=folder)  # type: ignore[call-arg]
-    copy = dataclasses.replace(file, path=None, max_bytes=1000)
-    writer = _open(copy)  # a plain standalone file: not the folder's, not counted by it
-    try:
-        assert os.path.dirname(writer.path) != folder.path
-    finally:
-        writer.finish(delete=True)
-    with pytest.raises(FileExistsError):
-        dataclasses.replace(file, max_bytes=1000).open()  # standalone, at an existing path
-    assert _open(file).write(b"0123456789") == 4  # the folder's file, capped, still opens
-    folder.close()
 
 
 # --- eviction: the newest finished is kept longest; create before evicting ----------------
@@ -384,26 +356,26 @@ def test_the_folder_link_is_not_a_constructor_argument_or_a_field() -> None:
 
 def test_eviction_keeps_the_most_recently_finished_file() -> None:
     # model S2 (probes_r9 P3): a long command started first and finished last
-    # lost its output to the next file().
+    # lost its output to the next file() (now open()).
     folder = OverflowDir(max_files=2, file_bytes=8)
-    a, b = _open(folder.file()), _open(folder.file())
+    a, b = _open(folder), _open(folder)
     a.write(b"A-long")
     b.write(b"B-short")
     b.finish(delete=False)
     a.finish(delete=False)
-    assert folder.file() is not None
+    assert folder.open() is not None
     assert os.path.exists(a.path) and not os.path.exists(b.path)
     folder.close()
 
 
 @posix_only
 def test_a_failed_create_evicts_nothing() -> None:
-    # model C1 / GLM #13 (probes_r9 P4): under EMFILE, file() deleted the closed
+    # model C1 / GLM #13 (probes_r9 P4): under EMFILE, file() (now open()) deleted the closed
     # output and then failed to create the new file.
     import resource
 
     folder = OverflowDir(max_files=1, file_bytes=8)
-    writer = _open(folder.file())
+    writer = _open(folder)
     writer.write(b"keep me")
     writer.finish(delete=False)
     soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
@@ -415,14 +387,14 @@ def test_a_failed_create_evicts_nothing() -> None:
                 held.append(os.open(os.devnull, os.O_RDONLY))
         except OSError:
             pass
-        got = folder.file()
+        got = folder.open()
     finally:
         for fd in held:
             os.close(fd)
         resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
     assert got is None
     assert Path(writer.path).read_bytes() == b"keep me"
-    assert folder.file() is not None  # once a file can be made, the old one makes room
+    assert folder.open() is not None  # once a file can be made, the old one makes room
     assert not os.path.exists(writer.path)
     folder.close()
 
@@ -434,7 +406,7 @@ def test_a_failed_create_evicts_nothing() -> None:
 def test_a_failed_removal_is_logged(caplog: pytest.LogCaptureFixture) -> None:
     # GLM #1: close() of a folder it could not remove said nothing.
     folder = OverflowDir()
-    writer = _open(folder.file())
+    writer = _open(folder)
     writer.write(b"x")
     writer.finish(delete=False)
     os.chmod(folder.path, 0o500)
@@ -452,19 +424,15 @@ def test_a_failed_removal_is_logged(caplog: pytest.LogCaptureFixture) -> None:
 # --- finish twice; a read-only path ---------------------------------------------------------
 
 
-def test_a_later_finish_with_delete_removes_a_kept_file(tmp_path: Path) -> None:
+def test_a_later_finish_with_delete_removes_a_kept_file() -> None:
     # GLM #15: finish(delete=True) after finish(delete=False) left the file.
-    standalone = _open(OverflowFile(path=str(tmp_path / "out.txt")))
-    standalone.write(b"out")
-    assert standalone.finish(delete=False) is True
-    assert standalone.finish(delete=True) is False
-    assert not os.path.exists(standalone.path)
     folder = OverflowDir(max_files=1)
-    writer = _open(folder.file())
-    writer.finish(delete=False)
-    writer.finish(delete=True)
+    writer = _open(folder)
+    writer.write(b"out")
+    assert writer.finish(delete=False) is True
+    assert writer.finish(delete=True) is False
     assert not os.path.exists(writer.path)
-    assert folder.file() is not None  # its place is free
+    assert folder.open() is not None  # its place is free
     folder.close()
 
 
@@ -472,27 +440,12 @@ def test_the_writers_path_is_read_only(tmp_path: Path) -> None:
     # GLM #19: reassigning writer.path made finish(delete=True) delete another file.
     other = tmp_path / "other.txt"
     other.write_text("precious")
-    writer = _open(OverflowFile())
-    with pytest.raises(AttributeError):
-        writer.path = str(other)  # type: ignore[misc]
-    writer.finish(delete=True)
+    with OverflowDir() as folder:
+        writer = _open(folder)
+        with pytest.raises(AttributeError):
+            writer.path = str(other)  # type: ignore[misc]
+        writer.finish(delete=True)
     assert other.read_text() == "precious"
-
-
-# --- a handed-out file that is never opened ---------------------------------------------
-
-
-def test_a_handed_out_file_can_be_released() -> None:
-    # model C2 (probes_r9 P2): a caller got a file and failed before opening it;
-    # the place stayed taken until close().
-    folder = OverflowDir(max_files=1, file_bytes=8)
-    file = folder.file()
-    assert file is not None and file.path is not None
-    assert folder.file() is None
-    file.release()
-    assert not os.path.exists(file.path) and file.open() is None
-    assert folder.file() is not None  # the place is free again
-    folder.close()
 
 
 # --- the writer's errors -------------------------------------------------------------------
@@ -506,7 +459,7 @@ def test_a_writer_raises_only_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
     import resource
 
     folder = OverflowDir(max_files=1, file_bytes=8)
-    writer = _open(folder.file())
+    writer = _open(folder)
     assert not hasattr(writer, "file")
     previous = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
     limits = resource.getrlimit(resource.RLIMIT_FSIZE)
@@ -525,20 +478,36 @@ def test_a_writer_raises_only_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
 # --- Windows flags; one copy less ------------------------------------------------------------
 
 
-def test_files_are_created_binary_where_o_binary_exists(tmp_path: Path) -> None:
-    # GLM #9: without O_BINARY, Windows writes b"\n" as b"\r\n".
+def test_without_o_nofollow_overflow_files_are_off(tmp_path: Path) -> None:
+    # Round G, POSIX only: where os.O_NOFOLLOW is missing (Windows), open() keeps
+    # memory only and says so once, instead of a weaker fallback.
     code = """
-        import os
-        os.O_BINARY = 1 << 29  # as on Windows
-        from nooa.overflow import _overflow
-        print(bool(_overflow._CREATE & os.O_BINARY))
+        import logging, os
+        logging.basicConfig(format="LOG %(message)s")
+        del os.O_NOFOLLOW  # as on Windows
+        from nooa.overflow import OverflowDir
+        with OverflowDir() as folder:
+            print(folder.open() is None, folder.open() is None, os.listdir(folder.path) == [])
     """
-    assert _run(code, tmp_path) == ["True"]
+    env = {**os.environ, "TMPDIR": str(tmp_path)}
+    result = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(code)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["True", "True", "True"]
+    assert result.stderr.count("overflow files are off") == 1
+    assert _folders(tmp_path) == []
 
 
 def test_a_cut_write_copies_nothing() -> None:
     # GLM #25: write() sliced a copy of the part that fits (up to file_bytes).
-    writer = _open(OverflowFile(max_bytes=4 << 20))
+    folder = OverflowDir(file_bytes=4 << 20)
+    writer = _open(folder)
     data = os.urandom(8 << 20)
     tracemalloc.start()
     try:
@@ -547,4 +516,5 @@ def test_a_cut_write_copies_nothing() -> None:
     finally:
         tracemalloc.stop()
         writer.finish(delete=True)
+        folder.close()
     assert peak < 1 << 20

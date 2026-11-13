@@ -78,8 +78,8 @@ class CaptureConfig(BaseModel):
                 "file (up to 64 MiB) while still truncating the in-memory "
                 "representation; the path is in the cut line so the LLM can read it. "
                 "The file comes from the session's OverflowDir "
-                "(nooa.runtime.output_capture.capture_overflow) when one is set, else a "
-                "temp file kept when the output was cut. Ignored (no file) when "
+                "(nooa.runtime.output_capture.capture_overflow) when one is set, else the "
+                "process's own private OverflowDir (removed at exit). Ignored (no file) when "
                 "TruncationConfig.overflow_files is False."
             ),
         ),
