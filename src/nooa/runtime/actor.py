@@ -520,12 +520,18 @@ def _pop_generation_id() -> str | None:
     return popped
 
 
-def _make_capture_buffer(limit: int, capture: "CaptureConfig") -> CaptureBuffer:
-    """Create a stdout/stderr capture buffer, file-backed if ``capture`` says so."""
+def _make_capture_buffer(
+    limit: int, capture: "CaptureConfig", *, overflow_files: bool = True
+) -> CaptureBuffer:
+    """Create a stdout/stderr capture buffer, file-backed if ``capture`` says so.
+
+    ``overflow_files``: ``TruncationConfig.overflow_files``, the off switch:
+    False never writes a file, whatever ``capture.file_backed`` says.
+    """
     return CaptureBuffer(
         limit,
         capture.tail,
-        file_backed=capture.file_backed,
+        file_backed=capture.file_backed and overflow_files,
         unrecoverable_hint=capture.unrecoverable_hint,
     )
 
@@ -1760,8 +1766,13 @@ class ActorRuntime:
                 media_buffer = capture_scope.media
             else:
                 capture = truncation_config.capture
-                stdout_buffer = _make_capture_buffer(capture.max_stdout, capture)
-                stderr_buffer = _make_capture_buffer(capture.max_stderr, capture)
+                files = truncation_config.overflow_files
+                stdout_buffer = _make_capture_buffer(
+                    capture.max_stdout, capture, overflow_files=files
+                )
+                stderr_buffer = _make_capture_buffer(
+                    capture.max_stderr, capture, overflow_files=files
+                )
                 stdout_token = _stdout_buffer_var.set(stdout_buffer)
                 stderr_token = _stderr_buffer_var.set(stderr_buffer)
                 # Block stdin reads for this async task (prevents hangs from input(), etc.)

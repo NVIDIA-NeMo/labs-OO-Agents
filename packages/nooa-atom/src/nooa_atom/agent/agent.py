@@ -751,7 +751,8 @@ class AtomAgent(
             capture_factory=lambda: CaptureScope(self.runtime.truncation_config),
             on_wait_cancelled=note_running_job,
         )
-        self._shells = work_shell.ShellOwner()
+        # ``TruncationConfig.overflow_files`` off: no Shell, job or cell writes a file.
+        self._shells = work_shell.ShellOwner(overflow_files=self._truncation.overflow_files)
         self.files = Files(self.shell)
         # Atom's own to-do list: membership on the list, content on each item.
         self._install_todo_list()
