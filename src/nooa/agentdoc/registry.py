@@ -10,11 +10,25 @@ This is the recommended approach for third-party library integration.
 
 import threading
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 from nooa.agentdoc._info import ModuleInfo, TypeInfo
 
 _registry_lock = threading.RLock()
+
+
+class PreviewBudget(NamedTuple):
+    """Truncation budget handed to a value-preview extractor.
+
+    Mirrors the ``pformat`` knobs active at the call site. Budgets are
+    advisory: an extractor interprets them sensibly for its type (e.g. a
+    DataFrame preview treats ``max_length`` as a row/column sample budget),
+    but the result must stay bounded regardless of the value's size.
+    """
+
+    max_length: int | None
+    max_string: int | None
+
 
 # Type for extractor functions
 # Returns TypeInfo for types, or (TypeInfo, dict) for instances
@@ -23,11 +37,18 @@ TypeInfoExtractorFunc = Callable[[Any], TypeInfo | tuple[TypeInfo, dict[str, Any
 # Module extractor: receives the module object, returns ModuleInfo
 ModuleInfoExtractorFunc = Callable[[Any], ModuleInfo]
 
+# Value-preview extractor: receives the value and the active truncation budget,
+# returns a bounded one-line preview string, or None to fall back to repr.
+PreviewExtractorFunc = Callable[[Any, PreviewBudget], "str | None"]
+
 # Global registry: type -> extractor function
 _extractor_registry: dict[type, TypeInfoExtractorFunc] = {}
 
 # Global registry: module qualified name -> extractor function
 _module_extractor_registry: dict[str, ModuleInfoExtractorFunc] = {}
+
+# Global registry: type -> value-preview extractor function
+_preview_registry: dict[type, PreviewExtractorFunc] = {}
 
 
 def register_type_info_extractor(
@@ -182,6 +203,76 @@ def unregister_module_info_extractor(target_module: Any) -> None:
         _module_extractor_registry.pop(target_module.__name__, None)
 
 
+def register_preview_extractor(
+    target_type: type,
+) -> Callable[[PreviewExtractorFunc], PreviewExtractorFunc]:
+    """Decorator to register a value-preview extractor for a type.
+
+    Preview extractors give ``pformat``/``pprint`` a structural, bounded
+    preview for opaque third-party values (numpy arrays, DataFrames, …) that
+    would otherwise fall back to a truncated ``repr``. The extractor receives
+    the instance and the active :class:`PreviewBudget`, and returns the
+    preview string — or ``None`` to decline (e.g. when the plain repr already
+    fits the budget), which falls through to the default repr rendering.
+
+    Extractors must never raise for values of their type; a raising extractor
+    is treated as declining.
+
+    Args:
+        target_type: The type to register the extractor for. Lookup follows
+            the value's MRO, so subclasses are covered too.
+
+    Returns:
+        Decorator function
+
+    Example:
+        @register_preview_extractor(np.ndarray)
+        def _ndarray_preview(arr, budget) -> str | None:
+            if fits_budget(repr(arr), budget):
+                return None  # complete values render as plain repr
+            return f"ndarray(shape={arr.shape}, dtype={arr.dtype}, ...)"
+    """
+
+    def decorator(func: PreviewExtractorFunc) -> PreviewExtractorFunc:
+        with _registry_lock:
+            _preview_registry[target_type] = func
+        return func
+
+    return decorator
+
+
+def get_preview_extractor(obj: Any) -> PreviewExtractorFunc | None:
+    """Get the registered value-preview extractor for an object's type.
+
+    Checks the object's type and all base classes (MRO order) for a
+    registered extractor.
+
+    Args:
+        obj: Instance to get the extractor for
+
+    Returns:
+        Extractor function if registered, None otherwise
+    """
+    with _registry_lock:
+        for base_type in type(obj).__mro__:
+            if base_type in _preview_registry:
+                return _preview_registry[base_type]
+
+    return None
+
+
+def unregister_preview_extractor(target_type: type) -> None:
+    """Remove a type from the value-preview registry.
+
+    Mainly useful for testing.
+
+    Args:
+        target_type: Type to unregister
+    """
+    with _registry_lock:
+        _preview_registry.pop(target_type, None)
+
+
 def clear_registry() -> None:
     """Clear all registered extractors.
 
@@ -190,3 +281,4 @@ def clear_registry() -> None:
     with _registry_lock:
         _extractor_registry.clear()
         _module_extractor_registry.clear()
+        _preview_registry.clear()
