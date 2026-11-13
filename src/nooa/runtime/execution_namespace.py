@@ -2,13 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """The cell engine: one owned globals dictionary per call or session.
 
-CodeAct's in-process backend runs every cell in an :class:`ExecutionNamespace`
-(see ``CodeActStrategy.execute``). ``Agent.execution_namespace_for(call)``
-supplies it: the default is a fresh namespace per call
-(:func:`default_execution_namespace`); an agent overrides the hook to share
-one across calls (Atom's ``handle`` keeps one per live session). Caller
-``_session_locals`` seed the namespace as user globals and are written back
-when the call ends. The sandbox backend keeps its worker's namespace.
+Every in-process cell runs in an :class:`ExecutionNamespace`: it is the only
+in-process execution path of ``ActorRuntime.execute_code`` (a call without a
+namespace gets a fresh one for that cell). CodeAct and PurePython take theirs
+from :func:`enter_call_namespace`. CodeAct asks ``Agent.execution_namespace_for(call)``:
+the default is a fresh namespace per call (:func:`default_execution_namespace`);
+an agent overrides the hook to share one across calls (Atom's ``handle`` keeps
+one per live session). PurePython always gets a fresh namespace per call.
+Caller ``_session_locals`` seed the namespace as user globals and are written
+back when the call ends: "session_locals seeding and write-back" in
+``nooa/runtime/README.md``. The sandbox backend keeps one owned globals
+dictionary per session in its worker; it seeds from ``_session_locals`` but
+never writes back.
 
 The async wrapper preserves Python's return/await/finally semantics. Only its
 bindings are lifted into one authoritative globals dictionary. Runtime names
@@ -50,6 +55,12 @@ RUNTIME_NAMES = frozenset(
         "Out",
     }
 )
+# Runtime names that only write output: a helper that outlives its cell keeps
+# them (the output goes to whatever cell runs in the caller's context, else to
+# the process's stdout). ``self`` keeps resolving too; the others belong to a call.
+OUTPUT_NAMES = frozenset({"print", "pprint", "show"})
+# What a call keeps once it ended: the only runtime names that keep working.
+AFTERLIFE_NAMES = OUTPUT_NAMES | {"self"}
 
 
 def framework_name_allowed(name: str, reserved: frozenset[str]) -> bool:
@@ -393,6 +404,8 @@ class _RuntimeBuiltins(dict):
             calls = _calls.get()
             for call in reversed(calls):
                 if call.owner is self.owner:
+                    # A task that inherited this call keeps its originating
+                    # call's bindings, also after the call ended.
                     if name in call.values:
                         return call.values[name]
                     break
@@ -429,6 +442,83 @@ def default_execution_namespace(call: Any) -> ExecutionNamespace:
     return ExecutionNamespace(reserved=RUNTIME_NAMES | frozenset(call.kwargs))
 
 
+@contextmanager
+def enter_call_namespace(
+    agent: Any, call: Any, *, arguments: Mapping[str, Any] | None = None
+) -> Iterator[ExecutionNamespace]:
+    """Enter the namespace a call's in-process cells run in, then seed it.
+
+    CodeAct (no ``arguments``): ``agent.execution_namespace_for(call)`` picks
+    the namespace (an object that is not an Agent, or a hook returning None,
+    gets :func:`default_execution_namespace`); the arguments are reserved
+    runtime names. PurePython passes its ``arguments``: it always gets a fresh
+    namespace where they are ordinary user names, and the hook is not
+    consulted (a shared namespace cannot hold one call's locals).
+
+    Seeding and write-back follow "session_locals seeding and write-back" in
+    ``nooa/runtime/README.md``; :func:`write_back_session_locals` completes it.
+    """
+    if arguments is None:
+        selector = getattr(agent, "execution_namespace_for", None)
+        namespace = selector(call) if selector is not None else None
+        if namespace is None:
+            namespace = default_execution_namespace(call)
+    else:
+        namespace = ExecutionNamespace(reserved=RUNTIME_NAMES)
+    # Entering first: a namespace another call occupies raises before it changes.
+    with namespace.enter({}):
+        allowed = namespace.reserved
+        seeds = {
+            name: value
+            for name, value in (call.session_locals or {}).items()
+            if framework_name_allowed(name, allowed)
+        }
+        own = {
+            name: value
+            for name, value in (arguments or {}).items()
+            if framework_name_allowed(name, allowed)
+        }
+        # An argument wins over a same-named seed.
+        for values in (seeds, own):
+            namespace.globals.update(values)
+            namespace.user_names.update(values)
+        call.seeded_locals = seeds
+        call.argument_names = frozenset(arguments or ())
+        call.namespace_before = namespace.snapshot()
+        yield namespace
+
+
+def write_back_session_locals(call: Any) -> None:
+    """Write what the call's cells changed back to the caller's ``session_locals``.
+
+    The rules are "session_locals seeding and write-back" in
+    ``nooa/runtime/README.md``. What changed also joins the namespace's user
+    names (``inventory``). The sandbox backend (no ``call.execution_namespace``)
+    never writes back. Called once, when the call ends: it clears the entry
+    snapshot.
+    """
+    namespace = call.execution_namespace
+    if namespace is None:
+        return
+    changed = namespace.changed_since(call.namespace_before)
+    namespace.user_names.update(changed)
+    session_locals = call.session_locals
+    if session_locals is not None:
+        for name, seed in call.seeded_locals.items():
+            if (
+                name not in call.argument_names
+                and name not in namespace.globals
+                and name in session_locals
+                and session_locals[name] is seed
+            ):
+                del session_locals[name]
+        for name, value in changed.items():
+            if name not in call.argument_names:
+                session_locals[name] = value
+    call.seeded_locals = {}
+    call.namespace_before = {}
+
+
 class ExecutionNamespace:
     """Experimental per-owner namespace. Values are never snapshot state.
 
@@ -457,10 +547,15 @@ class ExecutionNamespace:
         self._framework_names: set[str] = set()
         self.deleted_names: set[str] = set()
         self._foreground: CallBindings | None = None
+        # The last call's runtime bindings: what output names and ``self``
+        # resolve to once no cell of this namespace is running.
+        self._last_values: Mapping[str, Any] = {}
         self._initialized = False
         self.user_names: set[str] = set()
         # The cell number that last bound each name: inventory lists newest first.
         self._bound_in: dict[str, int] = {}
+        # What :meth:`initialize` seeded: not a call's change while unchanged.
+        self._environment: dict[str, Any] = {}
         self.dependency_names: set[str] = set()
         self.epoch = 0
 
@@ -490,8 +585,10 @@ class ExecutionNamespace:
                     name not in self.reserved
                     and name != "__builtins__"
                     and (name not in self._framework_names or name in static_names)
+                    and name not in self.globals
                 ):
-                    self.globals.setdefault(name, value)
+                    self.globals[name] = value
+                    self._environment[name] = value
             self._initialized = True
 
     def delete_global(self, name: str) -> None:
@@ -566,6 +663,9 @@ class ExecutionNamespace:
 
             bound["return_result"] = authorized_return
         call.values = bound
+        self._last_values = {
+            name: value for name, value in bound.items() if name in AFTERLIFE_NAMES
+        }
 
     @contextmanager
     def executing_cell(self):
@@ -583,29 +683,73 @@ class ExecutionNamespace:
             call.cell_context = None
 
     def _thread_fallback(self, name: str) -> Any:
-        """A runtime name used where no call context was inherited.
+        """A runtime name used where no call of this namespace is in context.
 
         ``loop.run_in_executor`` and ``threading.Thread`` do not copy
-        contextvars, so a helper a cell runs there sees no call. While that
-        cell runs, the name resolves to the foreground call's binding, and
+        contextvars, and a helper defined in one call can be used after its
+        cell ended (in another call's cell, or with no cell at all). While this
+        namespace's cell runs, the name resolves to that call's binding, and
         callables (``print``, ``pprint``, ``show``) run in the cell's context,
-        so their output is captured for that cell. After the cell has ended
-        the output would be lost, so this raises a clear error instead.
+        so their output is captured for that cell. Otherwise the output names
+        resolve to their last binding unchanged: output goes to the cell
+        running in the caller's context, if any, else to the process's stdout.
+        ``self`` resolves to the last bound agent. Every other runtime name
+        (``return_result``, CodeAct's reserved arguments...) belongs to a call
+        and raises; PurePython's arguments are ordinary globals, not runtime names.
         """
         call = self._foreground
         context = call.cell_context if call is not None and call.active else None
-        if call is None or context is None:
-            raise RuntimeError(
-                f"Runtime name {name!r} was used from a thread or executor after its cell "
-                "ended; its output would be lost. Wait for thread and run_in_executor work "
-                "before the cell ends (or use asyncio.to_thread, which keeps the cell's context)."
-            )
-        if name not in call.values:
-            raise RuntimeError(f"Runtime name {name!r} has no originating call context")
-        value = call.values[name]
-        if name != "self" and callable(value):
-            return _in_context(context, value)
-        return value
+        # A caller with a call of its own (another namespace's cell) keeps its
+        # output; only a thread or executor without one joins this cell.
+        caller_has_call = any(other.active for other in _calls.get())
+        if call is not None and context is not None and not caller_has_call:
+            if name not in call.values:
+                raise RuntimeError(f"Runtime name {name!r} has no originating call context")
+            value = call.values[name]
+            if name != "self" and callable(value):
+                return _in_context(context, value)
+            return value
+        values = call.values if call is not None and call.active else self._last_values
+        return self._after_call(name, values)
+
+    @staticmethod
+    def _after_call(name: str, values: Mapping[str, Any]) -> Any:
+        """``name`` used outside its call: only the output names and ``self`` resolve."""
+        if name in AFTERLIFE_NAMES and name in values:
+            return values[name]
+        raise RuntimeError(
+            f"Runtime name {name!r} belongs to a cell that has ended (or is not running): "
+            "only print, pprint, show and self keep working in a helper that outlives its "
+            "cell or runs in a thread or executor. Wait for thread and run_in_executor work "
+            "before the cell ends (or use asyncio.to_thread, which keeps the cell's context)."
+        )
+
+    def snapshot(self) -> dict[str, Any]:
+        """Every global a cell can own (not protected), dunders included: the entry state."""
+        return {
+            name: value
+            for name, value in self.globals.items()
+            if framework_name_allowed(name, self.reserved)
+        }
+
+    def changed_since(self, before: Mapping[str, Any]) -> dict[str, Any]:
+        """The globals a call changed since :meth:`snapshot` returned ``before``.
+
+        A name in ``before`` changed if it holds another object now. A new name
+        counts unless it is a dunder (``__annotations__``...) or the environment
+        :meth:`initialize` seeded (modules, tools) still holding its seeded object.
+        """
+        environment = self._environment
+        changed = {}
+        for name, value in self.snapshot().items():
+            if name in before:
+                if before[name] is not value:
+                    changed[name] = value
+            elif not (name.startswith("__") and name.endswith("__")) and not (
+                name in environment and environment[name] is value
+            ):
+                changed[name] = value
+        return changed
 
     def inventory(self) -> dict[str, Any]:
         """Bounded names/types only, newest binding first; no repr, deep walks or callbacks."""

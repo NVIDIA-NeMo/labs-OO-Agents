@@ -51,27 +51,6 @@ class TestPopGenerationId:
             _generation_id_stack_var.reset(token)
 
 
-class TestExtractCapturedLocals:
-    """_extract_captured_locals() skips bound methods (line 188)."""
-
-    def test_bound_method_skipped(self):
-        from nooa.runtime.actor import _extract_captured_locals
-
-        class _MyClass:
-            def method(self) -> None:
-                pass
-
-        obj = _MyClass()
-        # A bound method has __self__
-        bound = obj.method
-        assert callable(bound) and hasattr(bound, "__self__")
-
-        exec_globals = {"__repl_captured_locals__": {"bm": bound, "x": 42}}
-        result = _extract_captured_locals(exec_globals)
-        assert "bm" not in result  # bound method skipped
-        assert result["x"] == 42  # regular value kept
-
-
 class TestActorGetCode:
     """RuntimeActor.get_code() returns None for nonexistent methods (line 1193)."""
 
@@ -264,42 +243,6 @@ class TestActorExpandVariables:
         )
         # Should keep the placeholder since format raises
         assert "{x!r:.2f}" in result
-
-
-class TestActorIndentCode:
-    """_indent_code() with multi-line strings (lines 2000-2001, 2008) and tokenization error (2014-2016)."""
-
-    def _make_runtime(self):
-        from nooa.agent import Agent
-
-        llm = FakeLLMClient()
-
-        class _A(Agent, llm=llm):
-            async def run(self) -> str:
-                """Run."""
-                ...
-
-        return _A().runtime
-
-    def test_indent_code_with_multiline_string(self):
-        runtime = self._make_runtime()
-        code = 'x = """line1\nline2\nline3"""'
-        indented = runtime._indent_code(code, "    ")
-        # First line gets indented
-        assert indented.split("\n")[0].startswith("    ")
-        # String continuation lines preserved
-        assert "line2" in indented
-        assert "line3" in indented
-
-    def test_indent_code_tokenization_fallback(self):
-        """Lines 2014-2016: tokenization fails → simple indentation."""
-        runtime = self._make_runtime()
-        # Malformed code that triggers tokenize.TokenError
-        bad_code = "x = '''\nunclosed triple"
-        # Should not raise; falls back to simple indentation
-        result = runtime._indent_code(bad_code, "    ")
-        assert isinstance(result, str)
-        assert "    " in result
 
 
 class TestActorGenerate:
@@ -1864,48 +1807,6 @@ class TestGetTypeHintStrUnparameterized:
 # =============================================================================
 
 
-class TestHelperFunctionManagerNonCallable:
-    """HelperFunctionManager.apply skips non-callable results (line 327)."""
-
-    def test_non_callable_func_is_skipped(self):
-        """Line 327: If compiled func is not callable, skip it."""
-        from nooa.strategies.generated_code import HelperFunctionManager
-
-        class _FakeAgent:
-            pass
-
-        agent = _FakeAgent()
-        manager = HelperFunctionManager()
-
-        # Inject a non-callable into namespace to simulate non-callable result
-        namespace = {"not_a_func": 42}
-
-        # The function 'not_a_func' exists in namespace but is not callable
-        # We can test this by having the code define a method that gets compiled
-        # but the namespace value is overridden to be non-callable
-        code = "def not_a_func(self): pass"
-        namespace["not_a_func"] = 42  # Override compiled result with non-callable
-
-        result = manager.apply(
-            code,
-            agent,
-            {},
-            namespace=namespace,
-        )
-        # 'not_a_func' was in namespace as 42 (not callable), so it should be skipped
-        # But the compile step will overwrite it...
-        # Let's just check no error occurs
-        assert result is not None
-
-    def test_type_error_on_class_input(self):
-        """Guard: passing a class instead of instance raises TypeError."""
-        from nooa.strategies.generated_code import HelperFunctionManager
-
-        manager = HelperFunctionManager()
-        with pytest.raises(TypeError, match="instance"):
-            manager.apply("", type, {}, namespace={})
-
-
 class TestReturnValueValidatorPaths:
     """ReturnValueValidator covers various type checking paths (lines 465-466, 490, 507-510, etc.)."""
 
@@ -2056,23 +1957,6 @@ class TestReturnValueValidatorPaths:
         result = validator._collect_async_method_names(agent)
         assert isinstance(result, set)
 
-    def test_exec_with_source_tracking_wrong_name_returns_none(self):
-        """Line 250: _exec_with_source_tracking returns None when method_name not in namespace."""
-        import ast
-
-        from nooa.strategies.generated_code import _exec_with_source_tracking
-
-        # Decorated function with wrong method_name passed — bare exec creates 'actual_func'
-        # but namespace.get('wrong_name') returns None → line 250
-        code = "@identity_decorator\ndef actual_func(self):\n    pass"
-        tree = ast.parse(code)
-        node = tree.body[0]
-        namespace = {"identity_decorator": lambda f: f}
-        method_code = ast.unparse(node)
-
-        result = _exec_with_source_tracking(node, method_code, namespace, "wrong_name")
-        assert result is None  # Line 250: func is None → return None
-
     def test_validate_generic_elements_dict_wrong_key_type(self):
         """Line 575: dict with wrong key type raises TypeError."""
         from nooa.strategies.generated_code import ReturnValueValidator
@@ -2092,22 +1976,6 @@ class TestReturnValueValidatorPaths:
         v = ReturnValueValidator()
         with pytest.raises(TypeError, match="mismatch"):
             v._validate_basic_type(_BrokenStr(), str, "my_method")
-
-    def test_helper_method_manager_non_callable_decorator_skipped(self):
-        """Line 327: Decorator that returns None makes func non-callable → skipped."""
-        from nooa.strategies.generated_code import HelperFunctionManager
-
-        class _FakeAgent:
-            pass
-
-        agent = _FakeAgent()
-        manager = HelperFunctionManager()
-        namespace = {"none_decorator": lambda f: None}
-
-        # Decorator returns None → func not callable → line 327 continue
-        code = "@none_decorator\ndef helper_method(self):\n    pass"
-        result = manager.apply(code, agent, {}, namespace=namespace)
-        assert "helper_method" not in result.installed  # Not installed (non-callable)
 
 
 # =============================================================================

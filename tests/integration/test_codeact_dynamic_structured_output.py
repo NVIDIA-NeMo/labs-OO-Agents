@@ -9,8 +9,8 @@ Reproduces the scenario where the LLM generates code inside execute_python() tha
 3. Returns the aggregated results via inline return_result().
 
 Helpers are not attached to the agent — calls go through bare names, not
-`self.helper`. This exercises the full pipeline: HelperFunctionManager
-pre-compilation (for `_generated_source` / decorator detection) →
+`self.helper`. This exercises the full pipeline: the cell compiler
+(`_generated_source` for decorator detection) →
 standalone wrapper → PredictStrategy nested generation → fan-out.
 """
 

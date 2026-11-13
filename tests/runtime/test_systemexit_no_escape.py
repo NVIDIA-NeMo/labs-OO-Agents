@@ -133,17 +133,22 @@ class TestReturnResultStillPropagatesAsSignal:
         def return_result(value):
             raise ExecutionSignal("return_result", {"result": value})
 
-        result = await test_agent.runtime.execute_code(
-            "answer = 41 + 1\nreturn_result(answer)",
-            wrap_in_function=True,
-            validate=False,
-            builtins={"return_result": return_result},
-        )
+        from nooa.runtime.execution_namespace import RUNTIME_NAMES, ExecutionNamespace
+
+        namespace = ExecutionNamespace(reserved=RUNTIME_NAMES)
+        with namespace.enter({}):
+            result = await test_agent.runtime.execute_code(
+                "answer = 41 + 1\nreturn_result(answer)",
+                wrap_in_function=True,
+                validate=False,
+                builtins={"return_result": return_result},
+                execution_namespace=namespace,
+            )
 
         assert result.error is None
         assert result.signal is not None
         assert isinstance(result.signal, ExecutionSignal)
-        assert result.captured_locals["answer"] == 42
+        assert namespace.globals["answer"] == 42
 
 
 class TestCancellationStillPropagates:

@@ -6,6 +6,46 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- In-process cells have one execution path: `PurePythonStrategy` now runs its
+  cells in the call's owned `ExecutionNamespace` like CodeAct
+  (`enter_call_namespace`), and `ActorRuntime.execute_code` no longer copies
+  session state into and out of every cell (locals wrapper, helper
+  pre-compilation). PurePython gets a fresh namespace per call, as before:
+  `Agent.execution_namespace_for` stays CodeAct-only. A direct `execute_code`
+  call without a namespace runs in a fresh one (pass an `ExecutionNamespace`
+  to keep what a cell binds). In-process, `ExecutionResult.captured_locals` is
+  no longer filled (read the namespace's globals) and `wrapper_line_offset` is
+  0. A cell always runs as an async body, so
+  `execute_code(wrap_in_function=False)` now accepts a top-level `return`; the
+  flag only adds the implicit return of a final expression. PurePython method
+  arguments are ordinary names a cell can rebind or delete (seeded each call;
+  `del arg` stays deleted in later cells); CodeAct keeps reserving them. A
+  helper that outlives its cell (in a thread or executor, another call's cell,
+  or with no cell running) keeps `print`, `pprint`, `show` and `self` instead
+  of raising: output goes to the cell running in the caller's context, else to
+  the process's stdout. Other runtime names (`return_result`, `_call`,
+  CodeAct's arguments) raise there (an asyncio task created in a cell keeps
+  its originating call's names), and once a call ends the namespace keeps only
+  those four of its runtime names. Tracebacks shown to the model name
+  in-process cells `Cell In[N], line L, in <module>` (no internal wrapper name
+  or namespace id), for CodeAct too. The sandbox backend is unchanged: its
+  worker keeps one owned namespace per session, seeded from `_session_locals`
+  and never written back.
+- `_session_locals` still seeds the call's namespace and is written back when
+  the call ends, with these changes (rules: "session_locals seeding and
+  write-back" in `src/nooa/runtime/README.md`):
+  - Write-back merges instead of replacing the caller's dict: it takes only
+    what the call changed (rebinds, new names, deletions of its seeds). Keys
+    others added or changed while the call ran keep their current value, and
+    a reused namespace's older names no longer reach later callers.
+  - The call's arguments never reach `_session_locals`, and a caller key named
+    like an argument keeps its value. Inside a PurePython call the argument
+    beats a same-named seed (before, the seed won).
+  - Changes are detected by object identity against the call's entry state,
+    not by binding syntax: a rebound environment name (`asyncio = 5`) writes
+    back, an unchanged re-import (`import json`) does not, and a rebound
+    seeded dunder (`__version__`) writes back.
+
 - `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
   publishes a runtime event when a job finishes (the job's handle state and
   result say it ended).

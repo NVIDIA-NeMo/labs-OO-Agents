@@ -9,12 +9,10 @@ import copy
 import hashlib
 import inspect
 import io
-import linecache
 import logging
 import math
 import re as _re
 import time
-import tokenize
 import types
 import warnings
 from collections.abc import Awaitable, Callable
@@ -63,7 +61,7 @@ from nooa.runtime.context_vars import (
     _in_generation_session,
     _parent_agent_var,
 )
-from nooa.runtime.execution_namespace import ExecutionNamespace
+from nooa.runtime.execution_namespace import RUNTIME_NAMES, ExecutionNamespace
 from nooa.runtime.harness_metrics import (
     HarnessMetrics,
     get_harness_metrics,
@@ -469,15 +467,6 @@ _stderr_buffer_var: contextvars.ContextVar[io.StringIO | TruncatingStringIO | No
 # Re-export image buffer ContextVar so it's set alongside stdout/stderr
 # Agent call stack - defined in context_vars.py to avoid circular imports.
 from nooa.runtime.context_vars import _get_agent_call_stack  # noqa: E402
-from nooa.runtime.media_capture import (  # noqa: E402
-    _media_buffer_var,
-    _MediaBuffer,
-)
-from nooa.runtime.stream_wrappers import (  # noqa: E402
-    BlockedStdinWrapper,
-    ContextVarStream,
-    _block_stdin_var,
-)
 
 # Task-local stack for generation ID tracking.
 # Uses immutable tuples for parallel task isolation (same pattern as agent call stack).
@@ -524,29 +513,6 @@ def _make_capture_buffer(limit: int, capture: "CaptureConfig") -> TruncatingStri
     """Create a stdout/stderr capture buffer, file-backed if ``capture`` says so."""
     kind = FileBackedTruncatingStringIO if capture.file_backed else TruncatingStringIO
     return kind(limit=limit, tail_chars=capture.tail, unrecoverable_hint=capture.unrecoverable_hint)
-
-
-def _extract_captured_locals(exec_globals: dict[str, Any]) -> dict[str, Any]:
-    """Extract captured locals from __repl_captured_locals__, filtering out bound methods.
-
-    The wrapper's finally block captures locals into exec_globals["__repl_captured_locals__"].
-    This function extracts them, filtering out bound methods. Modules are preserved
-    so that `import X` in one cell persists to subsequent cells.
-
-    Args:
-        exec_globals: The globals dict from code execution
-
-    Returns:
-        Dict of captured local variables (filtered)
-    """
-    captured: dict[str, Any] = {}
-    raw_captured = exec_globals.get("__repl_captured_locals__", {})
-    for k, v in raw_captured.items():
-        # Skip callables that are helper methods (they're handled separately)
-        if callable(v) and hasattr(v, "__self__"):
-            continue  # Skip bound methods
-        captured[k] = v
-    return captured
 
 
 class _TopLevelReturnFinder(ast.NodeVisitor):
@@ -1485,7 +1451,9 @@ class ActorRuntime:
             code: Python code to execute.
             builtins: Strategy-provided functions (return_result, message, method args, etc.)
             validate: Run planning language validation first.
-            wrap_in_function: If True, wrap code in async function and capture return value.
+            wrap_in_function: If True, return the value of a final expression (REPL
+                style). A cell always runs as an async body: top-level ``await``
+                and ``return`` work either way.
             timeout: Maximum execution time in seconds (default 30s). None to disable.
             tool_call_id: LLM's tool call ID for trace correlation (OpenAI format).
             execution_count: Execution number for Jupyter-style "Cell In[N]" filename.
@@ -1495,13 +1463,34 @@ class ActorRuntime:
                 guarded worker process instead of in-process. The surrounding
                 middleware pipeline, before/after_code_execution hooks and events
                 still run here on the parent, so the sandbox composes with them.
-            execution_namespace: When set, the cell runs in this namespace (its
-                globals persist across the call's cells); None runs it in a
-                fresh per-cell namespace.
+            execution_namespace: The namespace the cell runs in (its globals
+                persist across the call's cells). None (in-process): a fresh
+                namespace for this one cell. The sandbox backend takes none; its
+                worker owns the namespace.
 
         Returns:
             ExecutionResult with stdout, error, defined_methods, and optionally returned_value.
         """
+        if execution_namespace is None and sandbox_executor is None:
+            # One in-process engine: a direct call without a namespace runs in
+            # a fresh one (pass a namespace to keep the names a cell binds).
+            execution_namespace = ExecutionNamespace(reserved=RUNTIME_NAMES)
+            with execution_namespace.enter({}):
+                return await self.execute_code(
+                    code,
+                    builtins=builtins,
+                    validate=validate,
+                    wrap_in_function=wrap_in_function,
+                    timeout=timeout,
+                    tool_call_id=tool_call_id,
+                    execution_count=execution_count,
+                    restrictions=restrictions,
+                    execution_namespace=execution_namespace,
+                    framework_bindings=framework_bindings,
+                )
+        if execution_namespace is not None and sandbox_executor is not None:
+            raise ValueError("A sandbox cell runs in its worker's namespace, not an owned one")
+
         # --- Middleware: execute_python --------------------------------------
         em = self.event_manager
         mid = em._middleware_id
@@ -1575,10 +1564,6 @@ class ActorRuntime:
 
         result: ExecutionResult | None = None
         execution_exception: BaseException | None = None
-        stdout_token: contextvars.Token[Any] | None = None  # Track for cleanup in finally
-        stderr_token: contextvars.Token[Any] | None = None
-        stdin_token: contextvars.Token[Any] | None = None
-        media_token: contextvars.Token[Any] | None = None
         # Initialize buffer vars so the finally block can safely
         # isinstance-check them even if an early validation return
         # exited before they were assigned (caught by NameError previously).
@@ -1599,7 +1584,7 @@ class ActorRuntime:
 
             # The names every cell sees (core, media, strategies...): one registry,
             # shared with the sandbox worker. NOTE: stdout/stderr capture is
-            # handled by ContextVarStream wrappers installed below.
+            # installed below by CaptureScope (runtime/capture_scope.py).
             from nooa.runtime.namespace_providers import cell_namespace_names
 
             core_globals = {"self": self.agent, "asyncio": asyncio, **cell_namespace_names()}
@@ -1630,9 +1615,8 @@ class ActorRuntime:
                 exec_globals, effective_restrictions.blocked_modules
             )
 
+            # In-process only (the sandbox worker seeds its own namespace).
             if execution_namespace is not None:
-                if sandbox_executor is not None or not wrap_in_function:
-                    raise ValueError("Owned namespaces require the in-process async cell engine")
                 if framework_bindings is not None:
                     execution_namespace.update_framework(
                         _strip_blocked_modules(
@@ -1746,54 +1730,23 @@ class ActorRuntime:
             # Each async task gets its own buffers via contextvars, so parallel
             # executions are isolated. TruncatingStringIO prevents LLMs from
             # filling the context window.
-            truncation_config = self.truncation_config
-            if execution_namespace is not None:
-                from nooa.runtime.capture_scope import CaptureScope
+            from nooa.runtime.capture_scope import CaptureScope
 
-                capture_scope = CaptureScope(truncation_config)
-                capture_scope.__enter__()
-                stdout_buffer, stderr_buffer = capture_scope.stdout, capture_scope.stderr
-                media_buffer = capture_scope.media
-            else:
-                capture = truncation_config.capture
-                stdout_buffer = _make_capture_buffer(capture.max_stdout, capture)
-                stderr_buffer = _make_capture_buffer(capture.max_stderr, capture)
-                stdout_token = _stdout_buffer_var.set(stdout_buffer)
-                stderr_token = _stderr_buffer_var.set(stderr_buffer)
-                # Block stdin reads for this async task (prevents hangs from input(), etc.)
-                stdin_token = _block_stdin_var.set(True)
-                # Media capture buffer for show() calls; scoped per cell by design.
-                media_buffer = _MediaBuffer(
-                    max_attachments=truncation_config.media_capture.max_attachments_per_execution
-                )
-                media_token = _media_buffer_var.set(media_buffer)
-
-                # Install stream wrappers around the CURRENT sys.stdout/sys.stderr/sys.stdin
-                # (which may have been replaced by pytest or other tools)
-                # We only wrap if not already wrapped, and we NEVER restore - the wrappers
-                # are transparent (fall through to original when no buffer/block is set) and
-                # must persist for parallel async executions to work correctly.
-                import sys
-
-                if not isinstance(sys.stdout, ContextVarStream):
-                    sys.stdout = ContextVarStream(sys.stdout, _stdout_buffer_var, "stdout")
-                if not isinstance(sys.stderr, ContextVarStream):
-                    sys.stderr = ContextVarStream(sys.stderr, _stderr_buffer_var, "stderr")
-                if not isinstance(sys.stdin, BlockedStdinWrapper):
-                    sys.stdin = BlockedStdinWrapper(sys.stdin)
+            capture_scope = CaptureScope(self.truncation_config)
+            capture_scope.__enter__()
+            stdout_buffer, stderr_buffer = capture_scope.stdout, capture_scope.stderr
+            media_buffer = capture_scope.media
 
             # Use the execution-cell filename for parser diagnostics as well as
             # compiled runtime tracebacks.
-            cell_filename = f"Cell In[{execution_count}]"
-            if execution_namespace is not None:
-                # A retained helper must keep its original source even when a
-                # later handle restarts the visible execution counter at one.
-                cell_filename += (
-                    f" [ns:{execution_namespace.identity}:{execution_namespace.epoch + 1}]"
-                )
+            # A retained helper must keep its original source even when a later
+            # handle restarts the visible execution counter at one.
+            cell_filename = (
+                f"Cell In[{execution_count}]"
+                f" [ns:{execution_namespace.identity}:{execution_namespace.epoch + 1}]"
+            )
 
             # Parse AST to find method definitions
-            source_code = code
             try:
                 tree = ast.parse(code, filename=cell_filename)
             except SyntaxError as e:
@@ -1841,8 +1794,6 @@ class ActorRuntime:
                         get_harness_metrics().implicit_return()
 
             returned_value = _NO_RETURN
-            captured_locals: dict[str, Any] = {}
-            wrapper_line_offset = 0  # Lines of wrapper before user code (for error adjustment)
 
             def _frozen_output() -> dict[str, Any]:
                 """Freeze the capture scope, then read this cell's captured output.
@@ -1860,208 +1811,26 @@ class ActorRuntime:
                 }
 
             try:
-                if execution_namespace is not None:
-                    from nooa.runtime.async_safety import agent_async_safety_context
+                from nooa.runtime.async_safety import agent_async_safety_context
 
-                    async def run_owned_cell():
-                        # Authorize the task actually executing the cell. wait_for
-                        # may use this same task (e.g. positive timeouts on 3.13),
-                        # so completion also checks the actual generation identity.
-                        with execution_namespace.executing_cell(), agent_async_safety_context():
-                            return await execution_namespace.cell(code, cell_filename)
+                async def run_owned_cell():
+                    # Authorize the task actually executing the cell. wait_for
+                    # may use this same task (e.g. positive timeouts on 3.13),
+                    # so completion also checks the actual generation identity.
+                    with execution_namespace.executing_cell(), agent_async_safety_context():
+                        return await execution_namespace.cell(code, cell_filename)
 
-                    if timeout is None:
-                        result_value = await run_owned_cell()
-                    else:
-                        result_value = await run_with_deadline(run_owned_cell(), timeout)
-                    if has_explicit_return or (implicit_return_added and result_value is not None):
-                        returned_value = result_value
-                elif wrap_in_function:
-                    # REPL mode: wrap entire code in async function to capture return
-                    # Use try/finally to capture locals regardless of how function exits
-                    indented = self._indent_code(code, "        ")
-                    # Initialize the captured locals dict in exec_globals
-                    exec_globals["__repl_captured_locals__"] = {}
-
-                    # Build global declarations for session variables (REPL persistence)
-                    # This allows code like `x = x + 5` to work when x was defined in a prior call
-                    # Without this, Python sees `x = ...` and marks x as local, failing on the RHS
-                    # We need to declare as global any variable that was passed in builtins
-                    global_vars = [
-                        name
-                        for name, val in (builtins or {}).items()
-                        if (
-                            not name.startswith("_")
-                            and name not in ("self", "asyncio", "__builtins__")
-                            and not callable(val)
-                            and not isinstance(val, types.ModuleType)
-                        )
-                    ]
-                    global_decl = f"    global {', '.join(global_vars)}\n" if global_vars else ""
-
-                    # Build the set of global var names for the finally block
-                    global_var_set = set(global_vars)
-
-                    # Calculate wrapper header line count for error line adjustment
-                    # User code starts after: "async def __repl_wrapper__():\n" + global_decl + "    try:\n"
-                    wrapper_header = f"async def __repl_wrapper__():\n{global_decl}    try:\n"
-                    wrapper_line_offset = wrapper_header.count("\n")
-
-                    wrapper = f"""async def __repl_wrapper__():
-{global_decl}    try:
-{indented}
-    finally:
-        # Capture locals for REPL persistence (exclude internals and builtins)
-        # Also capture updated global variables that were declared global
-        __repl_captured_locals__.update({{
-            k: v for k, v in locals().items()
-            if not k.startswith('_') and k not in ('self', 'asyncio')
-        }})
-        # Capture updated values of global variables we declared
-        for _gvar in {repr(global_var_set)}:
-            if _gvar in globals():
-                __repl_captured_locals__[_gvar] = globals()[_gvar]
-"""
-                    # Register wrapper with linecache so traceback can show source lines
-                    linecache.cache[cell_filename] = (
-                        len(wrapper),
-                        None,
-                        wrapper.splitlines(keepends=True),
-                        cell_filename,
-                    )
-
-                    exec(compile(wrapper, cell_filename, "exec"), exec_globals)
-                    # Execute with async safety (blocks Future.result() etc from event loop)
-                    from nooa.runtime.async_safety import agent_async_safety_context
-
-                    coro = exec_globals["__repl_wrapper__"]()
-                    with agent_async_safety_context():
-                        if timeout is not None:
-                            result_value = await run_with_deadline(coro, timeout)
-                        else:
-                            result_value = await coro
-
-                    # Extract captured locals (filter out non-serializable/internal items)
-                    captured_locals = _extract_captured_locals(exec_globals)
-                    # Same-cell names (imports, dicts, ...) were wrapper locals. Publish
-                    # them into this cell's exec_globals, which is the __globals__ of the
-                    # top-level functions re-bound below, so those functions still
-                    # resolve them when called from a later cell (and their default
-                    # arguments evaluate). Mirrors sandbox/cell_core.py, which writes the
-                    # captured locals back into its namespace before re-binding.
-                    exec_globals.update(captured_locals)
-
-                    # Capture return value based on return type:
-                    # - Explicit return: always capture (even None)
-                    # - Implicit return: only capture non-None (like IPython)
-                    if has_explicit_return:
-                        returned_value = result_value
-                    elif implicit_return_added and result_value is not None:
-                        # Suppress None from implicit returns (matches IPython behavior)
-                        returned_value = result_value
-
-                    # Still extract method definitions for helper functions
-                    # Re-execute just the function defs to bind them
-                    func_defs: list[ast.stmt] = [
-                        n
-                        for n in tree.body
-                        if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
-                    ]
-                    if func_defs:
-                        func_tree = ast.Module(body=func_defs, type_ignores=[])
-                        # Persisted helpers are compiled directly from the cell
-                        # AST, not through the async wrapper. Keep their source
-                        # cache aligned before decorators inspect their bodies.
-                        linecache.cache[cell_filename] = (
-                            len(source_code),
-                            None,
-                            source_code.splitlines(keepends=True),
-                            cell_filename,
-                        )
-                        exec(compile(func_tree, cell_filename, "exec"), exec_globals)
-                        # The wrapper's finally block captured the wrapped
-                        # function objects. Persist the direct-compiled versions
-                        # instead so later calls use source-relative line numbers.
-                        for node in func_defs:
-                            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                                if node.name in exec_globals:
-                                    captured_locals[node.name] = exec_globals[node.name]
-
-                    # Attach source code to defined functions for has_ellipsis_body() detection
-                    for method_name, method_code in method_sources.items():
-                        if method_name in exec_globals and callable(exec_globals[method_name]):
-                            try:
-                                exec_globals[method_name]._generated_source = method_code
-                            except (AttributeError, TypeError):
-                                # Some built-in functions don't allow attribute assignment
-                                pass
+                if timeout is None:
+                    result_value = await run_owned_cell()
                 else:
-                    # Original mode: separate function defs from other statements
-                    func_defs = [
-                        n
-                        for n in tree.body
-                        if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
-                    ]
-                    other_stmts: list[ast.stmt] = [
-                        n
-                        for n in tree.body
-                        if not isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
-                    ]
+                    result_value = await run_with_deadline(run_owned_cell(), timeout)
+                # Explicit return: always capture (even None); implicit: non-None only.
+                if has_explicit_return or (implicit_return_added and result_value is not None):
+                    returned_value = result_value
 
-                    # Execute function definitions
-                    if func_defs:
-                        func_tree = ast.Module(body=func_defs, type_ignores=[])
-                        exec(compile(func_tree, cell_filename, "exec"), exec_globals)
-
-                    # Execute other statements
-                    if other_stmts:
-                        other_tree = ast.Module(body=other_stmts, type_ignores=[])
-                        has_await = any(isinstance(n, ast.Await) for n in ast.walk(other_tree))
-                        if has_await:
-                            other_code = ast.unparse(other_tree)
-                            indented = "\n".join("    " + line for line in other_code.split("\n"))
-                            wrapper = f"async def __wrapper__():\n{indented}"
-                            # Register wrapper with linecache so traceback can show source lines
-                            linecache.cache[cell_filename] = (
-                                len(wrapper),
-                                None,
-                                wrapper.splitlines(keepends=True),
-                                cell_filename,
-                            )
-                            exec(compile(wrapper, cell_filename, "exec"), exec_globals)
-                            # Execute with async safety (blocks Future.result() etc)
-                            from nooa.runtime.async_safety import (
-                                agent_async_safety_context,
-                            )
-
-                            coro = exec_globals["__wrapper__"]()
-                            with agent_async_safety_context():
-                                if timeout is not None:
-                                    await run_with_deadline(coro, timeout)
-                                else:
-                                    await coro
-                        else:
-                            # Sync code execution - enable async safety for Future.result() etc
-                            from nooa.runtime.async_safety import (
-                                agent_async_safety_context,
-                            )
-
-                            with agent_async_safety_context():
-                                exec(compile(other_tree, cell_filename, "exec"), exec_globals)
-
-                # The owned compiler attaches source once, by lexical definition,
-                # including nested/class methods; never overwrite it by bare name.
-                if execution_namespace is None:
-                    for method_name, method_code in method_sources.items():
-                        if method_name in exec_globals and callable(exec_globals[method_name]):
-                            try:
-                                exec_globals[method_name]._generated_source = method_code
-                            except (AttributeError, TypeError):
-                                # Some built-in functions don't allow attribute assignment
-                                pass
-
-                # Helpers stay as REPL locals (captured via __repl_captured_locals__).
-                # The names list is kept in ExecutionResult.defined_methods for feedback only.
+                # The owned compiler attaches ``_generated_source`` by lexical
+                # definition (nested/class methods included). The names list
+                # is kept in ExecutionResult.defined_methods for feedback only.
                 defined_methods: dict[str, Any] = {
                     method_name: exec_globals[method_name]
                     for method_name in method_sources
@@ -2074,18 +1843,10 @@ class ActorRuntime:
                     defined_methods=defined_methods,
                     returned_value=returned_value,
                     explicit_return=has_explicit_return,
-                    captured_locals=captured_locals,
-                    wrapper_line_offset=wrapper_line_offset,
                 )
                 return result
 
             except ExecutionSignal as sig:
-                # Extract captured locals even on signal (IPython behavior).
-                # The wrapper function's finally block still runs before this handler,
-                # populating exec_globals["__repl_captured_locals__"] with all variables
-                # that were defined before the signal was raised.
-                captured_locals = _extract_captured_locals(exec_globals)
-
                 result = ExecutionResult(
                     **_frozen_output(),
                     error=None,  # NOT an error
@@ -2093,8 +1854,6 @@ class ActorRuntime:
                     defined_methods={},
                     returned_value=_NO_RETURN,
                     explicit_return=False,
-                    captured_locals=captured_locals,
-                    wrapper_line_offset=wrapper_line_offset,
                 )
                 return result
 
@@ -2107,8 +1866,6 @@ class ActorRuntime:
                 # ordinary execution error so one cell cannot terminate the parent run.
                 # NOTE: asyncio.CancelledError (also BaseException) is deliberately NOT
                 # caught here — real cancellation must still propagate.
-                captured_locals = _extract_captured_locals(exec_globals)
-
                 # ExecutionResult.error is typed Exception | None, so wrap the
                 # BaseException in a RuntimeError (original kept as __cause__).
                 wrapped = RuntimeError(
@@ -2124,26 +1881,16 @@ class ActorRuntime:
                     defined_methods={},
                     returned_value=_NO_RETURN,
                     explicit_return=False,
-                    captured_locals=captured_locals,
-                    wrapper_line_offset=wrapper_line_offset,
                 )
                 return result
 
             except Exception as e:
-                # Extract captured locals even on error (IPython behavior).
-                # The wrapper function's finally block still runs before this handler,
-                # populating exec_globals["__repl_captured_locals__"] with all variables
-                # that were defined before the exception was raised.
-                captured_locals = _extract_captured_locals(exec_globals)
-
                 result = ExecutionResult(
                     **_frozen_output(),
                     error=e,
                     defined_methods={},
                     returned_value=_NO_RETURN,
                     explicit_return=False,
-                    captured_locals=captured_locals,
-                    wrapper_line_offset=wrapper_line_offset,
                 )
                 return result
 
@@ -2170,34 +1917,13 @@ class ActorRuntime:
             # when no buffer is set) and must persist for parallel async executions.
 
             # A capture scope leases the buffer: check the buffer it wraps.
-            captured = capture_scope.stdout.buffer if capture_scope is not None else stdout_buffer
-            if isinstance(captured, TruncatingStringIO) and captured.was_truncated:
-                from nooa.agentdoc._format_observation import record_truncation
-
-                record_truncation("capture.max_stdout")
             if capture_scope is not None:
-                capture_scope.__exit__(None, None, None)
+                captured = capture_scope.stdout.buffer
+                if isinstance(captured, TruncatingStringIO) and captured.was_truncated:
+                    from nooa.agentdoc._format_observation import record_truncation
 
-            # Reset task-local stdout/stderr buffers and stdin blocking (only if they were set)
-            if stdout_token is not None:
-                _stdout_buffer_var.reset(stdout_token)
-            if stderr_token is not None:
-                _stderr_buffer_var.reset(stderr_token)
-            if stdin_token is not None:
-                _block_stdin_var.reset(stdin_token)
-            if media_token is not None:
-                _media_buffer_var.reset(media_token)
-            # Close file handles for file-backed buffers (but keep files on disk
-            # so the LLM can reference the full output via the path in the notice).
-            # stdout_buffer/stderr_buffer may not be defined if an early return
-            # (validation, SyntaxError) exited before buffer creation.
-            try:
-                if isinstance(stdout_buffer, FileBackedTruncatingStringIO):
-                    stdout_buffer.close()
-                if isinstance(stderr_buffer, FileBackedTruncatingStringIO):
-                    stderr_buffer.close()
-            except NameError:
-                pass
+                    record_truncation("capture.max_stdout")
+                capture_scope.__exit__(None, None, None)
             # Reset parent agent context
             _parent_agent_var.reset(parent_token)
             # The one place a cell's stderr is finalized, for every backend
@@ -3204,48 +2930,6 @@ class ActorRuntime:
             # Restore previous context variable value
             # (handles nested generation sessions correctly)
             _in_generation_session.set(prev_in_session)
-
-    def _indent_code(self, code: str, indent: str) -> str:
-        """Indent each line of code, preserving multiline string indentation."""
-        lines = code.split("\n")
-        try:
-            # Tokenize to find string literals
-            tokens = list(tokenize.generate_tokens(io.StringIO(code).readline))
-
-            # Track which lines are continuation lines of multiline strings
-            # Uses 0-indexed line numbers to match enumerate(lines)
-            string_ranges = set()
-            fstring_middle_type = getattr(tokenize, "FSTRING_MIDDLE", None)
-
-            for token in tokens:
-                # Check for STRING tokens or FSTRING_MIDDLE (Python 3.12+)
-                if token.type == tokenize.STRING or (
-                    fstring_middle_type and token.type == fstring_middle_type
-                ):
-                    # Convert 1-based tokenizer positions to 0-indexed
-                    start_line = token.start[0] - 1
-                    end_line = token.end[0] - 1
-
-                    # Check if this token spans multiple lines
-                    if end_line > start_line:
-                        # Mark continuation lines (not the first line, but include the last)
-                        for line_idx in range(start_line + 1, end_line + 1):
-                            string_ranges.add(line_idx)
-
-            # Indent normal lines, preserve string continuation lines
-            result_lines = []
-            for idx, line in enumerate(lines):
-                if idx in string_ranges:
-                    # String continuation - keep as-is
-                    result_lines.append(line)
-                else:
-                    # Normal code - add indent
-                    result_lines.append(indent + line)
-
-            return "\n".join(result_lines)
-        except (tokenize.TokenError, IndentationError):
-            # Fallback to simple indentation if tokenization fails
-            return "\n".join(indent + line for line in lines)
 
     async def _prepare_context(
         self,

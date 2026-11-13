@@ -62,7 +62,7 @@ async def test_helper_method_can_use_doc_introspection():
     """Test that helper methods can access agentdoc helpers (doc, brief, etc).
 
     This verifies that helper methods have access to agentdoc introspection functions
-    that are part of ExecutionNamespaceBuilder.
+    that every cell sees (namespace providers).
     """
     # helpers are plain callables — LLM calls them as helper(self, ...).
     code = """

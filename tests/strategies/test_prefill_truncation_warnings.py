@@ -12,7 +12,8 @@ import pytest
 
 from nooa.agentdoc import pformat
 from nooa.agentdoc._format_observation import observe_truncation
-from nooa.runtime.actor import ContextVarStream, _stderr_buffer_var
+from nooa.runtime.actor import _stderr_buffer_var
+from nooa.runtime.stream_wrappers import ContextVarStream
 from nooa.strategies.current_call import CurrentCall
 from nooa.strategies.prefill import PrefillTruncationWarning, warn_on_prefill_truncation
 
