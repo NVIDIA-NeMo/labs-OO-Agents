@@ -85,17 +85,28 @@ def test_defaults_and_private_folder() -> None:
 
 
 def test_invalid_arguments(tmp_path: Path) -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(FileNotFoundError):  # the parent must exist: mkdtemp's own error
         OverflowDir(str(tmp_path / "missing"))
     (tmp_path / "file").write_text("x")
-    with pytest.raises(ValueError):
+    with pytest.raises(NotADirectoryError):
         OverflowDir(str(tmp_path / "file"))
     with pytest.raises(ValueError):
-        OverflowDir(str(tmp_path), max_files=-1)
+        OverflowDir(max_files=-1)
     with pytest.raises(ValueError):
-        OverflowDir(str(tmp_path), file_bytes=-1)
+        OverflowDir(file_bytes=-1)
     with pytest.raises(ValueError):
         OverflowFile(max_bytes=-1).open()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["file"]
+
+
+def test_a_parent_only_says_where_the_private_folder_goes(tmp_path: Path) -> None:
+    (tmp_path / "keep.txt").write_text("mine")
+    with OverflowDir(str(tmp_path), max_files=2, file_bytes=10) as folder:
+        assert os.path.dirname(folder.path) == str(tmp_path)
+        assert os.path.basename(folder.path).startswith("nooa-overflow-")
+        assert stat.S_IMODE(os.stat(folder.path).st_mode) == 0o700
+        assert os.path.dirname(_closed(folder)) == folder.path
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["keep.txt"]
 
 
 def test_file_without_a_folder() -> None:
@@ -107,7 +118,7 @@ def test_file_without_a_folder() -> None:
 
 
 def test_each_file_is_capped_at_file_bytes(tmp_path: Path) -> None:
-    with OverflowDir(str(tmp_path), max_files=3, file_bytes=4) as folder:
+    with OverflowDir(max_files=3, file_bytes=4) as folder:
         writers = [_open(folder.file()) for _ in range(3)]
         for writer in writers:
             assert writer.max_bytes == 4
@@ -117,46 +128,48 @@ def test_each_file_is_capped_at_file_bytes(tmp_path: Path) -> None:
             assert writer.written == 4
             writer.finish(delete=False)
         assert [Path(w.path).read_bytes() for w in writers] == [b"0123"] * 3
-        assert _disk(str(tmp_path)) == (3, 12)  # max_files * file_bytes at most
+        assert _disk(folder.path) == (3, 12)  # max_files * file_bytes at most
 
 
 def test_file_count_cap(tmp_path: Path) -> None:
-    with OverflowDir(str(tmp_path), max_files=3, file_bytes=10) as folder:
+    with OverflowDir(max_files=3, file_bytes=10) as folder:
         held = [folder.file() for _ in range(3)]
         assert all(file is not None for file in held)
         assert folder.file() is None  # three in use: nothing to evict
-        assert _disk(str(tmp_path))[0] == 3
+        assert _disk(folder.path)[0] == 3
 
 
 def test_zero_budget_creates_no_file(tmp_path: Path) -> None:
-    with OverflowDir(str(tmp_path), max_files=0) as folder:
+    with OverflowDir(max_files=0) as folder:
         assert folder.file() is None
-    with OverflowDir(str(tmp_path), file_bytes=0) as folder:
+    with OverflowDir(file_bytes=0) as folder:
         assert folder.file() is None
     assert list(tmp_path.iterdir()) == []
 
 
-def test_replace_keeps_the_folder(tmp_path: Path) -> None:
-    # ``dataclasses.replace`` of a folder's file keeps its link to the folder.
-    with OverflowDir(str(tmp_path), max_files=5, file_bytes=1000) as folder:
+def test_replace_makes_a_standalone_copy(tmp_path: Path) -> None:
+    # The link to the folder is not a field: a copy is a standalone file at an
+    # existing path, which open() refuses, and the folder's own file is unchanged.
+    with OverflowDir(max_files=5, file_bytes=1000) as folder:
         file = folder.file()
         assert file is not None and file.path is not None
-        kept = dataclasses.replace(file, max_bytes=3)
-        assert kept._owner is folder and kept.max_bytes == 3
-        assert kept == dataclasses.replace(kept, _owner=None)  # not compared
-        assert "_owner" not in repr(kept)
-        writer = _open(kept)
+        copy = dataclasses.replace(file, max_bytes=3)
+        assert copy == OverflowFile(path=file.path, max_bytes=3)
+        assert "folder" not in repr(copy)
+        with pytest.raises(FileExistsError):
+            copy.open()
+        writer = _open(file)
         writer.write(b"hello")
         writer.finish(delete=False)
-        assert Path(file.path).read_bytes() == b"hel"  # kept, and still the folder's
+        assert Path(file.path).read_bytes() == b"hello"
     assert not os.path.exists(file.path)  # deleted by the folder's close()
 
 
-def test_replace_cannot_raise_the_file_cap(tmp_path: Path) -> None:
-    with OverflowDir(str(tmp_path), max_files=2, file_bytes=5) as folder:
+def test_the_writer_never_exceeds_the_folders_file_bytes() -> None:
+    with OverflowDir(max_files=2, file_bytes=5) as folder:
         file = folder.file()
         assert file is not None and file.max_bytes == 5
-        writer = _open(dataclasses.replace(file, max_bytes=1000))
+        writer = _open(file)
         assert writer.max_bytes == 5 and writer.write(b"0123456789") == 5
 
 
@@ -164,7 +177,7 @@ def test_replace_cannot_raise_the_file_cap(tmp_path: Path) -> None:
 
 
 def test_eviction_deletes_the_oldest_closed_file_first(tmp_path: Path) -> None:
-    with OverflowDir(str(tmp_path), max_files=2, file_bytes=1000) as folder:
+    with OverflowDir(max_files=2, file_bytes=1000) as folder:
         first = _closed(folder)
         second = _closed(folder)
         third = _closed(folder)
@@ -176,7 +189,7 @@ def test_eviction_deletes_the_oldest_closed_file_first(tmp_path: Path) -> None:
 
 
 def test_an_evicted_path_raises_file_not_found(tmp_path: Path) -> None:
-    with OverflowDir(str(tmp_path), max_files=1, file_bytes=10) as folder:
+    with OverflowDir(max_files=1, file_bytes=10) as folder:
         first = _closed(folder)
         _closed(folder)
         with pytest.raises(FileNotFoundError):  # how a reader tells the full output is gone
@@ -184,7 +197,7 @@ def test_an_evicted_path_raises_file_not_found(tmp_path: Path) -> None:
 
 
 def test_an_open_file_is_never_evicted(tmp_path: Path) -> None:
-    with OverflowDir(str(tmp_path), max_files=2, file_bytes=100) as folder:
+    with OverflowDir(max_files=2, file_bytes=100) as folder:
         running = _open(folder.file())
         running.write(b"0123456789")
         closed = _closed(folder)
@@ -204,7 +217,7 @@ def test_an_open_file_is_never_evicted(tmp_path: Path) -> None:
 
 
 def test_a_handed_out_file_is_never_evicted(tmp_path: Path) -> None:
-    with OverflowDir(str(tmp_path), max_files=1, file_bytes=10) as folder:
+    with OverflowDir(max_files=1, file_bytes=10) as folder:
         handed = folder.file()
         assert handed is not None and handed.path is not None
         assert folder.file() is None
@@ -212,7 +225,7 @@ def test_a_handed_out_file_is_never_evicted(tmp_path: Path) -> None:
 
 
 def test_a_deleted_file_frees_its_place(tmp_path: Path) -> None:
-    with OverflowDir(str(tmp_path), max_files=1, file_bytes=10) as folder:
+    with OverflowDir(max_files=1, file_bytes=10) as folder:
         writer = _open(folder.file())
         writer.write(b"short")
         writer.finish(delete=True)
@@ -220,8 +233,8 @@ def test_a_deleted_file_frees_its_place(tmp_path: Path) -> None:
         assert folder.file() is not None  # its place is free again
 
 
-def test_one_file_opens_one_writer(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    with OverflowDir(str(tmp_path), max_files=2, file_bytes=100) as folder:
+def test_one_file_opens_one_writer(caplog: pytest.LogCaptureFixture) -> None:
+    with OverflowDir(max_files=2, file_bytes=100) as folder:
         file = folder.file()
         assert file is not None and file.path is not None
         first = _open(file)
@@ -229,12 +242,13 @@ def test_one_file_opens_one_writer(tmp_path: Path, caplog: pytest.LogCaptureFixt
         with caplog.at_level(logging.WARNING, logger="nooa.overflow._overflow"):
             assert file.open() is None  # refused, and the first file is untouched
         # A reused file is a usage error, not a file error: no traceback.
+        name = os.path.basename(file.path)
         assert [r.getMessage() for r in caplog.records] == [
-            f"overflow file {file.path!r} is not open to a new writer; keeping memory only"
+            f"overflow file {name!r} is not open to a new writer; keeping memory only"
         ]
         assert all(r.exc_info is None for r in caplog.records)
-        first.finish(delete=False)
-        first.finish(delete=True)  # idempotent: already handed back
+        assert first.finish(delete=False) is True
+        assert first.finish(delete=False) is True  # idempotent: the same answer
         assert Path(file.path).read_bytes() == b"first"
         assert file.open() is None  # closed now: still refused
 
@@ -242,7 +256,7 @@ def test_one_file_opens_one_writer(tmp_path: Path, caplog: pytest.LogCaptureFixt
 def test_many_writers_never_exceed_the_budget(tmp_path: Path) -> None:
     rng = random.Random(7)
     file_bytes, max_files = 800, 6
-    with OverflowDir(str(tmp_path), max_files=max_files, file_bytes=file_bytes) as folder:
+    with OverflowDir(max_files=max_files, file_bytes=file_bytes) as folder:
         running: list[OverflowWriter] = []
         written = 0
         for _ in range(300):
@@ -255,9 +269,8 @@ def test_many_writers_never_exceed_the_budget(tmp_path: Path) -> None:
             for writer in running:
                 chunk = os.urandom(rng.randrange(0, 1500))
                 written += len(chunk)
-                writer.write(chunk)
-                writer.file.flush()  # type: ignore[union-attr]
-            files, size = _disk(str(tmp_path))
+                writer.write(chunk)  # unbuffered: on disk at once
+            files, size = _disk(folder.path)
             assert files <= max_files and size <= max_files * file_bytes
         for writer in running:
             writer.finish(delete=False)
@@ -285,25 +298,25 @@ def test_close_deletes_everything_and_is_idempotent() -> None:
 
 
 def test_a_file_after_its_folder_closed_is_refused(tmp_path: Path) -> None:
-    folder = OverflowDir(str(tmp_path), max_files=2, file_bytes=10)
+    folder = OverflowDir(max_files=2, file_bytes=10)
     file = folder.file()
     folder.close()
     assert file is not None and file.open() is None
     assert list(tmp_path.iterdir()) == []
 
 
-def test_close_of_a_given_folder_removes_only_its_own_files(tmp_path: Path) -> None:
+def test_close_leaves_the_rest_of_the_parent_alone(tmp_path: Path) -> None:
     foreign = tmp_path / "keep.txt"
     foreign.write_text("mine")
     (tmp_path / "sub").mkdir()
-    with OverflowDir(str(tmp_path), max_files=3, file_bytes=100) as folder:
+    with OverflowDir(max_files=3, file_bytes=100) as folder:
         _closed(folder)
         _closed(folder)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["keep.txt", "sub"]
     assert foreign.read_text() == "mine"
 
 
-def test_close_of_a_given_folder_never_follows_a_symlink(tmp_path: Path) -> None:
+def test_close_removes_a_symlink_not_its_target(tmp_path: Path) -> None:
     outside = tmp_path / "outside.txt"
     outside.write_text("precious")
     given = tmp_path / "given"
@@ -330,19 +343,19 @@ def test_close_of_a_private_folder_never_follows_a_symlink(tmp_path: Path) -> No
     assert (outside / "precious.txt").read_text() == "precious"
 
 
-def test_a_writer_does_not_open_a_symlink_put_in_its_place(tmp_path: Path) -> None:
+def test_a_writer_writes_the_file_its_folder_created(tmp_path: Path) -> None:
+    # Never reopened by name: a symlink put in its place is neither written nor followed.
     outside = tmp_path / "outside.txt"
     outside.write_text("precious")
-    given = tmp_path / "given"
-    given.mkdir()
-    with OverflowDir(str(given), max_files=1, file_bytes=100) as folder:
+    with OverflowDir(max_files=1, file_bytes=100) as folder:
         file = folder.file()
         assert file is not None and file.path is not None
         os.unlink(file.path)
         os.symlink(outside, file.path)
-        assert file.open() is None  # memory only
+        writer = _open(file)
+        assert writer.write(b"output") == 6
+        writer.finish(delete=False)
         assert outside.read_text() == "precious"
-        assert folder.file() is not None  # released
     assert outside.read_text() == "precious"
 
 
@@ -408,7 +421,7 @@ def test_threads_share_one_folder() -> None:
 
 def test_threads_never_exceed_the_budget(tmp_path: Path) -> None:
     max_files, file_bytes = 4, 100
-    folder = OverflowDir(str(tmp_path), max_files=max_files, file_bytes=file_bytes)
+    folder = OverflowDir(max_files=max_files, file_bytes=file_bytes)
     errors: list[BaseException] = []
     barrier = threading.Barrier(8)
 
@@ -433,7 +446,7 @@ def test_threads_never_exceed_the_budget(tmp_path: Path) -> None:
         thread.start()
     for thread in threads:
         thread.join()
-    files, size = _disk(str(tmp_path))
+    files, size = _disk(folder.path)
     assert errors == [] and files <= max_files and size <= max_files * file_bytes
     folder.close()
     assert list(tmp_path.iterdir()) == []

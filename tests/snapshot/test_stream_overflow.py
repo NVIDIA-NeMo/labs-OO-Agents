@@ -40,14 +40,14 @@ def _disk(folder: str) -> tuple[int, int]:
 
 
 def test_each_stream_file_is_capped_at_file_bytes(tmp_path: Path) -> None:
-    with OverflowDir(str(tmp_path), max_files=3, file_bytes=4) as folder:
+    with OverflowDir(max_files=3, file_bytes=4) as folder:
         paths = [_cut(folder) for _ in range(3)]
         assert [Path(p).read_bytes() for p in paths] == [b"0123"] * 3
-        assert _disk(str(tmp_path)) == (3, 12)
+        assert _disk(folder.path) == (3, 12)
 
 
 def test_one_file_opens_one_stream(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    with OverflowDir(str(tmp_path), max_files=2, file_bytes=100) as folder:
+    with OverflowDir(max_files=2, file_bytes=100) as folder:
         file = folder.file()
         assert file is not None and file.path is not None
         first = _stream(file)
@@ -55,7 +55,8 @@ def test_one_file_opens_one_stream(tmp_path: Path, caplog: pytest.LogCaptureFixt
         with caplog.at_level(logging.WARNING, logger="nooa.overflow._overflow"):
             second = _stream(file)  # refused: memory only, and the first file is untouched
         assert [r.getMessage() for r in caplog.records] == [
-            f"overflow file {file.path!r} is not open to a new writer; keeping memory only"
+            f"overflow file {os.path.basename(file.path)!r} is not open to a new writer; "
+            "keeping memory only"
         ]
         second.write(b"second")
         assert second.close().full is None
@@ -64,7 +65,7 @@ def test_one_file_opens_one_stream(tmp_path: Path, caplog: pytest.LogCaptureFixt
 
 
 def test_evicted_full_output_raises_file_not_found(tmp_path: Path) -> None:
-    with OverflowDir(str(tmp_path), max_files=1, file_bytes=100) as folder:
+    with OverflowDir(max_files=1, file_bytes=100) as folder:
         first = _cut(folder)
         _cut(folder)
         with pytest.raises(FileNotFoundError):  # how a reader tells the full output is gone
@@ -72,7 +73,7 @@ def test_evicted_full_output_raises_file_not_found(tmp_path: Path) -> None:
 
 
 def test_complete_output_deleted_by_its_stream_is_released(tmp_path: Path) -> None:
-    with OverflowDir(str(tmp_path), max_files=1, file_bytes=10) as folder:
+    with OverflowDir(max_files=1, file_bytes=10) as folder:
         file = folder.file()
         assert file is not None and file.path is not None
         stream = TextStream(unit="bytes", head=10, tail=10, overflow=file)
@@ -92,35 +93,34 @@ def test_a_stream_keeps_running_after_its_folder_closed() -> None:
 
 
 def test_a_file_after_the_folder_closed_keeps_memory_only(tmp_path: Path) -> None:
-    folder = OverflowDir(str(tmp_path), max_files=2, file_bytes=10)
+    folder = OverflowDir(max_files=2, file_bytes=10)
     file = folder.file()
     folder.close()
     stream = _stream(file)
     stream.write(b"0123456789")
     assert stream.close().full is None
-    assert list(tmp_path.iterdir()) == []
+    assert not os.path.exists(folder.path)
 
 
-def test_stream_does_not_open_a_symlink_put_in_its_place(tmp_path: Path) -> None:
+def test_stream_does_not_write_a_symlink_put_in_its_place(tmp_path: Path) -> None:
+    # The stream writes the descriptor its folder created, never the name.
     outside = tmp_path / "outside.txt"
     outside.write_text("precious")
-    given = tmp_path / "given"
-    given.mkdir()
-    with OverflowDir(str(given), max_files=1, file_bytes=100) as folder:
+    with OverflowDir(max_files=1, file_bytes=100) as folder:
         file = folder.file()
         assert file is not None and file.path is not None
         os.unlink(file.path)
         os.symlink(outside, file.path)
         stream = _stream(file)
         stream.write(b"0123456789")
-        assert stream.close().full is None  # memory only
+        stream.close()
         assert outside.read_text() == "precious"
 
 
 def test_many_streams_never_exceed_the_budget(tmp_path: Path) -> None:
     rng = random.Random(7)
     file_bytes, max_files = 800, 6
-    with OverflowDir(str(tmp_path), max_files=max_files, file_bytes=file_bytes) as folder:
+    with OverflowDir(max_files=max_files, file_bytes=file_bytes) as folder:
         running: list[TextStream] = []
         written = 0
         for _ in range(300):
@@ -132,7 +132,7 @@ def test_many_streams_never_exceed_the_budget(tmp_path: Path) -> None:
                 chunk = os.urandom(rng.randrange(0, 1500))
                 written += len(chunk)
                 stream.write(chunk)
-            files, size = _disk(str(tmp_path))
+            files, size = _disk(folder.path)
             assert files <= max_files and size <= max_files * file_bytes
         for stream in running:
             stream.close()
