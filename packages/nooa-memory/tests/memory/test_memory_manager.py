@@ -6,6 +6,7 @@ Uses ``FakeLLMClient`` so no network/LLM is needed — the hooks, store and
 consolidation are exercised directly.
 """
 
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -260,12 +261,60 @@ def test_before_turn_sets_context_block(agent):
 
 
 def test_injection_respects_char_budget(agent):
-    mgr = _install(agent, spontaneous=SpontaneousConfig(context_char_budget=40))
+    mgr = _install(agent, spontaneous=SpontaneousConfig(context_char_budget=120))
     for i in range(5):
         agent.remember(f"a fairly long memory about deploying service number {i}", type="info")
     agent.event_manager.add(Task(prompt="deploy the service please"))
     text = mgr.recall_for_context()
-    assert len(text) <= 40 + 5  # budget + ellipsis slack
+    assert "[info#" in text
+    assert len(text) <= 120
+
+
+_HANDLE_RE = re.compile(r"#([0-9a-f]+)\]")
+
+
+def test_long_untitled_memory_does_not_starve_the_block(agent):
+    mgr = _install(agent)  # default 2000-char budget
+    body = "the staging cluster uses blue/green; " * 80
+    long_id = agent.remember("deploy notes: " + body, type="info")
+    short = [
+        agent.remember("deploy rollback runs make undeploy", type="skill"),
+        agent.remember("deploy rate limit is 600 req/min", type="info"),
+        agent.remember("deploy key rotation is due friday", type="todo"),
+    ]
+    agent.event_manager.add(Task(prompt="deploy the staging cluster"))
+    text = mgr.recall_for_context()
+    assert len(text) <= mgr.config.spontaneous.context_char_budget
+    for mid in short:
+        assert f"#{mid[:8]}]" in text
+    # The shortened memory keeps its handle, and an explicit recall returns all of it.
+    assert f"#{long_id[:8]}]" in text
+    assert body not in text
+    recalled = {m.id: m for m in agent.recall("deploy notes staging cluster")}
+    assert body in recalled[long_id].content
+
+
+def test_block_that_fits_is_not_shortened(agent):
+    mgr = _install(agent)
+    long_tail = "the answer is at the very end of this note: 42"
+    agent.remember("deploy notes: " + "the cluster uses a gate; " * 20 + long_tail, type="info")
+    agent.event_manager.add(Task(prompt="deploy the cluster"))
+    assert long_tail in mgr.recall_for_context()
+
+
+@pytest.mark.parametrize("budget", [60, 90, 150, 260])
+def test_injected_handles_are_never_cut_and_match_logged_ids(agent, budget):
+    mgr = _install(agent, spontaneous=SpontaneousConfig(context_char_budget=budget))
+    for i in range(6):
+        agent.remember(f"deploy fact {i}: " + "cluster gate detail " * 6, type="info")
+    agent.event_manager.add(Task(prompt="deploy cluster gate"))
+    text = mgr.recall_for_context()
+    visible = _HANDLE_RE.findall(text)
+    assert visible
+    assert len(text) <= budget
+    assert all(len(h) == 8 for h in visible)
+    assert text.count("[info") == len(visible)  # no marker cut before its closing bracket
+    assert visible == [mid[:8] for mid in mgr._last_injected_ids]
 
 
 def test_spontaneous_disabled_returns_empty(agent):
