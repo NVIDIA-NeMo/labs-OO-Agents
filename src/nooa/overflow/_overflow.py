@@ -1,0 +1,468 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""``OverflowDir`` and ``OverflowWriter``; see ``nooa.overflow`` for the contract.
+
+Built on the standard library: ``tempfile.mkdtemp`` for the private folder
+(0700), ``os.open(..., O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW |
+O_CLOEXEC, 0o600)`` for each file, ``os.write`` on that descriptor,
+``os.unlink`` by name inside the folder, ``shutil.rmtree`` to remove the
+folder and ``atexit`` for the exit cleanup. What it adds is the eviction
+bookkeeping and the explicit lifetime (no ``weakref.finalize``: nothing is
+deleted by garbage collection).
+
+POSIX only: without ``os.O_NOFOLLOW`` (Windows) overflow files are off,
+``OverflowDir.open()`` returns ``None`` (logged once).
+
+Processes: an ``os.register_at_fork`` hook makes everything inherited by a
+forked child inert there (no writes, deletes or exit cleanup; fresh locks,
+so the child never waits on a lock held at the fork); a child's own
+``OverflowDir`` works normally.
+
+Shutdown: the exit cleanup takes each folder's lock (never runs without
+it). A folder whose lock a thread holds for more than a second is marked
+for cleanup and that thread removes it when it lets go (an ``open()`` in
+progress then returns ``None``). An ``OverflowDir`` made after the exit
+cleanup started gets no folder at all.
+"""
+
+from __future__ import annotations
+
+import atexit
+import contextlib
+import functools
+import logging
+import os
+import secrets
+import shutil
+import tempfile
+import threading
+from collections.abc import Iterator
+
+__all__ = ["OverflowDir", "OverflowWriter"]
+
+_log = logging.getLogger(__name__)
+
+DEFAULT_FILE_BYTES = 64 * 1024 * 1024  # OverflowDir.file_bytes default
+DEFAULT_MAX_FILES = 20  # OverflowDir.max_files default
+_PREFIX, _SUFFIX = "nooa-output-", ".txt"  # file names: nooa-output-*.txt
+_DIR_PREFIX = "nooa-overflow-"  # private folders: nooa-overflow-*
+_NOFOLLOW: int | None = getattr(os, "O_NOFOLLOW", None)  # None: overflow files are off
+_CREATE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | (_NOFOLLOW or 0) | getattr(os, "O_CLOEXEC", 0)
+
+
+@functools.cache
+def _unsupported() -> None:
+    """Log, once per process, that this platform has no overflow files."""
+    _log.warning("no os.O_NOFOLLOW on this platform: overflow files are off, keeping memory only")
+
+
+class OverflowWriter:
+    """The open file of one overflow stream: what ``OverflowDir.open()`` returns.
+
+    Not constructed directly.
+
+    - ``path``: the file (read-only).
+    - ``max_bytes``: the most bytes ``write`` keeps (read-only).
+    - ``written``: the bytes written to the file so far (read-only): only
+      bytes the operating system took, never bytes still in a buffer.
+    - ``closed``: whether ``finish`` ran (or the writer belongs to the
+      parent of a forked process).
+
+    ``write(data)`` writes what fits under ``max_bytes`` straight to the
+    file's descriptor (there is no buffer) and returns how much; it raises
+    ``OSError`` on a file error (the caller decides to give up:
+    ``finish(delete=True)``). ``finish(delete=...)`` closes the file; with
+    ``delete`` it removes it, else the file becomes evictable. Only
+    ``finish`` closes the descriptor; it is never handed out.
+
+    One thread at a time: a writer has no lock. In a forked child an
+    inherited writer is inert: ``write`` returns 0 and ``finish`` only closes
+    the child's copy of the descriptor.
+    """
+
+    def __init__(self, fd: int, path: str, max_bytes: int, folder: _Folder) -> None:
+        self._fd: int | None = fd
+        self._path = path
+        self._max_bytes = max_bytes
+        self._written = 0
+        self._folder = folder
+        self._kept = False  # finish(delete=False) closed it cleanly
+        self._pid = os.getpid()
+
+    @property
+    def path(self) -> str:
+        """The file."""
+        return self._path
+
+    @property
+    def max_bytes(self) -> int:
+        """The most bytes ``write`` keeps."""
+        return self._max_bytes
+
+    @property
+    def written(self) -> int:
+        """The bytes written to the file so far."""
+        return self._written
+
+    @property
+    def closed(self) -> bool:
+        """Whether ``finish`` ran, or the writer was inherited by a forked child."""
+        return self._fd is None or os.getpid() != self._pid
+
+    def write(self, data: bytes) -> int:
+        """Write the part of ``data`` that fits under ``max_bytes``; return its length.
+
+        Returns 0 once finished or full. Raises ``OSError`` on a file error;
+        ``written`` then counts what reached the file before it.
+        """
+        if self.closed:
+            return 0
+        part = memoryview(data)[: max(0, self._max_bytes - self._written)]
+        done = 0
+        while done < len(part):
+            n = os.write(self._fd, part[done:])  # type: ignore[arg-type]  # not closed
+            if n <= 0:
+                raise OSError(f"no progress writing overflow file {self._path!r}")
+            done += n
+            self._written += n
+        return done
+
+    def finish(self, *, delete: bool) -> bool:
+        """Close the file and, with ``delete``, remove it; else it becomes the folder's newest closed file.
+
+        Returns whether the file is kept: ``True`` after ``delete=False``
+        when the file closed cleanly. Never raises: a failed close is
+        logged and the file, which may not hold ``written`` bytes, is
+        deleted (``False``). A later ``finish(delete=True)`` deletes a kept
+        file; any other later call returns the same answer. In a forked
+        child it only closes the child's copy of the descriptor
+        (``False``).
+        """
+        fd, self._fd = self._fd, None
+        if os.getpid() != self._pid:
+            if fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+            return False
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                _log.warning(
+                    "could not close overflow file %r; deleting it", self._path, exc_info=True
+                )
+                delete = True
+            if not delete:
+                self._kept = True
+                self._folder.finished(os.path.basename(self._path), delete=False)
+                return True
+        elif not (delete and self._kept):
+            return self._kept  # finished before: the same answer
+        self._kept = False
+        self._folder.finished(os.path.basename(self._path), delete=True)
+        return False
+
+
+class _Folder:
+    """An ``OverflowDir``'s state, held apart from it so that the exit cleanup can reach it.
+
+    It holds no reference to the ``OverflowDir``: dropping the folder object
+    deletes nothing; it stays registered (``_live``) until a ``close()`` or
+    the exit removes everything. Every method that changes it runs under
+    ``lock``, in the process that created it, through ``locked()``.
+    """
+
+    def __init__(self, max_files: int, file_bytes: int) -> None:
+        self.max_files = max_files
+        self.file_bytes = file_bytes
+        self.pid = os.getpid()
+        self.lock = threading.Lock()
+        # Every file of the folder by name: False while its writer is open, True once
+        # closed (evictable); closed ones in finish order, the oldest first.
+        self.files: dict[str, bool] = {}
+        self.closing = False  # close() or the exit began: no new files
+        self.exit_pending = False  # the exit could not take the lock: its holder cleans up
+        self.done = False  # everything removed
+        self.path = tempfile.mkdtemp(prefix=_DIR_PREFIX)
+
+    def mine(self) -> bool:
+        """True in the process that created the folder; in a forked child the folder is inert."""
+        return os.getpid() == self.pid
+
+    @contextlib.contextmanager
+    def locked(self) -> Iterator[None]:
+        """Hold the lock; on leaving, run a cleanup the exit asked for while it was held."""
+        with self.lock:
+            try:
+                yield
+            finally:
+                if self.exit_pending and not self.done:
+                    self.run()
+
+    def remove(self, name: str) -> None:
+        """Delete one file by name; when that fails (logged) it stays a closed file, counted and evictable."""
+        path = os.path.join(self.path, name)
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            _log.warning("could not delete overflow file %r", path, exc_info=True)
+            self.files[name] = True
+            return
+        del self.files[name]
+
+    def new_writer(self, max_bytes: int) -> OverflowWriter | None:
+        """Create a new file, make room for it and return its writer, or ``None`` (memory only). Under the lock.
+
+        The place is reserved before the file is created and given up on
+        any exception, so an interrupt never leaves a file uncounted.
+        Closed files are evicted only after the new file exists, oldest
+        finished first; when they cannot be, the new file goes instead.
+        """
+        closed = [name for name, done in self.files.items() if done]
+        if self.file_bytes == 0 or len(self.files) - len(closed) >= self.max_files:
+            return None
+        name = _PREFIX + secrets.token_hex(6) + _SUFFIX
+        while name in self.files:
+            name = _PREFIX + secrets.token_hex(6) + _SUFFIX
+        path = os.path.join(self.path, name)
+        self.files[name] = False  # reserved first: counted from here on
+        fd = None
+        try:
+            fd = os.open(path, _CREATE, 0o600)
+            for old in closed:
+                if len(self.files) <= self.max_files:
+                    break
+                self.remove(old)
+            if len(self.files) <= self.max_files and not self.closing:
+                return OverflowWriter(fd, path, max_bytes, self)
+        except OSError:  # only os.open raises it: nothing was created or evicted
+            del self.files[name]
+            _log.warning("could not create an overflow file; keeping memory only", exc_info=True)
+            return None
+        except BaseException:  # interrupted, perhaps after the file was made: the name is ours
+            self.files.pop(name, None)
+            with contextlib.suppress(OSError):
+                if fd is not None:
+                    os.close(fd)
+                os.unlink(path)
+            raise
+        os.close(fd)  # no room after all, or the exit began meanwhile
+        self.remove(name)
+        return None
+
+    def finished(self, name: str, *, delete: bool) -> None:
+        """The writer of ``name`` finished: delete it, or make it the newest closed file."""
+        if not self.mine():
+            return
+        with self.locked():
+            if self.closing or name not in self.files:
+                return  # the folder closed, or evicted it
+            if delete:
+                self.remove(name)
+            else:
+                del self.files[name]
+                self.files[name] = True  # newest finished: evicted last
+
+    def run(self) -> None:
+        """Remove the whole private folder; on failure (logged) stay registered to retry. Under the lock."""
+        self.closing = True
+        if self.done or not self.mine():
+            return
+        ok = True
+
+        def failed(_func: object, path: object, exc: BaseException) -> None:
+            nonlocal ok
+            if not isinstance(exc, FileNotFoundError):
+                ok = False
+                _log.warning(
+                    "could not remove %r in overflow folder %r", path, self.path, exc_info=exc
+                )
+
+        shutil.rmtree(self.path, onexc=failed)
+        if not ok:
+            return  # still registered: the next close() or the exit retries
+        self.done = True
+        self.files.clear()
+        with _live_lock:
+            _live.discard(self)
+
+    def close_at_exit(self) -> None:
+        """The exit cleanup: under the lock, or by the thread holding it when it lets go."""
+        self.closing = self.exit_pending = True
+        if self.lock.acquire(timeout=1.0):
+            try:
+                self.run()
+            finally:
+                self.lock.release()
+        elif not self.done:
+            _log.warning(
+                "overflow folder %r is busy at exit; the thread using it removes it", self.path
+            )
+
+
+# Every folder not yet removed, for the exit cleanup: strong references to the
+# ``_Folder`` states only, never to the ``OverflowDir`` objects. ``_exiting``:
+# the exit cleanup started, so a new ``OverflowDir`` gets no folder.
+_live: set[_Folder] = set()
+_live_lock = threading.Lock()  # held for set updates only, never across I/O
+_exiting = False
+
+
+def _after_fork_in_child() -> None:
+    """A forked child starts with no exit cleanups: the inherited folders are its parent's (inert here)."""
+    global _live, _live_lock  # noqa: PLW0603 - per-process registry
+    for folder in _live:
+        folder.lock = threading.Lock()
+    _live = set()
+    _live_lock = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_in_child)
+
+
+@atexit.register
+def _close_all_at_exit() -> None:
+    """At interpreter exit, remove every folder of this process not yet removed."""
+    global _exiting  # noqa: PLW0603 - set once, at exit
+    with _live_lock:
+        _exiting = True
+        pending = list(_live)
+    for folder in pending:
+        try:
+            folder.close_at_exit()
+        except Exception:  # noqa: BLE001 - never fail the exit
+            _log.warning("could not clean up overflow folder %r", folder.path, exc_info=True)
+
+
+class OverflowDir:
+    """A private folder of overflow files shared by many writers: at most ``max_files`` of ``file_bytes`` each.
+
+    ``OverflowDir(*, max_files=20, file_bytes=64 * 2**20)`` creates its own
+    private folder in the system temporary directory
+    (``tempfile.mkdtemp``, ``nooa-overflow-*``, mode 0700, an unpredictable
+    name) and removes it whole when closed.
+
+    - ``max_files``: at most this many of its files exist at once.
+    - ``file_bytes``: each file holds at most this many bytes, so the
+      folder never holds more than ``max_files * file_bytes``.
+
+    ``open(max_bytes=None)`` creates a new file in the folder (exclusively,
+    ``O_NOFOLLOW``, 0600) and returns its ``OverflowWriter``. It creates the
+    file first, then makes room by deleting closed files, the oldest
+    finished first ("keep the newest"): while it runs the new, empty file
+    can be one more than ``max_files``. It never deletes the file of a
+    writer still open. When every place is in use, or the file cannot be
+    created (logged), it returns ``None``: keep memory only; nothing was
+    evicted. A writer that finishes with ``delete=True`` frees its place at
+    once. A file whose delete failed (logged) stays a closed file: counted
+    against ``max_files``, and deleted by a later eviction or the close.
+
+    A file in an ``OverflowDir`` is not permanent: a path handed out earlier
+    can name a file deleted since, because the folder needed room or
+    closed. Reading that path then raises ``FileNotFoundError``.
+
+    Lifetime: ``close()`` (also on leaving a ``with`` block) removes the
+    whole folder; ``open()`` then returns ``None``. When a removal fails
+    (logged, never raised), the folder stays registered and the next
+    ``close()`` or the exit retries; once everything is gone, later calls
+    do nothing. A folder never closed is removed at interpreter exit
+    (``atexit``), **not** when it is garbage collected: its files outlive
+    the object. A writer still open when the folder closes keeps running;
+    its file is gone.
+
+    Processes: in a forked child an inherited folder is inert: ``open()``
+    returns ``None`` (logged), and ``close()`` and the child's exit leave
+    the parent's files alone. A child makes its own ``OverflowDir``.
+
+    Threads: ``open()``, ``close()`` and the writers' ``finish`` may run in
+    any threads; the bookkeeping is locked.
+
+    Raises ``ValueError`` for a negative ``max_files`` or ``file_bytes``,
+    and ``OSError`` when the folder cannot be created.
+    """
+
+    def __init__(
+        self, *, max_files: int = DEFAULT_MAX_FILES, file_bytes: int = DEFAULT_FILE_BYTES
+    ) -> None:
+        if max_files < 0 or file_bytes < 0:
+            raise ValueError("max_files and file_bytes must be non-negative")
+        folder = _Folder(max_files, file_bytes)
+        with _live_lock:
+            exiting = _exiting
+            if not exiting:
+                _live.add(folder)
+        if exiting:  # made after the exit cleanup started: nothing would remove it
+            with folder.lock:
+                folder.run()
+        self._folder = folder
+
+    @property
+    def path(self) -> str:
+        """The private folder (gone once closed)."""
+        return self._folder.path
+
+    @property
+    def max_files(self) -> int:
+        """At most this many files at once, as given."""
+        return self._folder.max_files
+
+    @property
+    def file_bytes(self) -> int:
+        """At most this many bytes per file, as given."""
+        return self._folder.file_bytes
+
+    @property
+    def closed(self) -> bool:
+        """Whether ``close()`` (or the exit) ran: no new files; its files are gone, or a retry is pending."""
+        return self._folder.closing
+
+    def open(self, max_bytes: int | None = None) -> OverflowWriter | None:
+        """A writer of a new file in the folder, within the budget; ``None``: keep memory only.
+
+        ``max_bytes``: this file's cap, at most ``file_bytes`` (``None``:
+        ``file_bytes``), for a folder shared by writers with smaller limits.
+        Creates the file, then deletes the oldest finished closed files to
+        make room (see ``OverflowDir``). Returns ``None`` when ``max_files``
+        files are still in use (or could not be deleted), ``file_bytes`` is
+        0, the file cannot be created (logged), once the folder is closed or
+        the exit began, in a forked child (logged), or without
+        ``O_NOFOLLOW`` (logged once). Raises ``ValueError`` for a negative
+        ``max_bytes``.
+        """
+        if max_bytes is not None and max_bytes < 0:
+            raise ValueError("max_bytes must be non-negative")
+        if _NOFOLLOW is None:
+            _unsupported()
+            return None
+        folder = self._folder
+        if not folder.mine():  # never take the lock: a parent thread may have held it at fork
+            _log.warning(
+                "overflow folder %r belongs to the parent process; keeping memory only", self.path
+            )
+            return None
+        cap = folder.file_bytes if max_bytes is None else min(max_bytes, folder.file_bytes)
+        with folder.locked():
+            return None if folder.closing else folder.new_writer(cap)
+
+    def close(self) -> None:
+        """Remove the whole folder and every file in it.
+
+        Never raises: failures are logged, and what could not be removed
+        is retried by the next ``close()`` and at exit. Does nothing in a
+        forked child, or once everything is gone.
+        """
+        folder = self._folder
+        if folder.mine():
+            with folder.locked():
+                folder.run()
+
+    def __enter__(self) -> OverflowDir:
+        """Return the folder itself, for ``with OverflowDir() as folder:``."""
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        """``close()`` the folder on leaving the ``with`` block."""
+        self.close()
