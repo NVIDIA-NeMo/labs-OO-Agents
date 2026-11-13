@@ -408,6 +408,34 @@ one) with the fields of `nooa_atom.workspace.model_sources.ModelSource`:
 A source that fails to load or is not valid is logged and skipped, so Atom
 always starts.
 
+### OpenRouter (built in)
+
+`nooa-atom` ships one source, **OpenRouter** (`id: openrouter`): every model
+of OpenRouter's public text-model list with one key, as
+`openrouter/<OpenRouter model ID>` (for example
+`openrouter/anthropic/claude-sonnet-4.5`).
+
+- **Sign in:** in the client's sign-in picker (Pool, Zed, T3 Code: `/connect`)
+  choose "OpenRouter", or run `nooa atom --sign-in openrouter` yourself. It
+  asks for the key (hidden input; with a key already set up it offers to keep
+  it), checks it with one request to OpenRouter's `/key` endpoint (no model
+  call), saves it as `OPENROUTER_API_KEY` in the user `secrets.yaml` (as
+  `nooa connect` does) and switches the session to
+  `openrouter/anthropic/claude-sonnet-4.5` (or the first listed model).
+- **The models need the key:** without `OPENROUTER_API_KEY` in the
+  environment or in NOOA's `secrets.yaml`, the source lists no models.
+- **Configuration:** each entry is what `nooa connect --provider openrouter`
+  saves for that model, without its test calls: OpenRouter's API base, the
+  listed context window, Connect's default reply limit, the reasoning levels
+  OpenRouter lists, and the media inputs it lists that NOOA can send (enabled
+  without a test). Run `nooa connect` for a model to test it or change its
+  settings; an alias in a configuration file replaces the source's.
+- **Cache:** the model list is kept in `openrouter_models.json` in the user
+  NOOA directory (`~/.config/nooa/` by default) and fetched again when it is
+  older than 24 hours, with a 10-second limit. When the fetch fails, the old
+  list is kept (and retried 10 minutes later). Delete the file to fetch the
+  list at the next start.
+
 ## Skills and MCP servers
 
 The Atom agent reaches all its capabilities through one `SkillManager`,

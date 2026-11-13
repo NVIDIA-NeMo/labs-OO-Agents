@@ -6,6 +6,12 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Connect: `connect.openrouter_entry(record)` returns the entry Connect saves
+  for an OpenRouter catalogue record, without test calls, and
+  `connect.saved_entry(entry)` the form `write()` saves (normalised, without
+  `provenance`); `write()` uses it. `connect.catalogue()` takes `timeout=`
+  and `outputs=` (defaults unchanged: 30 seconds, `"text,decisions"`).
+
 - `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
   publishes a runtime event when a job finishes (the job's handle state and
   result say it ended).

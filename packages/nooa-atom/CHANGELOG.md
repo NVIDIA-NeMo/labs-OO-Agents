@@ -7,6 +7,14 @@ based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- `nooa-atom`: built-in OpenRouter model source. After one sign-in
+  (`/connect` -> "OpenRouter" in an ACP client, or
+  `nooa atom --sign-in openrouter`), which checks the key and saves it as
+  `OPENROUTER_API_KEY`, every OpenRouter text model is listed as
+  `openrouter/<model ID>`, configured as `nooa connect` saves it. The model
+  list is cached for 24 hours in `openrouter_models.json` in the user NOOA
+  directory; no key means no models.
+
 - `nooa-atom`: model sources. An installed package can add models and an ACP
   sign-in through the `nooa_atom.model_sources` entry point group: its models
   are listed below the configuration files, and terminal-auth clients are
