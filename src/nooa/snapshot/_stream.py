@@ -61,8 +61,8 @@ class TextStream:
       as its original byte, so such text need not give valid UTF-8); a file
       error never raises (see ``OverflowFile``).
 
-    Threads: one writer. ``snapshot()`` only reads memory (and flushes
-    the overflow file) but is not synchronised with ``write``: call it from
+    Threads: one writer. ``snapshot()`` only reads memory but is not
+    synchronised with ``write``: call it from
     the writer's thread, or serialise it with writes.
     There is no lock.
 
@@ -137,7 +137,7 @@ class TextStream:
         """
         self._produced += len(data)
         writer = self._file
-        if writer is None or writer.file is None:
+        if writer is None:
             return
         room = self._file_max - self._kept
         if room <= 0:
@@ -153,17 +153,6 @@ class TextStream:
             self._kept += writer.write(part)
         except OSError:
             _log.warning("could not write the overflow file; keeping memory only", exc_info=True)
-            self._fail()
-
-    def _flush(self) -> None:
-        """Push buffered bytes to the overflow file, so it holds what ``Overflow.kept`` says."""
-        writer = self._file
-        if writer is None or writer.file is None:
-            return
-        try:
-            writer.file.flush()
-        except OSError:
-            _log.warning("could not flush the overflow file; keeping memory only", exc_info=True)
             self._fail()
 
     # --- writing ----------------------------------------------------------
@@ -239,12 +228,11 @@ class TextStream:
     def snapshot(self) -> Text:
         """The whole stream so far, as a ``Text``; once closed, the final one.
 
-        Callable at any time while the stream runs. It first flushes the
-        overflow file, so ``Text.full.kept`` bytes are on disk.
+        Callable at any time while the stream runs. The overflow file is
+        unbuffered, so its ``Text.full.kept`` bytes are already on disk.
         """
         if self._closed is not None:
             return self._closed
-        self._flush()
         return self._text()
 
     def close(self) -> Text:
@@ -256,16 +244,11 @@ class TextStream:
         """
         if self._closed is not None:
             return self._closed
-        writer = self._file
-        if writer is not None and writer.file is not None:
-            try:
-                writer.file.close()
-            except OSError:
-                self._fail()
         text = self._text()
         writer, self._file = self._file, None
-        if writer is not None:
-            writer.finish(delete=text.complete)
+        if writer is not None and not writer.finish(delete=text.complete) and not text.complete:
+            self._file_failed = True  # the file did not close cleanly (logged, deleted)
+            text = self._text()
         self._closed = text
         return text
 
