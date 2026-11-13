@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Prefill string cuts go through nooa.snapshot's capture + render_python (PR 2b)."""
 
-import sys
 from unittest import mock
 
 import pytest
@@ -27,10 +26,14 @@ def test_a_cut_string_is_render_python_with_an_even_split():
 
 
 def test_the_cut_runs_through_capture_and_render_python():
-    module = sys.modules["nooa.agentdoc._pformat"]  # nooa.agentdoc._pformat is also a function
-    with mock.patch.object(module, "_render_cut_string", wraps=module._render_cut_string) as cut:
-        assert "'k': str(len=3000, [:1000]=" in pformat({"k": "x" * 3_000}, max_string=2_000)
-    cut.assert_called_with("x" * 3_000, 2_000)  # pformat may lay a value out twice
+    import nooa.snapshot
+
+    value = {"k": "x" * 3_000}
+    with mock.patch.object(nooa.snapshot, "capture", wraps=nooa.snapshot.capture) as capture:
+        assert "'k': str(len=3000, [:1000]=" in pformat(value, max_string=2_000)
+    capture.assert_called_once()  # the whole value, once (PR 2c)
+    assert capture.call_args.args[0] is value
+    assert capture.call_args.args[1].max_string == 2_000
 
 
 @pytest.mark.parametrize("max_string", [0, 1, 2, 7, 2_000])

@@ -125,11 +125,10 @@ def test_extractor_with_instance_values():
             return (type_info, {"value": obj.value * 10})  # Transform value
 
     obj = SampleType(5)
-    # With new design: doc(instance) shows type, pformat(instance) shows values
-    result = pformat(obj)
-
-    # Should show transformed value (50, not 5)
-    assert "50" in result
+    # doc(instance) uses the extractor's values; pformat reads the instance with
+    # nooa.snapshot, which runs no extractor (PR 2c): the stored value.
+    assert "value: int = 50" in doc(obj)
+    assert pformat(obj) == "SampleType(value=5)"
 
 
 def test_extractor_inheritance_via_mro():

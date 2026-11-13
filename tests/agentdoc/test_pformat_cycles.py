@@ -38,7 +38,7 @@ class TestSelfReferentialContainers:
         t: tuple = ([],)
         t[0].append(t)
         result = pformat(t)
-        assert result == "([<cycle>])"
+        assert result == "([<cycle>],)"  # a one-item tuple keeps its comma (nooa.snapshot)
 
     def test_set_with_unhashable_cycle_skipped(self):
         """Sets can't contain themselves (unhashable), but a frozenset of frozensets
