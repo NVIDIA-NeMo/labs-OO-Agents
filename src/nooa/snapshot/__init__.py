@@ -19,8 +19,8 @@ Producers:
   ``object_like`` or ``text_like``. ``capture_fields(**fields)`` captures
   named parts (a call's arguments) so that every part survives.
 - ``TextStream``: output that arrives over time, with an optional
-  overflow file (``nooa.overflow``: ``OverflowFile``; ``OverflowDir`` bounds
-  the files of many streams);
+  overflow file in an ``OverflowDir`` (``nooa.overflow``, which bounds the
+  files of many streams), opened only once the output is cut;
   ``merge`` joins two ``Text``s (progress batches).
 - ``cut(data, head=, tail=)``: a string or bytes that is already whole.
 

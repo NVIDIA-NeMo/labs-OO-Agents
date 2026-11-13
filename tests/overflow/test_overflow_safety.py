@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""nooa.overflow: forks, replaced files, failed deletes and failed closes.
+"""nooa.overflow: forks, a replaced file, failed deletes and failed closes.
 
 Each test replays a scenario where a folder deleted files that were not its
 own, wrote to a file it had not created, or forgot its own: a forked child,
@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from nooa.overflow import OverflowDir, OverflowFile
+from nooa.overflow import OverflowDir
 
 needs_fork = pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
 needs_permissions = pytest.mark.skipif(
@@ -29,9 +29,7 @@ needs_permissions = pytest.mark.skipif(
 
 def _kept(folder: OverflowDir, data: bytes = b"ABCD") -> Path:
     """A written, closed (kept) file in ``folder``; its path."""
-    file = folder.file()
-    assert file is not None
-    writer = file.open()
+    writer = folder.open()
     assert writer is not None
     writer.write(data)
     writer.finish(delete=False)
@@ -39,12 +37,15 @@ def _kept(folder: OverflowDir, data: bytes = b"ABCD") -> Path:
 
 
 def _run(code: str, *args: str) -> list[str]:
+    """Run ``code`` in a fresh interpreter; with ``args``, ``TMPDIR`` is the first."""
+    env = {**os.environ, "TMPDIR": args[0]} if args else None
     result = subprocess.run(
         [sys.executable, "-c", textwrap.dedent(code), *args],
         capture_output=True,
         text=True,
         timeout=60,
         check=False,
+        env=env,
     )
     assert result.returncode == 0, result.stderr
     return result.stdout.split()
@@ -61,8 +62,8 @@ def test_a_forked_child_exiting_keeps_the_parents_files_on_disk(tmp_path: Path) 
         from pathlib import Path
         from nooa.overflow import OverflowDir
 
-        folder = OverflowDir(sys.argv[1])
-        writer = folder.file().open()
+        folder = OverflowDir()
+        writer = folder.open()
         writer.write(b"parent output")
         writer.finish(delete=False)
         pid = os.fork()
@@ -85,22 +86,22 @@ def test_a_forked_child_leaves_the_parents_folders_alone_and_cleans_its_own(
         from pathlib import Path
         from nooa.overflow import OverflowDir
 
-        folders = [OverflowDir(sys.argv[1]), OverflowDir(sys.argv[1])]
+        folders = [OverflowDir(), OverflowDir()]
         kept = []
         for folder in folders:
-            writer = folder.file().open()
+            writer = folder.open()
             writer.write(b"parent output")
             writer.finish(delete=False)
             kept.append(writer.path)
-        running = folders[0].file().open()
+        running = folders[0].open()
         running.write(b"running")
         pid = os.fork()
         if pid == 0:
             running.finish(delete=True)  # inert in the child: deletes nothing
             folders[1].close()  # does nothing in the child
-            assert folders[0].file() is None  # inherited folders are inert in the child
-            own = OverflowDir(sys.argv[1])  # the child's own folder: cleaned at the child's exit
-            writer = own.file().open()
+            assert folders[0].open() is None  # inherited folders are inert in the child
+            own = OverflowDir()  # the child's own folder: cleaned at the child's exit
+            writer = own.open()
             writer.write(b"child output")
             writer.finish(delete=False)
             Path(sys.argv[1], "child-own").write_text(own.path)
@@ -121,34 +122,22 @@ def test_a_forked_child_leaves_the_parents_folders_alone_and_cleans_its_own(
 # --- replaced files: only what the folder created is written; only ours is deleted -----
 
 
-def test_a_reserved_file_replaced_by_a_regular_file_is_not_written() -> None:
+def test_a_file_replaced_by_a_regular_file_is_not_written() -> None:
     # Round 8: open() reopened the name and wrote over a file put in its place.
+    # The writer writes only the descriptor the folder created the file with.
     folder = OverflowDir(max_files=1, file_bytes=4)
-    file = folder.file()
-    assert file is not None and file.path is not None
-    path = Path(file.path)
+    writer = folder.open()
+    assert writer is not None
+    path = Path(writer.path)
     path.unlink()
     path.write_bytes(b"FOREIGN-CONTENT-IS-LONG")
-    writer = file.open()
-    if writer is not None:  # writes, if any, go to the file the folder created
-        writer.write(b"XXXX")
-        writer.finish(delete=False)
+    writer.write(b"XXXX")
+    writer.finish(delete=False)
     assert path.read_bytes() == b"FOREIGN-CONTENT-IS-LONG"
     folder.close()
 
 
-def test_a_replaced_standalone_file_is_not_deleted(tmp_path: Path) -> None:
-    standalone = tmp_path / "standalone"
-    writer = OverflowFile(path=str(standalone)).open()
-    assert writer is not None
-    writer.write(b"mine")
-    standalone.unlink()
-    standalone.write_bytes(b"precious")
-    writer.finish(delete=True)
-    assert standalone.read_bytes() == b"precious"
-
-
-# --- a failed delete: still counted and retried ---------------------------------------
+# --- a failed delete: still counted, deleted by a later eviction or the close ---------------------------------------
 
 
 @needs_permissions
@@ -158,11 +147,11 @@ def test_a_failed_eviction_stays_counted_and_is_retried() -> None:
     first = _kept(folder)
     private.chmod(0o500)
     try:
-        assert folder.file() is None  # the eviction failed: no room
+        assert folder.open() is None  # no file can be made: nothing evicted
     finally:
         private.chmod(0o700)
     assert first.exists()
-    second = _kept(folder)  # the retry succeeds now
+    second = _kept(folder)  # the eviction succeeds now
     assert not first.exists()
     assert sorted(os.listdir(private)) == [second.name]  # within 1 file of 4 bytes
     folder.close()
@@ -173,19 +162,17 @@ def test_a_failed_eviction_stays_counted_and_is_retried() -> None:
 def test_a_failed_delete_on_finish_stays_counted_and_is_retried() -> None:
     folder = OverflowDir(max_files=1, file_bytes=4)
     private = Path(folder.path)
-    file = folder.file()
-    assert file is not None
-    writer = file.open()
+    writer = folder.open()
     assert writer is not None
     writer.write(b"ABCD")
     private.chmod(0o500)
     try:
         writer.finish(delete=True)  # the delete fails
         assert Path(writer.path).exists()
-        assert folder.file() is None  # still counted
+        assert folder.open() is None  # still counted
     finally:
         private.chmod(0o700)
-    assert _kept(folder).exists()  # retried: its place is free
+    assert _kept(folder).exists()  # a closed file now, evicted: its place is free
     assert not Path(writer.path).exists()
     folder.close()
     assert not private.exists()
@@ -198,7 +185,7 @@ def test_a_failed_delete_is_retried_by_close() -> None:
     first = _kept(folder)
     private.chmod(0o500)
     try:
-        assert folder.file() is None
+        assert folder.open() is None
         assert first.exists()
     finally:
         private.chmod(0o700)
@@ -218,8 +205,7 @@ def test_a_failed_close_is_retried_by_the_next_close() -> None:
     try:
         folder.close()  # fails: logged, not raised
         assert folder.closed and path.exists()
-        with pytest.raises(ValueError):
-            folder.file()  # closed to new files all the same
+        assert folder.open() is None  # closed to new files all the same
     finally:
         private.chmod(0o700)
     folder.close()
@@ -233,7 +219,7 @@ def test_a_failed_close_is_retried_at_exit() -> None:
         from nooa.overflow import OverflowDir
 
         folder = OverflowDir()
-        writer = folder.file().open()
+        writer = folder.open()
         writer.write(b"ABCD")
         writer.finish(delete=False)
         os.chmod(folder.path, 0o500)
