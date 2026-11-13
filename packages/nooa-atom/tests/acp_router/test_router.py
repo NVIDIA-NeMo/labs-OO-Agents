@@ -278,14 +278,39 @@ async def test_initialize_advertises_pool_2_steer_to_pool_2(harness):
     assert harness.spawned == []
 
 
-async def test_authenticate_and_unknown_methods_are_method_not_found(harness):
-    for method in ("authenticate", "logout", "_nooa/other"):
+async def test_initialize_offers_terminal_auth_to_clients_that_run_it(harness):
+    frame = await harness.initialize(
+        {"protocolVersion": PROTOCOL_VERSION, "clientCapabilities": {"auth": {"terminal": True}}}
+    )
+    assert frame.message["result"]["authMethods"] == [
+        {
+            "id": "nooa-connect",
+            "name": "Connect a model",
+            "description": "Set up a model provider in a terminal",
+            "type": "terminal",
+            "args": ["--connect"],
+        }
+    ]
+    assert harness.spawned == []
+
+
+async def test_unknown_methods_are_method_not_found(harness):
+    for method in ("logout", "_nooa/other"):
         frame = await harness.call(method, {})
         assert frame.message["error"] == {
             "code": -32601,
             "message": "Method not found",
             "data": {"method": method},
         }
+    assert harness.spawned == []
+
+
+async def test_authenticate_with_the_connect_method_is_answered_by_the_router(harness):
+    # The client ran `nooa atom --connect`; the next worker request takes its result.
+    frame = await harness.call("authenticate", {"methodId": "nooa-connect"})
+    assert frame.message["result"] == {}
+    frame = await harness.call("authenticate", {"methodId": "other"})
+    assert frame.message["error"]["code"] == -32602
     assert harness.spawned == []
 
 

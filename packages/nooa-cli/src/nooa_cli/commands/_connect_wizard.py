@@ -132,6 +132,7 @@ class WizardState:
     probe: Any = None
     prompt_key: Any = None
     proposal: Any = None
+    saved_alias: Any = None
     provider: Any = None
     reasoning_level: Any = None
     guided_reasoning_choice: Any = None
@@ -3294,6 +3295,7 @@ def save_model(state: WizardState) -> bool:
             connect.write(
                 state.result.entry, state.path, alias=state.alias, expected_alias=expected_alias
             )
+        state.saved_alias = state.alias
         view.section("Saved model")
         view.fields(scrub_setup(state, [("Alias", state.alias), ("File", state.path)]))
         view.media_settings(state.result.entry)
@@ -3838,6 +3840,9 @@ def run_wizard(**options):
     Raises ``click.ClickException`` when an approved test fails or on errors
     such as invalid YAML, file errors or network errors; the message never
     contains the API key.
+
+    Returns the alias written, or ``None`` when nothing was saved (``nooa
+    atom --connect`` reports that as its exit code; ``nooa connect`` ignores it).
     """
     state = new_state(options)
     try:
@@ -3859,7 +3864,7 @@ def run_wizard(**options):
                     "Approved connection test failed or was cancelled. Nothing saved.", err=True
                 )
                 raise click.ClickException("Test failed.")
-            return
+            return state.saved_alias
         for step in (
             select_connection,
             select_model,
@@ -3875,7 +3880,7 @@ def run_wizard(**options):
                 if state.test_failed:
                     view.note("Approved connection test failed. Nothing saved.", err=True)
                     raise click.ClickException("Test failed.")
-                return
+                return None
     except (ValueError, OSError, yaml.YAMLError, httpx.HTTPError, PosixOnlyFeatureError) as exc:
         detail = scrub_setup(
             state, view.local_failure(exc, api_key=state.api_key, api_key_env=state.api_key_env)
@@ -3907,3 +3912,4 @@ def run_wizard(**options):
                 dim=True,
             )
         raise click.ClickException(detail) from None
+    return state.saved_alias
