@@ -331,16 +331,11 @@ def test_overflow_write_failure_falls_back_to_memory(tmp_path: Path) -> None:
     path = tmp_path / "out.log"
     stream = TextStream(unit="bytes", head=2, tail=2, overflow=OverflowFile(path=str(path)))
 
-    class Broken:
-        def write(self, data: bytes) -> int:
-            raise OSError("disk full")
-
-        def close(self) -> None:
-            pass
+    def broken(data: bytes) -> int:
+        raise OSError("disk full")
 
     assert stream._file is not None
-    stream._file.file.close()  # type: ignore[union-attr]
-    stream._file.file = Broken()  # type: ignore[assignment]
+    stream._file.write = broken  # type: ignore[method-assign]
     stream.write(b"abcdefgh")
 
     text = stream.close()
@@ -386,29 +381,23 @@ def test_running_snapshot_matches_the_file_on_disk(tmp_path: Path) -> None:
     stream.close()
 
 
-def test_overflow_flush_failure_falls_back_to_memory(tmp_path: Path) -> None:
+def test_overflow_close_failure_falls_back_to_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     path = tmp_path / "out.log"
     stream = TextStream(unit="bytes", head=2, tail=2, overflow=OverflowFile(path=str(path)))
     stream.write(b"abcdefgh")
-    assert stream._file is not None
-    real = stream._file.file
-    assert real is not None
+    real_close = os.close
 
-    class Broken:
-        def write(self, data: bytes) -> int:
-            return real.write(data)
+    def failing_close(fd: int) -> None:
+        real_close(fd)
+        raise OSError("disk full")
 
-        def flush(self) -> None:
-            raise OSError("disk full")
-
-        def close(self) -> None:
-            real.close()
-
-    stream._file.file = Broken()  # type: ignore[assignment]
-
-    text = stream.snapshot()
+    monkeypatch.setattr(os, "close", failing_close)
+    text = stream.close()
+    monkeypatch.undo()
     assert text.full is None and text.reason == "max_length"
-    assert not path.exists()  # handled like a write failure
+    assert not path.exists()  # a file that did not close cleanly is not kept
     assert (text.head, text.tail, text.length) == (b"ab", b"gh", 8)
 
 

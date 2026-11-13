@@ -27,7 +27,10 @@ stay in memory, and the whole stream also goes to an overflow file
 (``nooa.overflow``), up to the output limit. A ``CommandResult`` carries each stream in ``render_output``'s notation
 (whole up to 1 MiB, else ``HEAD``, one ``[... N bytes omitted; ...]`` line
 that names the file, ``TAIL``) and the file path when the text was cut (short
-output keeps no file).
+output keeps no file). With the agent's ``TruncationConfig.overflow_files``
+off (``ShellOwner(overflow_files=False)``) no file is written: a cut stream
+keeps its head and tail, its line says ``full output not kept``, and the
+path is None.
 
 Retention of those files: an ``OverflowDir`` keeps at most 20 files (the
 newest) and deletes the oldest closed files when it needs room, so a path in
@@ -55,7 +58,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
-import dataclasses
 import itertools
 import math
 import os
@@ -220,11 +222,8 @@ def _captures(folder: OverflowDir | None, limit: int) -> tuple[_Capture, _Captur
     def file() -> OverflowFile | None:
         if folder is None or limit <= 0:
             return None
-        new = folder.file()
-        if new is not None and limit < new.max_bytes:
-            # A folder shared by Shells with different limits (an agent's): this Shell's own.
-            new = dataclasses.replace(new, max_bytes=limit)
-        return new
+        # A folder shared by Shells with different limits (an agent's): this Shell's own.
+        return folder.file(max_bytes=limit)
 
     return _Capture(file()), _Capture(file())
 
@@ -361,13 +360,19 @@ class ShellOwner:
 
     __nosnapshot__ = True
 
-    def __init__(self) -> None:
+    def __init__(self, *, overflow_files: bool = True) -> None:
         self._shells: weakref.WeakSet[Shell] = weakref.WeakSet()
         self._closed = False
+        # The agent's ``TruncationConfig.overflow_files``: False writes no file at all.
+        self.overflow_files = overflow_files
         self._overflow: OverflowDir | None = None  # the agent's output files (``overflow_dir``)
 
     def overflow_dir(self) -> OverflowDir | None:
         """The agent's one ``OverflowDir`` (20 files, up to 64 MiB each); None once closed.
+
+        Also None when ``overflow_files`` is False (the agent's
+        ``TruncationConfig.overflow_files``): its Shells, jobs and cells
+        then keep memory only, and write nothing to disk.
 
         Shared by every output source of the agent: cell output, its Shells'
         direct runs and the commands of its launched jobs, so the 20-file cap
@@ -375,7 +380,7 @@ class ShellOwner:
         exit); the folder keeps the newest, so an older path may no longer
         exist (``FileNotFoundError``).
         """
-        if self._closed:
+        if self._closed or not self.overflow_files:
             return None
         if self._overflow is None:
             self._overflow = _new_overflow_dir(_MAX_OUTPUT_BYTES)
@@ -692,8 +697,10 @@ class Shell:
     def _bash_alive(self) -> bool:
         return self._bash is not None and _start_time(self._bash[0]) == self._bash[1]
 
-    def _overflow_dir(self) -> OverflowDir:
+    def _overflow_dir(self) -> OverflowDir | None:
         """The ``OverflowDir`` of a command's captures (20 files, each up to ``max_output`` bytes).
+
+        ``None`` under an owner whose ``overflow_files`` is off: memory only.
 
         Started under an agent session (an owner): the session's one folder,
         shared with every Shell, job and cell of that agent (files up to
@@ -702,6 +709,8 @@ class Shell:
         launched jobs alike, until the Shell closes.
         """
         owner = self._owner
+        if owner is not None and not owner.overflow_files:
+            return None
         if owner is not None and (shared := owner.overflow_dir()) is not None:
             return shared
         if self._overflow is None:
@@ -722,7 +731,6 @@ class Shell:
                 self._own_dir = tempfile.TemporaryDirectory(prefix="nooa-shell-")
             directory = Path(self._own_dir.name)
         stem = f"cmd-{next(self._count)}"
-        out, err = _captures(self._overflow_dir(), self._max_output)
         fifos = [directory / f"{stem}.out.fifo", directory / f"{stem}.err.fifo"]
         source = "/dev/null"
         if stdin is not None:  # a file, written before the command starts
@@ -733,6 +741,9 @@ class Shell:
             source = str(stdin_path)
             fifos.append(stdin_path)  # removed with the FIFOs
         pidfile = self._pidfile = directory / f"{stem}.pid"
+        # The captures hand out files: made last before the ``try`` whose
+        # ``finally`` closes them, so nothing above can fail with one unclosed.
+        out, err = _captures(self._overflow_dir(), self._max_output)
         opened: list[tuple[asyncio.StreamReader, asyncio.BaseTransport, int]] = []
         write_fds: set[int] = set()
         pumps: list[tuple[asyncio.Task[None], asyncio.BaseTransport, _Capture]] = []

@@ -79,7 +79,8 @@ class CaptureConfig(BaseModel):
                 "representation; the path is in the cut line so the LLM can read it. "
                 "The file comes from the session's OverflowDir "
                 "(nooa.runtime.output_capture.capture_overflow) when one is set, else a "
-                "temp file kept when the output was cut."
+                "temp file kept when the output was cut. Ignored (no file) when "
+                "TruncationConfig.overflow_files is False."
             ),
         ),
     ] = False
@@ -237,6 +238,19 @@ class TruncationConfig(BaseModel):
             )
         ),
     ] = 4_096
+    overflow_files: Annotated[
+        bool,
+        Field(
+            description=(
+                "The one switch for output files (nooa.overflow). True: a cut output's "
+                "whole text can go to a file named in its cut line (cells with "
+                "capture.file_backed, an agent's Shell results and job commands). "
+                "False: nothing is ever written to disk; every output keeps its "
+                "in-memory head and tail, and its cut line says the full output was "
+                "not kept."
+            )
+        ),
+    ] = True
     capture: CaptureConfig = CaptureConfig()
     media_capture: MediaCaptureConfig = MediaCaptureConfig()
     # Generous: rendered every turn, especially PythonOutput.value (the LLM
