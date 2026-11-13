@@ -238,6 +238,17 @@ def _check_writable(path: Path) -> None:
         probe.close()
 
 
+def close_db() -> None:
+    """Close the schema connection opened by init_db(). Idempotent."""
+    global _db
+    if _db is not None:
+        try:
+            _db.close()
+        except Exception:
+            log.debug("Failed to close schema connection", exc_info=True)
+        _db = None
+
+
 def init_db() -> int:
     """Create tables and return the number of existing sessions.
 
@@ -270,6 +281,10 @@ def init_db() -> int:
                 "Failed to close thread-local write connection during init_db()", exc_info=True
             )
         del _write_tls.conn
+
+    # Same reason as the two resets above: without this the previous schema
+    # connection (and its handle on the old DB file) leaks on every re-init.
+    close_db()
 
     _db = sqlite3.connect(str(DB_PATH), check_same_thread=False)
     _db.execute("PRAGMA journal_mode=WAL")
