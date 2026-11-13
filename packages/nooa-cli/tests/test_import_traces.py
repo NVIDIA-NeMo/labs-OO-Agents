@@ -574,3 +574,48 @@ def test_import_exits_nonzero_when_sync_fails(
     assert result.exit_code == 1
     assert "failed to sync viewer ingest" in result.output
     assert "timeout waiting for queue drain" in result.output
+
+
+_ATIF = {
+    "schema_version": "ATIF-v1.7",
+    "trajectory_id": "t",
+    "agent": {"name": "a", "version": "1"},
+    "steps": [{"step_id": 1, "source": "user", "message": "hi"}],
+}
+
+
+def test_atif_jsonl_is_not_imported_and_points_to_import_atif(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _patch_viewer_preflight(monkeypatch)
+    posted: list = []
+    monkeypatch.setattr(
+        import_traces, "post_traces_batch_with_retry", lambda *a, **k: posted.append(a)
+    )
+    (tmp_path / "traces.jsonl").write_text(json.dumps(_ATIF) + "\n")
+    result = CliRunner().invoke(import_traces.command, [str(tmp_path)])
+    assert result.exit_code == 1
+    assert not posted
+    assert "1 file(s) hold ATIF trajectories" in result.output
+    assert f"nooa import-atif {tmp_path}" in result.output
+
+
+def test_single_atif_json_file_points_to_import_atif(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    _patch_viewer_preflight(monkeypatch)
+    path = tmp_path / "trajectory.json"
+    path.write_text(json.dumps(_ATIF, indent=2))
+    result = CliRunner().invoke(import_traces.command, [str(path)])
+    assert result.exit_code == 1
+    assert "invalid JSON" not in result.output
+    assert "nooa import-atif" in result.output
+
+
+def test_directory_with_only_atif_json_points_to_import_atif(tmp_path: Path):
+    (tmp_path / "trial").mkdir()
+    (tmp_path / "trial" / "trajectory.json").write_text(json.dumps(_ATIF))
+    result = CliRunner().invoke(import_traces.command, [str(tmp_path)])
+    assert result.exit_code == 1
+    assert "No trace files found" in result.output
+    assert "nooa import-atif" in result.output
