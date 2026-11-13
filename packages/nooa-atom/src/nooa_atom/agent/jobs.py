@@ -32,16 +32,12 @@ from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from nooa._platform import require_posix
-from nooa.agentdoc import (
-    LineSplitter,
-    bounded_lines,
-    hidden,
-    spec,
-)
+from nooa.agentdoc import hidden, spec
 from nooa.context_blocks import EventBase
 from nooa.skill import Skill
 from nooa.snapshot import TextStream, render_output
 from nooa.tools import StreamDone, StreamEvent
+from nooa_atom.agent.lines import LineSplitter, bounded_lines
 from nooa_atom.session.names import ROOT_PATH, check_name, child_path
 
 if TYPE_CHECKING:

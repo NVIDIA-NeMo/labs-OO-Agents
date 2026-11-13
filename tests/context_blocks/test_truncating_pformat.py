@@ -66,7 +66,7 @@ class TestNonStringPformat:
 
 
 class TestOOMSafetyNet:
-    """When max_chars is set on a non-string render, TruncatingStringIO
+    """When max_chars is set on a non-string render, the bounded stream
     stops the in-memory buffer from growing without bound."""
 
     def test_max_chars_caps_nonstring_render(self):

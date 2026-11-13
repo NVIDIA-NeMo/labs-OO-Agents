@@ -140,29 +140,6 @@ def _attr(span, key):
 
 
 # ---------------------------------------------------------------------------
-# _safe_json_value structure preservation
-# ---------------------------------------------------------------------------
-
-
-def test_safe_json_value_preserves_dict_keys_on_overflow():
-    """Even when the serialized input exceeds the cap, the top-level keys survive
-    so readers can still extract ``args``/``kwargs``/``code`` by key (the value is
-    application/json-tagged, so it must parse back to a dict)."""
-    from nooa.tracing._hooks_impl import OpenInferenceHooks
-
-    big = {"args": ["x" * 200_000], "kwargs": {"k": "y" * 200_000}}
-    out = OpenInferenceHooks._safe_json_value(big, max_chars=50_000)
-    parsed = json.loads(out)  # must be valid JSON
-    assert isinstance(parsed, dict), f"overflow output should stay a dict, got {type(parsed)}"
-    assert set(parsed) == {"args", "kwargs"}
-    assert len(out) <= 50_000  # bounded
-
-    # The common code shape also round-trips by key.
-    code_out = OpenInferenceHooks._safe_json_value({"code": "z" * 200_000}, max_chars=50_000)
-    assert "code" in json.loads(code_out)
-
-
-# ---------------------------------------------------------------------------
 # Framework span-kind conformance
 # ---------------------------------------------------------------------------
 
@@ -199,9 +176,10 @@ async def test_agent_method_span_is_agent_kind_with_io(framework_spans):
     assert "args" in parsed and "kwargs" in parsed
     assert _attr(span, SpanAttributes.INPUT_MIME_TYPE) == OpenInferenceMimeTypeValues.JSON.value
 
-    # output.value present, text mime-typed.
-    assert _attr(span, SpanAttributes.OUTPUT_VALUE) is not None
-    assert _attr(span, SpanAttributes.OUTPUT_MIME_TYPE) == OpenInferenceMimeTypeValues.TEXT.value
+    # output.value present: the snapshot preview, valid JSON and JSON mime-typed.
+    json.loads(_attr(span, SpanAttributes.OUTPUT_VALUE))
+    assert _attr(span, SpanAttributes.OUTPUT_MIME_TYPE) == OpenInferenceMimeTypeValues.JSON.value
+    assert _attr(span, "nooa.output.preview.version") == 1
 
     # OI-only export: the legacy native I/O attrs are no longer
     # emitted — input.value/output.value are the single canonical representation.
@@ -250,12 +228,13 @@ async def test_code_execution_span_is_tool_with_io(framework_spans):
     assert "code" in json.loads(input_value), "code_execution input.value must be {'code': ...}"
     assert _attr(span, SpanAttributes.INPUT_MIME_TYPE) == OpenInferenceMimeTypeValues.JSON.value
     assert _attr(span, SpanAttributes.OUTPUT_VALUE) is not None
-    # output.mime_type is JSON for an ExecutionResult (the value is JSON-encoded
-    # stdout/stderr/returned_value), else text/plain — both are valid spec values.
-    assert _attr(span, SpanAttributes.OUTPUT_MIME_TYPE) in {
-        OpenInferenceMimeTypeValues.JSON.value,
-        OpenInferenceMimeTypeValues.TEXT.value,
+    # output.value is the JSON preview of {stdout, stderr, returned_value}.
+    assert set(json.loads(_attr(span, SpanAttributes.OUTPUT_VALUE))) == {
+        "stdout",
+        "stderr",
+        "returned_value",
     }
+    assert _attr(span, SpanAttributes.OUTPUT_MIME_TYPE) == OpenInferenceMimeTypeValues.JSON.value
     # Tool-call identity: function name + JSON args + id (fallback to the
     # execution id when there is no model-provided tool-call id).
     assert _attr(span, ToolCallAttributes.TOOL_CALL_FUNCTION_NAME) == "python_executor"

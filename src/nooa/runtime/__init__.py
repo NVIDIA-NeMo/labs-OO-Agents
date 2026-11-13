@@ -10,7 +10,6 @@ Middleware types are imported directly from ``nooa.runtime.middleware``::
     from nooa.runtime.middleware import LLMCallContext, LLMCallMiddleware
 """
 
-from nooa.agentdoc import TruncatingStringIO
 from nooa.config.truncation_config import TruncationConfig
 from nooa.runtime import media_recovery as _media_recovery  # noqa: F401  registers its recovery
 from nooa.runtime.actor import ActorRuntime
@@ -43,7 +42,6 @@ __all__ = [
     "get_hooks",
     # Truncation system
     "TruncationConfig",
-    "TruncatingStringIO",
     "pprint",
     "show",
 ]

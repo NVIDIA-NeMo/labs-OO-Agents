@@ -15,6 +15,7 @@ from nooa._immutable_json import NativeJSON, freeze, json_containers
 from nooa.agentdoc import spec
 from nooa.context_blocks.events import EventBase
 from nooa.context_blocks.roles import Role
+from nooa.snapshot import capture, object_like
 
 
 class CacheBoundary(BaseModel):
@@ -509,3 +510,17 @@ class LLMResponse(EventBase):
 # model serializer. dict(response) is portable; model_dump() is an archive.
 Mapping.register(LLMResponse)
 Mapping.register(CacheBoundary)
+
+# Snapshots (trace previews) show the readable response, as ``pformat`` does
+# through ``__instance_values__``: ``parts`` and the metadata are ``repr=False``,
+# which ``capture`` reads as hidden.
+capture.register(
+    LLMResponse,
+    object_like(
+        {
+            "content": lambda response: response.content,
+            "reasoning": lambda response: response.reasoning,
+            "tool_calls": lambda response: response.tool_calls,
+        }
+    ),
+)

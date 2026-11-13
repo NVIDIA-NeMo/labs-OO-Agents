@@ -130,7 +130,7 @@ pformat(obj, max_length=None, max_string=None, max_depth=None, expand_all=False,
         concise=False, instance_mode="repr", unquote_strings=False)   # bare pformat is unlimited;
         # the 50/500/4-style caps are DocConfig/TruncationConfig defaults applied by callers
 pprint(obj, ...)                       # same, to stdout (Rich drop-in: console/indent_guides accepted+ignored)
-truncating_pformat(obj, max_chars=N)   # hard char cap via TruncatingStringIO
+truncating_pformat(obj, max_chars=N)   # hard char cap: head + tail around a [... N chars omitted] line
 ```
 
 Truncation is always *visible* — a marker means truncated, a bare literal is complete:

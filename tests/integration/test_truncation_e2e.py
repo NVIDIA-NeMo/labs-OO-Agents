@@ -4,8 +4,9 @@
 
 Tests the interactions between truncation layers:
 
-- **L2** — I/O capture: ``TruncatingStringIO`` head/tail-truncates stdout/stderr
-  during ``execute_code()``, producing ``<truncated-output>`` wrappers.
+- **L2** — I/O capture: a ``nooa.snapshot.TextStream`` head/tail-cuts stdout/stderr
+  during ``execute_code()``, rendered with ``render_output``'s
+  ``[... N chars omitted; ...]`` line.
 - **L3** — Event rendering: ``format_event()`` / ``pformat()`` renders events
   for the LLM context.  ``PythonOutput.stdout`` and ``.stderr`` carry
   ``spec(max_string=None)`` so they pass through verbatim (no re-truncation).
@@ -111,7 +112,7 @@ def _count_tokens(text: str) -> int:
 
 
 class TestL2ToL3Interaction:
-    """L2 (TruncatingStringIO) truncates stdout/stderr at capture time.
+    """L2 (a TextStream) truncates stdout/stderr at capture time.
     L3 (format_event / pformat) must render the result *verbatim* — no
     re-truncation of the already-bounded content.
 
@@ -693,38 +694,38 @@ class TestCrossLayerPipeline:
 
     @pytest.mark.asyncio
     async def test_head_tail_structure_preserved_through_pipeline(self):
-        """The head/tail structure from L2's TruncatingStringIO must survive
+        """The head/tail structure from L2's TextStream must survive
         all the way through L3 event rendering into the context."""
-        from nooa.agentdoc import TruncatingStringIO
+        from nooa.snapshot import TextStream, render_output
 
         # Create a head/tail truncated output directly
-        buf = TruncatingStringIO(limit=200)
-        buf.write("HEAD_CONTENT_" * 20)  # 260 chars, exceeds 200
-        buf.write("TAIL_CONTENT_" * 20)  # more tail content
-        truncated = buf.getvalue()
+        stream = TextStream(unit="chars", head=100, tail=100)
+        stream.write("HEAD_CONTENT_" * 20)  # 260 chars, exceeds 200
+        stream.write("TAIL_CONTENT_" * 20)  # more tail content
+        truncated = render_output(stream.close())
 
-        assert "Output too large" in truncated
-        assert "chars not shown" in truncated
+        marker = "[... 320 chars omitted; full output not kept]"
+        assert marker in truncated
 
         # Now render it through L3
         event = _make_python_output(stdout=truncated)
         rendered = pformat(event, max_string=100)
 
-        # The truncation markers must survive
-        assert "Output too large" in rendered
-        assert "chars not shown" in rendered
+        # The truncation marker must survive
+        assert marker in rendered
 
     def test_l3_rendering_preserves_l2_truncation_notice_in_event_format(self):
         """format_event with event_format must preserve the L2 truncation
         notice verbatim, not wrap it in str(len=...) markers."""
-        from nooa.agentdoc import TruncatingStringIO
+        from nooa.snapshot import TextStream, render_output
 
         # Produce realistic L2 output
-        buf = TruncatingStringIO(limit=500)
+        stream = TextStream(unit="chars", head=250, tail=250)
         for i in range(100):
-            buf.write(f"line {i}: " + "x" * 50 + "\n")
-        l2_output = buf.getvalue()
-        assert buf.was_truncated
+            stream.write(f"line {i}: " + "x" * 50 + "\n")
+        text = stream.close()
+        l2_output = render_output(text)
+        assert not text.complete
 
         event = _make_python_output(stdout=l2_output)
         fmt = XMLBlockFormatter()
