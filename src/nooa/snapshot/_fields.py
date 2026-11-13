@@ -5,8 +5,8 @@
 What lives here:
 
 - the hidden-field rules: agentdoc ``hidden`` / ``spec(hidden=...)``
-  markers and the ``_agentdoc_fields_docs`` overrides of a class or an
-  instance;
+  markers and the ``spec(obj, field, ...)`` overrides of a class or an
+  instance, read through the shared contract ``nooa.agentdoc.markers``;
 - the annotation metadata of a dataclass with string annotations:
   ``typing.get_type_hints(cls, include_extras=True)``; a success is cached
   by class identity in ``_HINTS``. On a failure each annotation is resolved
@@ -38,8 +38,7 @@ from typing import Any, cast
 from pydantic import BaseModel
 from pydantic.fields import FieldInfo
 
-from nooa.agentdoc._docs import SpecAnnotation
-from nooa.agentdoc._visibility import hidden
+from nooa.agentdoc.markers import CLASS_METADATA_ATTR, FIELD_METADATA_ATTR, SpecAnnotation, hidden
 from nooa.snapshot._limits import _State
 from nooa.snapshot._raw import (
     _BASE_MODEL_DICT,
@@ -55,8 +54,6 @@ from nooa.snapshot._raw import (
     _slot_value,
 )
 
-_FIELD_METADATA_ATTR = "_agentdoc_fields_docs"  # agentdoc's per-field ``spec(cls, name, ...)`` map
-_CLASS_METADATA_ATTR = "_agentdoc_docs"  # agentdoc's class-level ``@spec(...)`` keywords
 _DATACLASS_FIELD_TYPE = cast(Any, dataclasses)._FIELD  # a real field (not ClassVar / InitVar)
 _ANNOTATED_ALIAS = type(typing.Annotated[int, "x"])
 """The type of an ``Annotated[...]`` hint, compared by identity (``type(hint) is ...``)."""
@@ -135,8 +132,8 @@ def _visibility_overrides(
     for base in mro:
         if not state.take_node():
             raise _FailClosed
-        read_map(dict.get(_namespace(base, state), _FIELD_METADATA_ATTR), overwrite=False)
-    read_map(dict.get(obj_dict, _FIELD_METADATA_ATTR), overwrite=True)
+        read_map(dict.get(_namespace(base, state), FIELD_METADATA_ATTR), overwrite=False)
+    read_map(dict.get(obj_dict, FIELD_METADATA_ATTR), overwrite=True)
     return overrides
 
 
@@ -203,14 +200,16 @@ def _annotation_spec(
         state: the capture's state.
 
     Returns:
-        The keywords; ``{}`` for an annotation that is neither a string nor
-        an exact ``typing.Annotated`` alias (compared by type identity).
+        The keywords; ``{}`` for an annotation that is neither a string, a
+        ``typing.ForwardRef`` nor an exact ``typing.Annotated`` alias
+        (compared by type identity).
 
     Raises:
-        _FailClosed: a string annotation that did not resolve, or metadata
-            that cannot be read.
+        _FailClosed: a string or ``ForwardRef`` annotation (one that
+            Python 3.14's lazy annotations left unevaluated) that did not
+            resolve, or metadata that cannot be read.
     """
-    if type(annotation) is str:
+    if type(annotation) is str or type(annotation) is typing.ForwardRef:
         metadata = dict.get(hints(), name)
         if metadata is None:
             raise _FailClosed
@@ -311,8 +310,11 @@ def _single_hints(cls: type[Any], state: _State) -> dict[str, tuple[Any, ...]]:
         namespace = _raw_namespace(base, state)
         if namespace is None:
             continue
-        annotations = dict.get(namespace, "__annotations__")
-        if type(annotations) is not dict:
+        try:
+            annotations = _class_annotations(base, namespace, state)
+        except _FailClosed:
+            continue  # unreadable: none of its annotations resolves, so its fields fail closed
+        if annotations is None:
             continue
         module_name = dict.get(namespace, "__module__")
         module = sys.modules.get(module_name) if type(module_name) is str else None
@@ -342,6 +344,77 @@ def _single_hints(cls: type[Any], state: _State) -> dict[str, tuple[Any, ...]]:
             except Exception:
                 continue  # unresolvable: this field fails closed
     return metadata
+
+
+# --- class annotations (PEP 649) ----------------------------------------------------
+
+
+try:  # Python 3.14+: a class may keep its annotations lazily, as an ``__annotate__`` function
+    import annotationlib as _annotationlib  # pyright: ignore[reportMissingImports]
+except ImportError:  # Python 3.12 / 3.13: they are always the namespace's ``__annotations__``
+    _annotationlib = None
+
+
+def _class_annotations(
+    cls: type[Any], namespace: dict[str, Any], state: _State
+) -> dict[str, Any] | None:
+    """The annotations class ``cls`` declares itself, from its raw namespace ``namespace``.
+
+    What ``annotationlib.get_annotations(cls, format=Format.FORWARDREF)``
+    returns, read without the class's or its metaclass's attribute lookup:
+
+    - a ``__annotations__`` dict in the namespace (always so before Python
+      3.14, and with ``from __future__ import annotations``) as it is;
+    - on Python 3.14 and later, the ``__annotations_cache__`` dict Python
+      keeps once ``cls.__annotations__`` was read or assigned;
+    - else, on Python 3.14 and later, the ``__annotate__`` function the class
+      body made (PEP 649), called in the ``FORWARDREF`` format: an
+      ``Annotated[T, hidden]`` keeps its marker even when ``T`` is not
+      defined (``T`` becomes a ``ForwardRef``). This runs the annotation
+      code the class's author wrote, as ``typing.get_type_hints`` does; the
+      result is kept for the capture (``state.annotations``).
+
+    Returns ``None`` when the class declares no annotation. Raises
+    ``_FailClosed`` when they cannot be read: a ``__annotations__`` that is
+    not a ``dict``, or an ``__annotate__`` that raises or returns something
+    else. Its fields' visibility is then unknown, never visible.
+    """
+    annotations = dict.get(namespace, "__annotations__")
+    if annotations is None and _annotationlib is not None:
+        annotations = dict.get(namespace, "__annotations_cache__")
+    if annotations is not None:
+        if type(annotations) is not dict:
+            raise _FailClosed
+        return annotations
+    if _annotationlib is None:
+        return None
+    key = id(cls)
+    cached = state.annotations.get(key)
+    if cached is None or cached[0] is not cls:
+        cached = (cls, _evaluated_annotations(cls, namespace))
+        state.annotations[key] = cached
+    if cached[1] is _UNREADABLE:
+        raise _FailClosed
+    return cached[1]
+
+
+_UNREADABLE: Any = object()
+"""What ``_evaluated_annotations`` returns for lazy annotations that could not be read."""
+
+
+def _evaluated_annotations(cls: type[Any], namespace: dict[str, Any]) -> Any:
+    """``cls``'s lazy annotations in the ``FORWARDREF`` format; ``None`` without any, ``_UNREADABLE`` on failure."""
+    assert _annotationlib is not None
+    try:
+        annotate = _annotationlib.get_annotate_from_class_namespace(namespace)
+        if annotate is None:
+            return None
+        found = _annotationlib.call_annotate_function(
+            annotate, _annotationlib.Format.FORWARDREF, owner=cls
+        )
+    except Exception:
+        return _UNREADABLE
+    return found if type(found) is dict else _UNREADABLE
 
 
 # --- Pydantic models and dataclasses ---------------------------------------------
@@ -417,7 +490,7 @@ def _class_hide_empty(mro: tuple[type[Any], ...], state: _State) -> bool:
     for base in mro:
         if base is object:
             continue
-        raw = dict.get(_namespace(base, state), _CLASS_METADATA_ATTR)
+        raw = dict.get(_namespace(base, state), CLASS_METADATA_ATTR)
         if raw is None:
             continue
         flag = _spec_flags(raw, state).get("hide_empty")
@@ -607,8 +680,8 @@ def _plain_annotation_spec(name: str, mro: tuple[type[Any], ...], state: _State)
     for base in mro:
         if base is object:
             continue
-        annotations = dict.get(_namespace(base, state), "__annotations__")
-        if type(annotations) is not dict:
+        annotations = _class_annotations(base, _namespace(base, state), state)
+        if annotations is None:
             continue
         for key, annotation in dict.items(annotations):
             if type(key) is str and key == name:
@@ -634,8 +707,11 @@ def _class_defaults(mro: tuple[type[Any], ...], state: _State) -> list[tuple[str
         if base is object:
             continue
         namespace = _namespace(base, state)
-        annotations = dict.get(namespace, "__annotations__")
-        if type(annotations) is not dict:
+        try:
+            annotations = _class_annotations(base, namespace, state)
+        except _FailClosed:
+            continue  # unknown: its defaults are not shown (its fields fail closed)
+        if annotations is None:
             continue
         for name in list(dict.keys(annotations)):
             if not state.take_node():

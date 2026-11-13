@@ -34,6 +34,7 @@ from nooa.snapshot._codec import (
     opaque_json,
     pointer_child,
 )
+from nooa.snapshot._keys import key_text
 from nooa.snapshot._model import (
     Mapping,
     Object,
@@ -67,11 +68,12 @@ def _shown(part: str | bytes) -> str:
     return decode(part) if isinstance(part, bytes) else part
 
 
-def _output_text(text: Text) -> str:
+def _output_text(text: Text, note: str | None = None) -> str:
     """``text`` in the output notation: its content when complete, else head, notice line, tail.
 
     The notice says how many units were left out and where the whole
-    output is (``Text.full``); see ``render_output``.
+    output is (``Text.full``); ``note``, when given and no file keeps the
+    output, follows it on the same line. See ``render_output``.
     """
     head, tail = _shown(text.head), _shown(text.tail)
     if text.complete:
@@ -79,7 +81,7 @@ def _output_text(text: Text) -> str:
     omitted = f"[... {text.omitted:,} {text.unit} omitted; "
     full = text.full
     if full is None:
-        line = omitted + "full output not kept]"
+        line = omitted + "full output not kept]" + (f" {note}" if note else "")
     elif full.cut:
         line = omitted + f"{full.path} holds the first {full.kept:,} of {full.total:,} bytes]"
     else:
@@ -132,16 +134,6 @@ _NODE_TYPES = (Scalar, Text, Sequence, Mapping, Object, Unavailable, Ref)  # the
 def _is_node(key: Any) -> bool:
     """Whether ``key`` is a snapshot node (exact type check), not a plain JSON-scalar key."""
     return any(type(key) is node_type for node_type in _NODE_TYPES)
-
-
-def key_text(node: Snapshot) -> str:
-    """A node key's text: its ``render_python`` notation on one line, standard hooks only.
-
-    Capture and ``render_json`` both use it as the node key's JSON object
-    key, so they agree on which keys collide. Registered hooks are left out,
-    so the key does not change when a hook is registered.
-    """
-    return PythonRenderer({}).render(node)
 
 
 def _python_key(key: Any) -> str:
@@ -596,11 +588,15 @@ _STANDARD_HOOKS: dict[str, TextHook] = {
 
 
 class _OutputNotation(PythonRenderer):
-    """``render_output``'s walk: ``Text`` in the output notation, no hooks."""
+    """``render_output``'s walk: ``Text`` in the output notation, no hooks; ``note`` as ``render_output``'s."""
+
+    def __init__(self, note: str | None = None) -> None:
+        super().__init__({})
+        self._note = note
 
     def _text(self, text: Text) -> str:
         """A ``Text`` node in the output notation (``_output_text``), not as a literal."""
-        return _output_text(text)
+        return _output_text(text, self._note)
 
 
 class _RenderPython:
@@ -702,7 +698,7 @@ render_python = _RenderPython()
 """The process-wide ``render_python`` function with its hook registry (see ``_RenderPython``)."""
 
 
-def render_output(snapshot: Snapshot) -> str:
+def render_output(snapshot: Snapshot, *, note: str | None = None) -> str:
     """``snapshot`` as the model sees command output: ``HEAD``, one notice line, ``TAIL``.
 
     A complete ``Text`` is its content. A cut ``Text`` is its head, a line
@@ -712,6 +708,12 @@ def render_output(snapshot: Snapshot) -> str:
         [... 1,234 bytes omitted; full output: /path]
         [... 1,234 bytes omitted; /path holds the first 65,536 of 99,999 bytes]
         [... 1,234 bytes omitted; full output not kept]
+
+    ``note`` (keyword-only, default ``None``): a sentence for the reader
+    when no file keeps the output, put after the last line form, after a
+    space: ``[... 1,234 chars omitted; full output not kept] NOTE``. Not
+    shown when the text is complete or a file keeps it; ``None`` or ``""``:
+    no note.
 
     Bytes are decoded as UTF-8 with replacement. Other nodes use
     ``render_python``'s generic notation without hooks, with nested ``Text``
@@ -725,8 +727,12 @@ def render_output(snapshot: Snapshot) -> str:
     ab
     [... 6 chars omitted; full output: /tmp/out.txt]
     yz
+    >>> print(render_output(Text(head="ab", length=10, unit="chars", reason="max_length"),
+    ...                     note="Print less."))
+    ab
+    [... 8 chars omitted; full output not kept] Print less.
     """
-    return _OutputNotation({}).render(snapshot)
+    return _OutputNotation(note).render(snapshot)
 
 
 # --- JSON notation (trace previews) ---------------------------------------------------
