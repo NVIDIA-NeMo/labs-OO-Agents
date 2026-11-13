@@ -6,6 +6,12 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- A client whose model LiteLLM cannot map to a provider (for example an alias
+  served by an OpenAI-compatible gateway) no longer prints LiteLLM's
+  "Provider List: https://docs.litellm.ai/docs/providers" banner when NOOA
+  looks up its model metadata. With no `context_window` configured, that
+  lookup runs on every turn, so the banner repeated throughout the log. The
+  lookup still returns `None` for such a model.
 - `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
   publishes a runtime event when a job finishes (the job's handle state and
   result say it ended).
