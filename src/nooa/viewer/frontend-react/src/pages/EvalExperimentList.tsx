@@ -123,6 +123,8 @@ export function EvalExperimentList() {
           <div className="text-center py-12 text-gray-500">No experiments found</div>
         ) : (
           experiments.map((exp, idx) => {
+            const hasGrades = (exp.classified_count ?? exp.test_count) > 0;
+            const scoredCount = exp.scored_count ?? 0;
             const passRate =
               exp.test_count > 0 ? ((exp.passed_count / exp.test_count) * 100).toFixed(0) : '0';
             return (
@@ -157,17 +159,27 @@ export function EvalExperimentList() {
                     <div className="text-right">
                       <div
                         className={`text-lg font-semibold ${
-                          parseInt(passRate) === 100
+                          !hasGrades
+                            ? 'text-gray-200'
+                            : parseInt(passRate) === 100
                             ? 'text-green-400'
                             : parseInt(passRate) >= 80
                               ? 'text-yellow-400'
                               : 'text-red-400'
                         }`}
                       >
-                        {passRate}%
+                        {hasGrades
+                          ? `${passRate}%`
+                          : scoredCount > 0 && exp.avg_score != null
+                            ? exp.avg_score.toFixed(3)
+                            : 'No scores'}
                       </div>
                       <div className="text-xs text-gray-500">
-                        {exp.passed_count}/{exp.test_count} passed
+                        {hasGrades
+                          ? `${exp.passed_count}/${exp.test_count} passed`
+                          : scoredCount > 0
+                            ? `Avg score · ${scoredCount}/${exp.test_count} scored`
+                            : `${exp.test_count} unclassified`}
                       </div>
                     </div>
                   </div>

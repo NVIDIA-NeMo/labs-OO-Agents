@@ -97,6 +97,9 @@ export interface ExperimentSummaryItem {
   models: string[];
   test_count: number;
   passed_count: number;
+  classified_count?: number;
+  scored_count?: number;
+  avg_score?: number | null;
   status: string;
   suite_name: string | null;
 }

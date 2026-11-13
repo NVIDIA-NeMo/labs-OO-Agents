@@ -53,5 +53,21 @@ export function assertOk(res: Response, what: string): void {
     publish(err);
     throw err;
   }
-  throw new Error(`${what}: ${res.statusText}`);
+  throw new Error(`${what}: ${res.statusText || `HTTP ${res.status}`}`);
+}
+
+/** Include a backend reason when a trace cannot be materialized. */
+export async function assertOkWithDetail(res: Response, what: string): Promise<void> {
+  if (!res.ok && res.status !== 401 && res.status !== 403) {
+    let detail: string | undefined;
+    try {
+      const body = await res.json();
+      if (typeof body?.detail === 'string') detail = body.detail;
+      else if (typeof body?.error === 'string') detail = body.error;
+    } catch {
+      // Proxies may return plain text or an empty body.
+    }
+    throw new Error(`${what}: ${detail || res.statusText || `HTTP ${res.status}`}`);
+  }
+  assertOk(res, what);
 }
