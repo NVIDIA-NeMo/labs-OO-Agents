@@ -72,7 +72,7 @@ from typing import Annotated, Any, Literal
 
 from nooa import hidden
 from nooa.agentdoc import spec
-from nooa.overflow import OverflowDir, OverflowFile
+from nooa.overflow import OverflowDir
 from nooa.runtime.cell_deadline import deadline_cancel
 from nooa.snapshot import Text, TextStream, cut, render_output, render_python
 from nooa.tools import BashSession
@@ -171,12 +171,19 @@ class CommandResult:
 class _Capture:
     """One stream as a bounded ``TextStream`` (bytes): head and tail in memory, all of it in a file.
 
-    ``file``: the stream's overflow file (from an ``OverflowDir``), or
-    ``None`` to keep memory only.
+    ``folder``: where the stream opens its overflow file once it is cut (at
+    most ``limit`` bytes), or ``None`` to keep memory only.
     """
 
-    def __init__(self, file: OverflowFile | None) -> None:
-        self.stream = TextStream(unit="bytes", head=_HEAD_BYTES, tail=_TAIL_BYTES, overflow=file)
+    def __init__(self, folder: OverflowDir | None, limit: int) -> None:
+        self.stream = TextStream(
+            unit="bytes",
+            head=_HEAD_BYTES,
+            tail=_TAIL_BYTES,
+            overflow=folder if limit > 0 else None,
+            # A folder shared by Shells with different limits (an agent's): this Shell's own.
+            overflow_bytes=max(limit, 0),
+        )
         self.progress: Any = None  # a managed job's preview stream (work_progress)
 
     def feed(self, chunk: bytes) -> None:
@@ -217,15 +224,8 @@ def _new_overflow_dir(per_file: int) -> OverflowDir:
 
 
 def _captures(folder: OverflowDir | None, limit: int) -> tuple[_Capture, _Capture]:
-    """stdout's and stderr's captures, each with a file in ``folder`` (at most ``limit`` bytes)."""
-
-    def file() -> OverflowFile | None:
-        if folder is None or limit <= 0:
-            return None
-        # A folder shared by Shells with different limits (an agent's): this Shell's own.
-        return folder.file(max_bytes=limit)
-
-    return _Capture(file()), _Capture(file())
+    """stdout's and stderr's captures, each opening a file in ``folder`` once cut (at most ``limit`` bytes)."""
+    return _Capture(folder, limit), _Capture(folder, limit)
 
 
 def _result(
@@ -741,8 +741,8 @@ class Shell:
             source = str(stdin_path)
             fifos.append(stdin_path)  # removed with the FIFOs
         pidfile = self._pidfile = directory / f"{stem}.pid"
-        # The captures hand out files: made last before the ``try`` whose
-        # ``finally`` closes them, so nothing above can fail with one unclosed.
+        # The captures open files once cut: made last before the ``try`` whose
+        # ``finally`` closes them, so none is left unclosed.
         out, err = _captures(self._overflow_dir(), self._max_output)
         opened: list[tuple[asyncio.StreamReader, asyncio.BaseTransport, int]] = []
         write_fds: set[int] = set()

@@ -7,37 +7,44 @@ incrementally, so the whole output is never held in memory. It reads no
 live objects and does not import the capture layers; it shares only the
 nodes (``_model``) and the UTF-8 cut points (``_codec``).
 
-Each ``TextStream`` bounds its own overflow file (``nooa.overflow``:
-``OverflowFile``, ``OverflowDir``).
+A ``TextStream`` given an ``OverflowDir`` (``nooa.overflow``) opens its
+overflow file only once its output is cut, and bounds it.
 """
 
 from __future__ import annotations
 
 import collections
 import logging
+import re
 from typing import Literal
 
-from nooa.overflow import OverflowFile, OverflowWriter
+from nooa.overflow import OverflowDir, OverflowWriter
 from nooa.snapshot._codec import complete_prefix, encode_text, safe_end, safe_start
 from nooa.snapshot._model import Overflow, Text
 
 __all__ = ["TextStream"]
 
 _log = logging.getLogger(__name__)
+_SURROGATE = re.compile("[\ud800-\udfff]")
 
 
 class TextStream:
     """One output stream as a bounded ``Text``: head, rolling tail, exact count, optional overflow file.
 
-    ``TextStream(*, unit, head, tail, overflow=None)``, all keyword-only:
+    ``TextStream(*, unit, head, tail, overflow=None, overflow_bytes=None)``, all keyword-only:
 
     - ``unit``: ``"chars"`` (``write`` takes ``str``) or ``"bytes"``
       (``write`` takes ``bytes``, ``bytearray``, ``memoryview`` or ``str``,
       which is encoded as UTF-8).
     - ``head``: the units kept from the start.
     - ``tail``: the units kept from the end (a rolling window).
-    - ``overflow`` (default ``None``): an ``OverflowFile`` to also write the
-      whole output to a file while the stream runs; ``None``: memory only.
+    - ``overflow`` (default ``None``): an ``OverflowDir`` to also write the
+      whole output to a file; ``None``: memory only. The stream opens its
+      file (``overflow.open(max_bytes=overflow_bytes)``) only when its
+      output first exceeds ``head + tail`` units, and then writes all of it
+      from the start; an output that is never cut makes no file.
+    - ``overflow_bytes`` (default ``None``: the folder's ``file_bytes``):
+      the cap of this stream's file, at most the folder's ``file_bytes``.
 
     Methods: ``write(data)``, ``snapshot()``, ``close()``.
     A ``TextStream`` is also a context manager that closes on exit.
@@ -55,20 +62,21 @@ class TextStream:
     - UTF-8-safe cuts: a bytes stream keeps the raw bytes, and a cut
       ``Text`` of it starts and ends on code point boundaries. Bytes are
       never decoded here; a chars stream keeps its ``str`` as written.
-    - The overflow file holds the first ``OverflowFile.max_bytes`` bytes of the
+    - The overflow file holds the first ``overflow_bytes`` bytes of the
       output (``Text.full``; a chars stream's file is UTF-8, cut on a code
       point boundary, except that a ``surrogateescape`` character is written
       as its original byte, so such text need not give valid UTF-8); a file
-      error never raises (see ``OverflowFile``).
+      error never raises (see ``OverflowDir``), and when the folder gives
+      no file (its budget is in use, it is closed) the stream keeps memory
+      only.
 
     Threads: one writer. ``snapshot()`` only reads memory but is not
     synchronised with ``write``: call it from
     the writer's thread, or serialise it with writes.
     There is no lock.
 
-    Raises ``ValueError`` for an unknown ``unit``, a negative ``head`` or
-    ``tail``, or a negative ``overflow.max_bytes``, and ``FileExistsError``
-    when ``overflow.path`` (outside an ``OverflowDir``) already exists.
+    Raises ``ValueError`` for an unknown ``unit``, or a negative ``head``,
+    ``tail`` or ``overflow_bytes``.
 
     >>> from nooa.snapshot import TextStream, render_output
     >>> stream = TextStream(unit="bytes", head=4, tail=4)
@@ -92,18 +100,21 @@ class TextStream:
         unit: Literal["chars", "bytes"],
         head: int,
         tail: int,
-        overflow: OverflowFile | None = None,
+        overflow: OverflowDir | None = None,
+        overflow_bytes: int | None = None,
     ) -> None:
         if unit not in ("chars", "bytes"):
             raise ValueError(f"unit must be 'chars' or 'bytes', got {unit!r}")
         if head < 0 or tail < 0:
             raise ValueError("head and tail must be non-negative")
-        if overflow is not None and overflow.max_bytes < 0:
-            raise ValueError("overflow max_bytes must be non-negative")
+        if overflow_bytes is not None and overflow_bytes < 0:
+            raise ValueError("overflow_bytes must be non-negative")
         self.unit: Literal["chars", "bytes"] = unit
         self.head = head
         self.tail = tail
-        self._file_max = overflow.max_bytes if overflow is not None else 0
+        self._folder = overflow  # until the output is first cut: then its file opens
+        self._file_bytes = overflow_bytes
+        self._file_max = 0
         self._total = 0  # units written
         self._window = _Window(head, tail, b"" if unit == "bytes" else "")
         self._closed: Text | None = None
@@ -112,14 +123,39 @@ class TextStream:
         self._file_failed = False
         self._kept = 0  # bytes written to the file
         self._produced = 0  # bytes produced
-        if overflow is not None:
-            self._file = overflow.open()
-            if self._file is None:
-                self._file_failed = True
-            else:
-                self._path, self._file_max = self._file.path, self._file.max_bytes
+        # A chars stream, until its file opens: the (start, end) of each write holding a
+        # surrogate. Its bytes, and where a cut file ends in them, depend on the write
+        # as a whole (``encode_text``, ``safe_end``), so the file gets it on its own.
+        self._spans: list[tuple[int, int]] = []
 
     # --- the overflow file ---------------------------------------------------------
+
+    def _open(self) -> None:
+        """The output is cut for the first time: open the overflow file and write it all so far.
+
+        Until now memory held the whole output (at most ``head + tail``
+        units), so the file gets exactly what writing it from the start
+        would have given.
+        """
+        folder, self._folder = self._folder, None
+        writer = folder.open(max_bytes=self._file_bytes) if folder is not None else None
+        if writer is None:
+            self._file_failed = True
+            return
+        self._file, self._path, self._file_max = writer, writer.path, writer.max_bytes
+        so_far = self._window.head() + self._window.tail()  # type: ignore[operator]
+        if isinstance(so_far, bytes):
+            self._to_file(so_far)
+            return
+        start = 0  # the writes between spans are surrogate-free: valid UTF-8, joined as is
+        for span_start, span_end in [*self._spans, (len(so_far), len(so_far))]:
+            for part in (so_far[start:span_start], so_far[span_start:span_end]):
+                if part:
+                    data = encode_text(part)
+                    self._produced += len(data)
+                    self._to_file(data)
+            start = span_end
+        self._spans = []
 
     def _fail(self) -> None:
         """Give up the overflow file after a file error: remove it and keep memory only (``Text.full`` is ``None``)."""
@@ -129,13 +165,12 @@ class TextStream:
             file.finish(delete=True)
 
     def _to_file(self, data: bytes) -> None:
-        """Count ``data`` as produced and write what fits of it to the overflow file.
+        """Write what fits of ``data`` to the overflow file.
 
         The file keeps a prefix of the output, at most ``max_bytes``; a chars
         stream's prefix ends on a code point boundary. A write error is
         logged and ends the file (``_fail``); it never raises.
         """
-        self._produced += len(data)
         writer = self._file
         if writer is None:
             return
@@ -171,7 +206,7 @@ class TextStream:
             ``memoryview`` (its raw bytes) and raises ``TypeError`` for anything
             else but ``str``; a ``str`` is encoded as UTF-8 (surrogate escapes as
             their raw bytes, a lone surrogate as ``\\udXXXX`` text). While an overflow file is active,
-            ``data`` is also written to it, up to ``OverflowFile.max_bytes``
+            ``data`` is also written to it, up to ``overflow_bytes``
             (a chars stream encodes it as a bytes stream would). Raises
             ``ValueError`` after ``close()``.
         """
@@ -187,14 +222,23 @@ class TextStream:
                     f"a bytes TextStream takes bytes, bytearray, memoryview or str, "
                     f"not {type(data).__name__}"
                 )
-            self._to_file(data)
         elif not isinstance(data, str):
             raise TypeError(
                 f"a chars TextStream takes str, not {type(data).__name__}; "
                 "write bytes to a bytes stream"
             )
+        if self._folder is not None:
+            if self._total + len(data) > self.head + self.tail:
+                self._open()  # this write cuts the output: write what came before first
+            elif isinstance(data, str) and not data.isascii() and _SURROGATE.search(data):
+                self._spans.append((self._total, self._total + len(data)))
+        if isinstance(data, bytes):
+            self._produced += len(data)
+            self._to_file(data)
         elif self._file is not None:
-            self._to_file(encode_text(data))
+            encoded = encode_text(data)
+            self._produced += len(encoded)
+            self._to_file(encoded)
         self._total += len(data)
         self._window.write(data)
 
