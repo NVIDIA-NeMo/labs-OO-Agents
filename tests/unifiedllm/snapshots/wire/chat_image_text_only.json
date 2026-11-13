@@ -1,0 +1,110 @@
+{
+  "async": {
+    "calls": [
+      {
+        "api": "acompletion",
+        "kwargs": {
+          "api_base": "https://gateway.test/v1",
+          "api_key": "sk-test",
+          "client": {
+            "__client__": "AsyncOpenAI",
+            "max_retries": 0
+          },
+          "max_retries": 0,
+          "messages": [
+            {
+              "content": [
+                {
+                  "text": "What is this?",
+                  "type": "text"
+                },
+                {
+                  "text": "[An image was removed here because this model is not set up to receive images.]",
+                  "type": "text"
+                }
+              ],
+              "role": "user"
+            }
+          ],
+          "model": "openai/gpt-4o-mini"
+        }
+      }
+    ],
+    "responses": [
+      {
+        "content": "No image.",
+        "finish_reason": "stop",
+        "parsed": null,
+        "parts": [
+          "AssistantText"
+        ],
+        "reasoning": null,
+        "replay_scope": "chat:openai:sha256:8a43428062692d369599bd00272fd529aa5949ba715361e20f54e63c444ccea1",
+        "tool_calls": [],
+        "usage": {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cost_usd": 0.0,
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "reasoning_tokens": 0,
+          "total_tokens": 18
+        }
+      }
+    ]
+  },
+  "sync": {
+    "calls": [
+      {
+        "api": "completion",
+        "kwargs": {
+          "api_base": "https://gateway.test/v1",
+          "api_key": "sk-test",
+          "client": {
+            "__client__": "OpenAI",
+            "max_retries": 0
+          },
+          "max_retries": 0,
+          "messages": [
+            {
+              "content": [
+                {
+                  "text": "What is this?",
+                  "type": "text"
+                },
+                {
+                  "text": "[An image was removed here because this model is not set up to receive images.]",
+                  "type": "text"
+                }
+              ],
+              "role": "user"
+            }
+          ],
+          "model": "openai/gpt-4o-mini"
+        }
+      }
+    ],
+    "responses": [
+      {
+        "content": "No image.",
+        "finish_reason": "stop",
+        "parsed": null,
+        "parts": [
+          "AssistantText"
+        ],
+        "reasoning": null,
+        "replay_scope": "chat:openai:sha256:8a43428062692d369599bd00272fd529aa5949ba715361e20f54e63c444ccea1",
+        "tool_calls": [],
+        "usage": {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cost_usd": 0.0,
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "reasoning_tokens": 0,
+          "total_tokens": 18
+        }
+      }
+    ]
+  }
+}

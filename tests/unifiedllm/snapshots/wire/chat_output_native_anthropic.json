@@ -1,0 +1,158 @@
+{
+  "async": {
+    "calls": [
+      {
+        "api": "acompletion",
+        "kwargs": {
+          "api_base": "https://anthropic.test",
+          "api_key": "sk-test",
+          "client": {
+            "__client__": "AsyncHTTPHandler",
+            "max_retries": null
+          },
+          "max_retries": 0,
+          "max_tokens": 512,
+          "messages": [
+            {
+              "content": [
+                {
+                  "text": "Hello",
+                  "type": "text"
+                }
+              ],
+              "role": "user"
+            }
+          ],
+          "model": "anthropic/claude-sonnet-4-5",
+          "output_config": {
+            "format": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "label": {
+                    "title": "Label",
+                    "type": "string"
+                  },
+                  "value": {
+                    "title": "Value",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "value",
+                  "label"
+                ],
+                "title": "Answer",
+                "type": "object"
+              },
+              "type": "json_schema"
+            }
+          }
+        }
+      }
+    ],
+    "responses": [
+      {
+        "content": "{\"value\": 1, \"label\": \"a\"}",
+        "finish_reason": "stop",
+        "parsed": {
+          "label": "a",
+          "value": 1
+        },
+        "parts": [
+          "AssistantText"
+        ],
+        "reasoning": null,
+        "replay_scope": "chat:anthropic:sha256:f2b3b47fd9a71add893f496f8441de86cf6b2a76d87d224a9ad0431601fa9c22",
+        "tool_calls": [],
+        "usage": {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cost_usd": 0.0,
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "reasoning_tokens": 0,
+          "total_tokens": 18
+        }
+      }
+    ]
+  },
+  "sync": {
+    "calls": [
+      {
+        "api": "completion",
+        "kwargs": {
+          "api_base": "https://anthropic.test",
+          "api_key": "sk-test",
+          "client": {
+            "__client__": "HTTPHandler",
+            "max_retries": null
+          },
+          "max_retries": 0,
+          "max_tokens": 512,
+          "messages": [
+            {
+              "content": [
+                {
+                  "text": "Hello",
+                  "type": "text"
+                }
+              ],
+              "role": "user"
+            }
+          ],
+          "model": "anthropic/claude-sonnet-4-5",
+          "output_config": {
+            "format": {
+              "schema": {
+                "additionalProperties": false,
+                "properties": {
+                  "label": {
+                    "title": "Label",
+                    "type": "string"
+                  },
+                  "value": {
+                    "title": "Value",
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "value",
+                  "label"
+                ],
+                "title": "Answer",
+                "type": "object"
+              },
+              "type": "json_schema"
+            }
+          }
+        }
+      }
+    ],
+    "responses": [
+      {
+        "content": "{\"value\": 1, \"label\": \"a\"}",
+        "finish_reason": "stop",
+        "parsed": {
+          "label": "a",
+          "value": 1
+        },
+        "parts": [
+          "AssistantText"
+        ],
+        "reasoning": null,
+        "replay_scope": "chat:anthropic:sha256:f2b3b47fd9a71add893f496f8441de86cf6b2a76d87d224a9ad0431601fa9c22",
+        "tool_calls": [],
+        "usage": {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cost_usd": 0.0,
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "reasoning_tokens": 0,
+          "total_tokens": 18
+        }
+      }
+    ]
+  }
+}

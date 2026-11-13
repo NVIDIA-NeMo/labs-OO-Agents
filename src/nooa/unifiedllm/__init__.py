@@ -41,9 +41,11 @@ from nooa.unifiedllm.registry import (
     get_decision_model,
     get_llm_client,
     get_registry_config,
+    load_llm,
     reload_registry,
     resolve_api_key_from_config,
 )
+from nooa.unifiedllm.request import LLMRequest
 from nooa.unifiedllm.retry import (
     RetryingWrapper,
     sync_retry,
@@ -68,6 +70,7 @@ __all__ = [
     "ResponsesClient",
     # Model registry
     "get_llm_client",
+    "load_llm",
     "get_decision_model",
     "get_registry_config",
     "reload_registry",
@@ -79,6 +82,7 @@ __all__ = [
     "ToolCall",
     "create_tool_from_callable",
     # Response types
+    "LLMRequest",
     "LLMResponse",
     "CacheBoundary",
     "LLMUsage",

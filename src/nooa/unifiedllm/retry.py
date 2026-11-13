@@ -15,7 +15,7 @@ from collections.abc import Callable
 from typing import Any, TypeVar
 
 from nooa.unifiedllm.admission import AdmissionError
-from nooa.unifiedllm.errors import EmptyContentError
+from nooa.unifiedllm.errors import EmptyContentError, _ReplyParseError
 from nooa.unifiedllm.retry_config import RetryConfig
 
 logger = logging.getLogger(__name__)
@@ -151,6 +151,11 @@ def _is_retryable_error(error: Exception, config: RetryConfig) -> tuple[bool, bo
     # and a controller outage should not be mistaken for a provider outage.
     # A higher-level workflow may still retry later if appropriate.
     if isinstance(error, AdmissionError):
+        return False, False
+
+    # The reply arrived; parsing it failed. Re-sending would bill the same
+    # request again, and the error text quotes the reply, so never match it.
+    if isinstance(error, _ReplyParseError):
         return False, False
 
     # Check for empty content error (if enabled)
