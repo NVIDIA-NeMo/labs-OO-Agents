@@ -668,9 +668,11 @@ class OverflowDir:
         """Whether ``close()`` (or the exit) ran: no new files; its files are gone, or a retry is pending."""
         return self._folder.closing
 
-    def file(self) -> OverflowFile | None:
+    def file(self, max_bytes: int | None = None) -> OverflowFile | None:
         """An ``OverflowFile`` for one new writer, within the budget; ``None``: keep memory only.
 
+        ``max_bytes``: this file's cap, at most ``file_bytes`` (``None``:
+        ``file_bytes``), for a folder shared by writers with smaller limits.
         Retries the deletes that failed, creates the file, then deletes the
         oldest finished closed files to make room (see ``OverflowDir``).
         Returns ``None`` when ``max_files`` files are still in use (or could
@@ -692,7 +694,8 @@ class OverflowDir:
             name = folder.new_file()
         if name is None:
             return None
-        file = OverflowFile(path=os.path.join(folder.path, name), max_bytes=folder.file_bytes)
+        cap = folder.file_bytes if max_bytes is None else min(max_bytes, folder.file_bytes)
+        file = OverflowFile(path=os.path.join(folder.path, name), max_bytes=cap)
         object.__setattr__(file, "_folder", folder)  # not a field: see OverflowFile
         return file
 

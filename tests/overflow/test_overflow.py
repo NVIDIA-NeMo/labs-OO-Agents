@@ -173,6 +173,21 @@ def test_the_writer_never_exceeds_the_folders_file_bytes() -> None:
         assert writer.max_bytes == 5 and writer.write(b"0123456789") == 5
 
 
+def test_file_takes_a_smaller_cap_but_never_a_larger_one() -> None:
+    # A folder shared by writers with different limits: file(max_bytes=...) caps
+    # this one file, still the folder's (closing the folder deletes it).
+    with OverflowDir(max_files=2, file_bytes=5) as folder:
+        small, large = folder.file(max_bytes=3), folder.file(max_bytes=100)
+        assert small is not None and large is not None
+        assert (small.max_bytes, large.max_bytes) == (3, 5)
+        writer = _open(small)
+        assert writer.max_bytes == 3 and writer.write(b"0123456789") == 3
+        writer.finish(delete=False)
+        large.release()
+        assert small.path is not None and Path(small.path).read_bytes() == b"012"
+    assert not os.path.exists(small.path)
+
+
 # --- eviction --------------------------------------------------------------------------
 
 

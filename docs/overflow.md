@@ -5,7 +5,7 @@
 | Name | What it is |
 |---|---|
 | `OverflowDir(parent=None, *, max_files=20, file_bytes=64 MiB)` | a bounded private folder of files, always its own `tempfile.mkdtemp` folder (0700, unpredictable name); `parent` only says where to create it |
-| `OverflowDir.file()` | a new `OverflowFile` in the folder (exclusive, `O_NOFOLLOW`, 0600), or `None` when the budget is in use |
+| `OverflowDir.file(max_bytes=None)` | a new `OverflowFile` in the folder (exclusive, `O_NOFOLLOW`, 0600), capped at `min(max_bytes, file_bytes)`, or `None` when the budget is in use |
 | `OverflowFile(path=None, max_bytes=64 MiB)` | one file; standalone or handed out by a folder; `open()` returns its `OverflowWriter`, `release()` gives a folder's unopened file back |
 | `OverflowWriter` | `write(data)` (unbuffered, straight to the descriptor), `finish(delete=...)` (returns whether the file is kept), read-only `path`, `max_bytes`, `written`, `closed` |
 
