@@ -37,6 +37,12 @@ each worker's client with a controller whose state is owned by a parent broker.
   `AdmissionTimeoutError` before provider dispatch and is not retried by the
   provider retry policy.
 - Each retry reacquires capacity. Retry backoff does not hold a slot.
+- Admission errors raised while CodeAct or CodeAct V2 requests its next model
+  response propagate unchanged, without another strategy acquisition or an
+  `LLM API error` event. Applications can distinguish call-cap, admission-timeout,
+  and unavailable-controller decisions and choose their own recovery. This does
+  not change ordinary provider retries, execution-cell error handling, or sandbox
+  exception transport.
 - A queued cancellation removes the waiter. After dispatch, capacity remains
   occupied until the provider task exits, even if its caller is cancelled.
 - Different concurrency, pacing, or cooldown settings for the same process-local
