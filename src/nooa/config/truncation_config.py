@@ -7,9 +7,8 @@ Two layers of bounds:
 1. **Whole-context token budget** (optional, applied at assembly):
    ``max_context_tokens``.
 2. **Sub-configs by mechanism**:
-   - ``capture`` (head/tail truncation of raw text streams via
-     ``TruncatingStringIO`` — used for execute_python's stdout / stderr /
-     error fields).
+   - ``capture`` (head/tail truncation of raw text streams: execute_python's
+     stdout / stderr and the error field, through ``nooa.snapshot.TextStream``).
    - ``media_capture`` (``MediaCaptureConfig``): cap on multimodal content
      blocks (images, audio, files) captured by ``show()`` per
      ``execute_python`` cell.
@@ -40,13 +39,16 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class CaptureConfig(BaseModel):
-    """Char budgets for raw text streams captured via ``TruncatingStringIO``.
+    """Char budgets for raw text streams captured at execution time.
 
     These apply at *capture time* (when execute_python writes to stdout / stderr
-    or formats an exception). The captured text is head/tail-truncated to fit
-    the budget, inside a ``<truncated-output>`` ... ``</truncated-output>``
-    wrapper that says how much was cut and where the full text is, if kept.
-    Error text past its hard cap ends in ``...<truncated>``.
+    or formats an exception). stdout / stderr keep their head and tail
+    (``nooa.runtime.output_capture.CaptureBuffer``, a ``nooa.snapshot.TextStream``)
+    around ``render_output``'s cut line, ``[... N chars omitted; full output:
+    PATH]`` or ``[... N chars omitted; full output not kept]``. Error text keeps
+    its head and tail the same way, around ``[... N chars omitted; full output
+    not kept]``; past its hard transport cap only the head is kept, before
+    that line.
 
     Field naming: ``max_<stream>`` — char count, no ``_chars`` suffix needed
     inside the capture config since every field here is char-based.
@@ -72,10 +74,14 @@ class CaptureConfig(BaseModel):
         bool,
         Field(
             description=(
-                "When True, stdout/stderr capture uses FileBackedTruncatingStringIO "
-                "which streams full output to a temp file on disk while still "
-                "truncating the in-memory representation. The temp file path is "
-                "included in the truncation notice so the LLM can reference it."
+                "When True, stdout/stderr capture also writes the full output to a "
+                "file (up to 64 MiB) while still truncating the in-memory "
+                "representation; the path is in the cut line so the LLM can read it. "
+                "The file comes from the session's OverflowDir "
+                "(nooa.runtime.output_capture.capture_overflow) when one is set, else the "
+                "process's own private OverflowDir (removed at exit). Ignored (no file) when "
+                "TruncationConfig.overflow_files is False, or when the session set "
+                "capture_overflow to NO_OVERFLOW_FILES (its files are off)."
             ),
         ),
     ] = False
@@ -83,7 +89,7 @@ class CaptureConfig(BaseModel):
         str | None,
         Field(
             description=(
-                "A sentence appended to the notice's 'not recoverable' line when a "
+                "A sentence put after the cut line when a "
                 "stream is cut and no file keeps the full output (None: nothing)."
             ),
         ),
@@ -233,6 +239,19 @@ class TruncationConfig(BaseModel):
             )
         ),
     ] = 4_096
+    overflow_files: Annotated[
+        bool,
+        Field(
+            description=(
+                "The one switch for output files (nooa.overflow). True: a cut output's "
+                "whole text can go to a file named in its cut line (cells with "
+                "capture.file_backed, an agent's Shell results and job commands). "
+                "False: nothing is ever written to disk; every output keeps its "
+                "in-memory head and tail, and its cut line says the full output was "
+                "not kept."
+            )
+        ),
+    ] = True
     capture: CaptureConfig = CaptureConfig()
     media_capture: MediaCaptureConfig = MediaCaptureConfig()
     # Generous: rendered every turn, especially PythonOutput.value (the LLM

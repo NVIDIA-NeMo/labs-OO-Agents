@@ -291,9 +291,13 @@ Cancelling a final-result wait does not cancel the job; owner cancellation does
 stop the command. Timeout returns a `CommandResult` with return code 124 and
 `timed_out=True`.
 
-A cell's printed stdout over 50,000 characters (stderr over 2,000) is cut in
-memory around a `<truncated-output>` marker, with no file; the marker says to
-write large output to a file and read it with `self.files.read(path)`.
+A cell's printed stdout over 50,000 characters (stderr over 2,000) keeps its
+head and tail around one `[... N chars omitted; full output: <path>]` line; the
+whole output is in the session's overflow folder until the session closes (the
+folder keeps the newest files, so an older path may be gone). When no file could
+be kept the line ends `full output not kept]`, followed by a hint to write large
+output to a file and read it with `self.files.read(path)`. A cell error over
+10,000 characters is cut the same way, with `full output not kept]`.
 
 Final `stdout` and `stderr` summaries are whole up to 1 MiB per stream, otherwise
 head (256 KiB) and tail (768 KiB) around a `[... N bytes omitted; full output: <path>]`
@@ -301,16 +305,15 @@ marker. Whenever a summary is cut,
 `stdout_path` and `stderr_path` name capture files, for managed jobs and direct
 `await sh.run(...)` calls alike; short output keeps no file. Each file holds at
 most the Shell's `max_output` bytes per stream (64 MiB by default); the marker
-reports capture-limit truncation. Retention: a job's files are removed when the
-job is pruned or the manager closes. A direct run's files are removed when that
-Shell closes (`aclose`, `async with` exit) or, for a Shell started under an
-owner (an Atom session owns the Shells its cells start), when the owner closes;
-under an owner they outlive a dropped Shell, so `r = await Shell().run(cmd)` in
-a cell keeps `r.stdout_path` readable until the session closes. A Shell with no
-owner that is dropped unclosed keeps them while a result naming them is alive.
-Direct-run files are not pruned before then: each long command keeps up to
-`max_output` bytes per stream until the Shell or session closes. This does not
-provide a PTY or live-input API.
+reports capture-limit truncation. Retention: the files live in a `nooa.overflow`
+`OverflowDir` that keeps at most 20 files, deleting the oldest closed ones when it
+needs room (so an earlier result's path may be gone: opening it raises
+`FileNotFoundError`). In an Atom session there is one folder per agent, shared by
+its Shells, its jobs' commands and its cell output; its files outlive closed or
+dropped Shells and jobs, and go when the session closes. Without an agent each
+Shell has its own folder, removed when the Shell closes (`aclose`, `async with`
+exit). Files are otherwise deleted only at interpreter exit, never by garbage
+collection. This does not provide a PTY or live-input API.
 
 ## Python session namespace and optional Done reflection
 

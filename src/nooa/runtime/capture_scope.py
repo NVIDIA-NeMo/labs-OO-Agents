@@ -65,9 +65,13 @@ class CaptureScope:
         from nooa.runtime.actor import _make_capture_buffer, _stderr_buffer_var, _stdout_buffer_var
 
         self.active = True
-        capture = self.config.capture
-        self.stdout = _TextLease(self, _make_capture_buffer(capture.max_stdout, capture))
-        self.stderr = _TextLease(self, _make_capture_buffer(capture.max_stderr, capture))
+        capture, files = self.config.capture, self.config.overflow_files
+        self.stdout = _TextLease(
+            self, _make_capture_buffer(capture.max_stdout, capture, overflow_files=files)
+        )
+        self.stderr = _TextLease(
+            self, _make_capture_buffer(capture.max_stderr, capture, overflow_files=files)
+        )
         self.media = _MediaBuffer(
             max_attachments=self.config.media_capture.max_attachments_per_execution,
             accepts_write=self.accepts_write,

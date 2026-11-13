@@ -13,14 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import codecs
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from nooa.snapshot import Text, cut, merge, render_output
 from nooa_atom.agent.work_manager import MAX_BYTES_LIMIT, Throttle, check_policy
 
 __all__ = ["MAX_BYTES_LIMIT", "ShellProgress", "Throttle"]
-
-_MARK = "\n[... progress omitted ...]\n"
 
 
 def _safe_end(data: bytes | bytearray, end: int) -> int:
@@ -43,45 +42,58 @@ def _safe_start(data: bytes, start: int) -> int:
     return start
 
 
-def _keep(text: str, limit: int) -> tuple[str, int]:
-    """``text`` cut to its head and tail of ``limit`` UTF-8 bytes, and the bytes left out."""
-    data = text.encode("utf-8")
-    if len(data) <= limit:
-        return text, 0
-    head_end = _safe_end(data, limit // 4)
-    tail_start = _safe_start(data, len(data) - (limit - head_end))
-    head = data[:head_end].decode("utf-8", errors="replace")
-    tail = data[tail_start:].decode("utf-8", errors="replace")
-    mark = _MARK.encode("utf-8")
-    earlier = data[head_end:tail_start].count(mark) * len(mark)  # not output: not counted
-    return head + _MARK + tail, tail_start - head_end - earlier
+def _text(text: str) -> Text:
+    """One batch of a stream's output as a complete bytes ``Text`` (UTF-8)."""
+    data = text.encode("utf-8", errors="surrogateescape")
+    return cut(data, head=len(data), tail=0)
+
+
+def _join(first: Text, later: Text, limit: int) -> Text:
+    """``first`` then ``later``, keeping a head of ``limit // 4`` and a tail of the rest (bytes)."""
+    head = limit // 4
+    return merge(first, later, head, limit - head)
 
 
 @dataclass(frozen=True)
 class ShellProgress:
     """Output of a running command since the last preview; the CommandResult has it all.
 
-    ``omitted`` counts bytes left out (head and tail kept) when unread batches merged.
+    ``omitted`` counts bytes left out (head and tail kept) when unread batches
+    merged; the text then has ``render_output``'s cut line where they were,
+    ``[... N bytes omitted; full output not kept]`` (not kept by the
+    preview: the ``CommandResult`` has the whole output).
     """
 
     stdout: str = ""
     stderr: str = ""
     omitted: int = 0
     batches: int = 1
+    # Each stream as a bounded bytes ``Text`` (the source of ``stdout`` / ``stderr``).
+    _out: Text | None = field(default=None, repr=False, compare=False, kw_only=True)
+    _err: Text | None = field(default=None, repr=False, compare=False, kw_only=True)
+
+    def _texts(self) -> tuple[Text, Text]:
+        return (
+            self._out if self._out is not None else _text(self.stdout),
+            self._err if self._err is not None else _text(self.stderr),
+        )
 
     def _merge(self, later: ShellProgress, limit: int) -> tuple[ShellProgress, int]:
         """One preview of ``self`` then ``later``, each stream bounded; and batches cut."""
-        out, cut_out = (
-            _keep(self.stdout + later.stdout, limit) if later.stdout else (self.stdout, 0)
-        )
-        err, cut_err = (
-            _keep(self.stderr + later.stderr, limit) if later.stderr else (self.stderr, 0)
-        )
-        omitted = cut_out + cut_err
+        (out, err), (later_out, later_err) = self._texts(), later._texts()
+        out = _join(out, later_out, limit) if later_out.length else out
+        err = _join(err, later_err, limit) if later_err.length else err
+        omitted = out.omitted + err.omitted
+        cut = omitted > self.omitted + later.omitted
         merged = ShellProgress(
-            out, err, self.omitted + later.omitted + omitted, self.batches + later.batches
+            render_output(out),
+            render_output(err),
+            omitted,
+            self.batches + later.batches,
+            _out=out,
+            _err=err,
         )
-        return merged, 1 if omitted else 0
+        return merged, 1 if cut else 0
 
 
 class _Stream:
@@ -146,7 +158,9 @@ class _Stream:
         self.lines -= chunk.count(b"\n")
         text = chunk.decode("utf-8", errors="replace")
         if text and self.owner.live():
-            self.owner.sink.emit(ShellProgress(**{self.name: text}))
+            self.owner.sink.emit(
+                ShellProgress(stdout=text) if self.name == "stdout" else ShellProgress(stderr=text)
+            )
 
     def flush_all(self) -> None:
         """Deliver what is pending (under the policy in force), in batches it allows."""

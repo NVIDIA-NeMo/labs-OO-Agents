@@ -34,13 +34,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from nooa._platform import require_posix
 from nooa.agentdoc import (
     LineSplitter,
-    TruncatingStringIO,
     bounded_lines,
     hidden,
     spec,
 )
 from nooa.context_blocks import EventBase
 from nooa.skill import Skill
+from nooa.snapshot import TextStream, render_output
 from nooa.tools import StreamDone, StreamEvent
 from nooa_atom.session.names import ROOT_PATH, check_name, child_path
 
@@ -51,10 +51,12 @@ __all__ = ["JobInfo", "JobUpdate", "JobsApi", "JobsLost", "Throttle"]
 
 JOBS_CHANNEL = "jobs"
 # Characters kept of stdout and, separately, of stderr on a run's done
-# update (the end of each stream); nothing more is kept anywhere.
+# update (the end of each stream); nothing more is kept anywhere. The tail is
+# of the line-framed output: each line already bounded to _LINE_CHARS.
 _TAIL_CHARS = 20_000
-# Longest delivered line (run progress, tail), in characters; the rest of the
-# line is replaced by a "[... N chars of this line omitted]" marker.
+# Longest delivered line (run progress, tail), in characters: a longer line is
+# its first _LINE_CHARS characters, then nooa.snapshot's render_output line
+# "[... N chars omitted; full output not kept]" (LineSplitter).
 _LINE_CHARS = 8_000
 # Bytes read from a pipe or a tailed file at a time.
 _CHUNK_BYTES = 64 * 1024
@@ -745,7 +747,7 @@ class JobsApi(Skill):
         """
         # Per stream, the kept end of the output (in memory; the full output only with log_path=).
         tails = {
-            kind: TruncatingStringIO(limit=_TAIL_CHARS, tail_chars=_TAIL_CHARS)
+            kind: TextStream(unit="chars", head=0, tail=_TAIL_CHARS)
             for kind in ("stdout", "stderr")
         }
         done = [StreamDone(kind="done", returncode=0, timed_out=False)]
@@ -773,8 +775,8 @@ class JobsApi(Skill):
             return {
                 "returncode": done[0].returncode,
                 "timed_out": done[0].timed_out,
-                "stdout": tails["stdout"].getvalue(),
-                "stderr": tails["stderr"].getvalue(),
+                "stdout": render_output(tails["stdout"].close()),
+                "stderr": render_output(tails["stderr"].close()),
                 "log_path": job.log_path,
             }
 
@@ -952,7 +954,8 @@ class JobsApi(Skill):
         ``notification["jobs"]`` with ``returncode`` (124 on timeout),
         ``timed_out``, ``stdout`` and ``stderr``. ``stdout`` and ``stderr`` are
         each capped at 20,000 chars: only the last 20,000 of each stream are
-        kept, after a ``[... N chars omitted]`` line. For the full output pass
+        kept, after a ``[... N chars omitted; full output not kept]`` line.
+        For the full output pass
         ``log_path=``: stdout and stderr are written there as lines arrive
         (interleaved; relative to the command's directory; overwritten), and
         the done update and ``JobInfo`` carry the path. In a pipe

@@ -194,7 +194,8 @@ class TestLineSplitter:
         for _ in range(10):
             lines += splitter.feed(b"x" * 1_000)
         lines += splitter.feed(b"\nnext\n")
-        assert lines == ["xxxxx[... 9,995 chars of this line omitted]\n", "next\n"]
+        # The line's cut through nooa.snapshot: render_output of a head-only chars stream.
+        assert lines == ["xxxxx\n[... 9,995 chars omitted; full output not kept]\n", "next\n"]
         assert bytes(seen) == b"x" * 10_000 + b"\nnext\n"
 
     def test_a_character_split_across_chunks_decodes_whole(self):
@@ -247,7 +248,10 @@ class TestBoundedLines:
             peak = tracemalloc.get_traced_memory()[1] - baseline
         finally:
             tracemalloc.stop()
-        assert lines == ["z" * 100 + "[... 2,999,900 chars of this line omitted]\n", "end"]
+        assert lines == [
+            "z" * 100 + "\n[... 2,999,900 chars omitted; full output not kept]\n",
+            "end",
+        ]
         assert total == 3_000_004
         assert peak < 100_000
 
@@ -256,7 +260,11 @@ class TestBoundedLines:
         reader.feed_data(b"a\n" + b"b" * 70_000 + b"\nc")
         reader.feed_eof()
         lines = [line async for line in bounded_lines(reader, max_line_chars=10)]
-        assert lines == ["a\n", "b" * 10 + "[... 69,990 chars of this line omitted]\n", "c"]
+        assert lines == [
+            "a\n",
+            "b" * 10 + "\n[... 69,990 chars omitted; full output not kept]\n",
+            "c",
+        ]
 
 
 def test_unrecoverable_hint_follows_the_not_recoverable_line():
@@ -268,16 +276,14 @@ def test_unrecoverable_hint_follows_the_not_recoverable_line():
     assert "The 20 chars in the middle are not recoverable.\n" in plain.getvalue()
 
 
-def test_docs_name_the_wrapper_the_stream_emits():
-    """The Agent prompt and CaptureConfig describe the marker TruncatingStringIO really writes."""
+def test_docs_name_the_cut_line_cell_errors_emit():
+    """The Agent prompt and CaptureConfig describe the line a cut cell error really has."""
     from nooa.agent import Agent
-    from nooa.agentdoc._truncating_stream import TruncatingStringIO
     from nooa.config.truncation_config import CaptureConfig
+    from nooa.errors.formatting import format_error_for_llm
 
-    buf = TruncatingStringIO(limit=50, tail_chars=10)
-    buf.write("x" * 500)
-    value = buf.getvalue()
-    assert value.startswith("<truncated-output>") and value.endswith("</truncated-output>")
+    value = format_error_for_llm(RuntimeError("x" * 500), max_error=50, tail_chars=10)
+    assert "\n[... 464 chars omitted; full output not kept]\n" in value
     for text in (Agent.__doc__, CaptureConfig.__doc__):
-        assert "<truncated-output>" in text and "</truncated-output>" in text
-        assert "<truncated>...</truncated>" not in text
+        assert "full output not kept]" in text
+        assert "<truncated-output>" not in text and "<truncated>" not in text

@@ -21,19 +21,36 @@ the Shells started under it; a launched Shell closes with its job. Inside a
 harness's ``preserve_background_services()`` scope, closing ends bash only:
 that external harness owns (and must clean up) the background processes.
 
-A command's stdout and stderr are read through pipes into files, each up to
-an output limit (past it, bytes are counted but not kept, and the summary says
-so): in the job's scratch directory when launched, else in the Shell's own
-output directory. A ``CommandResult`` carries a bounded summary of each stream
-and the file path when the summary was cut (short output keeps no file).
+A command's stdout and stderr are each read through a pipe into a bounded
+``nooa.snapshot.TextStream`` (bytes): the first 256 KiB and the last 768 KiB
+stay in memory, and the whole stream also goes to an overflow file
+(``nooa.overflow``), up to the output limit. A ``CommandResult`` carries each stream in ``render_output``'s notation
+(whole up to 1 MiB, else ``HEAD``, one ``[... N bytes omitted; ...]`` line
+that names the file, ``TAIL``) and the file path when the text was cut (short
+output keeps no file). With the agent's ``TruncationConfig.overflow_files``
+off (``ShellOwner(overflow_files=False)``) no file is written: a cut stream
+keeps its head and tail, its line says ``full output not kept``, and the
+path is None.
 
-Retention of those files: a job's are removed when the job is pruned or its
-manager closes. A direct ``run``'s are removed when that Shell closes
-(``aclose``, ``async with`` exit) or, for a Shell started under an owner, when
-the owner closes: under an owner they outlive a dropped Shell (``r = await
-Shell().run(...)`` in a cell keeps ``r.stdout_path`` until the session ends).
-A Shell with no owner that is dropped unclosed keeps them while any result
-naming them is alive.
+Retention of those files: an ``OverflowDir`` keeps at most 20 files (the
+newest) and deletes the oldest closed files when it needs room, so a path in
+an earlier result may no longer exist (opening it raises
+``FileNotFoundError``); the in-memory head and tail of every result are
+unaffected. Files are deleted only when their folder closes, by that cap, or
+at interpreter exit, never when an object is garbage collected.
+
+- In an agent session (a Shell started under an owner): one ``OverflowDir``
+  per agent, ``ShellOwner.overflow_dir()``, shared by every output source of
+  that agent: its Shells' direct runs, the commands inside its launched jobs
+  and its cell output. The 20-file cap is per agent, whatever produced the
+  files; each file holds up to ``min(max_output, 64 MiB)`` bytes. Its files
+  outlive a closed or dropped Shell and its jobs, and go when the session
+  (the owner) closes.
+- Without an agent (plain library use): one private ``OverflowDir`` per Shell
+  (files of up to ``max_output`` bytes) for its direct runs and the commands
+  it runs inside launched jobs, removed when that Shell closes (``aclose``,
+  ``async with`` exit, its job's end for a launched Shell). A Shell dropped
+  unclosed keeps them until interpreter exit.
 """
 
 from __future__ import annotations
@@ -45,21 +62,27 @@ import itertools
 import math
 import os
 import shlex
-import shutil
 import signal
 import sys
 import tempfile
 import weakref
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Annotated, Any, Literal
+from typing import Annotated, Any, Literal
 
 from nooa import hidden
 from nooa.agentdoc import spec
+from nooa.overflow import OverflowDir
 from nooa.runtime.cell_deadline import deadline_cancel
+from nooa.snapshot import Text, TextStream, cut, render_output, render_python
 from nooa.tools import BashSession
 from nooa_atom.agent.metrics import atom_metrics
-from nooa_atom.agent.work_manager import _progress_sink, current_name, describe, job_dir
+from nooa_atom.agent.work_manager import (
+    _progress_sink,
+    current_name,
+    describe,
+    job_dir,
+)
 from nooa_atom.agent.work_progress import _ShellProgress
 
 __all__ = ["CommandResult", "Shell", "ShellOwner", "default_cwd", "shell_owner"]
@@ -112,9 +135,9 @@ _CLOSED_BEFORE = "the shell was closed before this command started; it did not r
 
 def _deadline_note(command: str) -> str:
     """The cell deadline's note for the Shell command the cell was awaiting."""
-    shown = command if len(command) <= 80 else command[:77] + "..."
+    shown = render_python(cut(command, head=80, tail=0))  # whole: its repr
     return (
-        f"It stopped the Shell command {shown!r}; the Shell is still usable. A command's own "
+        f"It stopped the Shell command {shown}; the Shell is still usable. A command's own "
         "timeout= returns exit 124 instead. For long commands, use "
         "self.jobs.launch(sh.run(cmd), name=...) and return Waiting."
     )
@@ -129,9 +152,9 @@ _CLOSED_DURING = "the shell was closed while this command ran; the command was s
 class CommandResult:
     """One command's outcome: exit code, output, and bash's directory after it.
 
-    ``stdout``/``stderr``: whole up to 1 MiB, else head+tail around a marker;
-    ``*_path`` then names the capture (up to ``max_output``, default 64 MiB),
-    kept while the job is listed (direct ``run``: until its Shell/session closes).
+    ``stdout``/``stderr``: whole up to 1 MiB, else head+tail around a
+    ``[... N bytes omitted; ...]`` line; ``*_path``: that file (to 64 MiB),
+    kept until the session closes (outside one: its Shell) or evicted.
     """
 
     returncode: int
@@ -146,26 +169,26 @@ class CommandResult:
 
 
 class _Capture:
-    """One stream into a file, up to ``limit`` bytes; the last bytes also in memory."""
+    """One stream as a bounded ``TextStream`` (bytes): head and tail in memory, all of it in a file.
 
-    def __init__(self, path: str | None, limit: int) -> None:
-        self.path = path
-        self.limit = limit
-        self.file: IO[bytes] = open(path, "w+b") if path else tempfile.TemporaryFile()  # noqa: SIM115
-        self.written = 0
-        self.total = 0
-        self.tail = bytearray()
+    ``folder``: where the stream opens its overflow file once it is cut (at
+    most ``limit`` bytes), or ``None`` to keep memory only.
+    """
+
+    def __init__(self, folder: OverflowDir | None, limit: int) -> None:
+        self.stream = TextStream(
+            unit="bytes",
+            head=_HEAD_BYTES,
+            tail=_TAIL_BYTES,
+            overflow=folder if limit > 0 else None,
+            # A folder shared by Shells with different limits (an agent's): this Shell's own.
+            overflow_bytes=max(limit, 0),
+        )
         self.progress: Any = None  # a managed job's preview stream (work_progress)
 
     def feed(self, chunk: bytes) -> None:
-        self.total += len(chunk)
-        room = self.limit - self.written
-        if room > 0:
-            part = chunk[:room]
-            self.file.write(part)
-            self.written += len(part)
-        self.tail += chunk
-        del self.tail[:-_TAIL_BYTES]
+        with contextlib.suppress(ValueError):  # closed: late output has no reader
+            self.stream.write(chunk)
 
     async def pump(self, stream: asyncio.StreamReader) -> None:
         with contextlib.suppress(Exception):
@@ -176,55 +199,40 @@ class _Capture:
             if self.progress is not None:
                 self.progress.feed(b"", final=True)
 
-    def summary(self) -> tuple[str, str | None]:
-        """The stream's text, or its head and tail around a marker; and the path if cut."""
-        self.file.flush()
-        self.file.seek(0)
-        if self.total <= _SUMMARY_BYTES and self.total <= self.written:
-            return self.file.read(self.total).decode("utf-8", errors="replace"), None
-        # The file holds the first ``written`` bytes (maybe fewer than a head, under a
-        # small max_output) and memory the last ones; the marker counts what neither kept.
-        head_bytes = self.file.read(_HEAD_BYTES)
-        kept_tail = min(len(self.tail), self.total - len(head_bytes))
-        tail_bytes = bytes(self.tail[len(self.tail) - kept_tail :])
-        omitted = self.total - len(head_bytes) - kept_tail
-        if omitted == 0:  # head and tail meet: the text is whole even though the file is cut
-            return (head_bytes + tail_bytes).decode("utf-8", errors="replace"), None
-        head = head_bytes.decode("utf-8", errors="replace")
-        tail = tail_bytes.decode("utf-8", errors="replace")
-        if self.total > self.written:
-            where = (
-                f"over the {self.limit:,}-byte output limit: {self.path} holds only the "
-                f"first {self.written:,} of {self.total:,} bytes"
-                if self.path
-                else f"over the output limit; output not kept ({self.total:,} bytes)"
-            )
-        else:
-            where = f"full output: {self.path}" if self.path else "full output not kept"
-        return f"{head}\n[... {omitted:,} bytes omitted; {where}]\n{tail}", self.path
+    def text(self, *, final: bool) -> Text:
+        """The stream so far (``final``: closed, its file kept only if cut)."""
+        return self.stream.close() if final else self.stream.snapshot()
 
     def close(self) -> None:
         with contextlib.suppress(Exception):
-            self.file.close()
+            self.stream.close()
 
 
-def _captures(directory: Path | None, stem: str, limit: int) -> tuple[_Capture, _Capture]:
-    if directory is None:
-        return _Capture(None, limit), _Capture(None, limit)
-    return (
-        _Capture(str(directory / f"{stem}.stdout"), limit),
-        _Capture(str(directory / f"{stem}.stderr"), limit),
-    )
+def _summary(text: Text) -> tuple[str, str | None]:
+    """A stream's text in ``render_output``'s notation, and its file path if it was cut."""
+    return render_output(text), text.full_path
 
 
-def _result(code: int, timed_out: bool, out: _Capture, err: _Capture, cwd: str) -> CommandResult:
-    stdout, stdout_path = out.summary()
-    stderr, stderr_path = err.summary()
+_OVERFLOW_FILES = 20
+"""How many overflow files one folder keeps (the newest)."""
+
+
+def _new_overflow_dir(per_file: int) -> OverflowDir:
+    """A private ``OverflowDir`` of ``_OVERFLOW_FILES`` files, each up to ``per_file`` bytes (the per-capture cap)."""
+    return OverflowDir(max_files=_OVERFLOW_FILES, file_bytes=max(per_file, 0))
+
+
+def _captures(folder: OverflowDir | None, limit: int) -> tuple[_Capture, _Capture]:
+    """stdout's and stderr's captures, each opening a file in ``folder`` once cut (at most ``limit`` bytes)."""
+    return _Capture(folder, limit), _Capture(folder, limit)
+
+
+def _result(
+    code: int, timed_out: bool, out: _Capture, err: _Capture, cwd: str, *, final: tuple[bool, bool]
+) -> CommandResult:
+    stdout, stdout_path = _summary(out.text(final=final[0]))
+    stderr, stderr_path = _summary(err.text(final=final[1]))
     return CommandResult(code, timed_out, stdout, stderr, cwd, stdout_path, stderr_path)
-
-
-def _release(_directory: object) -> None:
-    """Nothing: a finalizer that only held ``_directory`` until its result went."""
 
 
 def _start_time(pid: int) -> str | None:
@@ -312,9 +320,9 @@ _BLOCKER_CHARS = 80
 def _blocker(command: str | None, job: str | None) -> str:
     """The command running in a Shell, as a note names it: `cmd` (job name)."""
     flat = " ".join((command or "a command").split())
-    if len(flat) > _BLOCKER_CHARS:
-        flat = flat[: _BLOCKER_CHARS - 1] + "…"
-    return f"`{flat}`" + (f" (job {job})" if job else "")
+    text = cut(flat, head=_BLOCKER_CHARS, tail=0)
+    shown = f"`{flat}`" if text.complete else render_python(text)
+    return shown + (f" (job {job})" if job else "")
 
 
 def _queued_note(blocker: str, waited: float) -> str:
@@ -351,20 +359,31 @@ class ShellOwner:
 
     __nosnapshot__ = True
 
-    def __init__(self) -> None:
+    def __init__(self, *, overflow_files: bool = True) -> None:
         self._shells: weakref.WeakSet[Shell] = weakref.WeakSet()
         self._closed = False
-        # Direct runs' output files of its Shells: they outlive a dropped Shell
-        # and go when the owner closes.
-        self._output: tempfile.TemporaryDirectory[str] | None = None
+        # The agent's ``TruncationConfig.overflow_files``: False writes no file at all.
+        self.overflow_files = overflow_files
+        self._overflow: OverflowDir | None = None  # the agent's output files (``overflow_dir``)
 
-    def _output_dir(self) -> Path | None:
-        """A new directory for one Shell's direct-run output (None once closed)."""
-        if self._closed:
+    def overflow_dir(self) -> OverflowDir | None:
+        """The agent's one ``OverflowDir`` (20 files, up to 64 MiB each); None once closed.
+
+        Also None when ``overflow_files`` is False (the agent's
+        ``TruncationConfig.overflow_files``): its Shells, jobs and cells
+        then keep memory only, and write nothing to disk.
+
+        Shared by every output source of the agent: cell output, its Shells'
+        direct runs and the commands of its launched jobs, so the 20-file cap
+        is per agent. Its files go when the owner closes (or at interpreter
+        exit); the folder keeps the newest, so an older path may no longer
+        exist (``FileNotFoundError``).
+        """
+        if self._closed or not self.overflow_files:
             return None
-        if self._output is None:
-            self._output = tempfile.TemporaryDirectory(prefix="nooa-shells-")
-        return Path(tempfile.mkdtemp(prefix="shell-", dir=self._output.name))
+        if self._overflow is None:
+            self._overflow = _new_overflow_dir(_MAX_OUTPUT_BYTES)
+        return self._overflow
 
     def adopt(self, shell: Shell) -> None:
         if self._closed:  # closing is terminal: no bash starts under a closed owner
@@ -379,10 +398,12 @@ class ShellOwner:
         self._closed = True
         shells = list(self._shells)
         self._shells.clear()
-        results = await asyncio.gather(*(s.aclose() for s in shells), return_exceptions=True)
-        output, self._output = self._output, None
-        if output is not None:  # also the output of Shells dropped unclosed
-            output.cleanup()
+        try:
+            results = await asyncio.gather(*(s.aclose() for s in shells), return_exceptions=True)
+        finally:  # also when cancelled: the folder closes (a still-running writer may go on)
+            overflow, self._overflow = self._overflow, None
+            if overflow is not None:  # also the output of Shells dropped unclosed
+                overflow.close()
         errors = [r for r in results if isinstance(r, BaseException)]
         if errors:
             raise errors[0]
@@ -440,10 +461,10 @@ class Shell:
         self._bash: tuple[int, str | None] | None = None  # pid and start time of bash
         self._own_dir: tempfile.TemporaryDirectory[str] | None = None
         self._owner: ShellOwner | None = None  # who adopted it at its last start
-        # Direct runs' capture files: a directory in the owner's (removed by
-        # aclose or the owner), else the Shell's own (aclose, or garbage once
-        # neither the Shell nor a result naming it is alive).
-        self._output: Path | tempfile.TemporaryDirectory[str] | None = None
+        # Without an owner, the capture files of its direct runs and launched
+        # commands: one private folder, closed by aclose (or at exit). Under an
+        # owner they go in the agent's folder (``overflow_dir``).
+        self._overflow: OverflowDir | None = None
         self._lingering: set[asyncio.Task[None]] = set()
         self._count = itertools.count(1)
         self._note = ""
@@ -634,9 +655,9 @@ class Shell:
             session, self._session = self._session, None
             pumps, self._lingering = self._lingering, set()
             own_dir, self._own_dir = self._own_dir, None
-            output, self._output = self._output, None
+            overflow, self._overflow = self._overflow, None
             closing = self._closing = asyncio.ensure_future(
-                self._cleanup(start, session, pumps, own_dir, output)
+                self._cleanup(start, session, pumps, own_dir, overflow)
             )
         await asyncio.shield(closing)
 
@@ -646,21 +667,19 @@ class Shell:
         session: BashSession | None,
         pumps: set[asyncio.Task[None]],
         own_dir: tempfile.TemporaryDirectory[str] | None,
-        output: Path | tempfile.TemporaryDirectory[str] | None = None,
+        overflow: OverflowDir | None = None,
     ) -> None:
         for pump in pumps:
             pump.cancel()
         await asyncio.gather(*pumps, return_exceptions=True)
+        if overflow is not None:
+            overflow.close()
         if start is not None:
             await asyncio.gather(start, return_exceptions=True)  # it closes what it started
         if session is not None:
             await session.close()
         if own_dir is not None:
             own_dir.cleanup()
-        if isinstance(output, Path):
-            shutil.rmtree(output, ignore_errors=True)
-        elif output is not None:
-            output.cleanup()
 
     async def _closed(self) -> None:
         """Wait for a close under way to finish (its outcome is the closers')."""
@@ -677,27 +696,25 @@ class Shell:
     def _bash_alive(self) -> bool:
         return self._bash is not None and _start_time(self._bash[0]) == self._bash[1]
 
-    def _output_path(self) -> Path:
-        """Where a direct run's captures go (see ``_output``), made on first use."""
-        if self._output is None:
-            owned = self._owner._output_dir() if self._owner is not None else None
-            self._output = owned or tempfile.TemporaryDirectory(prefix="nooa-shell-out-")
-        output = self._output
-        return output if isinstance(output, Path) else Path(output.name)
+    def _overflow_dir(self) -> OverflowDir | None:
+        """The ``OverflowDir`` of a command's captures (20 files, each up to ``max_output`` bytes).
 
-    def _retain(self, result: CommandResult, out: _Capture, err: _Capture) -> None:
-        """Keep a direct run's cut captures; remove the files of uncut streams."""
-        for capture, path in ((out, result.stdout_path), (err, result.stderr_path)):
-            if path is None and capture.path:
-                with contextlib.suppress(OSError):
-                    os.unlink(capture.path)  # short: whole in the summary
-        output = self._output
-        if isinstance(output, tempfile.TemporaryDirectory) and (
-            result.stdout_path or result.stderr_path
-        ):
-            # No owner: the result holds the directory, so dropping the Shell
-            # unclosed does not remove files a live result names.
-            weakref.finalize(result, _release, output)
+        ``None`` under an owner whose ``overflow_files`` is off: memory only.
+
+        Started under an agent session (an owner): the session's one folder,
+        shared with every Shell, job and cell of that agent (files up to
+        ``min(max_output, 64 MiB)``), until the session closes. Otherwise this
+        Shell's one private folder, for its direct runs and its commands in
+        launched jobs alike, until the Shell closes.
+        """
+        owner = self._owner
+        if owner is not None and not owner.overflow_files:
+            return None
+        if owner is not None and (shared := owner.overflow_dir()) is not None:
+            return shared
+        if self._overflow is None:
+            self._overflow = _new_overflow_dir(self._max_output)
+        return self._overflow
 
     async def _send_locked(
         self, command: str, stdin: str | None, timeout: float, generation: int
@@ -707,13 +724,12 @@ class Shell:
         # A preceding queued command may have changed cwd. Report it only once
         # this command owns the shell, not when its coroutine was submitted.
         describe(f"$ {command} · cwd {session.cwd}")
-        directory = kept = job_dir()  # output files are kept only in a job's directory
+        directory = job_dir()  # the FIFOs and pid file: a job's directory, else the Shell's own
         if directory is None:
             if self._own_dir is None:
                 self._own_dir = tempfile.TemporaryDirectory(prefix="nooa-shell-")
             directory = Path(self._own_dir.name)
         stem = f"cmd-{next(self._count)}"
-        out, err = _captures(kept or self._output_path(), stem, self._max_output)
         fifos = [directory / f"{stem}.out.fifo", directory / f"{stem}.err.fifo"]
         source = "/dev/null"
         if stdin is not None:  # a file, written before the command starts
@@ -724,6 +740,9 @@ class Shell:
             source = str(stdin_path)
             fifos.append(stdin_path)  # removed with the FIFOs
         pidfile = self._pidfile = directory / f"{stem}.pid"
+        # The captures open files once cut: made last before the ``try`` whose
+        # ``finally`` closes them, so none is left unclosed.
+        out, err = _captures(self._overflow_dir(), self._max_output)
         opened: list[tuple[asyncio.StreamReader, asyncio.BaseTransport, int]] = []
         write_fds: set[int] = set()
         pumps: list[tuple[asyncio.Task[None], asyncio.BaseTransport, _Capture]] = []
@@ -801,9 +820,10 @@ class Shell:
                 notes.insert(0, cwd_note)
             if timed_out:
                 notes.append(_timeout_note(timeout))
-            result = _result(code, timed_out, out, err, str(session.cwd))
-            if kept is None:
-                self._retain(result, out, err)
+            # A stream whose writer is gone is final (closed); one a background
+            # job still writes to is read as it is now, and closed when it ends.
+            final = (pumps[0][0].done(), pumps[1][0].done())
+            result = _result(code, timed_out, out, err, str(session.cwd), final=final)
         finally:
             if progress is not None:
                 progress.close()
@@ -812,7 +832,7 @@ class Shell:
                 if pump.done():
                     transport.close()
                     capture.close()
-                else:  # a background job still writes: bounded by the output limit
+                else:  # a background job still writes: bounded by head, tail and the file cap
                     self._lingering.add(pump)
                     pump.add_done_callback(
                         lambda _t, tr=transport, cap=capture: (tr.close(), cap.close())

@@ -24,7 +24,6 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
-from nooa.agentdoc import FileBackedTruncatingStringIO, TruncatingStringIO
 from nooa.agentdoc.introspect import methods, variables
 from nooa.context_blocks import (
     DynamicContext,
@@ -32,6 +31,7 @@ from nooa.context_blocks import (
     render_context,
 )
 from nooa.context_blocks.scoped import _scoped_blocks_var, _scoped_events_var
+from nooa.runtime.output_capture import CaptureBuffer
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import CaptureConfig, TruncationConfig
@@ -459,10 +459,10 @@ _decorator_events_var: contextvars.ContextVar["EventQuery | None"] = contextvars
 
 # Task-local stdout/stderr buffers for async-safe capture
 # Contextvars are per-task, so parallel async executions get isolated buffers
-_stdout_buffer_var: contextvars.ContextVar[io.StringIO | TruncatingStringIO | None] = (
+_stdout_buffer_var: contextvars.ContextVar[io.StringIO | CaptureBuffer | None] = (
     contextvars.ContextVar("stdout_buffer", default=None)
 )
-_stderr_buffer_var: contextvars.ContextVar[io.StringIO | TruncatingStringIO | None] = (
+_stderr_buffer_var: contextvars.ContextVar[io.StringIO | CaptureBuffer | None] = (
     contextvars.ContextVar("stderr_buffer", default=None)
 )
 
@@ -520,10 +520,20 @@ def _pop_generation_id() -> str | None:
     return popped
 
 
-def _make_capture_buffer(limit: int, capture: "CaptureConfig") -> TruncatingStringIO:
-    """Create a stdout/stderr capture buffer, file-backed if ``capture`` says so."""
-    kind = FileBackedTruncatingStringIO if capture.file_backed else TruncatingStringIO
-    return kind(limit=limit, tail_chars=capture.tail, unrecoverable_hint=capture.unrecoverable_hint)
+def _make_capture_buffer(
+    limit: int, capture: "CaptureConfig", *, overflow_files: bool = True
+) -> CaptureBuffer:
+    """Create a stdout/stderr capture buffer, file-backed if ``capture`` says so.
+
+    ``overflow_files``: ``TruncationConfig.overflow_files``, the off switch:
+    False never writes a file, whatever ``capture.file_backed`` says.
+    """
+    return CaptureBuffer(
+        limit,
+        capture.tail,
+        file_backed=capture.file_backed and overflow_files,
+        unrecoverable_hint=capture.unrecoverable_hint,
+    )
 
 
 def _extract_captured_locals(exec_globals: dict[str, Any]) -> dict[str, Any]:
@@ -1744,7 +1754,7 @@ class ActorRuntime:
             # leaking to the terminal as "<unknown>:N: SyntaxWarning: ..."
             #
             # Each async task gets its own buffers via contextvars, so parallel
-            # executions are isolated. TruncatingStringIO prevents LLMs from
+            # executions are isolated. CaptureBuffer prevents LLMs from
             # filling the context window.
             truncation_config = self.truncation_config
             if execution_namespace is not None:
@@ -1756,8 +1766,13 @@ class ActorRuntime:
                 media_buffer = capture_scope.media
             else:
                 capture = truncation_config.capture
-                stdout_buffer = _make_capture_buffer(capture.max_stdout, capture)
-                stderr_buffer = _make_capture_buffer(capture.max_stderr, capture)
+                files = truncation_config.overflow_files
+                stdout_buffer = _make_capture_buffer(
+                    capture.max_stdout, capture, overflow_files=files
+                )
+                stderr_buffer = _make_capture_buffer(
+                    capture.max_stderr, capture, overflow_files=files
+                )
                 stdout_token = _stdout_buffer_var.set(stdout_buffer)
                 stderr_token = _stderr_buffer_var.set(stderr_buffer)
                 # Block stdin reads for this async task (prevents hangs from input(), etc.)
@@ -2171,7 +2186,7 @@ class ActorRuntime:
 
             # A capture scope leases the buffer: check the buffer it wraps.
             captured = capture_scope.stdout.buffer if capture_scope is not None else stdout_buffer
-            if isinstance(captured, TruncatingStringIO) and captured.was_truncated:
+            if isinstance(captured, CaptureBuffer) and captured.was_truncated:
                 from nooa.agentdoc._format_observation import record_truncation
 
                 record_truncation("capture.max_stdout")
@@ -2187,14 +2202,14 @@ class ActorRuntime:
                 _block_stdin_var.reset(stdin_token)
             if media_token is not None:
                 _media_buffer_var.reset(media_token)
-            # Close file handles for file-backed buffers (but keep files on disk
-            # so the LLM can reference the full output via the path in the notice).
+            # End the capture streams: a cut stream's overflow file stays (the
+            # LLM reads the path in the cut line), an uncut one's is deleted.
             # stdout_buffer/stderr_buffer may not be defined if an early return
             # (validation, SyntaxError) exited before buffer creation.
             try:
-                if isinstance(stdout_buffer, FileBackedTruncatingStringIO):
+                if isinstance(stdout_buffer, CaptureBuffer):
                     stdout_buffer.close()
-                if isinstance(stderr_buffer, FileBackedTruncatingStringIO):
+                if isinstance(stderr_buffer, CaptureBuffer):
                     stderr_buffer.close()
             except NameError:
                 pass

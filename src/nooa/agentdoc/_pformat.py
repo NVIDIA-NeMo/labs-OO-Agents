@@ -154,8 +154,8 @@ def _pformat(
 
     Args:
         _object: Object to format.
-        _stream: Writer with a ``write(str)`` method. May be a
-            ``TruncatingStringIO`` (hard char cap) or plain ``io.StringIO``.
+        _stream: Writer with a ``write(str)`` method: plain ``io.StringIO``,
+            or a chars ``nooa.snapshot.TextStream`` for a hard char cap.
         max_length: Max elements per container (None=unlimited).
         max_string: Max string chars (None=unlimited).
         max_depth: Max nesting depth (None=unlimited).
@@ -1625,20 +1625,18 @@ def _format_string(s: str, max_string: int | None, *, reason: str = "max_string"
     if max_string is None or len(s) <= max_string:
         return _format_multiline_string(s) if needs_multiline else repr(s)
 
-    # Truncated → slice-keys marker. Split max_string evenly: ceiling head,
-    # floor tail. Falls back to head-only when max_string < 2.
+    # Truncated → slice-keys marker, from nooa.snapshot: capture keeps
+    # max_string characters split evenly (ceiling head, floor tail; head-only
+    # when max_string < 2) and render_python prints them.
     record_truncation(reason)
-    n = len(s)
-    n_head = (max_string + 1) // 2
-    n_tail = max_string - n_head
-    head = s[:n_head]
-    tail = s[-n_tail:] if n_tail > 0 else ""
+    return _render_cut_string(s, max_string)
 
-    head_repr = repr(head)
-    if n_tail > 0:
-        tail_repr = repr(tail)
-        return f"str(len={n}, [:{n_head}]={head_repr}, [-{n_tail}:]={tail_repr})"
-    return f"str(len={n}, [:{n_head}]={head_repr})"
+
+def _render_cut_string(s: str, max_string: int) -> str:
+    """``s`` cut to ``max_string`` characters in ``render_python``'s ``str(len=N, ...)`` marker."""
+    from nooa.snapshot import cut, render_python
+
+    return render_python(cut(s, head=max_string - max_string // 2, tail=max_string // 2))
 
 
 def _format_multiline_string(s: str) -> str:

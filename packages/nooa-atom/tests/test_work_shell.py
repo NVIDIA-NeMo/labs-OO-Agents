@@ -67,15 +67,18 @@ def cut_marker(path: str, omitted: int) -> str:
 
 
 async def test_long_output_bounded_with_retained_file(manager):
-    r = await manager.launch(Shell().run("seq 1 200000"))  # 1,288,895 bytes
+    sh = Shell()
+    r = await manager.launch(sh.run("seq 1 200000"))  # 1,288,895 bytes
     assert r.stdout_path and r.stdout.startswith("1\n2\n")
     assert cut_marker(r.stdout_path, 1_288_895 - 1_048_576) in r.stdout
     assert len(r.stdout.encode()) < 1_049_000 and r.stdout.endswith("199999\n200000\n")
     assert Path(r.stdout_path).read_text().count("\n") == 200000
-    # Kept after the result was consumed; removed with the manager.
+    # Kept after the result was consumed and after its job: the Shell owns it.
     await asyncio.sleep(0)
     assert Path(r.stdout_path).exists()
     await manager.aclose()
+    assert Path(r.stdout_path).exists()
+    await sh.aclose()
     assert not Path(r.stdout_path).exists()
 
 
@@ -124,10 +127,9 @@ async def test_direct_run_keeps_long_output_until_aclose(tmp_path):
         assert Path(path).read_text() == out
     short = await sh.run("echo hi")
     assert (short.stdout, short.stdout_path, short.stderr_path) == ("hi\n", None, None)
-    assert sorted(p.name for p in Path(r.stdout_path).parent.iterdir()) == [
-        "cmd-1.stderr",
-        "cmd-1.stdout",
-    ]  # short output keeps no file
+    assert sorted(Path(r.stdout_path).parent.iterdir()) == sorted(
+        [Path(r.stdout_path), Path(r.stderr_path)]
+    )  # short output keeps no file
     await sh.aclose()
     assert not Path(r.stdout_path).exists() and not Path(r.stderr_path).exists()
 
@@ -136,28 +138,57 @@ async def test_direct_run_output_limit_marker():
     sh = Shell(max_output=1000)
     r = await sh.run("head -c 2000000 /dev/zero | tr '\\0' a")
     assert r.stdout_path and Path(r.stdout_path).stat().st_size == 1000
-    assert (
-        f"over the 1,000-byte output limit: {r.stdout_path} holds only the first 1,000 of "
-        "2,000,000 bytes]"
-    ) in r.stdout
+    assert f"; {r.stdout_path} holds the first 1,000 of 2,000,000 bytes]" in r.stdout
     await sh.aclose()
     assert not Path(r.stdout_path).exists()
+
+
+async def test_a_small_output_limit_still_returns_an_output_under_1_mib_whole():
+    """Intended change (#578): the in-memory head and tail do not depend on max_output."""
+    sh = Shell(max_output=1000)
+    try:
+        r = await sh.run("head -c 900000 /dev/zero | tr '\\0' a")
+        assert r.stdout == "a" * 900_000  # before: a 1,000-byte head, a cut line, the tail
+        assert r.stdout_path is None
+    finally:
+        await sh.aclose()
+
+
+async def test_the_head_cut_is_utf8_safe():
+    """Intended change (#578): the head ends on a code point boundary, no replacement character."""
+    sh = Shell()
+    try:
+        # 1,200,000 bytes of 3-byte characters: 262,144 is not a multiple of 3.
+        r = await sh.run('python3 -c "import sys; sys.stdout.write(chr(0x6f22) * 400000)"')
+        assert "\ufffd" not in r.stdout
+        head, line, tail = r.stdout.split("\n")
+        assert head == "\u6f22" * (262_144 // 3) and tail == "\u6f22" * (786_432 // 3)
+        # The trimmed byte of the head counts as omitted: 151,425, not 151,424.
+        assert line == f"[... 151,425 bytes omitted; full output: {r.stdout_path}]"
+        assert Path(r.stdout_path).read_text() == "\u6f22" * 400_000
+    finally:
+        await sh.aclose()
 
 
 async def test_output_limit_under_the_summary_size_is_reported():
     sh = Shell(max_output=1000)
     small = await sh.run("head -c 2000 /dev/zero | tr '\\0' a")
     assert small.stdout == "a" * 2000  # whole from memory although the file stops at 1,000
-    big = await sh.run("head -c 900000 /dev/zero | tr '\\0' a")
-    omitted = 900_000 - 1000 - (1_048_576 - 262_144)
-    assert f"[... {omitted:,} bytes omitted; over the 1,000-byte output limit" in big.stdout
-    assert big.stdout_path and big.stdout.startswith("a" * 1000 + "\n[... ")
-    assert big.stdout.endswith("]\n" + "a" * (900_000 - 1000 - omitted))
+    big = await sh.run("head -c 1100000 /dev/zero | tr '\\0' a")
+    omitted = 1_100_000 - 1_048_576  # the head and tail stay in memory: 256 KiB + 768 KiB
+    assert big.stdout == (
+        "a"
+        * 262_144
+        + f"\n[... {omitted:,} bytes omitted; {big.stdout_path} holds the first 1,000 of "
+        "1,100,000 bytes]\n" + "a" * 786_432
+    )
     await sh.aclose()
 
 
-async def test_dropped_unowned_shell_keeps_files_while_the_result_lives():
+async def test_dropped_unowned_shell_keeps_files_until_exit():
     import gc
+
+    from nooa.overflow import _overflow
 
     r = await Shell().run("seq 1 300000")  # the temporary Shell is dropped
     gc.collect()
@@ -165,6 +196,11 @@ async def test_dropped_unowned_shell_keeps_files_while_the_result_lives():
     assert path.read_text().count("\n") == 300000
     del r
     gc.collect()
+    assert path.exists()  # never deleted by garbage collection: kept until exit
+    # The exit cleanup is still registered for its folder; run it now.
+    (cleanup,) = [c for c in _overflow._live if c.path == str(path.parent)]
+    with cleanup.lock:
+        cleanup.run()
     assert not path.exists()
 
 
@@ -190,7 +226,8 @@ async def test_dropped_owned_shell_keeps_files_until_the_owner_closes():
     assert not path.exists()
 
 
-async def test_owned_shell_aclose_removes_its_files():
+async def test_owned_shell_files_last_until_the_owner_closes():
+    """Under an owner the files are the agent's (one OverflowDir per agent): closing the Shell keeps them."""
     from nooa_atom.agent.work_shell import ShellOwner, shell_owner
 
     owner = ShellOwner()
@@ -200,10 +237,11 @@ async def test_owned_shell_aclose_removes_its_files():
         r = await sh.run("seq 1 300000")
     finally:
         shell_owner.reset(token)
-    assert Path(r.stdout_path).exists()
+    assert Path(r.stdout_path).parent == Path(owner.overflow_dir().path)
     await sh.aclose()
-    assert not Path(r.stdout_path).exists()
+    assert Path(r.stdout_path).exists()
     await owner.aclose()
+    assert not Path(r.stdout_path).exists()
 
 
 async def test_one_shot_cancel_kills_process_group(manager, tmp_path):
@@ -377,7 +415,7 @@ async def test_output_limit_is_enforced_while_writing(manager, tmp_path):
     cmd = "head -c 2000000 /dev/zero | tr '\\0' a"
     r = await manager.launch(Shell(max_output=1000).run(cmd))
     assert Path(r.stdout_path).stat().st_size == 1000
-    assert "holds only the first 1,000 of 2,000,000 bytes]" in r.stdout
+    assert "holds the first 1,000 of 2,000,000 bytes]" in r.stdout
     assert r.stdout.endswith("a" * 100)  # the tail is still shown
     sh = manager.launch(Shell(tmp_path, max_output=1000), name="sh")
     r = await sh.send("head -c 2000000 /dev/zero | tr '\\0' b; echo done >&2")
@@ -1341,3 +1379,113 @@ async def test_the_cell_deadline_names_the_shell_command_it_stopped(tmp_path):
         assert "self.jobs.launch(sh.run(cmd), name=...)" in message
         r = await sh.run("echo alive", timeout=10)
         assert (r.returncode, r.stdout) == (0, "alive\n")
+
+
+# ---- nooa.snapshot: the notation, the limits and the overflow folder (PR 2b) -------
+
+
+async def test_cut_output_is_render_output_of_the_stream(tmp_path):
+    """Head 256 KiB, tail 768 KiB (bytes), one render_output line naming the file."""
+    from nooa_atom.agent import work_shell
+
+    assert (work_shell._SUMMARY_BYTES, work_shell._HEAD_BYTES, work_shell._TAIL_BYTES) == (
+        1_048_576,
+        262_144,
+        786_432,
+    )
+    assert work_shell._MAX_OUTPUT_BYTES == 64 * 1024 * 1024
+    data = "".join(f"{i:07d}\n" for i in range(150_000))  # 1,200,000 bytes
+    (tmp_path / "o").write_text(data)
+    sh = Shell(tmp_path)
+    try:
+        r = await sh.run(f"cat {tmp_path / 'o'}")
+        assert r.stdout == (
+            data[:262_144]
+            + f"\n[... {1_200_000 - 1_048_576:,} bytes omitted; full output: {r.stdout_path}]\n"
+            + data[-786_432:]
+        )
+        assert Path(r.stdout_path).read_text() == data
+        assert Path(r.stdout_path).name.startswith("nooa-output-")
+    finally:
+        await sh.aclose()
+
+
+async def test_direct_runs_share_one_overflow_folder_that_keeps_the_newest(tmp_path):
+    """One OverflowDir per Shell (20 files, up to 64 MiB each): older paths may stop existing."""
+    sh = Shell(tmp_path)
+    try:
+        big = "head -c 1100000 /dev/zero | tr '\\0' a; head -c 1100000 /dev/zero | tr '\\0' b >&2"
+        first = await sh.run(big)
+        folder = sh._overflow
+        # Each file keeps today's 64 MiB cap.
+        assert folder is not None and (folder.max_files, folder.file_bytes) == (20, 64 * 2**20)
+        assert Path(first.stdout_path).parent == Path(first.stderr_path).parent
+        paths = [first.stdout_path, first.stderr_path]
+        for _ in range(10):  # 20 more cut streams: the oldest closed files go first
+            r = await sh.run(big)
+            paths += [r.stdout_path, r.stderr_path]
+            assert sh._overflow is folder
+        with pytest.raises(FileNotFoundError):
+            open(first.stdout_path, "rb")  # noqa: SIM115
+        assert all(Path(p).exists() for p in paths[-18:])
+    finally:
+        await sh.aclose()
+    assert not any(Path(p).exists() for p in paths)
+
+
+async def test_a_shell_shares_one_overflow_folder_between_jobs_and_direct_runs(manager, tmp_path):
+    """Without an agent: one private OverflowDir per Shell, for its launched commands and direct runs."""
+    big = "head -c 1100000 /dev/zero | tr '\\0' a; head -c 1100000 /dev/zero | tr '\\0' b >&2"
+    sh = Shell(max_output=1000)
+
+    async def commands() -> list[str]:
+        paths = []
+        for _ in range(11):
+            r = await sh.run(big)
+            paths += [r.stdout_path, r.stderr_path]
+        return paths
+
+    paths = await manager.launch(commands(), name="commands")
+    direct = await sh.run(big)
+    paths += [direct.stdout_path, direct.stderr_path]
+    folder = Path(paths[0]).parent
+    assert sh._overflow is not None and folder == Path(sh._overflow.path)
+    assert not folder.is_relative_to(tmp_path / "scratch")  # not the job's scratch dir
+    assert {Path(p).parent for p in paths} == {folder}
+    assert sorted(folder.glob("nooa-output-*")) == sorted(Path(p) for p in paths[4:])
+    for path in paths[:4]:  # 24 cut streams, 20 files: the 4 oldest went
+        with pytest.raises(FileNotFoundError):
+            open(path, "rb")  # noqa: SIM115
+    await manager.aclose()
+    assert all(Path(p).exists() for p in paths[4:])  # the job's end does not remove them
+    await sh.aclose()
+    assert not any(Path(p).exists() for p in paths)  # the Shell's close does
+
+
+async def test_a_launched_shell_closes_its_folder_with_its_job(manager):
+    job = manager.launch(Shell(), name="sh")
+    r = await job.send("seq 1 200000")
+    path = Path(r.stdout_path)
+    assert path.exists()
+    await job.cancel()
+    assert not path.exists()
+
+
+async def test_launched_command_files_go_in_its_shells_folder(manager, tmp_path):
+    sh = Shell()
+    r = await manager.launch(sh.run("seq 1 200000"))
+    assert r.stdout_path is not None
+    assert sh._overflow is not None and Path(r.stdout_path).parent == Path(sh._overflow.path)
+    assert not Path(r.stdout_path).is_relative_to(tmp_path / "scratch")
+    await sh.aclose()
+    assert not Path(r.stdout_path).exists()
+
+
+def test_long_command_previews_are_cut_by_the_snapshot():
+    from nooa_atom.agent.work_shell import _blocker, _deadline_note
+
+    assert _blocker("ls  -la\n", "j") == "`ls -la` (job j)"  # short: whole, as before
+    long = "echo " + "x" * 200
+    assert _blocker(long, None) == "str(len=205, [:80]=" + repr(long[:80]) + ")"
+    assert "the Shell command 'ls -la';" in _deadline_note("ls -la")
+    assert "str(len=205, [:80]=" + repr(long[:80]) + ")" in _deadline_note(long)

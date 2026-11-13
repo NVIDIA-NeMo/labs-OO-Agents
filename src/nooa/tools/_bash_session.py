@@ -32,13 +32,12 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 from nooa._platform import require_posix
-from nooa.agentdoc import TruncatingStringIO
+from nooa.snapshot import cut, render_output
 
 logger = logging.getLogger(__name__)
 
 MAX_OUTPUT_CHARS = 30_000
 """Characters kept of each of a command's stdout and stderr: the first and last half."""
-_BOUNDED_CHUNK_CHARS = 65_536  # Pieces fed to the truncating buffer by _bounded
 _DRAIN_TIMEOUT = 0.05  # Seconds to wait for remaining output after sentinel
 _SIGTERM_GRACE = 5.0  # Seconds to wait for sentinel after SIGTERM
 _SIGKILL_GRACE = 2.0  # Seconds to wait for sentinel after SIGKILL
@@ -60,19 +59,16 @@ _DRAIN_SCRIPT = (
 
 
 def _bounded(text: str) -> str:
-    """``text`` cut to ``MAX_OUTPUT_CHARS``: its head and tail around the standard notice.
+    """``text`` cut to ``MAX_OUTPUT_CHARS``: its head and tail around ``render_output``'s line.
 
-    The tail matters as much as the head: a failing command usually ends
-    with its error.
+    ``HEAD``, ``[... N chars omitted; full output not kept]``, ``TAIL`` (half
+    of ``MAX_OUTPUT_CHARS`` each). The tail matters as much as the head: a
+    failing command usually ends with its error.
     """
     if len(text) <= MAX_OUTPUT_CHARS:
         return text
-    buffer = TruncatingStringIO(limit=MAX_OUTPUT_CHARS)
-    # Feed the buffer in bounded pieces: one write of the whole stream would
-    # copy everything past the head a second time before the tail is trimmed.
-    for start in range(0, len(text), _BOUNDED_CHUNK_CHARS):
-        buffer.write(text[start : start + _BOUNDED_CHUNK_CHARS])
-    return buffer.getvalue()
+    head = MAX_OUTPUT_CHARS - MAX_OUTPUT_CHARS // 2
+    return render_output(cut(text, head=head, tail=MAX_OUTPUT_CHARS // 2))
 
 
 def _process_start_time(pid: int) -> str | None:

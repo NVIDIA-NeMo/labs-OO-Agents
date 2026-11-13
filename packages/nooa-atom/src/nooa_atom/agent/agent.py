@@ -30,6 +30,7 @@ from nooa.agentdoc import doc, spec
 from nooa.errors import hints as _hints
 from nooa.interactive import Done, NeedInput, Waiting
 from nooa.runtime.execution_namespace import ExecutionNamespace
+from nooa.runtime.output_capture import NO_OVERFLOW_FILES, capture_overflow
 from nooa.strategies import CodeActV2, PredictStrategy  # noqa: F401
 from nooa_atom.agent.work_manager import Job, JobEvent, Throttle, WorkManager
 from nooa_atom.agent.work_shell import CommandResult, Shell
@@ -40,6 +41,7 @@ from nooa_atom.tools.repo_tools import RepoTools
 from nooa_atom.tools.todo_list import Todo, TodoList  # noqa: F401
 
 with hidden:
+    import contextvars
     import inspect
     import re
     import sys
@@ -208,7 +210,7 @@ def _module_not_found_hint(agent: Any, error: BaseException, formatted: str) -> 
     )
 
 
-# After the core cut notice of a cell print kept only in memory (capture config).
+# After the cut line of a cell print no file keeps (capture config; Atom keeps a file by default).
 _CUT_PRINT_HINT = "Write large output to a file and read it with self.files.read(path)."
 
 
@@ -245,7 +247,26 @@ class AtomCodeAct(CodeActV2):
     """
 
     async def execute(self, runtime: Any, call: Any) -> Any:
-        result = await super().execute(runtime, call)
+        # The generation's cell context: the default cwd, the Shell owner and the
+        # cell-output folder. Set for this generation only and reset after it, so
+        # a nested generation (a child agent awaited inside a cell) cannot leave
+        # its own context installed for the parent's later cells.
+        tokens: list[tuple[contextvars.ContextVar[Any], contextvars.Token[Any]]] = []
+        cwd = getattr(runtime.agent, "cwd", None)
+        if cwd is not None:
+            tokens.append((work_shell.default_cwd, work_shell.default_cwd.set(str(cwd))))
+        owner = getattr(runtime.agent, "_shells", None)
+        if owner is not None:  # the session closes the Shells its cells start
+            tokens.append((work_shell.shell_owner, work_shell.shell_owner.set(owner)))
+            # Cell output goes to the session's folder: kept until it closes;
+            # none at all when the session's output files are off.
+            folder = owner.overflow_dir() if owner.overflow_files else NO_OVERFLOW_FILES
+            tokens.append((capture_overflow, capture_overflow.set(folder)))
+        try:
+            result = await super().execute(runtime, call)
+        finally:
+            for var, token in reversed(tokens):
+                var.reset(token)
         if (
             call.method_name == "handle"
             and runtime.agent._done_reflection
@@ -348,15 +369,6 @@ class AtomCodeAct(CodeActV2):
         tool = super()._build_execute_python_tool()
         tool.description = tool.description.replace(_LEGACY_TOOL_HINT, _TOOL_HINT)
         return tool
-
-    def _build_builtins(self, runtime: Any, call: Any) -> dict[str, Any]:
-        cwd = getattr(runtime.agent, "cwd", None)
-        if cwd is not None:
-            work_shell.default_cwd.set(str(cwd))
-        owner = getattr(runtime.agent, "_shells", None)
-        if owner is not None:  # the session closes the Shells its cells start
-            work_shell.shell_owner.set(owner)
-        return super()._build_builtins(runtime, call)
 
 
 # ---- turn conditions ---------------------------------------------------------
@@ -612,7 +624,9 @@ _REMOVED: Annotated[str, hidden] = (
 
 class AtomAgent(
     AtomAgentBase,
-    truncation=TruncationConfig(capture=CaptureConfig(unrecoverable_hint=_CUT_PRINT_HINT)),
+    truncation=TruncationConfig(
+        capture=CaptureConfig(file_backed=True, unrecoverable_hint=_CUT_PRINT_HINT)
+    ),
 ):
     """You are a careful agent working in one local repository.
 
@@ -739,7 +753,8 @@ class AtomAgent(
             capture_factory=lambda: CaptureScope(self.runtime.truncation_config),
             on_wait_cancelled=note_running_job,
         )
-        self._shells = work_shell.ShellOwner()
+        # ``TruncationConfig.overflow_files`` off: no Shell, job or cell writes a file.
+        self._shells = work_shell.ShellOwner(overflow_files=self._truncation.overflow_files)
         self.files = Files(self.shell)
         # Atom's own to-do list: membership on the list, content on each item.
         self._install_todo_list()

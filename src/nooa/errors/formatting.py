@@ -37,8 +37,8 @@ import traceback
 from pathlib import Path, PurePath
 from typing import Any, Protocol
 
-from nooa.agentdoc import TruncatingStringIO
 from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
+from nooa.snapshot import cut, render_output
 
 # ---------------------------------------------------------------------------
 # Traceback selection and IPython normalization policy
@@ -788,21 +788,31 @@ def _bound_diagnostic(
 ) -> str:
     """Apply the caller's error budget, falling back to framework defaults."""
     limit, tail = _diagnostic_budget(max_error, tail_chars)
-    stream = TruncatingStringIO(limit=limit, tail_chars=tail)
-    stream.write(text)
-    return stream.getvalue()
+    return _cut_text(text, limit, tail)
 
 
-def _hard_bound_text(text: str, limit: int, *, closing: str = "") -> str:
-    """Cap text at ``limit``, optionally preserving a structural closing marker."""
+def _cut_text(text: str, limit: int, tail: int | None) -> str:
+    """``text`` within ``limit`` chars: ``HEAD``, ``render_output``'s cut line, ``TAIL``.
+
+    ``tail`` chars come from the end (``None``: half of ``limit``), the rest from
+    the start; no file keeps the whole text, so the line ends ``full output not kept]``.
+    """
+    tail_chars = limit // 2 if tail is None else tail
+    return render_output(cut(text, head=limit - tail_chars, tail=tail_chars))
+
+
+def _hard_bound_text(text: str, limit: int) -> str:
+    """Cap text at ``limit`` chars in all: its head, then ``render_output``'s cut line.
+
+    A transport ceiling, not a capture budget: it keeps no tail.
+    """
     if len(text) <= limit:
         return text
-    marker = "...<truncated>"
-    suffix = closing if closing and text.endswith(closing) else ""
-    keep = limit - len(marker) - len(suffix)
-    if keep > 0:
-        return text[:keep] + marker + suffix
-    return marker[:limit]
+    notice = render_output(cut(text, head=0, tail=0))
+    keep = limit - len(notice) - 1  # the head and its newline before the line
+    if keep <= 0:
+        return notice[:limit]
+    return render_output(cut(text, head=keep, tail=0))
 
 
 class ErrorFormatter(Protocol):
@@ -865,7 +875,6 @@ class IPythonErrorFormatter:
             return _hard_bound_text(
                 error.diagnostic.rstrip() or str(error),
                 limit + 1_024,
-                closing="\n</truncated-output>",
             )
 
         wrapped_syntax = _wrapped_syntax_error(error)

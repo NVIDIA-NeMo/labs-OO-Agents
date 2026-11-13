@@ -877,14 +877,18 @@ async def test_a_big_run_result_keeps_the_last_20000_chars_of_each_stream(agent)
     result = item
     out = "".join(f"line {i:05d}\n" for i in range(5000))  # 55,000 chars
     err = "".join(f"err {i:05d}\n" for i in range(3000))  # 30,000 chars
-    # Each stream keeps exactly its own last 20,000 chars, after a one-line
-    # notice that names no file (there is none).
-    assert result.stdout == f"[... {55_000 - 20_000:,} chars omitted]\n" + out[-20_000:]
-    assert result.stderr == f"[... {30_000 - 20_000:,} chars omitted]\n" + err[-20_000:]
+    # Each stream keeps exactly its own last 20,000 chars (a chars TextStream
+    # with no head), after render_output's cut line: no file keeps the rest.
+    assert result.stdout == (
+        f"[... {55_000 - 20_000:,} chars omitted; full output not kept]\n" + out[-20_000:]
+    )
+    assert result.stderr == (
+        f"[... {30_000 - 20_000:,} chars omitted; full output not kept]\n" + err[-20_000:]
+    )
     for stream in (result.stdout, result.stderr):
         notice, _, kept = stream.partition("\n")
         assert len(kept) == 20_000
-        assert "full output" not in notice and "/" not in notice and ".log" not in notice
+        assert "/" not in notice and ".log" not in notice
 
 
 async def test_a_run_under_the_cap_is_not_truncated(agent):
@@ -961,11 +965,22 @@ async def test_a_5mb_line_stays_bounded_and_later_lines_still_arrive(agent):
         tracemalloc.stop()
     assert peak < 2_000_000, f"peak {peak:,} bytes above baseline"
     lines = [line for update in updates[:-1] for line in update.lines]
-    assert lines[0] == "x" * 8_000 + "[... 4,992,000 chars of this line omitted]"
+    assert lines[0] == "x" * 8_000 + "\n[... 4,992,000 chars omitted; full output not kept]"
     assert lines[1:] == ["after-1", "after-2"]
     done = updates[-1]
     assert done.done and len(done.stdout) <= 20_000
     assert done.stdout.endswith("after-1\nafter-2\n")
+
+
+async def test_a_single_overlong_line_is_cut_in_the_snapshot_notation_in_the_tail(agent):
+    """The done update's tail is of line-framed output: the line's own cut is render_output's."""
+    cmd = "python3 -c \"import sys; sys.stdout.write('A' * 30_000 + 'THE_REAL_END\\n')\""
+    await agent.jobs.run(cmd, name="long")
+    done = (await _stream_updates(agent, "long"))[-1]
+    assert done.done and done.returncode == 0
+    # 30,012 chars: the first 8,000, then the omitted rest, counted by the snapshot.
+    assert done.stdout == "A" * 8_000 + "\n[... 22,012 chars omitted; full output not kept]\n"
+    assert "THE_REAL_END" not in done.stdout and "of this line omitted" not in done.stdout
 
 
 async def test_a_throttled_chatty_run_sends_batches_early_at_the_cap(agent):
@@ -988,7 +1003,7 @@ async def test_tail_caps_a_5mb_line(agent, tmp_path):
         handle.write("y" * 5_000_000 + "\nshort\n")
     first = await _next(agent)
     second = await _next(agent)
-    assert first.lines == ["y" * 8_000 + "[... 4,992,000 chars of this line omitted]"]
+    assert first.lines == ["y" * 8_000 + "\n[... 4,992,000 chars omitted; full output not kept]"]
     assert second.lines == ["short"]
     await agent.jobs.cancel("log")
 
