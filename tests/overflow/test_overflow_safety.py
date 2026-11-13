@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""nooa.overflow: forks, replaced paths, failed deletes and failed closes.
+"""nooa.overflow: forks, replaced files, failed deletes and failed closes.
 
-Each test replays a scenario where the files of a folder were deleted that
-were not its own, or its own were forgotten: a forked child exiting, a file
-or folder replaced at its path, a delete or a close failing.
+Each test replays a scenario where a folder deleted files that were not its
+own, wrote to a file it had not created, or forgot its own: a forked child,
+a file replaced at its path, a delete or a close failing. (Same-user
+tampering inside a private folder is out of scope; see ``nooa.overflow``.)
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import pytest
 
 from nooa.overflow import OverflowDir, OverflowFile
 
+needs_fork = pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
 needs_permissions = pytest.mark.skipif(
     hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores directory permissions"
 )
@@ -48,56 +50,12 @@ def _run(code: str, *args: str) -> list[str]:
     return result.stdout.split()
 
 
-# --- fork: cleanup runs only in the process that created the folder -------------------
+# --- fork: inherited folders and writers are inert in the child -------------------------
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
-def test_a_forked_child_exiting_leaves_the_parents_files(tmp_path: Path) -> None:
-    code = """
-        import os, sys
-        from pathlib import Path
-        from nooa.overflow import OverflowDir
-
-        given = OverflowDir(sys.argv[1])
-        private = OverflowDir()
-        kept = []
-        for folder in (given, private):
-            writer = folder.file().open()
-            writer.write(b"parent output")
-            writer.finish(delete=False)
-            kept.append(writer.path)
-        running = given.file().open()  # a writer still open across the fork
-        running.write(b"running")
-        pid = os.fork()
-        if pid == 0:
-            given.close()  # inherited: does nothing in the child
-            assert given.file() is None  # inherited folders are inert in the child
-            own = OverflowDir()  # the child's own folder: cleaned at the child's exit
-            writer = own.file().open()
-            writer.write(b"child output")
-            writer.finish(delete=False)
-            Path(sys.argv[1], "child-own").write_text(own.path)
-            sys.exit(0)  # runs atexit
-        os.waitpid(pid, 0)
-        child_own = Path(sys.argv[1], "child-own").read_text()
-        print(given.closed, private.path, *kept, running.path, child_own)
-        running.finish(delete=False)
-        given.close()
-        private.close()
-        print(*(os.path.lexists(p) for p in (private.path, *kept, running.path)))
-    """
-    out = _run(code, str(tmp_path))
-    closed, private, given_kept, private_kept, running, child_own = out[:6]
-    assert closed == "False"
-    # The parent's files survived the child's exit, and the parent can still clean them up.
-    assert out[6:] == ["False"] * 4
-    # The child's own folder was removed when the child exited.
-    assert not os.path.lexists(child_own)
-    assert sorted(os.listdir(tmp_path)) == ["child-own"]
-
-
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs os.fork")
+@needs_fork
 def test_a_forked_child_exiting_keeps_the_parents_files_on_disk(tmp_path: Path) -> None:
+    # Round 8: the child's exit ran the inherited cleanup and removed the parent's folder.
     code = """
         import os, sys
         from pathlib import Path
@@ -109,7 +67,7 @@ def test_a_forked_child_exiting_keeps_the_parents_files_on_disk(tmp_path: Path) 
         writer.finish(delete=False)
         pid = os.fork()
         if pid == 0:
-            sys.exit(0)
+            sys.exit(0)  # runs atexit
         os.waitpid(pid, 0)
         print(folder.closed, Path(writer.path).exists())
         folder.close()
@@ -118,13 +76,54 @@ def test_a_forked_child_exiting_keeps_the_parents_files_on_disk(tmp_path: Path) 
     assert os.listdir(tmp_path) == []
 
 
-# --- replaced paths: only what the folder created is written or deleted -----------------
-
-
-def test_a_reserved_file_replaced_by_a_regular_file_is_neither_written_nor_deleted(
+@needs_fork
+def test_a_forked_child_leaves_the_parents_folders_alone_and_cleans_its_own(
     tmp_path: Path,
 ) -> None:
-    folder = OverflowDir(str(tmp_path), max_files=1, file_bytes=4)
+    code = """
+        import os, sys
+        from pathlib import Path
+        from nooa.overflow import OverflowDir
+
+        folders = [OverflowDir(sys.argv[1]), OverflowDir(sys.argv[1])]
+        kept = []
+        for folder in folders:
+            writer = folder.file().open()
+            writer.write(b"parent output")
+            writer.finish(delete=False)
+            kept.append(writer.path)
+        running = folders[0].file().open()
+        running.write(b"running")
+        pid = os.fork()
+        if pid == 0:
+            running.finish(delete=True)  # inert in the child: deletes nothing
+            folders[1].close()  # does nothing in the child
+            assert folders[0].file() is None  # inherited folders are inert in the child
+            own = OverflowDir(sys.argv[1])  # the child's own folder: cleaned at the child's exit
+            writer = own.file().open()
+            writer.write(b"child output")
+            writer.finish(delete=False)
+            Path(sys.argv[1], "child-own").write_text(own.path)
+            sys.exit(0)  # runs atexit
+        os.waitpid(pid, 0)
+        print(*(os.path.exists(p) for p in (*kept, running.path)))
+        print(Path(sys.argv[1], "child-own").read_text())
+        running.finish(delete=False)
+        for folder in folders:
+            folder.close()
+    """
+    out = _run(code, str(tmp_path))
+    assert out[:3] == ["True"] * 3  # the parent's files survived the child
+    assert not os.path.lexists(out[3])  # the child's own folder went at the child's exit
+    assert sorted(os.listdir(tmp_path)) == ["child-own"]  # and the parent cleaned its own
+
+
+# --- replaced files: only what the folder created is written; only ours is deleted -----
+
+
+def test_a_reserved_file_replaced_by_a_regular_file_is_not_written() -> None:
+    # Round 8: open() reopened the name and wrote over a file put in its place.
+    folder = OverflowDir(max_files=1, file_bytes=4)
     file = folder.file()
     assert file is not None and file.path is not None
     path = Path(file.path)
@@ -136,54 +135,6 @@ def test_a_reserved_file_replaced_by_a_regular_file_is_neither_written_nor_delet
         writer.finish(delete=False)
     assert path.read_bytes() == b"FOREIGN-CONTENT-IS-LONG"
     folder.close()
-    assert path.read_bytes() == b"FOREIGN-CONTENT-IS-LONG"
-
-
-def test_eviction_leaves_a_replaced_file_alone(tmp_path: Path) -> None:
-    with OverflowDir(str(tmp_path), max_files=1, file_bytes=4) as folder:
-        first = _kept(folder)
-        first.rename(tmp_path / "moved")  # (renamed, not deleted: see the inode note in _overflow)
-        first.write_bytes(b"precious")
-        second = _kept(folder)  # evicts the first: its name is no longer ours
-        assert first.read_bytes() == b"precious" and second.exists()
-    assert first.read_bytes() == b"precious" and not second.exists()
-
-
-def test_a_renamed_given_folder_with_a_symlink_in_its_place(tmp_path: Path) -> None:
-    given = tmp_path / "given"
-    given.mkdir()
-    folder = OverflowDir(str(given))
-    path = _kept(folder)
-    moved = tmp_path / "moved-given"
-    given.rename(moved)
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    foreign = outside / path.name
-    foreign.write_text("precious")
-    given.symlink_to(outside, target_is_directory=True)
-    folder.close()
-    assert foreign.read_text() == "precious"  # not ours: left alone
-    assert not (moved / path.name).exists()  # ours, in the folder we created, is removed
-    assert folder.closed
-
-
-def test_a_replaced_private_folder_is_left_alone(tmp_path: Path) -> None:
-    folder = OverflowDir()
-    original = Path(folder.path)
-    path = _kept(folder)
-    moved = tmp_path / "moved-private"
-    original.rename(moved)
-    original.mkdir()
-    foreign = original / "foreign.txt"
-    foreign.write_text("precious")
-    try:
-        folder.close()
-        assert foreign.read_text() == "precious"  # the replacement is not removed
-        assert not (moved / path.name).exists()  # our own file is
-        assert folder.closed
-    finally:
-        shutil.rmtree(original, ignore_errors=True)
-        shutil.rmtree(moved, ignore_errors=True)
 
 
 def test_a_replaced_standalone_file_is_not_deleted(tmp_path: Path) -> None:
@@ -201,60 +152,58 @@ def test_a_replaced_standalone_file_is_not_deleted(tmp_path: Path) -> None:
 
 
 @needs_permissions
-def test_a_failed_eviction_stays_counted_and_is_retried(tmp_path: Path) -> None:
-    given = tmp_path / "given"
-    given.mkdir()
-    folder = OverflowDir(str(given), max_files=1, file_bytes=4)
+def test_a_failed_eviction_stays_counted_and_is_retried() -> None:
+    folder = OverflowDir(max_files=1, file_bytes=4)
+    private = Path(folder.path)
     first = _kept(folder)
-    given.chmod(0o500)
+    private.chmod(0o500)
     try:
         assert folder.file() is None  # the eviction failed: no room
     finally:
-        given.chmod(0o700)
+        private.chmod(0o700)
     assert first.exists()
     second = _kept(folder)  # the retry succeeds now
     assert not first.exists()
-    assert sorted(os.listdir(given)) == [second.name]  # within 1 file of 4 bytes
+    assert sorted(os.listdir(private)) == [second.name]  # within 1 file of 4 bytes
     folder.close()
-    assert os.listdir(given) == []
+    assert not private.exists()
 
 
 @needs_permissions
-def test_a_failed_delete_on_finish_stays_counted_and_is_retried(tmp_path: Path) -> None:
-    given = tmp_path / "given"
-    given.mkdir()
-    folder = OverflowDir(str(given), max_files=1, file_bytes=4)
+def test_a_failed_delete_on_finish_stays_counted_and_is_retried() -> None:
+    folder = OverflowDir(max_files=1, file_bytes=4)
+    private = Path(folder.path)
     file = folder.file()
     assert file is not None
     writer = file.open()
     assert writer is not None
     writer.write(b"ABCD")
-    given.chmod(0o500)
+    private.chmod(0o500)
     try:
         writer.finish(delete=True)  # the delete fails
         assert Path(writer.path).exists()
         assert folder.file() is None  # still counted
     finally:
-        given.chmod(0o700)
+        private.chmod(0o700)
     assert _kept(folder).exists()  # retried: its place is free
     assert not Path(writer.path).exists()
     folder.close()
-    assert os.listdir(given) == []
+    assert not private.exists()
 
 
 @needs_permissions
-def test_a_failed_delete_is_retried_by_close(tmp_path: Path) -> None:
-    given = tmp_path / "given"
-    given.mkdir()
-    folder = OverflowDir(str(given), max_files=1, file_bytes=4)
+def test_a_failed_delete_is_retried_by_close() -> None:
+    folder = OverflowDir(max_files=1, file_bytes=4)
+    private = Path(folder.path)
     first = _kept(folder)
-    given.chmod(0o500)
+    private.chmod(0o500)
     try:
         assert folder.file() is None
+        assert first.exists()
     finally:
-        given.chmod(0o700)
+        private.chmod(0o700)
     folder.close()
-    assert not first.exists()
+    assert not first.exists() and not private.exists()
 
 
 # --- a failed close: retried by the next close() and at exit ---------------------------
@@ -278,7 +227,7 @@ def test_a_failed_close_is_retried_by_the_next_close() -> None:
 
 
 @needs_permissions
-def test_a_failed_close_is_retried_at_exit(tmp_path: Path) -> None:
+def test_a_failed_close_is_retried_at_exit() -> None:
     code = """
         import os
         from nooa.overflow import OverflowDir

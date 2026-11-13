@@ -64,12 +64,57 @@ def test_file_backed_writes_into_the_session_folder(tmp_path):
         buffer.write("0123456789" * 10)
         buffer.close()
         path = buffer.file_path
-        assert path is not None and Path(path).parent == tmp_path
+        assert path is not None and Path(path).parent == Path(folder.path)
+        assert Path(folder.path).parent == tmp_path  # a private folder made in the parent
         assert buffer.getvalue() == (
             f"0123456789\n[... 80 chars omitted; full output: {path}]\n0123456789"
         )
         assert Path(path).read_text() == "0123456789" * 10
     assert not Path(path).exists()  # the folder's close deletes it
+
+
+def test_switch_off_writes_no_file_even_with_a_session_folder(tmp_path):
+    # TruncationConfig.overflow_files=False: memory only, whatever file_backed says.
+    with OverflowDir(str(tmp_path)) as folder:
+        token = capture_overflow.set(folder)
+        try:
+            buffer = _make_capture_buffer(
+                20, CaptureConfig(tail=10, file_backed=True), overflow_files=False
+            )
+        finally:
+            capture_overflow.reset(token)
+        buffer.write("0123456789" * 10)
+        buffer.close()
+        assert buffer.file_path is None
+        assert buffer.getvalue() == (
+            "0123456789\n[... 80 chars omitted; full output not kept]\n0123456789"
+        )
+        assert list(Path(folder.path).iterdir()) == []
+
+
+def test_switch_off_writes_no_temp_file_without_a_session_folder(tmp_path, monkeypatch):
+    import tempfile
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    buffer = _make_capture_buffer(10, CaptureConfig(tail=5, file_backed=True), overflow_files=False)
+    buffer.write("y" * 50)
+    buffer.close()
+    assert buffer.file_path is None and "full output not kept]" in buffer.getvalue()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_bad_sizes_give_the_folders_file_back(tmp_path):
+    # model.md C2 (output_capture.py:72-74): the file was handed out before
+    # TextStream checked its sizes, and kept its place for the folder's life.
+    with OverflowDir(str(tmp_path), max_files=1) as folder:
+        token = capture_overflow.set(folder)
+        try:
+            with pytest.raises(ValueError):
+                CaptureBuffer(5, 10, file_backed=True)  # tail longer than the limit
+        finally:
+            capture_overflow.reset(token)
+        assert list(Path(folder.path).iterdir()) == []
+        assert folder.file() is not None  # the one place is free again
 
 
 def test_file_backed_uncut_output_keeps_no_file():

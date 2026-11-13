@@ -18,6 +18,11 @@ lifetime, and the folder keeps the newest, so an older path may no longer
 exist), else from a standalone ``OverflowFile()`` (a temporary file kept
 when the output was cut).
 
+``TruncationConfig.overflow_files`` False (the off switch) makes no file at
+all, whatever ``file_backed`` says (``nooa.runtime.actor._make_capture_buffer``):
+a cut stream keeps its head and tail, and its line says ``full output not
+kept``.
+
 ``capture_overflow`` is a context variable, not a parameter, because the
 capture is made inside the core cell execution (``nooa.runtime.actor``) from
 the static ``CaptureConfig``, which knows nothing of a session; a session
@@ -71,7 +76,12 @@ class CaptureBuffer:
             folder = capture_overflow.get()
             file = folder.file() if folder is not None else OverflowFile()
         self._hint = unrecoverable_hint
-        self._stream = TextStream(unit="chars", head=limit - tail, tail=tail, overflow=file)
+        try:
+            self._stream = TextStream(unit="chars", head=limit - tail, tail=tail, overflow=file)
+        except BaseException:  # bad sizes: give the folder's unopened file back
+            if file is not None:
+                file.release()
+            raise
 
     def write(self, s: str) -> int:
         """Append ``s``; returns ``len(s)``. Raises ``TypeError`` for a non-``str``."""
