@@ -250,3 +250,33 @@ def test_rendering_any_bytes_text_never_raises() -> None:
                 if not node.complete:
                     assert f"[:{len(node.head)}]={node.head!r}" in python or not node.head
                 assert node.head.decode("utf-8", "replace") in output
+
+
+# --- render_output(note=...) and Text.full_path (round H) -----------------------------
+
+
+def test_render_output_puts_a_note_after_the_line_when_no_file_keeps_the_output():
+    from nooa.snapshot import Overflow, Text, render_output
+
+    cut = Text(head="ab\n", tail="yz", length=20, unit="chars", reason="max_length")
+    assert render_output(cut, note="Print less.") == (
+        "ab\n\n[... 15 chars omitted; full output not kept] Print less.\nyz"
+    )
+    assert render_output(cut, note=None) == render_output(cut) == render_output(cut, note="")
+    kept = Text(
+        head="ab", length=20, unit="chars", reason="max_length", full=Overflow("/tmp/o", 20, 20)
+    )
+    assert render_output(kept, note="Print less.") == render_output(kept)
+    whole = Text(head="abc", length=3, unit="chars")
+    assert render_output(whole, note="Print less.") == "abc"
+
+
+def test_full_path_is_the_file_of_a_cut_text_only():
+    from nooa.snapshot import Overflow, Text
+
+    file = Overflow("/tmp/o", 5, 9)
+    assert (
+        Text(head="a", length=9, unit="chars", reason="max_length", full=file).full_path == "/tmp/o"
+    )
+    assert Text(head="a", length=9, unit="chars", reason="max_length").full_path is None
+    assert Text(head="abc", length=3, unit="chars", full=Overflow("/tmp/o", 3, 3)).full_path is None

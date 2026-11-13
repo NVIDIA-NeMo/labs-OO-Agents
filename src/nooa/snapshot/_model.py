@@ -140,7 +140,8 @@ class Text:
     Derived: ``complete`` is ``reason is None`` (whether this text was
     cut; it says nothing of the node that holds it); ``omitted`` is
     ``length - len(head) - len(tail)``, the units left out between ``head``
-    and ``tail``. Counts are exact in the text's own unit. A bytes cut made
+    and ``tail``; ``full_path`` is the file to read the whole output from
+    (``full.path`` of a cut text, else ``None``). Counts are exact in the text's own unit. A bytes cut made
     by this package ends and starts on UTF-8 code point boundaries.
     Renderers decode bytes (UTF-8, with replacement) only when they print.
 
@@ -184,6 +185,15 @@ class Text:
     def omitted(self) -> int:
         """The units left out between ``head`` and ``tail`` (0 when complete)."""
         return self.length - len(self.head) - len(self.tail)
+
+    @property
+    def full_path(self) -> str | None:
+        """Where to read the whole output: ``full.path`` when this text was cut and a file holds it, else ``None``.
+
+        A complete text needs no file, so it has none even when ``full`` is
+        set. ``full.cut`` still applies: the file may hold only its start.
+        """
+        return self.full.path if self.full is not None and self.reason is not None else None
 
 
 @dataclass(frozen=True)

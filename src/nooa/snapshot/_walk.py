@@ -60,6 +60,7 @@ from nooa.snapshot._fields import (
     _Scoped,
     _visibility_overrides,
 )
+from nooa.snapshot._keys import key_text
 from nooa.snapshot._limits import Limits, _split, _State
 from nooa.snapshot._model import (
     Key,
@@ -83,7 +84,6 @@ from nooa.snapshot._raw import (
     _raw_namespace,
     _safe_mro,
 )
-from nooa.snapshot._render import key_text
 from nooa.snapshot._shapes import (
     _REGISTRY,
     _Collection,
