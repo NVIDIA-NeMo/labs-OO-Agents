@@ -2,26 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """Type stub for _visibility.py.
 
-Returning Literal[False] from __exit__ tells pyright that the context manager
+``hidden`` is ``nooa.agentdoc.markers.hidden``, whose ``__exit__`` returns
+``Literal[False]``. Returning Literal[False] from __exit__ tells pyright that the context manager
 never suppresses exceptions, so the with-block body is always fully executed
 before control reaches code after the block. This prevents pyright from
 flagging names defined inside ``with hidden:`` as "possibly unbound".
 """
 
 import types
-from typing import Any, Literal
+from typing import Any
 
-class _Hidden:
-    def __call__(self, func: Any) -> Any: ...
-    def __enter__(self) -> _Hidden: ...
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: Any,
-    ) -> Literal[False]: ...
-
-hidden: _Hidden
+from nooa.agentdoc.markers import _Hidden as _Hidden
+from nooa.agentdoc.markers import hidden as hidden
 
 def is_hidden_method(func: Any) -> bool: ...
 def is_hidden_field(cls: Any, name: str) -> bool: ...

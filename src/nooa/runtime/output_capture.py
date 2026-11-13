@@ -20,9 +20,12 @@ at interpreter exit). Either folder keeps the newest files, so an older
 path may no longer exist.
 
 ``TruncationConfig.overflow_files`` False (the off switch) makes no file at
-all, whatever ``file_backed`` says (``nooa.runtime.actor._make_capture_buffer``):
-a cut stream keeps its head and tail, and its line says ``full output not
-kept``.
+all, whatever ``file_backed`` says: the actor clears ``file_backed``
+(``nooa.runtime.actor._make_capture_buffer``), and a session whose files are
+off sets ``capture_overflow`` to ``NO_OVERFLOW_FILES``, which the buffer
+itself honours, so a capture made by another entry point writes no file
+either. A cut stream keeps its head and tail, and its line says ``full
+output not kept``.
 
 ``capture_overflow`` is a context variable, not a parameter, because the
 capture is made inside the core cell execution (``nooa.runtime.actor``) from
@@ -39,12 +42,31 @@ import threading
 from nooa.overflow import OverflowDir
 from nooa.snapshot import Text, TextStream, render_output
 
-__all__ = ["CaptureBuffer", "capture_overflow"]
+__all__ = ["NO_OVERFLOW_FILES", "CaptureBuffer", "capture_overflow"]
 
-capture_overflow: contextvars.ContextVar[OverflowDir | None] = contextvars.ContextVar(
-    "nooa_capture_overflow", default=None
+
+class _NoOverflowFiles:
+    """The type of ``NO_OVERFLOW_FILES`` (one instance)."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "NO_OVERFLOW_FILES"
+
+
+NO_OVERFLOW_FILES = _NoOverflowFiles()
+"""``capture_overflow``'s value for a session whose output files are off: captures keep memory only."""
+
+capture_overflow: contextvars.ContextVar[OverflowDir | _NoOverflowFiles | None] = (
+    contextvars.ContextVar("nooa_capture_overflow", default=None)
 )
-"""The ``OverflowDir`` a file-backed cell capture writes into (a session sets it); None: the process's own."""
+"""Where a file-backed cell capture writes, as the session set it.
+
+- an ``OverflowDir``: the session's folder;
+- ``NO_OVERFLOW_FILES``: the session's output files are off: no file, whatever
+  ``file_backed`` says;
+- ``None`` (unset, no session): the process's own folder.
+"""
 
 _own_folder: OverflowDir | None = None
 _own_folder_lock = threading.Lock()
@@ -87,7 +109,12 @@ class CaptureBuffer:
         tail = tail_chars if tail_chars is not None else limit // 2
         folder: OverflowDir | None = None
         if file_backed:
-            folder = capture_overflow.get() or _process_folder()
+            session = capture_overflow.get()
+            if session is None:
+                folder = _process_folder()
+            elif isinstance(session, OverflowDir):
+                folder = session
+            # NO_OVERFLOW_FILES: the session's files are off, memory only.
         self._hint = unrecoverable_hint
         self._stream = TextStream(unit="chars", head=limit - tail, tail=tail, overflow=folder)
 
@@ -113,15 +140,8 @@ class CaptureBuffer:
         return self._stream.snapshot()
 
     def getvalue(self) -> str:
-        """The stream in ``render_output``'s notation (whole when nothing was cut)."""
-        text = self._stream.snapshot()
-        rendered = render_output(text)
-        if text.complete or text.full is not None or not self._hint:
-            return rendered
-        # The cut line alone, to find it after the head (which may hold any text).
-        line = render_output(Text(head="", length=text.omitted, unit="chars", reason=text.reason))
-        line_end = (len(text.head) + 1 if text.head else 0) + len(line)
-        return f"{rendered[:line_end]} {self._hint}{rendered[line_end:]}"
+        """The stream in ``render_output``'s notation (whole when nothing was cut), with the hint as its note."""
+        return render_output(self._stream.snapshot(), note=self._hint)
 
     @property
     def was_truncated(self) -> bool:
@@ -135,9 +155,8 @@ class CaptureBuffer:
 
     @property
     def file_path(self) -> str | None:
-        """The overflow file while the stream is cut, else ``None``."""
-        full = self._stream.snapshot().full
-        return full.path if full is not None else None
+        """The overflow file while the stream is cut, else ``None`` (``Text.full_path``)."""
+        return self._stream.snapshot().full_path
 
     def close(self) -> None:
         """End the stream; its overflow file stays only when the output was cut."""

@@ -160,3 +160,22 @@ def test_writes_after_close_are_ignored_and_non_str_rejected():
     assert buffer.write("late") == 4 and buffer.getvalue() == "abc"
     with pytest.raises(TypeError):
         CaptureBuffer(10).write(b"bytes")  # type: ignore[arg-type]
+
+
+def test_a_disabled_session_context_writes_no_file_even_with_file_backed(tmp_path, monkeypatch):
+    # Round H item 1: the off switch lives in the context, honoured by the buffer
+    # itself, so an entry point that forgets to clear file_backed writes nothing.
+    from nooa.runtime.output_capture import NO_OVERFLOW_FILES
+
+    monkeypatch.setattr(output_capture, "_own_folder", None)
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    token = capture_overflow.set(NO_OVERFLOW_FILES)
+    try:
+        buffer = CaptureBuffer(4, file_backed=True)
+    finally:
+        capture_overflow.reset(token)
+    buffer.write("x" * 100)
+    buffer.close()
+    assert buffer.file_path is None
+    assert buffer.getvalue() == "xx\n[... 96 chars omitted; full output not kept]\nxx"
+    assert list(tmp_path.iterdir()) == []

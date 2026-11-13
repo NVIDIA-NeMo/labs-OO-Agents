@@ -1191,7 +1191,12 @@ def test_module_namespace_hostile_key_fails_closed(monkeypatch) -> None:
     # field by field, only the annotation that looks up the hostile name is.
     assert _CollidingKey.calls != []
     assert isinstance(snapshot, Object)
-    assert snapshot.fields == (("ok", Scalar(1)),)
+    if sys.version_info >= (3, 14):
+        # Python 3.14's ForwardRef.evaluate copies the module namespace for every
+        # annotation, so the hostile key raises for each field: all fail closed.
+        assert snapshot.fields == ()
+    else:
+        assert snapshot.fields == (("ok", Scalar(1)),)
     assert not snapshot.complete and snapshot.reason == "unreadable"
     assert "s3cret" not in render_json(snapshot, max_chars=1000)
 
