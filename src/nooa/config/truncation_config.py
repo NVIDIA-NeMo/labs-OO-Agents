@@ -80,7 +80,8 @@ class CaptureConfig(BaseModel):
                 "The file comes from the session's OverflowDir "
                 "(nooa.runtime.output_capture.capture_overflow) when one is set, else the "
                 "process's own private OverflowDir (removed at exit). Ignored (no file) when "
-                "TruncationConfig.overflow_files is False."
+                "TruncationConfig.overflow_files is False, or when the session set "
+                "capture_overflow to NO_OVERFLOW_FILES (its files are off)."
             ),
         ),
     ] = False
