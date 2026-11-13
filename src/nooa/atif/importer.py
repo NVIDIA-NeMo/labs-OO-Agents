@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Iterable
 from datetime import datetime
 from typing import Any
@@ -88,6 +89,23 @@ def _text(message: Any) -> str:
                 pieces.append(str(part))
         return "\n".join(pieces)
     return "" if message is None else str(message)
+
+
+# NOOA's CodeAct task message starts with "## Task: <method name>".
+_TASK_HEADER = re.compile(r"^##\s*Task:\s*([A-Za-z_][\w.]*)", re.MULTILINE)
+
+
+def _method_name(trajectory: dict[str, Any], first_user: str | None) -> str | None:
+    """The agent method a trajectory ran; ATIF has no field for it.
+
+    Uses ``extra.method`` when a producer records it, else the NOOA task header
+    in the first user message.
+    """
+    method = (trajectory.get("extra") or {}).get("method")
+    if isinstance(method, str) and method:
+        return method
+    match = _TASK_HEADER.search(first_user or "")
+    return match.group(1) if match else None
 
 
 def _arguments(value: Any) -> str:
@@ -305,6 +323,8 @@ class _Converter:
                 clock = self.trajectory(sub, f"{seed}/sub/{sub_id}", root["spanId"], clock) + 0.001
 
         end = max(clock, start + 0.001)
+        method = _method_name(trajectory, first_user) or name
+        root["name"] = f"{agent_name}.{method}"
         root["endTimeUnixNano"] = _ns(end)
         root["attributes"] = _attrs(
             {
@@ -312,7 +332,7 @@ class _Converter:
                 "openinference.span.kind": "AGENT",
                 "nooa.viewer.plugin": "method",
                 "agent.name": agent_name,
-                "agent.method": name,
+                "agent.method": method,
                 "agent.call_id": root["spanId"],
                 "input.value": first_user or "",
                 "output.value": final if output is None else output,

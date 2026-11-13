@@ -97,7 +97,7 @@ TRAJECTORY = {
 def test_span_tree_and_subagent_nesting():
     spans = _spans(trajectory_to_otlp(TRAJECTORY, "sess", experiment="exp"))
     root = spans[0]
-    assert root["name"] == "agent.task/r0" and "parentSpanId" not in root
+    assert root["name"] == "agent.task/r0" and "parentSpanId" not in root  # no task header
     assert {s["traceId"] for s in spans} == {root["traceId"]}
     generations = [s for s in spans if s.get("parentSpanId") == root["spanId"]]
     assert [g["name"] for g in generations] == ["generation 1", "generation 2"]
@@ -139,6 +139,20 @@ def test_root_and_resource_attributes():
     assert root["status"]["code"] == 2
 
 
+def test_method_name_from_task_header_or_extra():
+    task = {**TRAJECTORY, "subagent_trajectories": []}
+    task["steps"] = [
+        {"step_id": 1, "source": "user", "message": "## Task: can_fulfill_order\n\nCheck."},
+        {"step_id": 2, "source": "agent", "message": "done"},
+    ]
+    root = _spans(trajectory_to_otlp(task, "sess"))[0]
+    assert root["name"] == "agent.can_fulfill_order"
+    assert _attrs(root)["agent.method"] == "can_fulfill_order"
+    assert _attrs(root)["atif.trajectory_id"] == "task/r0"
+    root = _spans(trajectory_to_otlp({**task, "extra": {"method": "explicit"}}, "sess"))[0]
+    assert root["name"] == "agent.explicit"
+
+
 def test_code_tools_are_configurable():
     spans = _spans(trajectory_to_otlp(TRAJECTORY, "sess", code_tools={"delegate"}))
     assert len(_by_name(spans, "code_execution")) == 1
@@ -178,6 +192,7 @@ async def test_round_trip_from_nooa_export_into_viewer_store(tmp_path: Path, mon
     trajectory = Trajectory.model_validate_json(out.read_text())
     body = trajectory_to_otlp(trajectory, "rt-session")
     spans = _spans(body)
+    assert spans[0]["name"] == "A.run"
     code = _by_name(spans, "code_execution")
     assert json.loads(_attrs(code[0])["input.value"]) == {"code": "x = 2"}
     assert _by_name(spans, "tool:return_result")
