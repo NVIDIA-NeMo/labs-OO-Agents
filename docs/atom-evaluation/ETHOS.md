@@ -18,7 +18,7 @@ source_revision: fd62a602aea69192f1d1a312ba57ab612a014d15
 > and supported mechanisms; it does not claim a completed intent interview,
 > product-owner approval or measured agent reliability. See the [source index](SOURCES.md#source-index)
 > and [capability evidence matrix](capability-evidence-matrix.md). The
-> [experiment plan](README.md) explains how this input will be used by Eval Author.
+> [preparation README](README.md) links the benchmark owned by the fixtures repository.
 
 ## Role
 
@@ -217,8 +217,9 @@ additional regression sources are `test_cell_deadline_detach.py`,
 A later Eval Author suite should map tasks to matrix IDs, prove environments/graders
 and distinguish outcome verification from tool-use evidence. Existing benchmark
 selection, compute, task generation and mutation execution remain preparation
-items in the [experiment plan](README.md). This PR proposes that study and
-provides [case templates](case/README.md); it does not execute it. Sources: [S18](SOURCES.md#s18),
+items in the [fixtures benchmark plan](https://github.com/NVIDIA-dev/nemo-eval-author-fixtures/blob/docs/atom-benchmark-preparation/benchmark-dev/experiments/nooa-atom/README.md).
+This NOOA package supplies agent intent and evidence; benchmark definitions,
+mutation design and experiment results belong in fixtures. Sources: [S18](SOURCES.md#s18),
 [S22](SOURCES.md#s22), [S23](SOURCES.md#s23).
 
 ## Metric Semantics

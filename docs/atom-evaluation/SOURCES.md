@@ -12,12 +12,12 @@ failure cases and evidence, then derives an intent draft for review.
 - [ETHOS.md](ETHOS.md): the source-derived behavioral draft. It is structurally
   validated, but its product intent is **not yet confirmed**.
 
-See the [experiment plan](README.md) for the comparison design and preparation status.
+See the [preparation README](README.md) for artifact status and the fixtures benchmark link.
 
 ## Scope and provenance
 
-The initial pass extracted capabilities and an Ethos draft. The accompanying
-experiment plan now proposes task-set comparison and mutation analysis; it does
+The initial pass extracted capabilities and an Ethos draft. The fixtures
+benchmark plan proposes task-set comparison and mutation analysis; this package does
 not select the existing benchmark roster, configure models, run ATOM evaluations,
 or establish a performance result. Source expectations remain distinct from
 human-confirmed product intent and measured behavior.
