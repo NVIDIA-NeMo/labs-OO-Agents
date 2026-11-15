@@ -68,10 +68,10 @@ First [connect a model](model-connect.md). Then:
 
 ### Prepare ATOM evaluations
 
-The [ATOM evaluation preparation package](../experiments/atom-eval-author/README.md) contains a
-source-linked tool inventory, capability evidence matrix, draft Ethos, and a
-mutation-based comparison plan with Eval Author case templates. The plan and
-initial artifacts are drafts for iteration; no benchmark results are claimed.
+The [ATOM evaluation preparation package](atom-evaluation/README.md) contains a
+source-linked tool inventory, capability evidence matrix and draft Ethos for
+Eval Author. It links the benchmark and mutation-design work owned by the fixtures
+repository. The initial artifacts remain drafts for joint iteration.
 
 ## Concepts at a glance
 
