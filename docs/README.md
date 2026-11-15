@@ -66,6 +66,13 @@ First [connect a model](model-connect.md). Then:
 2. [LLM admission control](concepts/llm-admission-control.md)
 3. [Architecture](architecture.md)
 
+### Prepare ATOM evaluations
+
+The [ATOM evaluation preparation package](../experiments/atom-eval-author/README.md) contains a
+source-linked tool inventory, capability evidence matrix, draft Ethos, and a
+mutation-based comparison plan with Eval Author case templates. The plan and
+initial artifacts are drafts for iteration; no benchmark results are claimed.
+
 ## Concepts at a glance
 
 | Document | Question it answers |
