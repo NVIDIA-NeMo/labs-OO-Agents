@@ -191,3 +191,41 @@ def test_system_prompt_small_values_are_unchanged():
     agent.ratio = 0.5
     agent.name = "n"
     assert agent._resolve_system_prompt() == "You are Small with 3 tools, 50.0% 'n'."
+
+
+class _Configured(Agent):
+    """Value {self.value}."""
+
+    async def work(self) -> str: ...
+
+
+def _configured(**limits):
+    from nooa.config.truncation_config import FormatConfig, TruncationConfig
+
+    agent = _Configured(
+        llm=FakeLLMClient([]), truncation=TruncationConfig(prefill_format=FormatConfig(**limits))
+    )
+    return agent
+
+
+async def test_placeholders_honour_tighter_prefill_limits():
+    # correctness 4 (placeholder_config.py): both callers used the global defaults.
+    agent = _configured(max_string=4, max_length=1, max_depth=1)
+    agent.value = ["abcdefghij", "second"]
+    expected = "list(len=2, [:1]=[str(len=10, [:2]='ab', [-2:]='ij')])"
+    assert agent._resolve_system_prompt() == f"Value {expected}."
+    assert await agent.runtime.expand_variables("{self.value}") == expected
+
+
+async def test_placeholders_honour_looser_prefill_limits():
+    agent = _configured(max_string=10_000, max_length=500, max_depth=6)
+    agent.value = list(range(300))  # the default prefill keeps 25 items
+    whole = str(list(range(300)))
+    assert agent._resolve_system_prompt() == f"Value {whole}."
+    assert await agent.runtime.expand_variables("{self.value}") == whole
+
+
+async def test_placeholder_strings_keep_the_50k_bound_whatever_the_limits():
+    agent = _configured(max_string=10_000_000)
+    agent.value = "a" * 200_000
+    assert len(await agent.runtime.expand_variables("{self.value}")) < BOUND

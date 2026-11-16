@@ -599,7 +599,14 @@ Inspect in REPL: print(doc(self.events))
                 try:
                     value = eval(field, {"self": self, "type": type})  # noqa: S307
                     # Bounded, through the snapshot (nooa.runtime.placeholders).
-                    parts.append(render_placeholder(value, conversion, fmt_spec or ""))
+                    parts.append(
+                        render_placeholder(
+                            value,
+                            conversion,
+                            fmt_spec or "",
+                            prefill=self._truncation.prefill_format,
+                        )
+                    )
                 except Exception:
                     logger.debug("Prompt template eval failed for %r", field, exc_info=True)
                     placeholder = field

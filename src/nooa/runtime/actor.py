@@ -2560,6 +2560,7 @@ class ActorRuntime:
 
         if not text or "{" not in text:
             return text
+        prefill = self.truncation_config.prefill_format  # the agent's limits for values
 
         # Use Python's built-in formatter to parse the template
         # This handles format specs, conversions (!r, !s, !a), and escaped braces
@@ -2598,7 +2599,9 @@ class ActorRuntime:
                         # render_placeholder cuts only its result, once.
                         value = formatter.convert_field(value, conversion)
                     try:
-                        result_parts.append(render_placeholder(value, None, format_spec))
+                        result_parts.append(
+                            render_placeholder(value, None, format_spec, prefill=prefill)
+                        )
                     except Exception:
                         if error_mode == "silent":
                             # Keep original placeholder on format error
@@ -2610,7 +2613,7 @@ class ActorRuntime:
                         else:
                             result_parts.append(f"{{{field_name}:{format_spec} | FORMAT ERROR}}")
                 else:
-                    result_parts.append(render_placeholder(value, conversion))
+                    result_parts.append(render_placeholder(value, conversion, prefill=prefill))
 
         return "".join(result_parts)
 
