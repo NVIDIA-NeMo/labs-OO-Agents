@@ -21,6 +21,8 @@ Producers:
 - ``TextStream``: output that arrives over time, with an optional
   overflow file in an ``OverflowDir`` (``nooa.overflow``, which bounds the
   files of many streams), opened only once the output is cut;
+  ``SharedTextStream`` is the same for several writing threads (a lock,
+  and the text file methods a ``sys.stdout`` replacement needs);
   ``merge`` joins two ``Text``s (progress batches).
 - ``cut(data, head=, tail=)``: a string or bytes that is already whole.
 
@@ -66,7 +68,7 @@ from nooa.snapshot._render import (
     render_python,
     render_trace,
 )
-from nooa.snapshot._stream import TextStream
+from nooa.snapshot._stream import SharedTextStream, TextStream
 from nooa.snapshot._text import cut, merge
 
 __all__ = [
@@ -79,6 +81,7 @@ __all__ = [
     "Scalar",
     "Sequence",
     "Overflow",
+    "SharedTextStream",
     "Snapshot",
     "Text",
     "TextStream",
