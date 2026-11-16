@@ -52,15 +52,32 @@ def unsendable_image_type(block: Mapping[str, Any]) -> str | None:
     ``media_type``, ``mime_type``; see ``nooa.media_inputs._mime_hints``),
     after lower-casing and dropping parameters. One hint outside
     ``SENDABLE_IMAGE_TYPES`` makes the image unsendable; two accepted hints
-    that disagree do not. A remote URL has no hint: the provider reads the type
-    from the server it downloads from.
+    that disagree do not. Only inline images are checked: for a remote URL the
+    provider reads the real type from the server it downloads from, so a
+    ``format`` hint next to it is not trusted to be wrong.
     """
-    if attachment_kind(block) != "image":
+    if attachment_kind(block) != "image" or not _is_inline(block):
         return None
     refused = sorted(
         {_canonical_image_type(hint) for hint in _mime_hints(block)} - SENDABLE_IMAGE_TYPES
     )
     return refused[0] if refused else None
+
+
+def _is_inline(block: Mapping[str, Any]) -> bool:
+    """True if ``block`` carries its bytes: a ``data:`` URL or a base64 ``source``."""
+    nodes = [
+        block,
+        *(block[key] for key in ("image_url", "source") if isinstance(block.get(key), Mapping)),
+    ]
+    for node in nodes:
+        if node.get("type") == "base64":
+            return True
+        for key in ("url", "image_url"):
+            value = node.get(key)
+            if isinstance(value, str) and value[:5].lower() == "data:":
+                return True
+    return False
 
 
 def _sendable_image_block(block: Mapping[str, Any]) -> Mapping[str, Any]:

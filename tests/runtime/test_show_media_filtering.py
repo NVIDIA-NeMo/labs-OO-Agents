@@ -123,3 +123,57 @@ def test_remote_image_urls_are_not_checked_for_format():
     assert filter_media_messages([{"role": "user", "content": [block]}], ALL)[0]["content"] == [
         block
     ]
+
+
+@pytest.mark.parametrize(
+    "block",
+    [
+        {
+            "type": "image_url",
+            "image_url": {"url": "https://example.com/a.svg", "format": "image/svg+xml"},
+        },
+        {
+            "type": "input_image",
+            "image_url": "https://example.com/a.svg",
+            "format": "image/svg+xml",
+        },
+        {
+            "type": "image",
+            "source": {
+                "type": "url",
+                "url": "https://example.com/a.svg",
+                "media_type": "image/svg+xml",
+            },
+        },
+    ],
+)
+def test_remote_images_with_a_format_hint_are_sent_unchanged(block):
+    """Image.from_url(url, media_type="image/svg+xml"): the provider fetches it (Severin, #595)."""
+    from nooa.unifiedllm.media_inputs import filter_media_messages, unsendable_image_type
+
+    assert unsendable_image_type(block) is None
+    assert filter_media_messages([{"role": "user", "content": [block]}], ALL)[0]["content"] == [
+        block
+    ]
+
+
+def test_image_from_url_with_an_svg_type_is_not_replaced():
+    from nooa.runtime.media_capture import media_to_content_block
+    from nooa.unifiedllm.media_inputs import filter_media_messages
+
+    block = media_to_content_block(
+        Image.from_url("https://example.com/a.svg", media_type="image/svg+xml")
+    )
+    assert filter_media_messages([{"role": "user", "content": [block]}], ALL)[0]["content"] == [
+        block
+    ]
+
+
+def test_a_base64_anthropic_svg_source_is_still_replaced():
+    from nooa.unifiedllm.media_inputs import unsendable_image_type
+
+    block = {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/svg+xml", "data": "PHN2Zy8+"},
+    }
+    assert unsendable_image_type(block) == "image/svg+xml"
