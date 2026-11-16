@@ -66,17 +66,11 @@ First [connect a model](model-connect.md). Then:
 2. [LLM admission control](concepts/llm-admission-control.md)
 3. [Architecture](architecture.md)
 
-### Prepare ATOM evaluations
-
-The [ATOM evaluation preparation package](atom-evaluation/README.md) contains a
-source-linked tool inventory, capability evidence matrix and draft Ethos for
-Eval Author. It links the benchmark and mutation-design work owned by the fixtures
-repository. The initial artifacts remain drafts for joint iteration.
-
 ## Concepts at a glance
 
 | Document | Question it answers |
 |---|---|
+| [ATOM evaluation preparation](atom-evaluation/README.md) | What behavior and source evidence should inform ATOM evaluations? (Draft for intent review.) |
 | [Agents and methods](concepts/agents-and-methods.md) | What is an agent in NOOA, and what does `...` mean? |
 | [Strategies](concepts/strategies.md) | When should a method use Predict or CodeAct? |
 | [Decision models](concepts/decisions.md) | How do I use typed probability, choice, and score decisions? |
