@@ -1,0 +1,158 @@
+{
+  "async": {
+    "calls": [
+      {
+        "api": "aresponses",
+        "kwargs": {
+          "api_key": "sk-test",
+          "client": {
+            "__client__": "AsyncHTTPHandler",
+            "max_retries": null
+          },
+          "include": [
+            "reasoning.encrypted_content"
+          ],
+          "input": [
+            {
+              "content": [
+                {
+                  "text": "Hello",
+                  "type": "input_text"
+                }
+              ],
+              "role": "user"
+            }
+          ],
+          "model": "openai/gpt-5.6",
+          "text": {
+            "format": {
+              "name": "Loose",
+              "schema": {
+                "properties": {
+                  "counts": {
+                    "additionalProperties": {
+                      "type": "integer"
+                    },
+                    "properties": {},
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "counts"
+                ],
+                "type": "object"
+              },
+              "strict": false,
+              "type": "json_schema"
+            }
+          },
+          "truncation": "disabled"
+        }
+      }
+    ],
+    "responses": [
+      {
+        "content": "{\"counts\": {\"a\": 1}}",
+        "finish_reason": "stop",
+        "parsed": {
+          "counts": {
+            "a": 1
+          }
+        },
+        "parts": [
+          "AssistantText"
+        ],
+        "reasoning": null,
+        "replay_scope": "responses:openai:sha256:b2eb13c61b299154bbc8af7301698bc457b8e948d08543a9945c9315536ee5b8",
+        "tool_calls": [],
+        "usage": {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cost_usd": 0.0,
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "reasoning_tokens": 0,
+          "total_tokens": 18
+        }
+      }
+    ]
+  },
+  "sync": {
+    "calls": [
+      {
+        "api": "responses",
+        "kwargs": {
+          "api_key": "sk-test",
+          "client": {
+            "__client__": "HTTPHandler",
+            "max_retries": null
+          },
+          "include": [
+            "reasoning.encrypted_content"
+          ],
+          "input": [
+            {
+              "content": [
+                {
+                  "text": "Hello",
+                  "type": "input_text"
+                }
+              ],
+              "role": "user"
+            }
+          ],
+          "model": "openai/gpt-5.6",
+          "text": {
+            "format": {
+              "name": "Loose",
+              "schema": {
+                "properties": {
+                  "counts": {
+                    "additionalProperties": {
+                      "type": "integer"
+                    },
+                    "properties": {},
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "counts"
+                ],
+                "type": "object"
+              },
+              "strict": false,
+              "type": "json_schema"
+            }
+          },
+          "truncation": "disabled"
+        }
+      }
+    ],
+    "responses": [
+      {
+        "content": "{\"counts\": {\"a\": 1}}",
+        "finish_reason": "stop",
+        "parsed": {
+          "counts": {
+            "a": 1
+          }
+        },
+        "parts": [
+          "AssistantText"
+        ],
+        "reasoning": null,
+        "replay_scope": "responses:openai:sha256:b2eb13c61b299154bbc8af7301698bc457b8e948d08543a9945c9315536ee5b8",
+        "tool_calls": [],
+        "usage": {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cost_usd": 0.0,
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "reasoning_tokens": 0,
+          "total_tokens": 18
+        }
+      }
+    ]
+  }
+}

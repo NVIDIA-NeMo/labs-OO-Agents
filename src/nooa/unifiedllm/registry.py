@@ -401,6 +401,33 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
     return cast("UnifiedLLM", client)
 
 
+# Adapters a registry entry may name with ``adapter:``. Omitted means litellm.
+SUPPORTED_ADAPTERS = ("litellm",)
+
+
+def load_llm(name: str, **overrides) -> UnifiedLLM:
+    """Load the LLM for a registry entry (or a LiteLLM model name).
+
+    The adapter is ``overrides["adapter"]``, else the entry's optional
+    ``adapter:`` field, else ``litellm``. Only ``litellm`` is supported now;
+    any other value raises ValueError. The adapter choice is removed before
+    the client is built, so it never reaches the provider. Everything else is
+    as in :func:`get_llm_client`, including ``overrides``.
+    """
+    config = get_registry_config(name)
+    adapter = overrides.pop("adapter", None)
+    if adapter is None:
+        adapter = config.get("adapter")
+    if adapter is None:
+        adapter = "litellm"
+    if adapter not in SUPPORTED_ADAPTERS:
+        raise ValueError(
+            f"Model alias {name!r} has unsupported adapter {adapter!r}; "
+            f"supported: {', '.join(SUPPORTED_ADAPTERS)}"
+        )
+    return get_llm_client(name, **overrides)
+
+
 def get_decision_model(name: str, **overrides) -> UnifiedDecisionModel:
     """Create a decision model from a configured registry alias.
 

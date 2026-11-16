@@ -1,0 +1,338 @@
+{
+  "async": {
+    "calls": [
+      {
+        "api": "acompletion",
+        "kwargs": {
+          "api_base": "https://gateway.test/v1",
+          "api_key": "sk-test",
+          "client": {
+            "__client__": "AsyncOpenAI",
+            "max_retries": 0
+          },
+          "max_retries": 0,
+          "messages": [
+            {
+              "content": "You are terse.",
+              "role": "system"
+            },
+            {
+              "content": "Hello",
+              "role": "user"
+            }
+          ],
+          "model": "openai/gateway-deepseek",
+          "parallel_tool_calls": false,
+          "tools": [
+            {
+              "function": {
+                "description": "Look something up.",
+                "name": "lookup",
+                "parameters": {
+                  "properties": {
+                    "limit": {
+                      "type": "integer"
+                    },
+                    "query": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "query"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "function"
+            }
+          ]
+        }
+      },
+      {
+        "api": "acompletion",
+        "kwargs": {
+          "api_base": "https://gateway.test/v1",
+          "api_key": "sk-test",
+          "client": {
+            "__client__": "AsyncOpenAI",
+            "max_retries": 0
+          },
+          "max_retries": 0,
+          "messages": [
+            {
+              "content": "You are terse.",
+              "role": "system"
+            },
+            {
+              "content": "Hello",
+              "role": "user"
+            },
+            {
+              "content": null,
+              "reasoning_content": "plain reasoning",
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "function": {
+                    "arguments": "{\"query\": \"x\"}",
+                    "name": "lookup"
+                  },
+                  "id": "call_1",
+                  "type": "function"
+                }
+              ]
+            },
+            {
+              "content": "found",
+              "role": "tool",
+              "tool_call_id": "call_1"
+            }
+          ],
+          "model": "openai/gateway-deepseek",
+          "parallel_tool_calls": false,
+          "tools": [
+            {
+              "function": {
+                "description": "Look something up.",
+                "name": "lookup",
+                "parameters": {
+                  "properties": {
+                    "limit": {
+                      "type": "integer"
+                    },
+                    "query": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "query"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "function"
+            }
+          ]
+        }
+      }
+    ],
+    "responses": [
+      {
+        "content": "",
+        "finish_reason": "tool_calls",
+        "parsed": null,
+        "parts": [
+          "AssistantReasoning",
+          "AssistantText",
+          "ToolCall"
+        ],
+        "reasoning": "plain reasoning",
+        "replay_scope": "chat:openai:sha256:1a31eac8242f2a5e33db4ab9f2dce2f0c68f0e45841a11f3bdbfc943233c2654",
+        "tool_calls": [
+          [
+            "call_1",
+            "lookup",
+            "{\"query\": \"x\"}"
+          ]
+        ],
+        "usage": {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cost_usd": 0.0,
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "reasoning_tokens": 0,
+          "total_tokens": 18
+        }
+      },
+      {
+        "content": "done",
+        "finish_reason": "stop",
+        "parsed": null,
+        "parts": [
+          "AssistantText"
+        ],
+        "reasoning": null,
+        "replay_scope": "chat:openai:sha256:1a31eac8242f2a5e33db4ab9f2dce2f0c68f0e45841a11f3bdbfc943233c2654",
+        "tool_calls": [],
+        "usage": {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cost_usd": 0.0,
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "reasoning_tokens": 0,
+          "total_tokens": 18
+        }
+      }
+    ]
+  },
+  "sync": {
+    "calls": [
+      {
+        "api": "completion",
+        "kwargs": {
+          "api_base": "https://gateway.test/v1",
+          "api_key": "sk-test",
+          "client": {
+            "__client__": "OpenAI",
+            "max_retries": 0
+          },
+          "max_retries": 0,
+          "messages": [
+            {
+              "content": "You are terse.",
+              "role": "system"
+            },
+            {
+              "content": "Hello",
+              "role": "user"
+            }
+          ],
+          "model": "openai/gateway-deepseek",
+          "parallel_tool_calls": false,
+          "tools": [
+            {
+              "function": {
+                "description": "Look something up.",
+                "name": "lookup",
+                "parameters": {
+                  "properties": {
+                    "limit": {
+                      "type": "integer"
+                    },
+                    "query": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "query"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "function"
+            }
+          ]
+        }
+      },
+      {
+        "api": "completion",
+        "kwargs": {
+          "api_base": "https://gateway.test/v1",
+          "api_key": "sk-test",
+          "client": {
+            "__client__": "OpenAI",
+            "max_retries": 0
+          },
+          "max_retries": 0,
+          "messages": [
+            {
+              "content": "You are terse.",
+              "role": "system"
+            },
+            {
+              "content": "Hello",
+              "role": "user"
+            },
+            {
+              "content": null,
+              "reasoning_content": "plain reasoning",
+              "role": "assistant",
+              "tool_calls": [
+                {
+                  "function": {
+                    "arguments": "{\"query\": \"x\"}",
+                    "name": "lookup"
+                  },
+                  "id": "call_1",
+                  "type": "function"
+                }
+              ]
+            },
+            {
+              "content": "found",
+              "role": "tool",
+              "tool_call_id": "call_1"
+            }
+          ],
+          "model": "openai/gateway-deepseek",
+          "parallel_tool_calls": false,
+          "tools": [
+            {
+              "function": {
+                "description": "Look something up.",
+                "name": "lookup",
+                "parameters": {
+                  "properties": {
+                    "limit": {
+                      "type": "integer"
+                    },
+                    "query": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "query"
+                  ],
+                  "type": "object"
+                }
+              },
+              "type": "function"
+            }
+          ]
+        }
+      }
+    ],
+    "responses": [
+      {
+        "content": "",
+        "finish_reason": "tool_calls",
+        "parsed": null,
+        "parts": [
+          "AssistantReasoning",
+          "AssistantText",
+          "ToolCall"
+        ],
+        "reasoning": "plain reasoning",
+        "replay_scope": "chat:openai:sha256:1a31eac8242f2a5e33db4ab9f2dce2f0c68f0e45841a11f3bdbfc943233c2654",
+        "tool_calls": [
+          [
+            "call_1",
+            "lookup",
+            "{\"query\": \"x\"}"
+          ]
+        ],
+        "usage": {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cost_usd": 0.0,
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "reasoning_tokens": 0,
+          "total_tokens": 18
+        }
+      },
+      {
+        "content": "done",
+        "finish_reason": "stop",
+        "parsed": null,
+        "parts": [
+          "AssistantText"
+        ],
+        "reasoning": null,
+        "replay_scope": "chat:openai:sha256:1a31eac8242f2a5e33db4ab9f2dce2f0c68f0e45841a11f3bdbfc943233c2654",
+        "tool_calls": [],
+        "usage": {
+          "cache_write_input_tokens": 0,
+          "cached_input_tokens": 0,
+          "cost_usd": 0.0,
+          "input_tokens": 11,
+          "output_tokens": 7,
+          "reasoning_tokens": 0,
+          "total_tokens": 18
+        }
+      }
+    ]
+  }
+}
