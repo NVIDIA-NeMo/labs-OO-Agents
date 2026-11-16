@@ -225,18 +225,30 @@ Two limits worth knowing:
 ### Bounded values and output
 
 Never write a new way to truncate, preview or cap a value or output. Use
-`nooa.snapshot` (see `docs/snapshot-model.md`): `capture` + `render_python` /
-`render_json` / `render_trace` for values, `TextStream` + `render_output` for
-output streams. The whole output goes to files only through `nooa.overflow`
-(`OverflowDir`, see `docs/overflow.md`). Each public name's docstring documents it (`print(doc(...))`).
+`nooa.snapshot` (see `docs/snapshot-model.md`):
+
+- values: `capture` + `render_python` (model-facing) / `render_json` /
+  `render_trace` (traces);
+- a string or bytes you already hold whole: `cut` + `render_output`;
+- output that arrives over time: `TextStream` + `render_output` (`merge` joins
+  two cut texts); `SharedTextStream` when several threads write to it (a
+  `sys.stdout` replacement).
+
+Whole output goes to disk only through a `TextStream` / `SharedTextStream`
+writing into a `nooa.overflow.OverflowDir` (see `docs/overflow.md`; the
+session's own, else `OverflowDir.default()`), and only while
+`TruncationConfig.overflow_files` is on. A cut line must say where the whole
+output is, or that it was not kept. Each public name's docstring documents it
+(`print(doc(...))`).
 
 If your code limits size for another reason (rejecting an oversized request,
 paginating a query, a protocol limit), mark the line with the reason:
 
     raw = f.read(MAX_BODY + 1)  # snapshot: allow reject oversized uploads; nothing is shown
 
-The reason is required. Existing truncation code is being moved onto
-`nooa.snapshot` in follow-up pull requests; don't add more of it.
+The reason is required. A few older hand-written cuts remain; they are tracked
+for PR 2d (issue #96). New code must not add more: when you change one, move it
+onto `nooa.snapshot` instead of copying it.
 
 ### Quality & Testing
 
