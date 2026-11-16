@@ -8,7 +8,10 @@ to follow semantic versioning.
 
 - `truncating_pformat(value, max_chars=N)` captures a non-string value within
   an `N`-char budget, so its memory and time follow the output, not the
-  input: the result is a bounded snapshot preview (`list(len=100000,
+  input (capture's own work; the time and memory of a value's custom
+  `__repr__`, which this model-facing preview may call, and of a registered
+  shape's accessors are not bounded, only what is kept of their result; see
+  `docs/snapshot-model.md`): the result is a bounded snapshot preview (`list(len=100000,
   [:27]=[...], [-k:]=[...])`), cut again to `N` chars (head and tail around
   `[... N chars omitted; full output not kept]`) only if its rendering is
   still longer. Without `max_chars` it is `pformat`, unchanged.

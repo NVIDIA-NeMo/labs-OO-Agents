@@ -620,9 +620,13 @@ class TestCrossLayerPipeline:
         finally:
             _current_llm_var.reset(token)
 
-        # The L2 truncation wrapper must be present in final context
+        # The cut output itself reaches the context: its own cut line (the
+        # system prompt also mentions the marker text) and its head and tail.
         full_context = str(messages)
-        assert "chars omitted; full output" in full_context
+        head, cut_line, tail = result.stdout.rstrip("\n").split("\n")
+        assert cut_line.startswith("[... ") and cut_line in full_context
+        assert head and set(head) == {"Z"} and tail.startswith("Z")
+        assert head + "\\n" + cut_line + "\\n" + tail in full_context
 
     @pytest.mark.asyncio
     async def test_l2_small_output_survives_full_pipeline(self):

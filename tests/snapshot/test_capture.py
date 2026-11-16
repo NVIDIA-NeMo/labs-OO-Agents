@@ -921,9 +921,12 @@ class _Node:
 
 
 def _node_depth(node: Any) -> int:
+    """Nesting below ``node``: through an ``Object``'s fields and a ``Sequence``'s or ``Mapping``'s head and tail."""
     children = [child for _, child in getattr(node, "fields", ())]
-    children += list(getattr(node, "items", ()))
-    children = [child[1] if isinstance(child, tuple) else child for child in children]
+    for part in ("head", "tail"):
+        kept = getattr(node, part, ())
+        if isinstance(kept, tuple):  # a Text's head and tail are str / bytes
+            children += [child[1] if isinstance(child, tuple) else child for child in kept]
     return max([0] + [1 + _node_depth(child) for child in children])
 
 
