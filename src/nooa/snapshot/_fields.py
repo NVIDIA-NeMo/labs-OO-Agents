@@ -495,8 +495,9 @@ def _is_empty(value: Any) -> bool:
     if value is None:
         return True
     value_type = type(value)
-    # Identity only: ``in`` would run a metaclass's ``__eq__``.
-    if any(value_type is kind for kind in _EMPTY_TYPES):  # exact built-in types: their own ``__len__``
+    # Exact built-in types (their own ``__len__``), by identity: ``in`` would
+    # run a metaclass's ``__eq__``.
+    if any(value_type is kind for kind in _EMPTY_TYPES):
         return len(value) == 0
     return False
 
