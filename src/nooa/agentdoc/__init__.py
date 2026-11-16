@@ -33,10 +33,6 @@ from typing import Annotated, Any
 from nooa._version import __version__ as __version__
 from nooa.agentdoc._docs import spec
 from nooa.agentdoc._pformat import _pformat
-from nooa.agentdoc._truncating_stream import (
-    FileBackedTruncatingStringIO,
-    TruncatingStringIO,
-)
 from nooa.agentdoc._visibility import hidden
 from nooa.agentdoc.core import doc
 from nooa.agentdoc.doc_config import DocConfig
@@ -50,13 +46,19 @@ def truncating_pformat(
     obj: Annotated[Any, "Object to format"],
     *,
     max_chars: Annotated[
-        int | None, "Hard char cap on non-string rendering via TruncatingStringIO"
+        int | None, "Hard char cap on non-string rendering: half head, half tail"
     ] = None,
     **kwargs: Any,
 ) -> str:
     """Format a value, with a hard total-size cap for non-string objects.
 
     Strings pass through unchanged. Other options are forwarded to ``pformat()``.
+    With ``max_chars``, a value is a bounded-snapshot preview: it is captured
+    within a ``max_chars`` budget (so memory and time follow the output, not
+    the input), and its long containers and strings say what they left out
+    (``list(len=N, [:k]=[...], [-j:]=[...])``). A rendering still longer than
+    ``max_chars`` keeps its first and last halves around ``[... N chars
+    omitted; full output not kept]``. Without ``max_chars`` it is ``pformat``.
     """
     if max_chars is not None and max_chars <= 0:
         raise ValueError(f"truncating_pformat max_chars must be > 0 or None, got {max_chars}")
@@ -68,10 +70,15 @@ def truncating_pformat(
         from io import StringIO
 
         stream = StringIO()
-    else:
-        stream = TruncatingStringIO(limit=max_chars)
-    _pformat(obj, stream, **kwargs)
-    return stream.getvalue()
+        _pformat(obj, stream, **kwargs)
+        return stream.getvalue()
+
+    from nooa.snapshot import TextStream, render_output
+
+    # A value is captured within max_chars; the rendering streams into a bounded TextStream.
+    bounded = TextStream(unit="chars", head=max_chars - max_chars // 2, tail=max_chars // 2)
+    _pformat(obj, bounded, _max_chars=max_chars, **kwargs)
+    return render_output(bounded.close())
 
 
 def pformat(
@@ -166,6 +173,4 @@ __all__ = [
     "pformat",
     "pprint",
     "truncating_pformat",
-    "FileBackedTruncatingStringIO",
-    "TruncatingStringIO",
 ]

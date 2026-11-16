@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Actual model requests preserve configured inputs and warn for omissions."""
 
+import re
 import warnings
 from typing import Annotated
 
@@ -84,9 +85,9 @@ async def test_prefill_request_and_warning(strategy_type, mode):
             assert reason in str(notices[0].message)
             if mode == "capture":
                 assert "prefill_format" not in str(notices[0].message)
-                assert "Output too large" in request
+                assert re.search(r"\[\.\.\. [\d,]+ chars omitted; full output", request)
             else:
-                assert "Output too large" not in request
+                assert not re.search(r"\[\.\.\. [\d,]+ chars omitted; full output", request)
         else:
             assert not notices
             assert payload in request

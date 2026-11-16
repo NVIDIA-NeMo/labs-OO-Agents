@@ -6,6 +6,203 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `truncating_pformat(value, max_chars=N)` captures a non-string value within
+  an `N`-char budget, so its memory and time follow the output, not the
+  input: the result is a bounded snapshot preview (`list(len=100000,
+  [:27]=[...], [-k:]=[...])`), cut again to `N` chars (head and tail around
+  `[... N chars omitted; full output not kept]`) only if its rendering is
+  still longer. Without `max_chars` it is `pformat`, unchanged.
+- Trace span `input.value` / `output.value` are `nooa.snapshot` previews:
+  `render_trace(capture(value))` JSON (at most 50,000 chars, always
+  `application/json`), with `nooa.{input,output}.preview.*` attributes saying
+  what was cut. Values are read without running their code, so an unknown
+  type shows as `"<opaque: Type>"` instead of its repr. ACP and CLI activity
+  cards cut output with `render_output`'s line instead of `<truncated-output>`.
+- `nooa.agentdoc.TruncatingStringIO` and `FileBackedTruncatingStringIO` (and
+  their `nooa.runtime` re-exports) are removed: use `nooa.snapshot.TextStream`
+  and `render_output`. `LineSplitter` and `bounded_lines` move from
+  `nooa.agentdoc` to `nooa_atom.agent.lines`.
+
+- The output the model reads goes through `nooa.snapshot` (limits unchanged;
+  only the cut markers change, to `render_output`'s one line): `Shell`
+  results (`[... N bytes omitted; full output: PATH]`), `ShellProgress`
+  merges (`[... N bytes omitted; full output not kept]` instead of
+  `[... progress omitted ...]`), cell stdout/stderr
+  (`nooa.runtime.output_capture.CaptureBuffer`: `[... N chars omitted; ...]`
+  instead of the `<truncated-output>` envelope; Atom writes them to the
+  session's folder), job output tails and the core bash tool. Prefill string
+  cuts render through `render_python` (same text). Cell errors (and the
+  sandbox's error messages), pyp's stderr and `truncating_pformat(max_chars=)`
+  keep their head and tail around `[... N chars omitted; full output not
+  kept]` instead of `<truncated-output>`; past the sandbox's transport ceiling an
+  error keeps its head before that line instead of ending in `...<truncated>`.
+  A job line longer than 8,000 characters (run progress, `tail`, the done
+  update's tail) is its head, then `[... N chars omitted; full output not
+  kept]` on its own line, instead of `[... N chars of this line omitted]`;
+  a job's done-update tail is the last 20,000 characters of that line-framed
+  output.
+- Two `Shell` result changes besides the markers: (a) the first 256 KiB and
+  last 768 KiB of a stream are kept in memory whatever `max_output` is, so
+  with a small `max_output` (say 1,000) an output up to 1 MiB comes back
+  whole, and a longer one keeps its head and tail (before, the head came from
+  the `max_output`-byte file: a 900,000-byte output came back as 787,582
+  bytes); (b) the cut is UTF-8-safe: the head ends on a code point boundary,
+  so no replacement character appears there (the omitted count then includes
+  the trimmed bytes: 151,425 instead of 151,424 bytes for 400,000 `漢`).
+- Output files are bounded per agent and live in a new standalone package,
+  `nooa.overflow` (`OverflowDir`, `OverflowFile`; see `docs/overflow.md`): in
+  an Atom session one `OverflowDir` (20 files of up to 64 MiB, newest kept)
+  holds every output file of that agent: its `Shell`s' direct runs, the
+  commands inside its launched jobs and its cell output, each file capped at
+  its `Shell`'s `max_output`. Its files last until the session closes (closing
+  a `Shell` or pruning a job no longer removes them); an evicted path raises
+  `FileNotFoundError`. A `Shell` used outside an agent keeps one private
+  folder for its direct runs and its launched commands, removed when the
+  `Shell` closes (before, every command in a job had its own folder, so the
+  20-file cap never bound). Files are never deleted by garbage collection: a
+  `Shell` dropped unclosed keeps its files until interpreter exit.
+
+- `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
+  publishes a runtime event when a job finishes (the job's handle state and
+  result say it ended).
+- `nooa.storage.serialization.register_legacy_module_prefix` is removed, and
+  nooa-atom no longer registers the `nooa_coder.*` prefixes: snapshot class
+  paths recorded under another package's old name (for example `nooa_coder.*`
+  in nooa-coder sessions) no longer restore; such attributes are skipped with
+  a warning. Core's own `nemo_oo_agents.*` → `nooa.*` mapping stays. Agent
+  specs and session item types recorded as `nooa_coder.*` still load.
+- Skills in an older `<project>/.nooa/libs` directory are no longer loaded;
+  only `.nooa/skills` is. When `.nooa/libs` exists the skills status shows
+  "Skills in .nooa/libs are no longer loaded; move them to .nooa/skills."
+  `older_skill_dirs()` and `SkillWriting(also_load=...)` are removed;
+  `SkillRegistry.add_notice()` adds such a line to the status.
+- Bundled config layers are removed: the `nooa.bundled_configs` and
+  `nooa.bundled_settings` entry-point groups are no longer read
+  (`nooa.llm_config.bundled_config_paths`, `nooa.layered_config.bundled_settings_paths`,
+  `BUNDLED_SETTINGS_ENTRY_POINT_GROUP` and `entry_point_paths` are gone), and
+  `nooa config eject`, which copied a bundled `llm_config.yaml`, is removed. The
+  LLM config and settings layers are the user file, the project file and the
+  `NEMO_OO_LLM_CONFIG` / `NEMO_OO_SETTINGS` files.
+- `PersistentVars`, `AgentVars` and `TodoVars` are removed: `self.v` and
+  `todo.v` are the owner's `vars`, a `SnapshotVars` (a dict, also usable as
+  attributes).
+- Core installs now exclude the individually verified LiteLLM releases affected
+  by the optional-MCP import regression (1.106.0–1.106.7, 1.108.0–1.108.1, and
+  affected prereleases). Future patch and security releases remain eligible;
+  there is no upper version bound.
+  The release gate now runs quickstarts 01–03 with real LLM calls against the
+  built core wheel in a fresh environment with freshly resolved dependencies.
+  A separate harness validates their results without editing the examples;
+  failures and timeouts block draft creation.
+- `nooa-bench` Gym worker: a local shell command that is cancelled (the
+  worker's deadline) or times out now has its whole process group killed and
+  reaped. Before, a cancelled command (and whatever it started) kept running
+  after the worker stopped and could change the sandbox while Gym graded it.
+- `SkillWriting` (`self.skill_writing`): `create()` refuses a skill whose name
+  is already an attribute of the agent (`self.shell`, another skill) with
+  "Not created: self.shell is already an attribute of the agent; choose
+  another name for the skill". Before, a text skill was reported created but
+  never loaded, and `reload()` then imported its SKILL.md-only directory as a
+  module and replaced the real attribute. `reload()` no longer imports a
+  directory without a pyproject.toml, never replaces an attribute that is not
+  a skill, and reports a text skill that did not load. Skill names are
+  validated wherever they become a path (`create`, `path`, `reload`,
+  `run_tests`): a Python identifier (a text skill may also use `-`), so
+  `"../x"`, `"a/b"` or `".."` raise `ValueError` instead of writing outside
+  `.nooa/skills`.
+- CodeAct cells run in an owned execution namespace for every agent (in-process
+  backend): `Agent.execution_namespace_for(call)` now returns a fresh
+  `ExecutionNamespace` per call by default (`default_execution_namespace`)
+  instead of `None`, so there is one cell engine; override the hook to share
+  a namespace across calls (Atom's `handle` does). Caller `_session_locals`
+  seed the namespace as user globals and are written back when the call ends
+  (only names the caller seeded or cells bound). A cell sees module globals as
+  they were when its namespace was seeded, not re-read per cell. Redundant
+  imports are stripped only when they could not run (`from strategy import
+  ...`); `from typing import Literal` runs as written. Tracebacks name cells
+  `Cell In[N] [ns:<id>:N]`. The sandbox backend keeps its worker namespace;
+  `PurePythonStrategy` keeps its own session locals.
+- Owned execution namespace (Atom): a cell helper run in a thread that does
+  not inherit the cell's context (`loop.run_in_executor`, `threading.Thread`)
+  can use `print`, `pprint`, `show` and `self` again; they resolve to the
+  running cell's bindings and the output is captured for that cell. Before,
+  they raised `RuntimeError: Runtime name 'print' has no originating call
+  context`. Used after the cell has ended, they raise a `RuntimeError` that
+  says the output would be lost, instead of losing it silently.
+- `UnifiedLLM`: `_call_once`/`_acall_once` are abstract: every subclass
+  implements them (one request each); `call`/`acall` wrap them with media
+  recovery. A subclass written against the older contract, which overrides
+  only `call`/`acall`, raises `TypeError: Can't instantiate abstract class`
+  when built; implement `_call_once`/`_acall_once` (a subclass that overrides
+  `call`/`acall` too must still implement them).
+- `nooa-acp` is deprecated, replaced by `nooa-atom` (`nooa atom`), and this is
+  its last release. It still works; the `nooa-acp` command (and `nooa acp`)
+  now prints a deprecation warning to standard error that points to
+  nooa-atom. Its README and package description say so. It is still built
+  and published this once; the next release drops it.
+- `nooa-bench` no longer depends on `nooa-atom`, so it installs from PyPI on
+  its own. The `atom` benchmark agent moved to `nooa_atom.bench_agent`
+  (`AtomBenchAgent`; was `nooa_bench.atom_agent`), and nooa-atom registers it
+  in the new `nooa_bench.agents` entry-point group. nooa-bench loads agents
+  through `nooa_bench.agents.load_agent` (built-in `bench`/`rlm`, then entry
+  points), so `nemo-harbor --agent-type atom` and `nooa-bench run` need
+  nooa-atom installed and otherwise stop with "No benchmark agent named
+  'atom' is installed ... install nooa-atom". `nooa-bench run` gains
+  `--agent` (default `atom`). `nooa_bench.bench_agent.TaskResult` is now
+  `nooa.interactive.TaskResult` (the same class nooa-atom re-exports), and
+  `AGENT_CLASSES` lists only the built-in agents.
+- MCP (behaviour change): a tool call whose result carries `structuredContent`
+  (most FastMCP tools with a typed return) now returns that structured value
+  as a `dict`, not the text of its first content block. FastMCP's
+  `{"result": <text>}` wrapper still comes back as the text, and an `isError`
+  result raises `MCPToolError` with the server's message. Callers that parsed
+  the old text (`json.loads(await self.srv.tool(...))`) or treated the result
+  as a `str` must use the dict directly; `json.dumps(result)` gives the old
+  JSON text.
+- `send()` of a Todo (or any model embedding `SnapshotVars`) no longer fails
+  with `PydanticSerializationError`: `SnapshotVars` has a pydantic schema.
+  JSON mode carries plain JSON only: a var that is not JSON data (a model, a
+  tuple) raises an error naming its key, so a Todo sent to another session must
+  have plain-JSON vars. Validation never imports or constructs a class (a
+  payload naming its own allowlist is refused); non-JSON vars still survive the
+  session snapshot, whose allowlist comes from code.
+  `TodoManager.status()` caps the active Todo's description at 600 characters,
+  with a pointer to `self.todo.get(id).description`, so the Other Todos and
+  Hint lines are no longer cut. `await ref.send(todo)` is an ordinary item:
+  to change a child's task, send the new brief as text or a Todo; the child
+  decides how to update its own Todo.
+- `self.v["x"] = ...` now raises a `TypeError` that names the working form
+  (`write self.v.x = ... instead`). It used to be Python's bare "'AgentVars'
+  object does not support item assignment". Nothing is stored either way.
+- Snapshot save and restore now detect cycles explicitly and cap nesting at 200
+  levels (`MAX_SNAPSHOT_DEPTH`), whatever the caller's stack depth. Errors for
+  cycles, too-deep values, unsupported types and non-string dict keys name the
+  path to the offending value (e.g. `<root>['a'][0]`) and set
+  `SerializationError.reason` / `DeserializationError.reason`. Restoring a
+  too-deep blob raises `DeserializationError`, not `RecursionError`. An agent
+  attribute that can't be saved or restored is skipped with a warning, on save
+  and now also on restore; checkpoints saved before this change with an
+  attribute nested more than 200 levels deep restore without that attribute.
+  `SnapshotVars` (agent and todo vars) rejects values too deep to checkpoint at
+  write time, and a stored var that later becomes unserializable (e.g. a list
+  that now contains itself) is skipped at checkpoint with a warning instead of
+  dropping every var.
+- Registry entries' `base_url`, `timeout` and `custom_llm_provider` settings
+  are now passed to the clients built from them. They were ignored before, so
+  configs that set them may now send requests to a different endpoint or
+  provider, or use a different timeout.
+- Native Anthropic Messages and OpenAI Responses clients now raise `ValueError`
+  locally, before any HTTP request, when a request carries an enabled audio or
+  video attachment. These interfaces can only send images and PDFs; before, the
+  attachment reached the provider. Chat routes are unchanged.
+- A `context_window` now belongs to the route it was declared for. Clients
+  built from a registry entry no longer reuse the entry's `context_window` when
+  an override changes the route (model, endpoint, client type, provider, client
+  object or credentials), and the registry logs one warning per alias naming
+  the settings it dropped. A client built directly borrows a registry
+  `context_window` only when an entry's route matches its own, including the
+  resolved key when the client passes `api_key`; otherwise it falls back to
+  LiteLLM model metadata.
 - Windows: WSL 2 is the supported way to run nooa on Windows. Native Windows is
   unsupported: `import nooa` raises `UnsupportedPlatformError` (an
   `ImportError`) and the `nooa` command exits with one line pointing to WSL 2,
@@ -23,6 +220,10 @@ to follow semantic versioning.
   invalid tool calls and failed result validation, still add up across the
   call. Previously a few scattered transient endpoint errors could end a long
   turn even though every retry succeeded.
+- Published minimum versions now exclude the vulnerable releases of
+  dependencies installed through nooa, so `pip install -U nooa` gets the fixes
+  too: `anyio>=4.15.1` and `urllib3>=2.8.0` in core, and `mcp>=1.30,<2`,
+  `PyJWT[crypto]>=2.15.1` and `cryptography>=50.0.2` in the `mcp` extra.
 - Dependency security update: the locked versions of Pillow, PyJWT,
   cryptography, aiohttp, urllib3, AnyIO, filelock, multidict, Werkzeug,
   setuptools, certifi, OpenTelemetry, and mcp now include their published
@@ -55,6 +256,10 @@ to follow semantic versioning.
   bytes was never timed out and the attempt awaited forever. On expiry the
   attempt is cancelled and a retryable `TimeoutError` is raised, so the retry
   layer recovers. Set `request_timeout=None` to disable.
+- Headless benchmarks with the nooa-atom coding agent: `nooa-bench run --workspace DIR
+  --model ALIAS "task"` runs one task unattended and prints the result as JSON (exit 0 when
+  the agent finished), and `nemo-harbor --agent-type atom` runs Harbor tasks the same way.
+  Each run is a stored session in the workspace. `nooa_atom.run_task` is the API.
 - Shell commands (`ShellTools.run`, `BashSession.run`) that print more than
   30,000 characters on stdout or stderr keep the first and last 15,000, with the
   standard truncation notice (`TruncatingStringIO`). Before, only the first
@@ -69,6 +274,7 @@ to follow semantic versioning.
   (about 3.3 s down to 0.3 s here). The strategy names, `LLMResponse` and
   `llm_config_chain` load on first use; `from nooa import CodeActStrategy`
   and `from nooa import *` work as before.
+- New package **nooa-atom** (NOOA Atom: interactive coding agent served over ACP); its changes are in packages/nooa-atom/CHANGELOG.md.
 - Groundwork for the session tree design, in shared code:
   - A cancelled CodeAct cell is now recorded for the model: an appended
     `PythonOutput` with the new `ResultStatus.CANCELLED` carries the stdout
@@ -85,7 +291,7 @@ to follow semantic versioning.
   - `nooa.interactive` adds the `Done`, `NeedInput` and `Waiting` turn
     results and a `handle_batch()` turn method (`Done | Waiting`) for
     unattended turns. `handle()` returns one of the three types.
-  - `RespondResult` and `RespondReason` are removed; `CodingAgent`, the ACP
+  - `RespondResult` and `RespondReason` are removed; `AtomAgent`, the ACP
     dispatcher and the ARC-AGI-3 example use the typed results. To migrate,
     return `Done` for `DONE`, `NeedInput` for `NEED_INPUT`, and `Waiting`
     for `WAIT` or `GET_USER_INPUT`.

@@ -198,3 +198,32 @@ class File(Media):
     ) -> "File":
         """Create a file reference from a URL."""
         return cls(data_url=url, media_type=media_type, vendor_metadata=vendor_metadata or None)
+
+
+def _cell_names() -> dict[str, object]:
+    from nooa.runtime.media_capture import show
+
+    return {
+        "show": show,  # media display for multimodal models
+        "Media": Media,
+        "Image": Image,
+        "Audio": Audio,
+        "Video": Video,
+        "File": File,
+    }
+
+
+def _register_cell_names() -> None:
+    from nooa.runtime.namespace_providers import register_namespace_provider
+
+    register_namespace_provider(
+        "media",
+        _cell_names,
+        prompt_note=(
+            "show(obj) attaches a nooa.media.Image/Audio/Video/File so you can see or hear it;",
+            "here `Image` is nooa.media.Image (e.g. Image.from_file(path)), not PIL.Image.",
+        ),
+    )
+
+
+_register_cell_names()

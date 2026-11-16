@@ -171,10 +171,10 @@ class TestCustomInstanceValues:
         assert "defaulted: int = 7" in instance_doc
         assert "shown: str = 'runtime'" in instance_doc
 
-        instance_repr = pformat(obj)
-        assert "shown='runtime'" in instance_repr
-        assert "required" not in instance_repr
-        assert "defaulted" not in instance_repr
+        # pformat reads values with nooa.snapshot, which runs no code of the
+        # value: __instance_values__ is doc()'s protocol only (PR 2c). The
+        # object has no instance attributes.
+        assert pformat(obj) == "SelectiveValues()"
 
     def test_partial_custom_uses_automatic_values(self):
         """Test object with only __type_info__ uses automatic value extraction."""

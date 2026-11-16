@@ -36,10 +36,10 @@ from nooa.events import (
     Message,
     PythonOutput,
     Reasoning,
+    SessionCleared,
+    SessionResumed,
     Summary,
     Task,
-    TuiSessionCleared,
-    TuiSessionResumed,
 )
 from nooa.llm_types import LLMResponse
 from nooa.storage.json_snapshot import snapshot_from_dict, snapshot_to_dict
@@ -90,8 +90,8 @@ for _cls in (
     BeforeTurn,
     AfterTurn,
     DecisionRecord,
-    TuiSessionResumed,
-    TuiSessionCleared,
+    SessionResumed,
+    SessionCleared,
 ):
     _key: str = _registry_key(_cls)
     if _key in _CORE_TYPES:
@@ -101,6 +101,12 @@ for _cls in (
             "Each event class must have a unique event_type default."
         )
     _CORE_TYPES[_key] = _cls
+
+# Stored event_type -> the current one, for event classes that were renamed.
+_RENAMED_EVENT_TYPES: dict[str, str] = {
+    "TuiSessionResumed": "SessionResumed",
+    "TuiSessionCleared": "SessionCleared",
+}
 
 _SCHEMA_VERSION = 1
 
@@ -302,6 +308,8 @@ class SQLiteEventBackend:
         if event_type == "LLMOutput":
             raw["event_type"] = "LLMResponse"
             return LLMResponse.model_validate(raw, context={"archive": True})
+        if event_type in _RENAMED_EVENT_TYPES:  # rows stored under an older class name
+            event_type = raw["event_type"] = _RENAMED_EVENT_TYPES[event_type]
         cls = self._registry.get(event_type)
         if cls is None:
             # Fall back to the global auto-registration registry
@@ -352,6 +360,51 @@ class SQLiteEventBackend:
             except sqlite3.DatabaseError as e:
                 self._raise_for_db_error(tag, e)
             self._next_tag_num = max(self._next_tag_num, _tag_max_num(tag) + 1)
+
+    def append_batch(self, events: list[EventBase]) -> list[str]:
+        """Allocate tags and append atomically, without event observers.
+
+        Unlike single-event store's reconnect/retry policy, a failed batch
+        propagates. Tags are assigned with the model's own setter before
+        storage; if that, serialization or the commit fails, the tags are reset
+        to None and nothing is stored. Counters advance only on success.
+        """
+        from nooa.runtime.event_backend import tagged_batch
+
+        def stored(identity: str) -> bool:
+            row = self._conn.execute(
+                "SELECT 1 FROM events WHERE event_id = ? LIMIT 1", (identity,)
+            ).fetchone()
+            return row is not None
+
+        with self._lock, tagged_batch(events, self, contains_id=stored) as tags:
+            if not events:
+                return []
+            rows = [
+                (
+                    tag,
+                    event.id,
+                    event.event_type,
+                    event.status.value,
+                    self._serialize(event),
+                    self._insertion_counter + i,
+                )
+                for i, (tag, event) in enumerate(zip(tags, events, strict=True))
+            ]
+            position = self._max_position() + 1
+            with self._conn:
+                self._conn.executemany(
+                    "INSERT INTO events (tag, event_id, event_type, status, data, "
+                    "insertion_order) VALUES (?, ?, ?, ?, ?, ?)",
+                    rows,
+                )
+                self._conn.executemany(
+                    "INSERT INTO active_tags (position, tag) VALUES (?, ?)",
+                    [(position + i, tag) for i, tag in enumerate(tags)],
+                )
+            self._next_tag_num += len(events)
+            self._insertion_counter += len(events)
+            return tags
 
     def _raise_for_db_error(self, tag: str, exc: sqlite3.DatabaseError) -> typing.NoReturn:
         """Re-raise a write-path DatabaseError, typed if it indicates corruption.

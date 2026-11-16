@@ -92,6 +92,20 @@ def set_default_strategy(strategy: GenerationStrategy | None) -> None:
     _default_strategy_var.set(strategy)
 
 
+def cell_namespace_names() -> dict[str, type]:
+    """The strategy classes every cell sees (registered by :mod:`nooa.decorators`)."""
+    from nooa.strategies.pure_python import PurePythonStrategy
+
+    return {
+        "PurePythonStrategy": PurePythonStrategy,
+        "CodeActStrategy": CodeActStrategy,
+        "ReflexionStrategy": ReflexionStrategy,
+        "PredictStrategy": PredictStrategy,
+        "TemplateStrategy": TemplateStrategy,
+        "CompositeStrategy": CompositeStrategy,
+    }
+
+
 __all__ = [
     "GenerationStrategy",
     "RuntimeServices",

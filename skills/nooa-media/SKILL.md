@@ -8,7 +8,9 @@ compatibility: nooa package
 
 See [the media guide](../../docs/media.md), the
 [image quickstart](../../examples/quickstart/13_multimodal.py), and
-[Connect](../../docs/model-connect.md) for setup.
+[Connect](../../docs/model-connect.md) for the setup reference. Agents follow
+[nooa-connect](../nooa-connect/SKILL.md) for the canonical headless workflow;
+obtain permission for configuration, network checks, samples and writes.
 
 ## Check setup and authorization
 

@@ -1,35 +1,62 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""TDD: truncating_pformat uses TruncatingStringIO instead of string post-cap slicing.
+"""truncating_pformat's hard cap: a bounded nooa.snapshot TextStream, not post-cap slicing.
 
-Change 2 of truncation-2.0: truncating_pformat delegates to TruncatingStringIO
-for head+tail truncation, producing valid prose output instead of mid-repr slices.
+A rendering past ``max_chars`` keeps its first and last halves around
+render_output's ``[... N chars omitted; full output not kept]`` line.
 """
 
-from nooa.agentdoc import truncating_pformat
+from nooa.agentdoc import pformat, truncating_pformat
 
 
-class TestSafePformatUsesTruncatingStringIO:
-    """truncating_pformat must use TruncatingStringIO prose format when cap fires."""
+class TestTruncatingPformatCap:
+    """truncating_pformat: a value captured within max_chars, then head and tail around
+    render_output's line if its rendering is still longer."""
 
     def test_small_value_passes_through_unchanged(self):
         result = truncating_pformat([1, 2, 3], max_chars=1000)
-        assert "1" in result
-        assert "Output too large" not in result
+        assert result == "[1, 2, 3]"
 
-    def test_large_non_string_uses_prose_notice(self):
-        # TDD: will fail until Change 2 is implemented
-        # Current code does string slicing; new code uses TruncatingStringIO.getvalue()
+    def test_large_non_string_is_a_bounded_snapshot_preview(self):
+        """The value is captured within max_chars: the preview says what it left out."""
         big = list(range(100_000))
         result = truncating_pformat(big, max_chars=200)
-        # TruncatingStringIO produces "Output too large (...) chars..." prose
-        assert "Output too large" in result
-        assert "chars not shown" in result
+        # The snapshot keeps both ends of the list and says how long it is; its
+        # rendering, still over 200 chars, keeps 100 + 100 around the cut line.
+        head, cut, tail = result.partition(" chars omitted; full output not kept]\n")
+        assert cut and head.startswith("list(len=100000,\n    [:")
+        assert tail.endswith("        99999,\n    ],\n)")
+        assert len(head.rsplit("\n[... ", 1)[0]) == 100 and len(tail) == 100
+        assert "Output too large" not in result and "<truncated-output>" not in result
+
+    def test_odd_cap_gives_the_extra_char_to_the_head(self):
+        result = truncating_pformat(list(range(1_000)), max_chars=101)
+        head, cut, tail = result.partition(" chars omitted; full output not kept]\n")
+        assert cut and len(head.rsplit("\n[... ", 1)[0]) == 51 and len(tail) == 50
+
+    def test_memory_and_time_follow_the_output_not_the_input(self):
+        import time
+        import tracemalloc
+
+        truncating_pformat([1], max_chars=100)  # warm imports
+        peaks = []
+        for count in (1_000, 20_000):
+            value = ["x" * 1_000] * count
+            tracemalloc.start()
+            started = time.perf_counter()
+            result = truncating_pformat(value, max_chars=100, expand_all=True)
+            elapsed = time.perf_counter() - started
+            peaks.append(tracemalloc.get_traced_memory()[1])
+            tracemalloc.stop()
+            assert len(result) < 200 and elapsed < 0.5
+        assert max(peaks) < 200_000  # was 4.4 MB / 86 MB: the whole rendering
+        assert peaks[1] < 2 * peaks[0]  # 20x the input, about the same memory
+
+    def test_unbounded_is_plain_pformat(self):
+        big = list(range(1_000))
+        assert truncating_pformat(big) == pformat(big)
 
     def test_large_non_string_preserves_head_and_tail(self):
-        # TDD: will fail until Change 2 is implemented
-        # Current string slicing gives head only (broken syntax at cut point).
-        # TruncatingStringIO gives head + tail.
         head_marker = "START_UNIQUE_MARKER"
         tail_marker = "END_UNIQUE_MARKER"
         big = [head_marker] + ["x"] * 10_000 + [tail_marker]
@@ -51,15 +78,9 @@ class TestSafePformatUsesTruncatingStringIO:
         result = truncating_pformat(huge_str, max_chars=100)
         assert result == huge_str
 
-    def test_no_broken_python_syntax_in_output(self):
-        # TDD: will fail until Change 2 is implemented
-        # String slicing cuts mid-repr (e.g. "[0, 1, 2, 3..." without "]").
-        # TruncatingStringIO preserves clean head + clean tail.
+    def test_cut_keeps_a_clean_head_and_tail(self):
         big = list(range(10_000))
         result = truncating_pformat(big, max_chars=500)
-        # Result should start with the prose notice, not a dangling "["
-        assert result.startswith("<truncated-output>") or result.startswith("[")
-        # If it starts with "[", it wasn't truncated — that's fine too
-        if "Output too large" in result:
-            # Verify it's the TruncatingStringIO format, not a bare slice
-            assert "Showing first" in result
+        assert result.startswith("list(len=10000,\n    [:")
+        assert "\n        0,\n        1,\n" in result
+        assert result.endswith("        9999,\n    ],\n)")

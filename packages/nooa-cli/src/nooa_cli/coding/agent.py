@@ -11,6 +11,7 @@ from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc, spec
 from nooa.agents import TokenBudgetSummarizer
 from nooa.config import CodeActConfig, PredictConfig
+from nooa.errors import hints as _hints
 from nooa.interactive import (
     Done,
     InteractiveAgent,
@@ -20,17 +21,18 @@ from nooa.interactive import (
     install_summarizer,
 )
 from nooa.paths import get_project_dir
+from nooa.runtime.channels import Channel
 from nooa.skill_registry import SkillRegistry
 from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActStrategy, PredictStrategy
 from nooa.tools import SkillWriting, TodoManager
+from nooa.tools import shell_tools as _shell_tools
 from nooa.tools.shell_tools import ShellTools
 from nooa_cli.coding.activity import ActivityShellTools
 from nooa_cli.coding.instructions import render_agent_instructions
 from nooa_cli.tools.repo_tools import RepoTools
 
 if TYPE_CHECKING:
-    from nooa.runtime.channels import Channel
     from nooa.unifiedllm import UnifiedLLM
 
 __all__ = ["CodingAgent"]
@@ -53,13 +55,15 @@ class CodingAgent(InteractiveAgent):
     # a later skill — a workspace SKILL.md, a client-forwarded MCP server —
     # take one over, which would remove the tool while the model is still told
     # it has it.
-    __protected_skill_attrs__ = frozenset({"shell", "repo", "todo", "libs", "skills"})
+    __protected_skill_attrs__ = frozenset({"shell", "repo", "todo", "skill_writing", "skills"})
 
     cwd: Annotated[Path, nosnapshot]
     # Host-driven input channels. These live here rather than on
     # InteractiveAgent because they are coding-host concepts: slash commands
     # are a UI affordance whose registry is in this package, and
     # system_messages carries host continuations such as keep-going.
+    # Channel is imported at runtime, not under TYPE_CHECKING: snapshots must
+    # resolve these hints to see nosnapshot, or they warn on every checkpoint.
     _slash_commands_in: Annotated[Channel, hidden, nosnapshot]
     slash_commands: Annotated[Any, nosnapshot]
     _system_messages_in: Annotated[Channel, hidden, nosnapshot]
@@ -67,10 +71,12 @@ class CodingAgent(InteractiveAgent):
     shell: Annotated[ActivityShellTools, nosnapshot]
     repo: Annotated[RepoTools, nosnapshot]
     todo: TodoManager
-    libs: Annotated[SkillWriting, nosnapshot]
+    skill_writing: Annotated[SkillWriting, nosnapshot]
     skills: Annotated[SkillRegistry, nosnapshot]
     _base_shell: Annotated[ShellTools, hidden, nosnapshot]
     _summarizers: Annotated[list[Any], hidden, nosnapshot]
+    # Set by CodingSlashCommandRegistry; rebuilt with the host, never saved.
+    _command_registry: Annotated[Any, hidden, nosnapshot]
 
     def __init__(
         self,
@@ -92,20 +98,21 @@ class CodingAgent(InteractiveAgent):
         self.shell = ActivityShellTools(self._base_shell, self.event_manager)
         self.repo = RepoTools(root=self.cwd, session=self.shell.session)
         self.todo = TodoManager()
-        # Libraries live at <project>/.nooa/libs. get_project_dir() resolves
-        # that per process, which is what a one-workspace host like the TUI
-        # wants. A host serving several workspaces at once must say which
-        # project it means, or every session shares one directory — and
-        # SkillWriting puts it on sys.path and activates local.*, so that
-        # would expose one workspace's agent-authored code to another.
-        self.libs = SkillWriting(self, path=libs_dir or get_project_dir("libs"))
-
         self.skills = SkillRegistry(self)
         self.skills.register("nemo.shell", self.shell)
         self.skills.register("nemo.repo", self.repo)
         self.skills.register("nemo.todo", self.todo)
-        self.skills.register("nemo.libwriting", self.libs)
-        self.skills.activate(["nemo.shell", "nemo.repo", "nemo.todo", "nemo.libwriting"])
+        # Skills the agent writes live at <project>/.nooa/skills (an older
+        # <project>/.nooa/libs is not loaded). get_project_dir() resolves that
+        # per process, which is what a one-workspace host like the TUI wants.
+        # A host serving several workspaces at once must say which project it
+        # means, or every session shares one directory — and SkillWriting puts
+        # it on sys.path and activates local.*, so that would expose one
+        # workspace's agent-authored code to another.
+        skills_dir = libs_dir or get_project_dir("skills")
+        self.skill_writing = SkillWriting(self, path=skills_dir)
+        self.skills.register("nemo.skill_writing", self.skill_writing)
+        self.skills.activate(["nemo.shell", "nemo.repo", "nemo.todo", "nemo.skill_writing"])
         # Installed ``nooa.skills`` entry points are part of the shared host
         # surface. Load them so hosts can expose ``@slash_command`` methods,
         # but leave them inactive until the user opts in with ``/skills``.
@@ -206,7 +213,7 @@ class CodingAgent(InteractiveAgent):
           is a short status line. Add ``evidence=[...]`` for checks you ran.
         - ``NeedInput(question=...)`` — you cannot continue without an
           answer. The host shows the question, so do not also send it with
-          ``self.message()``. Add ``options=[...]`` for a single choice.
+          ``self.message()``; put any suggested answers in it. The answer is plain text.
         - ``Waiting(message=..., explanation=..., on=[...])`` — a background
           job is still running; ``on`` names the job or channel.
         """
@@ -226,3 +233,7 @@ class CodingAgent(InteractiveAgent):
                     await shell.close()
                 finally:
                     await self.llm.aclose()
+
+
+# A blocked subprocess/os.system: use the agent's shell.
+_hints.register_hint(_hints.RUN_COMMAND, _shell_tools.SHELL_RUN_HINT, owner=CodingAgent)

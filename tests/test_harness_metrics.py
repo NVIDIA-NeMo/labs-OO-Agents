@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import sys
-from typing import Any
+from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 import pytest
@@ -81,6 +81,17 @@ class TestRecording:
         m.text_to_synthetic()
         m.text_to_synthetic()
         assert m.text_to_synthetic_count == 2
+
+    def test_tool_call_skipped_and_text_only_tool_markup(self):
+        m = HarnessMetrics()
+        m.tool_call_skipped(2)
+        m.tool_call_skipped()
+        m.text_only_tool_markup()
+        assert m.tool_call_skipped_count == 3
+        assert m.text_only_tool_markup_count == 1
+        attrs = m.to_span_attributes()
+        assert attrs["harness.tool_call_skipped.count"] == 3
+        assert attrs["harness.text_only_tool_markup.count"] == 1
 
     def test_empty_response(self):
         m = HarnessMetrics()
@@ -210,10 +221,48 @@ class TestRecording:
         assert m.exec_errors[0].code_preview == "df.head()"
 
     # Code Validation
+    def test_return_result_keyword_alias(self):
+        m = HarnessMetrics()
+        m.return_result_keyword_alias("value")
+        attrs = m.to_span_attributes()
+        assert attrs["harness.return_result_keyword_alias.count"] == 1
+        assert attrs["harness.return_result_keyword_alias.keywords"] == ["value"]
+
+    def test_return_result_invalid(self):
+        m = HarnessMetrics()
+        m.return_result_invalid("ValidationError")
+        m.return_result_invalid("InvariantError")
+        attrs = m.to_span_attributes()
+        assert attrs["harness.return_result_invalid.count"] == 2
+        assert attrs["harness.return_result_invalid.types"] == ["ValidationError", "InvariantError"]
+
+    def test_need_input_explanation_is_a_field_not_a_metric(self):
+        from nooa.interactive import NeedInput
+        from nooa.runtime.harness_metrics import harness_metrics_session
+
+        with harness_metrics_session() as m:
+            assert NeedInput(question="which?", explanation="  ").explanation is None
+            assert NeedInput(question="which?", explanation="asking").explanation == "asking"
+            assert not any("need_input" in key for key in m.to_span_attributes())
+
+    def test_media_rejected_retry(self):
+        from nooa.runtime.media_recovery import MediaHarnessMetrics
+
+        m = HarnessMetrics()
+        m.extension(MediaHarnessMetrics).rejected_retry("image")
+        attrs = m.to_span_attributes()
+        assert attrs["harness.media.rejected_retry.count"] == 1
+        assert attrs["harness.media.rejected_retry.kinds"] == ["image"]
+
     def test_missing_await(self):
         m = HarnessMetrics()
         m.missing_await("analyze")
         assert m.missing_awaits_detected == ["analyze"]
+
+    def test_return_result_tool_alias(self):
+        m = HarnessMetrics()
+        m.return_result_tool_alias()
+        assert m.to_span_attributes()["harness.return_result_tool_alias.count"] == 1
 
     def test_infinite_loop(self):
         m = HarnessMetrics()
@@ -421,7 +470,10 @@ class TestSchema:
             assert entry.category
             assert callable(entry.value_fn)
 
-    def test_get_span_schema_returns_same_object(self):
+    def test_get_span_schema_returns_same_object(self, monkeypatch):
+        from nooa.runtime import harness_metrics
+
+        monkeypatch.setattr(harness_metrics, "_EXTENSIONS", [])  # no package registered one
         assert get_span_schema() is _SPAN_SCHEMA
 
     def test_every_to_span_attributes_key_is_in_schema(self):
@@ -1022,3 +1074,201 @@ class TestToolUsageMetrics:
         null.shell_failure("bash:exit_1", "msg")
         null.repo_failure("filemap:file_not_found", "msg")
         null.tool_avoided("detail")
+
+
+# ── Extensions ─────────────────────────────────────────────────────
+
+from nooa.runtime import harness_metrics as _hm_module  # noqa: E402
+from nooa.runtime.harness_metrics import (  # noqa: E402
+    HarnessMetricsExtension,
+    extension_span_key,
+    register_harness_metrics_extension,
+)
+
+# The counters only Atom records live in nooa_atom.agent.metrics, not here.
+_ATOM_ONLY_FIELDS = (
+    "shell_queued_behind_running",
+    "shell_busy_rejected",
+    "child_detached_at_deadline",
+    "waiting_on_person_rejections",
+    "shell_exit_hints",
+    "shell_cwd_fallbacks",
+    "name_error_hints",
+    "mcp_tool_name_hints",
+    "module_not_found_hints",
+)
+
+
+class _ToyMetrics(HarnessMetricsExtension):
+    """A package's counters, as a test extension."""
+
+    namespace: ClassVar[str] = "toy"
+    pokes: int = 0
+    names: list[str] = []
+
+    span_schema = (
+        SchemaEntry("poke.count", "Pokes", "Toy", lambda m: m.pokes),
+        SchemaEntry("poke.names", "Poked names", "Toy", lambda m: m.names, True),
+    )
+
+    def poke(self, name: str) -> None:
+        self.pokes += 1
+        self._append(self.names, name)
+
+
+class _OtherToyMetrics(HarnessMetricsExtension):
+    """Another package's counters: same field and short key as _ToyMetrics."""
+
+    namespace: ClassVar[str] = "other"
+    pokes: int = 0
+
+    span_schema = (SchemaEntry("poke.count", "Pokes", "Toy", lambda m: m.pokes),)
+
+
+@pytest.fixture
+def _registry(monkeypatch):
+    """An empty extension registry, restored after the test."""
+    monkeypatch.setattr(_hm_module, "_EXTENSIONS", {})
+
+
+class TestExtensions:
+    def test_core_metrics_do_not_carry_atom_counters(self):
+        core_keys = {entry.key for entry in _SPAN_SCHEMA}
+        for name in _ATOM_ONLY_FIELDS:
+            assert name not in HarnessMetrics.model_fields
+        for key in ("harness.atom.shell_busy_rejected.count", "harness.atom.name_error_hint.count"):
+            assert key not in core_keys
+
+    def test_extension_records_into_span_attributes(self):
+        m = HarnessMetrics()
+        assert m.to_span_attributes() == {}
+        m.extension(_ToyMetrics).poke("a")
+        m.extension(_ToyMetrics).poke("b")
+        assert m.to_span_attributes() == {
+            "harness.toy.poke.count": 2,
+            "harness.toy.poke.names": ["a", "b"],
+        }
+
+    def test_span_keys_are_built_from_the_namespace(self):
+        assert extension_span_key("toy", "poke.count") == "harness.toy.poke.count"
+
+    def test_extension_is_per_session_and_capped(self):
+        m = HarnessMetrics()
+        for i in range(_MAX_LIST_ITEMS + 5):
+            m.extension(_ToyMetrics).poke("x" * (_MAX_STRING_CHARS + 10) + str(i))
+        names = m.extension(_ToyMetrics).names
+        assert len(names) == _MAX_LIST_ITEMS
+        assert all(len(n) <= _MAX_STRING_CHARS + 30 for n in names)
+        assert HarnessMetrics().extension(_ToyMetrics).pokes == 0
+
+    def test_registered_extension_is_in_the_schema(self, _registry):
+        before = {entry.key for entry in get_span_schema()}
+        assert "harness.toy.poke.count" not in before
+        assert register_harness_metrics_extension(_ToyMetrics) is _ToyMetrics
+        register_harness_metrics_extension(_ToyMetrics)  # again: no-op
+        entries = [e for e in get_span_schema() if e.key.startswith("harness.toy.")]
+        assert [(e.key, e.category, e.is_detail) for e in entries] == [
+            ("harness.toy.poke.count", "Toy", False),
+            ("harness.toy.poke.names", "Toy", True),
+        ]
+        m = HarnessMetrics()
+        m.extension(_ToyMetrics).poke("a")
+        assert {e.key: e.value_fn(m) for e in entries} == {
+            "harness.toy.poke.count": 1,
+            "harness.toy.poke.names": ["a"],
+        }
+
+    def test_registered_namespace_is_an_attribute(self, _registry):
+        register_harness_metrics_extension(_ToyMetrics)
+        m = HarnessMetrics()
+        m.toy.poke("a")
+        assert m.toy is m.extension(_ToyMetrics)
+        assert m.toy.pokes == 1
+        with pytest.raises(AttributeError):
+            _ = m.not_a_namespace
+
+    def test_unregistered_namespace_is_not_an_attribute(self, _registry):
+        with pytest.raises(AttributeError):
+            _ = HarnessMetrics().toy
+
+    def test_namespace_collision_is_refused_naming_both(self, _registry):
+        register_harness_metrics_extension(_ToyMetrics)
+
+        class Rival(HarnessMetricsExtension):
+            namespace: ClassVar[str] = "toy"
+
+        with pytest.raises(ValueError, match=r"'toy'.*_ToyMetrics.*Rival"):
+            register_harness_metrics_extension(Rival)
+        assert _hm_module._EXTENSIONS == {"toy": _ToyMetrics}
+
+    def test_same_field_in_two_namespaces_is_fine(self, _registry):
+        register_harness_metrics_extension(_ToyMetrics)
+        register_harness_metrics_extension(_OtherToyMetrics)
+        m = HarnessMetrics()
+        m.toy.poke("a")
+        m.other.pokes = 3
+        assert m.toy.pokes == 1
+        assert m.to_span_attributes() == {
+            "harness.toy.poke.count": 1,
+            "harness.toy.poke.names": ["a"],
+            "harness.other.poke.count": 3,
+        }
+        keys = [e.key for e in get_span_schema()]
+        assert "harness.toy.poke.count" in keys and "harness.other.poke.count" in keys
+
+    def test_namespace_is_required(self):
+        with pytest.raises(TypeError, match="needs a namespace"):
+
+            class Bare(HarnessMetricsExtension):
+                pokes: int = 0
+
+    @pytest.mark.parametrize("bad", ["Toy", "my.pkg", "my/pkg", "1st", "my-pkg", "_x"])
+    def test_namespace_must_be_a_lowercase_identifier(self, bad):
+        with pytest.raises(ValueError, match="lowercase identifier"):
+
+            class Bad(HarnessMetricsExtension):
+                namespace: ClassVar[str] = bad
+
+    def test_namespace_shadowing_a_core_attribute_is_refused(self, _registry):
+        class Shadow(HarnessMetricsExtension):
+            namespace: ClassVar[str] = "turn_count"
+
+        with pytest.raises(ValueError, match="shadows"):
+            register_harness_metrics_extension(Shadow)
+
+    def test_full_harness_keys_are_refused(self, _registry):
+        class Full(HarnessMetricsExtension):
+            namespace: ClassVar[str] = "full"
+            span_schema = (SchemaEntry("harness.full.count", "Turns", "Toy", lambda m: 0),)
+
+        with pytest.raises(ValueError, match="harness.full.count"):
+            register_harness_metrics_extension(Full)
+
+    def test_keys_repeated_within_one_extension_are_refused(self, _registry):
+        class Twice(HarnessMetricsExtension):
+            namespace: ClassVar[str] = "twice"
+            span_schema = (
+                SchemaEntry("twice.count", "A", "Toy", lambda m: 1),
+                SchemaEntry("twice.count", "B", "Toy", lambda m: 2),
+            )
+
+        with pytest.raises(ValueError, match="twice.count"):
+            register_harness_metrics_extension(Twice)
+        assert "twice" not in _hm_module._EXTENSIONS
+
+    def test_model_dump_nests_extensions_by_namespace(self):
+        m = HarnessMetrics()
+        assert "toy" not in m.model_dump()
+        m.extension(_ToyMetrics).poke("a")
+        assert m.model_dump()["toy"] == {"pokes": 1, "names": ["a"]}
+
+    def test_outside_a_session_extension_is_a_no_op(self, _registry):
+        get_harness_metrics().extension(_ToyMetrics).poke("a")  # no error
+        register_harness_metrics_extension(_ToyMetrics)
+        get_harness_metrics().toy.poke("a")  # no error
+
+    def test_session_flushes_extension_attributes(self):
+        with harness_metrics_session() as m:
+            m.extension(_ToyMetrics).poke("a")
+            assert get_harness_metrics().extension(_ToyMetrics) is m.extension(_ToyMetrics)
+            assert m.to_span_attributes()["harness.toy.poke.count"] == 1

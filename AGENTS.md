@@ -151,12 +151,12 @@ self.context["project_state"] = Context(expr="self.format_project_state()")
 
 ### Model onboarding and media
 
-- Use saved aliases in agent code. For model setup or diagnostics follow
-  [nooa-connect](skills/nooa-connect/SKILL.md), the canonical permission-first
-  headless guide: get scoped permission before configuration, network/media
-  checks or writes, and use stages rather than driving the wizard. Registry
-  semantics belong in `skills/nooa-model-configuration/SKILL.md`; guided human
-  setup and library references are in `docs/model-connect.md`.
+- Recommend `uv add "nooa[cli]"` for model setup; humans can use
+  `uv run nooa connect`. Agents follow the canonical headless workflow in
+  [nooa-connect](skills/nooa-connect/SKILL.md): obtain permission for configuration,
+  network checks and writes, then use stages. Use saved aliases in agent code.
+  Registry semantics and offline setup also belong in
+  `skills/nooa-model-configuration/SKILL.md` and `docs/model-connect.md`.
   On Windows, run nooa inside WSL 2: native Windows stops at `import nooa`
   unless `NOOA_SKIP_PLATFORM_CHECK=1` is set.
 - Import `Image`, `Audio`, `Video`, and `File` from `nooa.media`. Pass them as
@@ -221,6 +221,22 @@ Two limits worth knowing:
   decorator that returns the generator and one that consumes it are
   indistinguishable from the outside — so leave trace-sensitive generator
   methods undecorated.
+
+### Bounded values and output
+
+Never write a new way to truncate, preview or cap a value or output. Use
+`nooa.snapshot` (see `docs/snapshot-model.md`): `capture` + `render_python` /
+`render_json` / `render_trace` for values, `TextStream` + `render_output` for
+output streams. The whole output goes to files only through `nooa.overflow`
+(`OverflowDir`, see `docs/overflow.md`). Each public name's docstring documents it (`print(doc(...))`).
+
+If your code limits size for another reason (rejecting an oversized request,
+paginating a query, a protocol limit), mark the line with the reason:
+
+    raw = f.read(MAX_BODY + 1)  # snapshot: allow reject oversized uploads; nothing is shown
+
+The reason is required. Existing truncation code is being moved onto
+`nooa.snapshot` in follow-up pull requests; don't add more of it.
 
 ### Quality & Testing
 

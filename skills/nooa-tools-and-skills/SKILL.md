@@ -40,13 +40,14 @@ class DevAgent(Agent, llm=llm):
         self.todos = TodoManager()                # t = self.todos.add("step", deps=[...]); self.todos.done(t.id)
 ```
 
-`ShellTools` is the one shell/file tool (it replaced the removed `BashTool`/`FileTool`). One persistent bash session — `cd`, `export`, and cwd survive across calls — and four methods:
+`ShellTools` is the one shell/file tool (it replaced the removed `BashTool`/`FileTool`). One persistent bash session — `cd`, `export`, and cwd survive across calls — and five methods:
 
 ```python
 r = await shell.run("grep -rn 'def foo' src/")   # ShellResult: str subclass; .stdout/.stderr/.returncode/.success
 await shell.run("python -", stdin=script)        # pass payloads via stdin= instead of quoting heredocs
 region = await shell.read("f.py", lines=(10, 25))  # view a file region -> Match
 await shell.replace(r.matches[0], new_code)      # edit at a Match anchor (pure grep/rg results carry .matches)
+await shell.replace("f.py", old, new)           # edit by unique substring (old must occur once)
 await shell.write_file("out.py", content)        # create/overwrite
 ```
 
@@ -124,6 +125,10 @@ the resulting URL, header, argument, or environment value directly to
 `MCPManager.create_from_server()`.
 
 ## Multimodal media
+
+To configure a route or test its media permissions, get the user's permission
+and follow [nooa-connect](../nooa-connect/SKILL.md). It is the complete headless
+Connect guide for agents; use an existing configured route for the code below.
 
 ```python
 from nooa.media import Image, Audio, Video, File

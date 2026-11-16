@@ -133,7 +133,7 @@ same contract as an in-repo command module.
   `packages/nooa-cli/tests/test_cli_platform_check.py`) and switches redirected output to UTF-8
   on Windows. New console entry points should go through `main()`.
 
-This mirrors the existing `nooa.skills` and `nooa.bundled_configs` groups.
+This mirrors the existing `nooa.skills` group.
 
 ## Shared Utilities
 

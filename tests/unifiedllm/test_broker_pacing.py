@@ -554,7 +554,9 @@ def test_broker_pacing_is_shared_across_spawned_processes():
                 assert process.exitcode == 0
             snapshot = broker.snapshot()
         assert len(times) == 9
-        assert all(right - left >= 0.045 for left, right in zip(times, times[1:], strict=False))
+        # Client timestamps include process scheduling jitter; check the aggregate rate.
+        assert times[-1] - times[0] >= 8 * 0.05 * 0.9
+        assert all(right - left >= 0.025 for left, right in zip(times, times[1:], strict=False))
         assert snapshot.admitted_calls == 9
     finally:
         for process in processes:

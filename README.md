@@ -102,7 +102,7 @@ uv add "nooa[cli,memory]"       # several at once
 | Package | Extra | What it adds |
 |---|---|---|
 | `nooa-cli` | `nooa[cli]` | the `nooa` command, trace-viewer command, eval runner |
-| `nooa-acp` | `nooa[acp]` | coding agent for Agent Client Protocol hosts such as Zed — [setup](packages/nooa-acp/README.md) |
+| `nooa-acp` | `nooa[acp]` | **deprecated, replaced by nooa-atom (last release)**: coding agent for Agent Client Protocol hosts such as Zed — [setup](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/packages/nooa-acp/README.md) |
 | `nooa-memory` | `nooa[memory]` | long-term memory subsystem (`MemoryManager`) |
 | `nooa-bench` | `nooa[bench]` | `BenchAgent` and the Harbor benchmark runner |
 
@@ -165,7 +165,9 @@ llm = get_llm_client("my-model")
 See [Connect setup](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/model-connect.md)
 for providers, model settings, editing, and diagnostic stages.
 
-You can also construct clients directly using
+NOOA uses LiteLLM as its provider abstraction layer, allowing agents to use
+supported models and endpoints without changing agent code. You can also
+construct clients directly using
 [LiteLLM-supported model names](https://docs.litellm.ai/), with your endpoint
 and credentials. See [Model configuration](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/docs/model-configuration.md).
 

@@ -16,15 +16,18 @@ See: https://docs.litellm.ai/docs/completion/vision
 """
 
 import base64
+import contextlib
 import contextvars
 import io
+from collections.abc import Callable, Iterator
+from contextlib import nullcontext
 from typing import Any
 
 
 class _MediaBuffer:
     """Bounded collector of media content blocks captured by ``show()``.
 
-    Same self-enforcing principle as :class:`TruncatingStringIO` (the cap
+    Same self-enforcing principle as ``CaptureBuffer`` (the cap
     lives with the buffer), but signals overflow via a ``bool`` return from
     :meth:`append` rather than by silently truncating the payload —
     media blocks are atomic and cannot be partially kept.
@@ -33,22 +36,50 @@ class _MediaBuffer:
     ``MediaCaptureConfig.max_attachments_per_execution``.
     """
 
-    def __init__(self, max_attachments: int):
+    def __init__(
+        self,
+        max_attachments: int,
+        *,
+        accepts_write: Callable[[], bool] | None = None,
+        write_lock: Any = None,
+    ):
+        self._accepts_write = accepts_write
+        self._write_lock = write_lock
         self.blocks: list[dict[str, Any]] = []
         self.max_attachments = max_attachments
 
     def append(self, block: dict[str, Any]) -> bool:
-        """Append ``block``. Returns ``False`` if the buffer is full."""
-        if len(self.blocks) >= self.max_attachments:
-            return False
-        self.blocks.append(block)
-        return True
+        """Append ``block``; False means full or the optional owner lease closed."""
+        with self._write_lock if self._write_lock is not None else nullcontext():
+            if self._accepts_write is not None and not self._accepts_write():
+                return False
+            if len(self.blocks) >= self.max_attachments:
+                return False
+            self.blocks.append(block)
+            return True
 
 
 # Task-local media buffer for async-safe capture.
 _media_buffer_var: contextvars.ContextVar[_MediaBuffer | None] = contextvars.ContextVar(
     "media_buffer", default=None
 )
+
+
+@contextlib.contextmanager
+def capture_media(
+    buffer: _MediaBuffer | None = None, *, max_attachments: int = 100
+) -> Iterator[_MediaBuffer]:
+    """Context manager to capture media blocks produced by show() calls.
+
+    Sets the task-local media buffer for the duration of the block and resets
+    it upon exit.
+    """
+    buf = buffer if buffer is not None else _MediaBuffer(max_attachments=max_attachments)
+    token = _media_buffer_var.set(buf)
+    try:
+        yield buf
+    finally:
+        _media_buffer_var.reset(token)
 
 
 def media_to_content_block(media: Any) -> dict[str, Any]:

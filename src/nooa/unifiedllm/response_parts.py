@@ -247,9 +247,9 @@ def project_turn(
             item.update(call_id=part.id, name=part.name, arguments=part.arguments)
         elif isinstance(part, AssistantText):
             if native:
-                from .media_inputs import guard_native_media
+                from .media_inputs import check_replayed_native_media
 
-                guard_native_media(native, media_inputs)
+                check_replayed_native_media(native, media_inputs, interface="responses")
                 _restore_text(native["content"], part.text, "")
                 item = native
             elif part.text:

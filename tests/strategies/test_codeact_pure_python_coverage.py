@@ -15,6 +15,7 @@ pure_python.py missing: 59-61, 105-106, 147, 236-238, 243, 274-288, 304-340, 467
 """
 
 import json
+import re
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -2038,9 +2039,11 @@ class TestPurePythonSendExecutionError:
         await strat._send_execution_error(rt, SyntaxError("invalid syntax"), "bad code")
 
         event = rt.event_manager.add.call_args.args[0]
-        assert event.error.count("<truncated-output>") == 1
-        assert "Showing first 50 and last 50 chars" in event.error
-        assert event.error.endswith("G" * 50 + "\n</truncated-output>")
+        # One cut (render_output's line) around 50 head and 50 tail chars, no nested notice.
+        whole = "SyntaxError: invalid syntax\n\n" + "G" * 1_000
+        assert event.error == (
+            whole[:50] + "\n[... 929 chars omitted; full output not kept]\n" + whole[-50:]
+        )
 
     @pytest.mark.asyncio
     async def test_send_execution_error_preserves_source_caret_offset_and_both_streams(self):
@@ -4377,7 +4380,8 @@ class TestCodeActInlineReturnResultWithError:
             for event in agent.event_manager.values()
             if isinstance(event, PythonOutput) and event.tool_call_id == "c1"
         )
-        assert "Cell In[1], line 1" in failed_output.error
+        # Owned-namespace cells are named "Cell In[1] [ns:<identity>:1]".
+        assert re.search(r"Cell In\[1\]( \[ns:\w+:1\])?, line 1", failed_output.error)
         assert "x = 1/0" in failed_output.error
         assert "ZeroDivisionError: division by zero" in failed_output.error
         assert "Execution error" not in failed_output.stderr

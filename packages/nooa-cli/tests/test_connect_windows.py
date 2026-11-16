@@ -61,6 +61,7 @@ def test_wizard_reports_posix_only_save_cleanly(monkeypatch, tmp_path):
         "configure_media_inputs",
         "select_model",
         "check_interfaces",
+        "prepare_metadata",
         "configure_metadata",
         "configure_checks",
         "run_checks",
