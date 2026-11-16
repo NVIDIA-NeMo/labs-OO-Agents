@@ -86,9 +86,15 @@ def pformat(
     *,
     console: Any = None,
     indent_guides: bool = True,
-    max_length: Annotated[int | None, "Max elements per container; None = unlimited"] = None,
-    max_string: Annotated[int | None, "Max string chars; None = unlimited"] = None,
-    max_depth: Annotated[int | None, "Max nesting depth; None = unlimited"] = None,
+    max_length: Annotated[
+        int | None, "Max elements per container; None = no caller limit (safety ceilings apply)"
+    ] = None,
+    max_string: Annotated[
+        int | None, "Max string chars; None = no caller limit (safety ceilings apply)"
+    ] = None,
+    max_depth: Annotated[
+        int | None, "Max nesting depth; None = no caller limit (safety ceilings apply)"
+    ] = None,
     expand_all: Annotated[bool, "Always expand containers to multiple lines"] = False,
     concise: Annotated[bool, "Show first-line docstrings only"] = False,
     instance_mode: Annotated[
@@ -100,6 +106,15 @@ def pformat(
 
     Hidden fields are omitted and custom ``__repr__`` methods are honored. Use
     ``doc()`` for an object's API, or ``truncating_pformat()`` for a hard size cap.
+
+    Limits: ``None`` means no caller limit, not unbounded; these safety
+    ceilings always apply (``nooa.snapshot`` bounds every value preview):
+
+    - ``max_depth=None``: nesting is shown 64 levels deep;
+    - a mapping key that is not a plain scalar (a tuple, a frozenset) has
+      a fixed budget: 8 items, 50 chars per string, 2 levels;
+    - one value is read in at most 200,000 nodes (``max_nodes``) and a
+      100,000,000-char capture budget (``max_chars``).
     """
     # console and indent_guides are intentionally ignored for Rich compatibility
     del console, indent_guides
@@ -139,16 +154,27 @@ def pprint(
     *,
     console: Any = None,
     indent_guides: bool = True,
-    max_length: Annotated[int | None, "Max elements per container; None = unlimited"] = None,
-    max_string: Annotated[int | None, "Max string chars; None = unlimited"] = None,
-    max_depth: Annotated[int | None, "Max nesting depth; None = unlimited"] = None,
+    max_length: Annotated[
+        int | None, "Max elements per container; None = no caller limit (safety ceilings apply)"
+    ] = None,
+    max_string: Annotated[
+        int | None, "Max string chars; None = no caller limit (safety ceilings apply)"
+    ] = None,
+    max_depth: Annotated[
+        int | None, "Max nesting depth; None = no caller limit (safety ceilings apply)"
+    ] = None,
     expand_all: Annotated[bool, "Always expand containers to multiple lines"] = False,
     concise: Annotated[bool, "Show first-line docstrings only"] = False,
     instance_mode: Annotated[
         str, "Instance format: 'repr' for repr-style, 'type' for type structure"
     ] = "repr",
 ) -> None:
-    """Print the compact, value-focused representation produced by ``pformat()``."""
+    """Print the compact, value-focused representation produced by ``pformat()``.
+
+    ``None`` limits mean no caller limit; ``pformat``'s safety ceilings
+    apply (64 levels, a fixed budget for non-scalar keys, 200,000 nodes,
+    100,000,000 chars).
+    """
     # console and indent_guides are intentionally ignored for Rich compatibility
     del console, indent_guides
 
