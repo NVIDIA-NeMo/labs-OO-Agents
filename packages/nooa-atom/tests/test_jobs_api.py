@@ -1008,7 +1008,6 @@ async def test_a_single_overlong_line_is_cut_in_the_snapshot_notation_in_the_tai
     assert done.done and done.returncode == 0
     # 30,012 chars: the first 8,000, then the omitted rest, counted by the snapshot.
     assert done.stdout == "A" * 8_000 + "\n[... 22,012 chars omitted; full output not kept]\n"
-    assert "THE_REAL_END" not in done.stdout and "of this line omitted" not in done.stdout
 
 
 async def test_a_throttled_chatty_run_sends_batches_early_at_the_cap(agent):

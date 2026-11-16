@@ -111,6 +111,18 @@ def _count_tokens(text: str) -> int:
 # ── L2 → L3: stdout/stderr truncation → event rendering ─────────────────
 
 
+def _captured(limit: int, text: str) -> str:
+    """``text`` as a cell's capture stream renders it (``limit`` chars kept)."""
+    from nooa.config.truncation_config import TruncationConfig
+    from nooa.runtime.actor import _make_capture_stream, _render_capture
+
+    config = TruncationConfig()
+    stream = _make_capture_stream(limit, config)
+    stream.write(text)
+    stream.close()
+    return _render_capture(stream, config.capture)
+
+
 class TestL2ToL3Interaction:
     """L2 (a TextStream) truncates stdout/stderr at capture time.
     L3 (format_event / pformat) must render the result *verbatim* — no
@@ -122,24 +134,16 @@ class TestL2ToL3Interaction:
     ``max_string`` setting.
     """
 
-    def test_truncated_stdout_wrapper_survives_rendering(self):
-        """The <truncated-output> wrapper from L2 must appear verbatim in
-        the L3-rendered event — no str(len=...) marker wrapping it."""
-        # Simulate what L2 produces for large output
-        truncated_stdout = (
-            "<truncated-output>\n"
-            "Output too large (200,000 chars). "
-            "Showing first 25,000 and last 25,000 chars.\n\n"
-            + "x" * 25_000
-            + "\n\n... 150,000 chars not shown ...\n\n"
-            + "y" * 25_000
-            + "\n</truncated-output>"
-        )
-        event = _make_python_output(stdout=truncated_stdout)
+    def test_truncated_stdout_survives_rendering(self):
+        """A cut stdout, as the capture produces it, appears verbatim in the
+        L3-rendered event: no str(len=...) marker wrapping it."""
+        stdout = _captured(50_000, "x" * 100_000 + "y" * 100_000)
+        assert "\n[... 150,000 chars omitted; full output not kept]\n" in stdout
+        event = _make_python_output(stdout=stdout)
         rendered = pformat(event, max_string=500)
 
-        # The full truncated_stdout must be present — L3 must NOT re-truncate
-        assert truncated_stdout in rendered
+        # The whole cut stdout must be present: L3 must NOT re-truncate
+        assert stdout in rendered
         assert "str(len=" not in rendered
 
     def test_small_stdout_passes_through_unchanged(self):
@@ -149,20 +153,13 @@ class TestL2ToL3Interaction:
         rendered = pformat(event, max_string=500)
         assert small_output in rendered
 
-    def test_truncated_stderr_wrapper_survives_rendering(self):
-        """Same invariant for stderr — spec(max_string=None) applies."""
-        truncated_stderr = (
-            "<truncated-output>\n"
-            "Output too large (10,000 chars). "
-            "Showing first 1,000 and last 1,000 chars.\n\n"
-            + "W" * 1_000
-            + "\n\n... 8,000 chars not shown ...\n\n"
-            + "E" * 1_000
-            + "\n</truncated-output>"
-        )
-        event = _make_python_output(stderr=truncated_stderr)
+    def test_truncated_stderr_survives_rendering(self):
+        """Same invariant for stderr: spec(max_string=None) applies."""
+        stderr = _captured(2_000, "W" * 5_000 + "E" * 5_000)
+        assert "\n[... 8,000 chars omitted; full output not kept]\n" in stderr
+        event = _make_python_output(stderr=stderr)
         rendered = pformat(event, max_string=500)
-        assert truncated_stderr in rendered
+        assert stderr in rendered
         assert "str(len=" not in rendered
 
     def test_non_exempt_fields_still_truncated(self):
