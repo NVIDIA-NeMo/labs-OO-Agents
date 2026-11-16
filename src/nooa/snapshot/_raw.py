@@ -109,6 +109,10 @@ def _bounded_type_name(value: Any, max_chars: int) -> str:
     return name[:max_chars]
 
 
+_NAMESPACE_FLOOR = 2_000
+"""The default ``Limits.max_nodes``: a class namespace this large is always read."""
+
+
 def _safe_dict(owner: Any, raw: Any, state: _State) -> dict[str, Any] | None:
     """A copy of the native namespace ``raw`` of ``owner`` if every key is an exact ``str``.
 
@@ -129,7 +133,14 @@ def _safe_dict(owner: Any, raw: Any, state: _State) -> dict[str, Any] | None:
     # before the loop: a live namespace such as ``sys.modules`` may change
     # while it runs (an import in another thread). ``dict.copy`` is avoided.
     if type(raw) is MappingProxyType:
-        items: Iterable[tuple[Any, Any]] = list(raw.items())  # a class namespace: a native dict
+        # A class namespace: a native dict. Its size bounds the copy: one larger
+        # than the capture's work budget (at least the default ``max_nodes``, so
+        # that the small nested captures still read ordinary classes) is not
+        # copied at all (fail closed), whatever its size.
+        if len(raw) > max(state.limits.max_nodes, _NAMESPACE_FLOOR):
+            state.namespaces[marker] = (owner, None)
+            return None
+        items: Iterable[tuple[Any, Any]] = list(raw.items())
     elif type(raw) is dict:
         items = list(dict.items(raw))
     else:

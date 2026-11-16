@@ -189,14 +189,17 @@ def _default_text(value: Any, state: _State) -> str:
     """A parameter default as short ``render_python`` text.
 
     The default is captured with small fixed limits and the default
-    ``"opaque"`` fallback, so no user code runs and the text stays short.
+    ``"opaque"`` fallback, and rendered without registered hooks, so no user
+    code runs and the text stays short.
     """
     from nooa.snapshot._capture import capture
     from nooa.snapshot._limits import Limits
-    from nooa.snapshot._render import render_python
+    from nooa.snapshot._render import PythonRenderer
 
     limits = Limits(max_chars=400, max_nodes=50, max_depth=1, max_items=3, max_string=40)
-    return render_python(capture(value, limits))
+    # The standard notation only: a registered ``render_python`` hook is user
+    # code, and capture runs none (the hooks still apply when the result renders).
+    return PythonRenderer({}).render(capture(value, limits))
 
 
 def _signature(function: types.FunctionType, state: _State, skip_first: bool) -> str:
@@ -223,9 +226,20 @@ def _signature(function: types.FunctionType, state: _State, skip_first: bool) ->
     positional_only = code.co_posonlyargcount
     keyword_only = code.co_kwonlyargcount
     flags = code.co_flags
-    defaults = _FUNCTION_DEFAULTS.__get__(function, types.FunctionType) or ()
-    kwdefaults = _FUNCTION_KWDEFAULTS.__get__(function, types.FunctionType) or {}
+    # Exact types before any truth test: a tuple or dict subclass stored there
+    # would run its ``__bool__`` / ``__len__``.
+    defaults = _FUNCTION_DEFAULTS.__get__(function, types.FunctionType)
+    kwdefaults = _FUNCTION_KWDEFAULTS.__get__(function, types.FunctionType)
+    if defaults is None:
+        defaults = ()
+    if kwdefaults is None:
+        kwdefaults = {}
     if type(defaults) is not tuple or type(kwdefaults) is not dict:
+        return "(...)"
+    # Keys checked by type before any lookup: a foreign key with a colliding
+    # hash would run its ``__eq__`` (``_safe_dict``).
+    kwdefaults = _safe_dict(kwdefaults, kwdefaults, state)
+    if kwdefaults is None:
         return "(...)"
     params: list[str] = []
     first_default = positional - len(defaults)

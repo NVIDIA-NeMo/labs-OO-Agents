@@ -331,7 +331,10 @@ def _big_integer(value: int, max_size: int, depth: int, path: str, state: _State
     ]
     if negative:
         entries.append(("negative", True))
-    built = _object_fields("int", iter(entries), max_size, depth, path, state, "python.int")
+    # Structural fields: ``max_items`` limits a container's items, not these.
+    built = _object_fields(
+        "int", iter(entries), max_size, depth, path, state, "python.int", capped=False
+    )
     node = cast(Object, built.node)
     if len(node.fields) < len(entries):
         return _fallback(value, "max_length", max_size)

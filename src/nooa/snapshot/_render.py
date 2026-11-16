@@ -101,7 +101,20 @@ def _multiline(s: str) -> str:
     if "'''" in s and '"""' in s:
         return repr(s)
     quote = '"""' if "'''" in s else "'''"
-    return f"{quote}{s}{quote}"
+    body = "".join(_MULTILINE_ESCAPES.get(char) or _escape_unprintable(char) for char in s)
+    # A quote right before the closing delimiter would end the literal early.
+    kept = body.rstrip(quote[0])
+    body = kept + ("\\" + quote[0]) * (len(body) - len(kept))
+    return f"{quote}{body}{quote}"
+
+
+_MULTILINE_ESCAPES = {"\\": "\\\\", "\n": "\n", "\t": "\t"}
+"""Characters a triple-quoted literal writes specially: a backslash doubled; newline and tab as they are."""
+
+
+def _escape_unprintable(char: str) -> str:
+    """``char`` itself, or its ``repr`` escape when it is not printable (``\\r``, ``\\x00``)."""
+    return char if char.isprintable() else repr(char)[1:-1]
 
 
 def _python_str(s: str) -> str:
