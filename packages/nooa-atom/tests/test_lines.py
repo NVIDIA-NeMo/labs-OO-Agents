@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""LineSplitter and bounded_lines (moved from nooa.agentdoc._truncating_stream)."""
+"""LineSplitter and bounded_lines: job-log lines in bounded memory."""
 
 import asyncio
 

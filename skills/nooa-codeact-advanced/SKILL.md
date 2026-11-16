@@ -127,7 +127,7 @@ Coercion before validation, in order: bare values wrapped to the schema; string 
 
 Two independent mechanisms — set them separately:
 
-1. **Capture time** (`capture: CaptureConfig`) — per-cell stream caps with head/tail truncation: `max_stdout=50_000`, `max_stderr=2_000`, `max_error=10_000` chars; `tail=None` (half the budget); `file_backed=True` (default `False`) streams the *full* output to a temp file and puts its path in the truncation notice so the LLM can grep it.
+1. **Capture time** (`capture: CaptureConfig`) — per-cell stream caps with head/tail truncation: `max_stdout=50_000`, `max_stderr=2_000`, `max_error=10_000` chars; `tail=None` (half the budget); `file_backed=True` (default `False`) also writes the *full* output to a file in the session's `OverflowDir` (`nooa.overflow`), named in the cut line (`[... N chars omitted; full output: PATH]`) so the LLM can grep it; only while `TruncationConfig.overflow_files` is on.
 2. **Render time** (`FormatConfig` triplet = `pformat` bounds `max_string/max_length/max_depth`): `event_format` (event fields, every turn; defaults 10_000/200/5), `prefill_format` (parameter inspection; 2_000/25/4), `context_block_format` (non-string context values; unlimited — overflow handled by block eviction).
 
 When input inspection actually omits values, NOOA emits a developer-facing

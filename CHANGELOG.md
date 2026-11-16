@@ -53,7 +53,7 @@ to follow semantic versioning.
   so no replacement character appears there (the omitted count then includes
   the trimmed bytes: 151,425 instead of 151,424 bytes for 400,000 `漢`).
 - Output files are bounded per agent and live in a new standalone package,
-  `nooa.overflow` (`OverflowDir`, `OverflowFile`; see `docs/overflow.md`): in
+  `nooa.overflow` (`OverflowDir`, `OverflowWriter`; see `docs/overflow.md`): in
   an Atom session one `OverflowDir` (20 files of up to 64 MiB, newest kept)
   holds every output file of that agent: its `Shell`s' direct runs, the
   commands inside its launched jobs and its cell output, each file capped at
