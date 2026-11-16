@@ -1195,6 +1195,10 @@ class AtifExporter:
         )
 
         extra = dict(ps.extra) if ps.extra else {}
+        # ATIF has no field for the agent method; record it so consumers (and
+        # nooa.atif.importer) can name and nest method calls.
+        extra["method_name"] = ps.method_name
+        extra["strategy"] = ps.strategy_name
         # Preserve nesting structure (Case B-flatten).
         extra["generation_id"] = ps.generation_id
         if ps.parent_generation_id is not None:

@@ -72,6 +72,9 @@ nooa import-traces run.jsonl --endpoint http://host:5001 --batch-id my-exp-v2
 # Import a Harbor eval job directory
 nooa import-harbor <job-dir>
 
+# Import ATIF trajectories (trajectory.json files, or .jsonl with one per line)
+nooa import-atif <file-or-dir> --experiment my-eval
+
 # Export one session as .jsonl (round-trips through import-traces)
 curl -o session.jsonl "http://localhost:5001/api/trace/export?session_id=<ID>"
 

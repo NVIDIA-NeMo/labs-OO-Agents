@@ -10,9 +10,12 @@ Public surface:
   trajectories.
 - :func:`install_atif` and :func:`atif_scope` — activation API for
   attaching the exporter to an :class:`EventManager`.
+- :func:`trajectory_to_otlp` — the reverse direction: an ATIF trajectory as
+  OTLP spans the trace viewer renders (``nooa import-atif``).
 """
 
 from nooa.atif.exporter import AtifExporter
+from nooa.atif.importer import DEFAULT_CODE_TOOLS, trajectory_to_otlp
 from nooa.atif.install import atif_scope, enable_atif, install_atif
 from nooa.atif.schema import (
     SCHEMA_VERSION,
@@ -30,6 +33,7 @@ from nooa.atif.schema import (
 )
 
 __all__ = [
+    "DEFAULT_CODE_TOOLS",
     "SCHEMA_VERSION",
     "AgentSchema",
     "AtifExporter",
@@ -46,4 +50,5 @@ __all__ = [
     "atif_scope",
     "enable_atif",
     "install_atif",
+    "trajectory_to_otlp",
 ]

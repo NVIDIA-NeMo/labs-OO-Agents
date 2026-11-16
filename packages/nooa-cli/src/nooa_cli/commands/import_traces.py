@@ -64,6 +64,49 @@ def _detect_format(line: dict) -> str:
     return "unknown"
 
 
+def _looks_like_atif(value: object) -> bool:
+    """True for an ATIF trajectory, which ``nooa import-atif`` imports instead."""
+    return (
+        isinstance(value, dict)
+        and str(value.get("schema_version", "")).startswith("ATIF")
+        and isinstance(value.get("steps"), list)
+    )
+
+
+def _atif_json_files(path: Path, limit: int = 200) -> list[Path]:
+    """ATIF ``.json`` files (e.g. Harbor ``trajectory.json``) under path, bounded."""
+    candidates = [path] if path.is_file() else sorted(path.rglob("*.json"))[:limit]
+    found = []
+    for candidate in candidates:
+        if candidate.suffix != ".json":
+            continue
+        try:
+            if _looks_like_atif(json.loads(candidate.read_text(encoding="utf-8"))):
+                found.append(candidate)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+    return found
+
+
+def _atif_hint(path: str, count: int) -> str:
+    return (
+        f"  {count} file(s) hold ATIF trajectories, which import-traces does not read.\n"
+        f"  Import them with: nooa import-atif {shlex.quote(path)}"
+    )
+
+
+def _first_record_is_atif(path: Path) -> bool:
+    """Check the first non-empty line, so ATIF .jsonl files are not half-imported."""
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    return _looks_like_atif(json.loads(line))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return False
+
+
 def _session_id_from_filename(path: Path) -> str:
     """Derive a session ID from the trace file's basename."""
     name = path.name
@@ -205,7 +248,14 @@ def command(
 
     if not files:
         click.echo(f"No trace files found in {path}")
+        atif_files = _atif_json_files(target)
+        if atif_files:
+            click.echo(_atif_hint(path, len(atif_files)))
         raise SystemExit(1)
+
+    # A single pretty-printed ATIF .json would otherwise fail line by line.
+    atif_files = set(_atif_json_files(target)) if target.is_file() else set()
+    files = [f for f in files if f not in atif_files]
 
     validate_endpoint(endpoint)
 
@@ -234,6 +284,9 @@ def command(
 
     for file in files:
         session_id = _session_id_from_filename(file)
+        if file.suffix == ".jsonl" and _first_record_is_atif(file):
+            atif_files.add(file)
+            continue
 
         # Check for existing session before importing
         if session_exists(endpoint, session_id):
@@ -381,6 +434,8 @@ def command(
             skipped += 1
 
     click.echo(f"  {imported} imported, {skipped} skipped")
+    if atif_files:
+        click.echo(_atif_hint(path, len(atif_files)))
     if failed:
         click.echo(f"  {failed} failed")
     if already_exist:
@@ -394,6 +449,8 @@ def command(
             click.echo(f"  ... and {len(errors) - 10} more errors")
 
     encoded_batch = urllib.parse.quote(batch_id, safe="")
+    if atif_files and not imported and not errors:
+        raise SystemExit(1)
     if errors:
         click.echo(
             f"\nImport incomplete. Partial data may exist in batch '{batch_id}'.\n"
