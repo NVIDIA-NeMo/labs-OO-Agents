@@ -36,12 +36,9 @@ PLACEHOLDER_TEXT_CHARS = 50_000
 
 def bound_placeholder_text(text: str) -> str:
     """``text`` whole up to ``PLACEHOLDER_TEXT_CHARS``, else its first and last halves around the cut line."""
-    if len(text) <= PLACEHOLDER_TEXT_CHARS:
-        return text
-    from nooa.snapshot import cut, render_output
+    from nooa._bounded_text import cut_text
 
-    tail = PLACEHOLDER_TEXT_CHARS // 2
-    return render_output(cut(text, head=PLACEHOLDER_TEXT_CHARS - tail, tail=tail))
+    return cut_text(text, PLACEHOLDER_TEXT_CHARS)
 
 
 def _value_text(value: Any, prefill: FormatConfig | None) -> str:

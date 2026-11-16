@@ -31,8 +31,8 @@ import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+from nooa._bounded_text import cut_text
 from nooa._platform import require_posix
-from nooa.snapshot import cut, render_output
 
 logger = logging.getLogger(__name__)
 
@@ -65,10 +65,7 @@ def _bounded(text: str) -> str:
     of ``MAX_OUTPUT_CHARS`` each). The tail matters as much as the head: a
     failing command usually ends with its error.
     """
-    if len(text) <= MAX_OUTPUT_CHARS:
-        return text
-    head = MAX_OUTPUT_CHARS - MAX_OUTPUT_CHARS // 2
-    return render_output(cut(text, head=head, tail=MAX_OUTPUT_CHARS // 2))
+    return cut_text(text, MAX_OUTPUT_CHARS)
 
 
 def _process_start_time(pid: int) -> str | None:

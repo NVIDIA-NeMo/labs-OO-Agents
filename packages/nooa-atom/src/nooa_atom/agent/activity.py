@@ -16,12 +16,13 @@ from uuid import uuid4
 
 from pydantic import Field
 
+from nooa._bounded_text import cut_halves, text_stream
 from nooa.agentdoc import hidden, spec
 from nooa.context_blocks import EventBase
 from nooa.context_blocks.roles import Role
 from nooa.runtime.event_manager import EventManager
 from nooa.skill import Skill
-from nooa.snapshot import TextStream, cut, render_output, render_python
+from nooa.snapshot import TextStream, render_output, render_python
 from nooa.tools import BashSession, StreamDone, StreamEvent
 from nooa.tools.shell_tools import (
     FileWrite,
@@ -44,14 +45,12 @@ def _event_text(text: str) -> str:
     """``text`` itself, or past ``_MAX_EVENT_TEXT_CHARS`` its ``str(len=N, [:h]=..., [-t:]=...)`` cut."""
     if len(text) <= _MAX_EVENT_TEXT_CHARS:
         return text
-    tail = _MAX_EVENT_TEXT_CHARS // 2
-    return render_python(cut(text, head=_MAX_EVENT_TEXT_CHARS - tail, tail=tail))
+    return render_python(cut_halves(text, _MAX_EVENT_TEXT_CHARS))
 
 
 def _output_stream() -> TextStream:
     """One stream of a terminal card: the first and last halves of ``_MAX_COMMAND_OUTPUT_CHARS``."""
-    tail = _MAX_COMMAND_OUTPUT_CHARS // 2
-    return TextStream(unit="chars", head=_MAX_COMMAND_OUTPUT_CHARS - tail, tail=tail)
+    return text_stream(_MAX_COMMAND_OUTPUT_CHARS)
 
 
 def _command_output(

@@ -12,6 +12,7 @@ import sys
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 
+from nooa._bounded_text import text_stream
 from nooa.snapshot import TextStream, render_output
 from nooa.tools._bash_session import BashSession
 from nooa_cli.tools.pyp.errors import make_pipe_error
@@ -119,9 +120,7 @@ def run(cmd: str, *, check: bool = True, timeout: float = 30.0, cwd: str | None 
         try:
             buffer = ""
             # Half of _STDERR_CAP from each end, around render_output's cut line.
-            _stderr_io = TextStream(
-                unit="chars", head=_STDERR_CAP - _STDERR_CAP // 2, tail=_STDERR_CAP // 2
-            )
+            _stderr_io = text_stream(_STDERR_CAP)
             async for stream_name, chunk in bash.run_stream(cmd, timeout=timeout):
                 if stream_name == "__done__":
                     parts = chunk.split(",")

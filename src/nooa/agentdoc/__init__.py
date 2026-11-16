@@ -73,10 +73,11 @@ def truncating_pformat(
         _pformat(obj, stream, **kwargs)
         return stream.getvalue()
 
-    from nooa.snapshot import TextStream, render_output
+    from nooa._bounded_text import text_stream
+    from nooa.snapshot import render_output
 
     # A value is captured within max_chars; the rendering streams into a bounded TextStream.
-    bounded = TextStream(unit="chars", head=max_chars - max_chars // 2, tail=max_chars // 2)
+    bounded = text_stream(max_chars)
     _pformat(obj, bounded, _max_chars=max_chars, **kwargs)
     return render_output(bounded.close())
 
