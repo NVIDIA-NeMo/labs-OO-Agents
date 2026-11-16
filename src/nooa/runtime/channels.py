@@ -235,13 +235,19 @@ def _count_line(
 def _default_event_preview(value: Any) -> str:
     """Default ``value_preview`` for event-mode puts.
 
-    Strings under 200 chars pass through; everything else is
-    ``pformat``-rendered with bounded budgets.
+    Strings of up to 200 chars pass through; a longer one keeps its first
+    200 in ``nooa.snapshot.cut`` notation (``str(len=N, [:200]='…')``, as
+    ``pformat`` shows a cut string); everything else is ``pformat``-rendered
+    with bounded budgets.
     """
     from nooa.agentdoc import pformat
 
     if isinstance(value, str):
-        return value if len(value) <= 200 else value[:199] + "…"
+        if len(value) <= 200:
+            return value
+        from nooa.snapshot import cut, render_python
+
+        return render_python(cut(value, head=200, tail=0))
     return pformat(value, max_length=10, max_string=200, max_depth=3)
 
 
