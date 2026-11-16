@@ -30,6 +30,40 @@ def removed_media_notice(kind: str) -> str:
     return f"[{subject} was removed here because this model is not set up to receive {plural}.]"
 
 
+# Inline image formats that every supported model API accepts (OpenAI,
+# Anthropic, Bedrock, Gemini). Other types, such as SVG, BMP or TIFF, are
+# refused by some providers; kept in history, such an image would fail every
+# later request.
+SENDABLE_IMAGE_TYPES = frozenset(
+    {"image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"}
+)
+
+
+def unsendable_image_type(block: Mapping[str, Any]) -> str | None:
+    """The MIME type of an inline image block models do not accept, else None.
+
+    Only ``data:`` URLs are checked: for a remote URL the provider reads the
+    type from the server it downloads from.
+    """
+    if block.get("type") not in {"image_url", "input_image"}:
+        return None
+    image = block.get("image_url")
+    url = image.get("url") if isinstance(image, Mapping) else image
+    if not isinstance(url, str) or not url.startswith("data:"):
+        return None
+    media_type = url[5:].split(";", 1)[0].split(",", 1)[0].strip().lower()
+    return None if media_type in SENDABLE_IMAGE_TYPES else (media_type or "untyped")
+
+
+def unsendable_image_notice(media_type: str) -> str:
+    """The text the model sees in place of an image in a format models do not accept."""
+    return (
+        f"[An image was removed here: {media_type} images cannot be sent to a model. "
+        "Only PNG, JPEG, GIF and WebP are accepted; convert it (for example render "
+        "an SVG to PNG) and show it again.]"
+    )
+
+
 def rejected_media_notice(kind: str) -> str:
     """The text the model sees in place of media the provider could not read."""
     subject = _NOTICE_SUBJECT.get(kind, ("A file", "files"))[0]
@@ -80,6 +114,20 @@ def image_limit(exc: BaseException) -> int | None:
     return None
 
 
+_FORMAT_NOUN = {"image": "image", "audio": "audio", "video": "video", "pdf": "(?:file|document)"}
+
+
+def _unsupported_format(exc, kind) -> bool:
+    """True if ``exc`` says the attachment's format is unsupported.
+
+    The NVIDIA Inference Hub (a LiteLLM proxy) returns this as HTTP 500:
+    "Unsupported image format: svg+xml. Supported formats: [...]". The error
+    is about the request, so retrying it unchanged fails every time.
+    """
+    noun = _FORMAT_NOUN.get(kind, "file")
+    return bool(re.search(rf"\bunsupported {noun} (?:format|type)\b", str(exc).lower()))
+
+
 def explicitly_rejected(exc, kind):
     """Return True if ``exc`` is the provider refusing this kind of media.
 
@@ -91,7 +139,7 @@ def explicitly_rejected(exc, kind):
     of one image: the runtime collapses the oldest images instead.
     """
     status = getattr(exc, "_connect_http_status", getattr(exc, "status_code", None))
-    if status not in {400, 415, 422}:
+    if status not in {400, 415, 422} and not (status == 500 and _unsupported_format(exc, kind)):
         return False
     if image_limit(exc) is not None:
         return False
@@ -203,6 +251,8 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...], excluded=fr
     blocks of a ``content`` list (``output`` for ``function_call_output`` items).
     ``excluded`` holds keys from ``media_occurrences`` that the current
     connection rejected; each such block becomes a ``rejected_media_notice``.
+    An enabled inline image in a format models do not accept (such as SVG)
+    becomes an ``unsendable_image_notice``.
     Tool arguments, reasoning and vendor extensions are not inspected.
     ``LLMResponse`` and ``CacheBoundary`` objects are passed through unchanged;
     their native content is checked later by ``check_replayed_native_media``. The input
@@ -247,7 +297,15 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...], excluded=fr
             blocks = []
             for position, block in enumerate(content):
                 kind = attachment_kind(block) if isinstance(block, Mapping) else None
-                if kind is not None and (
+                bad_type = unsendable_image_type(block) if kind == "image" else None
+                if bad_type is not None and kind in enabled:
+                    blocks.append(
+                        {
+                            "type": "input_text" if slot == "output" else "text",
+                            "text": unsendable_image_notice(bad_type),
+                        }
+                    )
+                elif kind is not None and (
                     kind not in enabled or (message_index, position) in rejected
                 ):
                     blocks.append(

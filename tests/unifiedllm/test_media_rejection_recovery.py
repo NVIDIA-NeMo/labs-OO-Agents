@@ -227,3 +227,47 @@ def test_a_still_failing_sync_request_undoes_its_exclusions():
                 client.call(messages)
         view = client._prepare_media_messages(messages, client._prepare_call_config({}))
         assert images(view[0]["content"]) == [IMAGE]
+
+
+# Hub (LiteLLM proxy to Bedrock Claude), 2026-11-16: an SVG from show() came back
+# as HTTP 500, so the existing 400-only recovery never ran and every later turn
+# failed on the same image.
+HUB_SVG = (
+    "OpenAIException - litellm.APIConnectionError: Unsupported image format: svg+xml. "
+    "Supported formats: ['mp4', 'mov', 'mkv', 'webm', 'flv', 'mpeg', 'mpg', 'wmv', '3gp', "
+    "'png', 'jpeg', 'gif', 'webp']"
+)
+
+
+def server_error(text):
+    return litellm.InternalServerError(message=text, model="test", llm_provider="openai")
+
+
+def test_unsupported_format_500_is_an_explicit_rejection():
+    assert explicitly_rejected(server_error(HUB_SVG), "image")
+    assert not explicitly_rejected(server_error(HUB_SVG), "pdf")
+
+
+def test_other_500s_are_not_media_rejections():
+    assert not explicitly_rejected(server_error("Could not process image"), "image")
+    assert not explicitly_rejected(server_error("Internal server error"), "image")
+
+
+async def test_unsupported_format_500_is_retried_once_as_a_note():
+    messages = [{"role": "user", "content": [{"type": "text", "text": "Read this:"}, IMAGE]}]
+
+    async def hub(**kwargs):
+        # Like the Hub: every attempt that still carries the image fails the same way.
+        if any(images(m["content"]) for m in kwargs["messages"] if isinstance(m["content"], list)):
+            raise server_error(HUB_SVG)
+        return ok(False)
+
+    with CompletionClient("openai/test", media_inputs=["image"], cache_breakpoint=None) as client:
+        with (
+            patch("litellm.acompletion", new_callable=AsyncMock) as wire,
+            patch("nooa.unifiedllm.retry.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            wire.side_effect = hub
+            assert (await client.acall(messages)).content == "UNREADABLE"
+            last = sent_blocks(wire.call_args_list[-1], False)
+            assert images(last) == [] and NOTE in texts(last)

@@ -99,3 +99,27 @@ def test_removed_media_notice_is_plain(kind):
     assert notice.startswith("[") and notice.endswith(".]")
     assert "was removed here" in notice
     assert "media_inputs" not in notice and "input disabled" not in notice
+
+
+@pytest.mark.parametrize("media_type", ["image/svg+xml", "image/bmp", "image/tiff"])
+def test_an_image_format_models_refuse_becomes_a_notice(media_type):
+    from nooa.runtime.media_capture import media_to_content_block
+    from nooa.unifiedllm.media_inputs import filter_media_messages
+
+    block = media_to_content_block(Image.from_bytes(b"<svg/>", media_type=media_type))
+    good = media_to_content_block(Image.from_bytes(b"png", media_type="image/png"))
+    messages = [{"role": "user", "content": [block, good]}]
+    filtered = filter_media_messages(messages, ALL)
+    first, second = filtered[0]["content"]
+    assert first["type"] == "text" and media_type in first["text"] and "PNG" in first["text"]
+    assert second == good
+    assert messages[0]["content"][0] is block  # the stored history is unchanged
+
+
+def test_remote_image_urls_are_not_checked_for_format():
+    from nooa.unifiedllm.media_inputs import filter_media_messages
+
+    block = {"type": "image_url", "image_url": {"url": "https://example.com/a.svg"}}
+    assert filter_media_messages([{"role": "user", "content": [block]}], ALL)[0]["content"] == [
+        block
+    ]

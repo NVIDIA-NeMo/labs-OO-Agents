@@ -6,6 +6,13 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- An inline image in a format models do not accept (anything but PNG, JPEG,
+  GIF or WebP, for example SVG from `show(Image.from_file("chart.svg"))`) is now
+  replaced by a note before each request, instead of being sent. Before, the
+  NVIDIA Inference Hub refused it with HTTP 500 and, because the image stays in
+  history, every later turn of the session failed. A provider's HTTP 500 that
+  says "Unsupported image format" now also counts as an explicit rejection, so
+  the existing retry-with-a-note recovery handles it.
 - `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
   publishes a runtime event when a job finishes (the job's handle state and
   result say it ended).
