@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import re
+import threading
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Coroutine, Mapping, Sequence
@@ -1253,6 +1254,35 @@ def _update_token_calibration(
         logger.debug("token calibration skipped (estimate failed)", exc_info=True)
 
 
+_quiet_litellm_lock = threading.Lock()
+_quiet_litellm_depth = 0
+_quiet_litellm_previous = False
+
+
+@contextmanager
+def _quiet_litellm_lookup():
+    """Stop LiteLLM's "Provider List" banner while a lookup runs.
+
+    LiteLLM prints the banner before it raises for a model it cannot map to a
+    provider, even when the caller handles the exception. The setting is
+    global, so overlapping lookups (threads) share one saved value, and the
+    last one to finish restores it.
+    """
+    global _quiet_litellm_depth, _quiet_litellm_previous
+    with _quiet_litellm_lock:
+        if _quiet_litellm_depth == 0:
+            _quiet_litellm_previous = litellm.suppress_debug_info
+            litellm.suppress_debug_info = True
+        _quiet_litellm_depth += 1
+    try:
+        yield
+    finally:
+        with _quiet_litellm_lock:
+            _quiet_litellm_depth -= 1
+            if _quiet_litellm_depth == 0:
+                litellm.suppress_debug_info = _quiet_litellm_previous
+
+
 class UnifiedLLM(ABC):
     _registry_config: dict[str, Any] | None
     cache_breakpoint: Literal["auto", "openai", "anthropic"] | None
@@ -1620,8 +1650,13 @@ class UnifiedLLM(ABC):
             Dict with model info (max_input_tokens, max_output_tokens, etc.)
             or None if model is not in litellm's registry.
         """
+        # Context limits are resolved on every turn, so an unknown model (for
+        # example an alias served behind an OpenAI-compatible gateway) would
+        # print LiteLLM's banner each time. Not finding the model is an
+        # expected answer here.
         try:
-            return litellm.get_model_info(self.model)
+            with _quiet_litellm_lookup():
+                return litellm.get_model_info(self.model)
         except Exception:
             return None
 
