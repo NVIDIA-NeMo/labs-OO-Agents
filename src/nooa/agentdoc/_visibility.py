@@ -25,7 +25,10 @@ import typing
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Annotated, Any, cast
+from typing import Annotated, Any
+
+from nooa.agentdoc.markers import _Hidden as _Hidden  # re-exported: the type of ``hidden``
+from nooa.agentdoc.markers import hidden
 
 
 class _TypeHintCache:
@@ -80,75 +83,6 @@ def _resolve_type_hints(obj: Any) -> dict[str, Any]:
 def _is_dunder(name: str) -> bool:
     """True if name is a module/class dunder (e.g. __name__, __file__)."""
     return name.startswith("__") and name.endswith("__")
-
-
-class _Hidden:
-    """Hide a field, callable, or module-level name from documentation.
-
-    Use as ``@hidden``, ``Annotated[T, hidden]``, or ``with hidden:``.
-    """
-
-    def __init__(self):
-        self._local = threading.local()
-
-    @property
-    def _stack(self) -> list[tuple[types.ModuleType, set[str]]]:
-        """Thread-local stack of (module, snapshot) for nested ``with hidden:``."""
-        if not hasattr(self._local, "stack"):
-            self._local.stack = []
-        return cast(list[tuple[types.ModuleType, set[str]]], self._local.stack)
-
-    def __call__(self, func: Any) -> Any:
-        """Use as @hidden decorator on methods or module-level functions."""
-        try:
-            func._agentdoc_hidden = True
-        except AttributeError:
-            # property/cached_property have no __dict__; store on the inner
-            # function so is_hidden_method() can find it.
-            if isinstance(func, property) and func.fget is not None:
-                func.fget._agentdoc_hidden = True  # type: ignore[attr-defined]
-            elif isinstance(func, functools.cached_property):
-                func.func._agentdoc_hidden = True  # type: ignore[attr-defined]
-        return func
-
-    def __enter__(self):
-        frame = sys._getframe(1)
-        if frame.f_locals is not frame.f_globals:
-            raise RuntimeError(
-                "'with hidden:' must be used at module level, not inside a function or class body"
-            )
-        module_name = frame.f_globals.get("__name__")
-        module = sys.modules.get(module_name) if module_name else None
-        if module is None:
-            raise RuntimeError(
-                "hidden must be used at module level, could not determine calling module."
-            )
-        return self._enter_for_module(module)
-
-    def _enter_for_module(self, module: types.ModuleType):
-        """Enter the block for a specific module (used by tests)."""
-        self._stack.append((module, set(module.__dict__.keys())))
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: Any,
-    ) -> bool:
-        if not self._stack:
-            raise RuntimeError("_Hidden.__exit__ called without matching __enter__")
-        module, snapshot = self._stack.pop()
-        new_names = set(module.__dict__.keys()) - snapshot
-        existing: set[str] = getattr(module, "_agentdoc_hidden_names", set())
-        module._agentdoc_hidden_names = existing | new_names  # type: ignore[attr-defined]
-        return False
-
-    def __repr__(self):
-        return "hidden"
-
-
-hidden = _Hidden()
 
 
 def is_hidden_method(func: Any) -> bool:
