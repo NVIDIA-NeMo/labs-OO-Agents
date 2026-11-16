@@ -13,7 +13,6 @@ from nooa_atom.tools.todo_list import TodoList
 from nooa.storage.json_snapshot import snapshot_from_json, snapshot_to_json
 
 _BUILTINS = {
-    "nemo.shell": "shell",
     "nemo.repo": "repo",
     "nemo.todo": "todo",
     "nemo.skill_writing": "skill_writing",
@@ -31,7 +30,8 @@ def _assert_registry_holds_builtins(agent) -> None:
     for name, attr in _BUILTINS.items():
         assert name in registry.loaded()
         assert registry._attr_map[name] == attr
-    assert agent.repo.session is agent.shell.session
+    assert "nemo.shell" not in registry.loaded()
+    assert agent.repo.session is agent._workspace_shell.session
 
 
 @pytest.mark.parametrize("cls", [AtomAgentBase, AtomAgent])
@@ -43,6 +43,19 @@ async def test_fresh_agent_installs_builtins_without_overwrite_warning(cls, tmp_
         _assert_registry_holds_builtins(agent)
         if cls is AtomAgent:
             assert isinstance(agent.todo, TodoList)
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.parametrize("name", ["repo", "todo"])
+async def test_a_saved_skill_named_like_a_builtin_does_not_break_install(name, tmp_path):
+    skills_dir = tmp_path / "skills"
+    (skills_dir / name).mkdir(parents=True)
+    (skills_dir / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\nb\n")
+    agent = AtomAgent(llm=CellLLM(), cwd=tmp_path, libs_dir=skills_dir, skills_dirs=[])
+    try:
+        _assert_registry_holds_builtins(agent)
+        assert f"local.{name}" not in agent.skills.registry.loaded()
     finally:
         await agent.aclose()
 

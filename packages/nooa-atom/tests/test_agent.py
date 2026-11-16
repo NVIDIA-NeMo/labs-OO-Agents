@@ -96,7 +96,7 @@ async def test_closing_the_session_closes_skills_and_shell_but_not_a_shared_llm(
     agent = root._agent
     calls: list[str] = []
     real_skills_aclose = agent.skills.aclose
-    real_shell_close = agent.shell.close
+    real_shell_close = agent._workspace_shell.close
 
     async def skills_aclose():
         calls.append("skills")
@@ -107,7 +107,7 @@ async def test_closing_the_session_closes_skills_and_shell_but_not_a_shared_llm(
         await real_shell_close()
 
     agent.skills.aclose = skills_aclose
-    agent.shell.close = shell_close
+    agent._workspace_shell.close = shell_close
     await registry.close_all()
     assert calls == ["skills", "shell"]
     assert shared.closed is False
@@ -134,7 +134,7 @@ async def test_the_model_sees_the_turn_types_but_not_the_port(
             for line in rendered.splitlines()
             if re.match(r"^    \w+:", line)
         }
-        assert {"shell", "todo", "delegates"} <= fields  # the check sees the fields
+        assert {"repo", "todo", "delegates"} <= fields  # the check sees the fields
         assert "session" not in fields
         assert "session_port_visible" not in fields
         assert "SessionPort" not in rendered

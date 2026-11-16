@@ -740,12 +740,9 @@ class AtomAgent(
             on_wait_cancelled=note_running_job,
         )
         self._shells = work_shell.ShellOwner()
-        self.files = Files(self.shell)
+        self.files = Files(self._workspace_shell)
         # Atom's own to-do list: membership on the list, content on each item.
         self._install_todo_list()
-        # Commands run as Shell work; the legacy shell skill stays loaded for
-        # self.files and self.repo but is not offered (``/skills`` can still).
-        self.skills.registry.deactivate(["nemo.shell"])
         self._install_context()
 
     @hidden
@@ -1104,7 +1101,7 @@ class AtomAgent(
 
 
 # "producers" is also core's nemo.producers entry-point skill, which doc() would list.
-for _name in ("shell", "delegates", "producers", "system_messages", "cwd"):
+for _name in ("delegates", "producers", "system_messages", "cwd"):
     spec(AtomAgent, _name, hidden=True)
 # The fix hint of a blocked subprocess/os.system/network import or call.
 _hints.register_hint(

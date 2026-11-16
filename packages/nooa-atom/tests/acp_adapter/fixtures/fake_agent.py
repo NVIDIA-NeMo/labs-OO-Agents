@@ -52,8 +52,8 @@ def llm_factory(alias, workspace) -> FakeLLMClient:
             record.write(os.read(0, 4096) or b"<eof>")
     if "--shell" in sys.argv:
         # Blocks inside a real shell command, so cancellation exercises
-        # ActivityShellTools.run rather than a bare asyncio wait.
-        script = [_cell("await self.shell.run('sleep 30', timeout=30)")]
+        # Shell.run rather than a bare asyncio wait.
+        script = [_cell("await Shell().run('sleep 30', timeout=30)")]
     elif "--blocking" in sys.argv:
         script = [_cell("await asyncio.Event().wait()")]
     elif "--question" in sys.argv:

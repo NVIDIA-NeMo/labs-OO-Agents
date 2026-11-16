@@ -180,9 +180,16 @@ class SkillWriting(Skill):
 
     requires = ("nemo.shell",)
 
-    def __init__(self, agent: Any, path: Path) -> None:
-        """Save new skills in ``path`` and load the skills already there."""
+    def __init__(self, agent: Any, path: Path, *, shell: Any = None) -> None:
+        """Save new skills in ``path`` and load the skills already there.
+
+        ``run_tests()`` runs in ``shell`` (an object with an async ``run()``);
+        without one it uses the agent's ``nemo.shell`` skill, ``agent.shell``.
+        """
         self._agent = agent
+        self._shell = shell
+        if shell is not None:
+            self.requires = ()
         self._path = Path(path)
         self._path.mkdir(parents=True, exist_ok=True)
         if str(self._path) not in sys.path:
@@ -474,7 +481,7 @@ class SkillWriting(Skill):
         import shlex
         import sys as _sys
 
-        shell = self._agent.shell
+        shell = self._shell if self._shell is not None else self._agent.shell
         lib_dir = self._dir(lib_name)
         tests_dir = lib_dir / "tests"
         result = await shell.run(
