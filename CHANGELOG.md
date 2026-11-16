@@ -12,6 +12,9 @@ to follow semantic versioning.
   its LLM call (input rebuilt from the preceding steps) and tool calls; calls
   to `execute_python`/`python_cell` render as code execution, and embedded
   subagent trajectories nest under the tool call that started them.
+- The ATIF exporter records `method_name` and `strategy` in each agent step's
+  `extra`. The importer uses them to name traces after the agent method and to
+  nest same-agent method calls under the code execution that made them.
 - `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
   publishes a runtime event when a job finishes (the job's handle state and
   result say it ended).

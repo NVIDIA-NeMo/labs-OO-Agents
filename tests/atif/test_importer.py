@@ -6,13 +6,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
 from nooa import Agent, strategy
 from nooa.atif import Trajectory, atif_scope, trajectory_to_otlp
 from nooa.config import CodeActConfig
-from nooa.strategies import CodeActStrategy
+from nooa.strategies import CodeActStrategy, PredictStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
 
@@ -203,3 +204,69 @@ async def test_round_trip_from_nooa_export_into_viewer_store(tmp_path: Path, mon
     otlp_store.init_db()
     otlp_store.ingest(body)
     assert len(otlp_store.get_session_spans("rt-session")) == len(spans)
+
+
+class _NestedAgent(Agent, llm=FakeLLMClient()):
+    @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=5)))
+    async def outer(self, x: str) -> str:
+        """{x}"""
+        ...
+
+    @strategy(PredictStrategy())
+    async def inner_classify(self, text: str) -> Literal["a", "b"]:
+        """Classify {text}."""
+        ...
+
+
+@pytest.mark.asyncio
+async def test_exported_method_names_name_and_nest_method_calls(tmp_path: Path):
+    """NOOA records method_name per step; a nested same-agent call (flattened
+    into the trajectory) becomes its own method span inside the calling code."""
+    code = json.dumps({"code": "r = await self.inner_classify('hi')"})
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                raw_response=None,
+                content="",
+                tool_calls=[
+                    ToolCall(id="e1", name="execute_python", arguments=code),
+                    ToolCall(id="r1", name="return_result", arguments=json.dumps({"result": "a"})),
+                ],
+                finish_reason="tool_calls",
+                usage={"prompt_tokens": 50, "completion_tokens": 10},
+            ),
+            LLMResponse(
+                raw_response=None,
+                content='{"value": "a"}',
+                tool_calls=[],
+                finish_reason="stop",
+                usage={"prompt_tokens": 20, "completion_tokens": 5},
+            ),
+        ]
+    )
+    agent = _NestedAgent(llm=llm)
+    out = tmp_path / "t.json"
+    async with atif_scope(agent, path=out, session_id="n", agent_name="N", agent_version="1"):
+        assert await agent.outer("hi") == "a"
+
+    trajectory = Trajectory.model_validate_json(out.read_text())
+    methods = {s.extra["method_name"] for s in trajectory.steps if s.source == "agent"}
+    assert methods == {"outer", "inner_classify"}
+    assert all(s.extra.get("strategy") for s in trajectory.steps if s.source == "agent")
+
+    spans = _spans(trajectory_to_otlp(trajectory, "n-session"))
+    by_id = {s["spanId"]: s for s in spans}
+    root = spans[0]
+    assert root["name"] == "N.outer"
+    inner = _by_name(spans, "N.inner_classify")
+    assert len(inner) == 1
+    caller = by_id[inner[0]["parentSpanId"]]
+    assert caller["name"] == "code_execution"
+    assert by_id[caller["parentSpanId"]]["parentSpanId"] == root["spanId"]
+    inner_generations = [s for s in spans if s.get("parentSpanId") == inner[0]["spanId"]]
+    assert [s["name"] for s in inner_generations] == ["generation 1"]
+    for span in spans:  # every child lies within its parent's interval
+        parent = by_id.get(span.get("parentSpanId", ""))
+        if parent:
+            assert int(parent["startTimeUnixNano"]) <= int(span["startTimeUnixNano"])
+            assert int(parent["endTimeUnixNano"]) >= int(span["endTimeUnixNano"])

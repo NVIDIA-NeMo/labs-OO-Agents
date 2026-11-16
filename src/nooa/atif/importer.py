@@ -12,12 +12,21 @@ Span layout per trajectory::
     └── generation span (one per agent step)
         ├── LLM span          llm.input_messages.* / llm.output_messages.*
         └── tool span         one per tool call; code tools render as code
-            └── method span   an embedded subagent trajectory, if referenced
+            └── method span   a nested method call or embedded subagent trajectory
 
-ATIF stores one linear history. The input of each LLM call is rebuilt from the
-steps before it, so it is exact only when the agent did not rewrite its context.
-Agent steps carry their start timestamp; other steps carry none, and untimed
-spans are laid out on a 1 ms grid after the last known time.
+ATIF has no field for agent methods. NOOA's exporter records ``method_name``,
+``generation_id`` and ``parent_generation_id`` in each agent step's ``extra``;
+with them, steps of a nested same-agent method call (flattened into the
+trajectory) are grouped under their own method span, placed in the parent's
+code execution that made the call. Other producers' trajectories are named
+from ``extra.method`` or NOOA's ``## Task:`` header, else the trajectory ID.
+
+ATIF stores one linear history. The input of each top-level LLM call is
+rebuilt from the steps before it, so it is exact only when the agent did not
+rewrite its context; nested calls show only their own turns, because their
+prompts are not recorded. Agent steps carry their start timestamp; other steps
+carry none, and untimed spans are laid out on a 1 ms grid after the last known
+time.
 """
 
 from __future__ import annotations
@@ -128,6 +137,27 @@ def _message_attrs(prefix: str, index: int, message: dict[str, Any]) -> dict[str
     return out
 
 
+def _cover_children(spans: list[dict[str, Any]]) -> None:
+    """Widen parents so each span's interval contains its children's."""
+    by_id = {span["spanId"]: span for span in spans}
+    # Children are emitted after their parents, so one reverse pass suffices
+    # except for re-parented nested calls; repeat until stable (depth-bounded).
+    for _ in range(len(spans)):
+        changed = False
+        for span in reversed(spans):
+            parent = by_id.get(span.get("parentSpanId", ""))
+            if parent is None:
+                continue
+            if int(span["endTimeUnixNano"]) > int(parent["endTimeUnixNano"]):
+                parent["endTimeUnixNano"] = span["endTimeUnixNano"]
+                changed = True
+            if int(span["startTimeUnixNano"]) < int(parent["startTimeUnixNano"]):
+                parent["startTimeUnixNano"] = span["startTimeUnixNano"]
+                changed = True
+        if not changed:
+            return
+
+
 class _Converter:
     def __init__(self, session_id: str, trace_id: str, code_tools: frozenset[str]):
         self.session_id = session_id
@@ -177,23 +207,40 @@ class _Converter:
         clock = start
         root = self._span(seed, parent, f"{agent_name}.{name}", start, start, {})
 
-        history: list[dict[str, Any]] = []
+        context: list[dict[str, Any]] = []  # system/user steps + top-level turns
+        histories: dict[str, list[dict[str, Any]]] = {}  # nested calls: own turns
         first_user = None
         final = ""
-        generation = 0
+        top_gid: str | None = None
+        top_method: str | None = None
+        counts: dict[str | None, int] = {}
+        methods: dict[str, dict[str, Any]] = {}  # generation_id -> method span
+        nested: list[tuple[dict[str, Any], str, float]] = []  # (span, parent gid, start)
+        calls: dict[str, list[tuple[float, dict[str, Any], list[dict[str, Any]]]]] = {}
         for index, step in enumerate(steps):
             source = step.get("source")
             if source in ("system", "user"):
                 content = _text(step.get("message"))
-                history.append({"role": source, "content": content})
+                context.append({"role": source, "content": content})
                 if source == "user" and first_user is None:
                     first_user = content
                 continue
             if source != "agent":
                 continue
 
-            generation += 1
             extra = step.get("extra") or {}
+            gid = (
+                extra.get("generation_id") if isinstance(extra.get("generation_id"), str) else None
+            )
+            pgid = extra.get("parent_generation_id")
+            pgid = pgid if isinstance(pgid, str) else None
+            step_method = extra.get("method_name")
+            step_method = step_method if isinstance(step_method, str) else None
+            if top_gid is None and pgid is None:
+                top_gid, top_method = gid, step_method
+            is_top = gid is None or gid == top_gid or pgid is None
+            history = context if is_top else histories.setdefault(gid or "", [])
+            counts[gid] = generation = counts.get(gid, 0) + 1
             metrics = step.get("metrics") or {}
             step_start = _timestamp(step.get("timestamp"))
             step_start = max(clock, not_before) if step_start is None else step_start
@@ -211,9 +258,34 @@ class _Converter:
                 ],
             }
             generation_id = _span_id(f"{self.session_id}/{seed}/gen/{index}")
+            owner = root
+            if gid is not None and gid != top_gid:
+                if gid not in methods:
+                    # Parented under root for now; placed under the calling code
+                    # execution once all steps are known (inner steps can be
+                    # sealed before the outer step that made the call).
+                    methods[gid] = self._span(
+                        f"{seed}/method/{gid}",
+                        root["spanId"],
+                        f"{agent_name}.{step_method or 'method'}",
+                        step_start,
+                        step_start,
+                        {
+                            "openinference.span.kind": "AGENT",
+                            "nooa.viewer.plugin": "method",
+                            "agent.name": agent_name,
+                            "agent.method": step_method,
+                            "agent.call_id": _span_id(f"{self.session_id}/{seed}/method/{gid}"),
+                            "generation.id": gid,
+                            "generation.parent_id": pgid,
+                        },
+                    )
+                    if pgid is not None:
+                        nested.append((methods[gid], pgid, step_start))
+                owner = methods[gid]
             gen = self._span(
                 f"{seed}/gen/{index}",
-                root["spanId"],
+                owner["spanId"],
                 f"generation {generation}",
                 step_start,
                 llm_end,
@@ -261,6 +333,7 @@ class _Converter:
             }
             tool_clock = llm_end
             tool_messages = []
+            tool_spans: list[dict[str, Any]] = []
             for k, call in enumerate(message["tool_calls"]):
                 result = results.get(call["id"]) or {}
                 result_extra = result.get("extra") or {}
@@ -294,6 +367,8 @@ class _Converter:
                     },
                     ok=tool_ok,
                 )
+                if is_code:
+                    tool_spans.append(tool)
                 for ref in result.get("subagent_trajectory_ref") or []:
                     sub_id = (ref or {}).get("trajectory_id")
                     if (
@@ -314,8 +389,22 @@ class _Converter:
             gen["endTimeUnixNano"] = _ns(tool_clock)
             history.append(message)
             history.extend(tool_messages)
-            final = message["content"] or final
+            if gid is not None:
+                calls.setdefault(gid, []).append((step_start, gen, tool_spans))
+            if is_top:
+                final = message["content"] or final
             clock = tool_clock + 0.001
+
+        # Place each nested method call in the parent's latest code execution
+        # (else generation, else method) that started before it.
+        for span, pgid, call_start in nested:
+            candidates = [c for c in calls.get(pgid, []) if c[0] <= call_start]
+            if candidates:
+                _, parent_gen, parent_tools = max(candidates, key=lambda c: c[0])
+                target = parent_tools[-1] if parent_tools else parent_gen
+                span["parentSpanId"] = target["spanId"]
+            elif pgid in methods:
+                span["parentSpanId"] = methods[pgid]["spanId"]
 
         # Embedded subagents no observation referenced still belong to the trace.
         for sub_id, sub in subagents.items():
@@ -323,7 +412,7 @@ class _Converter:
                 clock = self.trajectory(sub, f"{seed}/sub/{sub_id}", root["spanId"], clock) + 0.001
 
         end = max(clock, start + 0.001)
-        method = _method_name(trajectory, first_user) or name
+        method = top_method or _method_name(trajectory, first_user) or name
         root["name"] = f"{agent_name}.{method}"
         root["endTimeUnixNano"] = _ns(end)
         root["attributes"] = _attrs(
@@ -375,6 +464,7 @@ def trajectory_to_otlp(
     trace_id = hashlib.sha256(f"{session_id}/trace".encode()).hexdigest()[:32]
     converter = _Converter(session_id, trace_id, frozenset(code_tools))
     converter.trajectory(trajectory, "root", None, 0.0, output=output, failed=failed)
+    _cover_children(converter.spans)
 
     agent = trajectory.get("agent") or {}
     attributes = {
