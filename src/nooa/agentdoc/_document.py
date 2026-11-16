@@ -21,6 +21,7 @@ from nooa.agentdoc._discover import (
 from nooa.agentdoc._info import CallableInfo, ModuleInfo, TypeInfo
 from nooa.agentdoc._introspection import (
     _extract_instance_values,
+    _instance_dict,
     _is_structured_instance,
 )
 from nooa.agentdoc._metadata import is_expand_false
@@ -40,14 +41,6 @@ class DocumentSubject:
     info: StructuredInfo | None = None
     values: dict[str, Any] | None = None
     represented_type: type | None = None
-
-
-def _instance_dict(obj: Any) -> dict[str, Any] | None:
-    try:
-        value = object.__getattribute__(obj, "__dict__")
-    except AttributeError:
-        return None
-    return value if isinstance(value, dict) else None
 
 
 def _extract_instance(obj: Any) -> tuple[TypeInfo, dict[str, Any]] | None:
