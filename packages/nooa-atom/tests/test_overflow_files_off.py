@@ -49,20 +49,28 @@ async def test_switch_off_writes_no_file_for_cells_shell_runs_or_jobs(tmp_path, 
     llm = CellLLM(
         [
             cell("print('h' * 30_000 + 'm' * 10_000 + 't' * 30_000)"),
+            cell("import sys\nawait asyncio.to_thread(sys.stdout.write, 'r' * 80_000)"),
+            cell("raise ValueError('e' * 100_000)"),
             cell(f"OUT = {str(out)!r}\n" + _WORK),
             cell("return_result(Done(explanation='ok'))"),
         ]
     )
     agent = AtomAgent(cwd=workspace, llm=llm, truncation=TruncationConfig(overflow_files=False))
+    assert _output_files(temp) == []
     try:
         assert agent._truncation.capture.file_backed  # Atom's cells would write a file
+        assert agent.runtime.truncation_config.overflow_files is False
         assert agent._shells.overflow_dir() is None
         assert await asyncio.wait_for(agent.handle({"user_messages": ["go"]}), 120) == Done(
             explanation="ok"
         )
-        seen = str(llm.calls[1].messages)
+        seen = str(llm.calls[1].messages)  # the cell's print
         assert "[... 20,001 chars omitted; full output not kept]" in seen, seen[-3000:]
-        assert "full output: " not in seen
+        seen = str(llm.calls[2].messages)  # a thread's print
+        assert "[... 30,000 chars omitted; full output not kept]" in seen, seen[-3000:]
+        seen = str(llm.calls[3].messages)  # a large error
+        assert "chars omitted; full output not kept]" in seen and "ValueError" in seen
+        assert "full output: " not in str(llm.calls[-1].messages)
         results = json.loads(out.read_text())
         for stdout, stderr, stdout_path, stderr_path in (results["job"], results["direct"]):
             assert stdout_path is None and stderr_path is None
@@ -116,39 +124,3 @@ async def test_a_failed_stdin_file_leaves_no_handed_out_file(tmp_path, monkeypat
     finally:
         shell_owner.reset(token)
         await owner.aclose()
-
-
-async def test_a_capture_that_forgets_the_switch_writes_no_file_under_a_switched_off_agent(
-    tmp_path, monkeypatch
-):
-    # Round H item 1: a new entry point that builds a file-backed capture
-    # without clearing file_backed still writes no file: the agent's cell
-    # context says the session's files are off, and the buffer honours it.
-    temp = tmp_path / "tmp"
-    temp.mkdir()
-    monkeypatch.setattr(tempfile, "tempdir", str(temp))
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    out = workspace / "capture.json"
-    code = (
-        "import json\n"
-        "from pathlib import Path\n"
-        "from nooa.runtime.output_capture import CaptureBuffer\n"
-        "buffer = CaptureBuffer(10, file_backed=True)\n"
-        "buffer.write('z' * 100)\n"
-        f"Path({str(out)!r}).write_text(json.dumps([buffer.file_path, buffer.getvalue()]))\n"
-        "buffer.close()\n"
-    )
-    llm = CellLLM([cell(code), cell("return_result(Done(explanation='ok'))")])
-    agent = AtomAgent(cwd=workspace, llm=llm, truncation=TruncationConfig(overflow_files=False))
-    try:
-        assert await asyncio.wait_for(agent.handle({"user_messages": ["go"]}), 120) == Done(
-            explanation="ok"
-        )
-        path, rendered = json.loads(out.read_text())
-        assert path is None
-        assert rendered == "zzzzz\n[... 90 chars omitted; full output not kept]\nzzzzz"
-        assert _output_files(temp) == [] and _output_files(workspace) == []
-    finally:
-        await agent.aclose()
-    assert _output_files(temp) == []

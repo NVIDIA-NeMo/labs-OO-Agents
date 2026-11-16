@@ -43,7 +43,7 @@ class CaptureConfig(BaseModel):
 
     These apply at *capture time* (when execute_python writes to stdout / stderr
     or formats an exception). stdout / stderr keep their head and tail
-    (``nooa.runtime.output_capture.CaptureBuffer``, a ``nooa.snapshot.TextStream``)
+    (a ``nooa.snapshot.SharedTextStream``, ``nooa.runtime.actor._make_capture_stream``)
     around ``render_output``'s cut line, ``[... N chars omitted; full output:
     PATH]`` or ``[... N chars omitted; full output not kept]``. Error text keeps
     its head and tail the same way, around ``[... N chars omitted; full output
@@ -78,10 +78,9 @@ class CaptureConfig(BaseModel):
                 "file (up to 64 MiB) while still truncating the in-memory "
                 "representation; the path is in the cut line so the LLM can read it. "
                 "The file comes from the session's OverflowDir "
-                "(nooa.runtime.output_capture.capture_overflow) when one is set, else the "
-                "process's own private OverflowDir (removed at exit). Ignored (no file) when "
-                "TruncationConfig.overflow_files is False, or when the session set "
-                "capture_overflow to NO_OVERFLOW_FILES (its files are off)."
+                "(nooa.runtime.context_vars.capture_overflow) when one is set, else "
+                "OverflowDir.default(), the process's own (removed at exit). Ignored "
+                "(no file) when TruncationConfig.overflow_files is False."
             ),
         ),
     ] = False

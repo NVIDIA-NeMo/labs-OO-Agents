@@ -8,7 +8,7 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from nooa.runtime.output_capture import CaptureBuffer
+    from nooa.snapshot import SharedTextStream
 
 # Task-local flag to block stdin reads (prevents hangs from input(), sys.stdin.read(), etc.)
 # When True for the current async task, any stdin read raises RuntimeError
@@ -34,7 +34,7 @@ class ContextVarStream:
     def __init__(
         self,
         original: io.TextIOBase | Any,
-        buffer_var: "contextvars.ContextVar[io.StringIO | CaptureBuffer | None]",
+        buffer_var: "contextvars.ContextVar[io.StringIO | SharedTextStream | Any | None]",
         name: str = "stdout",
     ):
         self._original = original

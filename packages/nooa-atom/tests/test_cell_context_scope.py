@@ -12,7 +12,7 @@ from nooa_atom.agent.work_shell import Shell, ShellOwner, shell_owner
 from nooa import Agent
 from nooa.config.truncation_config import CaptureConfig, TruncationConfig
 from nooa.decorators import strategy
-from nooa.runtime.output_capture import capture_overflow
+from nooa.runtime.context_vars import capture_overflow
 from nooa.unifiedllm import FakeLLMClient, LLMResponse
 
 

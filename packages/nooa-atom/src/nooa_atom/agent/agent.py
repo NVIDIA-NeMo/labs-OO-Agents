@@ -29,8 +29,8 @@ from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc, spec
 from nooa.errors import hints as _hints
 from nooa.interactive import Done, NeedInput, Waiting
+from nooa.runtime.context_vars import capture_overflow
 from nooa.runtime.execution_namespace import ExecutionNamespace
-from nooa.runtime.output_capture import NO_OVERFLOW_FILES, capture_overflow
 from nooa.strategies import CodeActV2, PredictStrategy  # noqa: F401
 from nooa_atom.agent.work_manager import Job, JobEvent, Throttle, WorkManager
 from nooa_atom.agent.work_shell import CommandResult, Shell
@@ -258,10 +258,12 @@ class AtomCodeAct(CodeActV2):
         owner = getattr(runtime.agent, "_shells", None)
         if owner is not None:  # the session closes the Shells its cells start
             tokens.append((work_shell.shell_owner, work_shell.shell_owner.set(owner)))
-            # Cell output goes to the session's folder: kept until it closes;
-            # none at all when the session's output files are off.
-            folder = owner.overflow_dir() if owner.overflow_files else NO_OVERFLOW_FILES
-            tokens.append((capture_overflow, capture_overflow.set(folder)))
+            # Cell output goes to the session's folder: kept until it closes.
+            # Whether a cell writes a file at all is the agent's
+            # ``TruncationConfig.overflow_files``, read by the capture itself.
+            folder = owner.overflow_dir()
+            if folder is not None:
+                tokens.append((capture_overflow, capture_overflow.set(folder)))
         try:
             result = await super().execute(runtime, call)
         finally:

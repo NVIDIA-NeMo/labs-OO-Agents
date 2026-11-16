@@ -31,7 +31,7 @@ from nooa.context_blocks import (
     render_context,
 )
 from nooa.context_blocks.scoped import _scoped_blocks_var, _scoped_events_var
-from nooa.runtime.output_capture import CaptureBuffer
+from nooa.snapshot import SharedTextStream, render_output
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import CaptureConfig, TruncationConfig
@@ -62,6 +62,7 @@ from nooa.runtime.context_vars import (
     _in_exec_middleware,
     _in_generation_session,
     _parent_agent_var,
+    capture_overflow,
 )
 from nooa.runtime.execution_namespace import ExecutionNamespace
 from nooa.runtime.harness_metrics import (
@@ -459,10 +460,10 @@ _decorator_events_var: contextvars.ContextVar["EventQuery | None"] = contextvars
 
 # Task-local stdout/stderr buffers for async-safe capture
 # Contextvars are per-task, so parallel async executions get isolated buffers
-_stdout_buffer_var: contextvars.ContextVar[io.StringIO | CaptureBuffer | None] = (
+_stdout_buffer_var: contextvars.ContextVar[io.StringIO | SharedTextStream | Any | None] = (
     contextvars.ContextVar("stdout_buffer", default=None)
 )
-_stderr_buffer_var: contextvars.ContextVar[io.StringIO | CaptureBuffer | None] = (
+_stderr_buffer_var: contextvars.ContextVar[io.StringIO | SharedTextStream | Any | None] = (
     contextvars.ContextVar("stderr_buffer", default=None)
 )
 
@@ -520,20 +521,33 @@ def _pop_generation_id() -> str | None:
     return popped
 
 
-def _make_capture_buffer(
-    limit: int, capture: "CaptureConfig", *, overflow_files: bool = True
-) -> CaptureBuffer:
-    """Create a stdout/stderr capture buffer, file-backed if ``capture`` says so.
+def _make_capture_stream(limit: int, config: "TruncationConfig") -> SharedTextStream:
+    """A cell's stdout or stderr capture: ``limit`` chars kept (head and tail), several writers.
 
-    ``overflow_files``: ``TruncationConfig.overflow_files``, the off switch:
-    False never writes a file, whatever ``capture.file_backed`` says.
+    ``config``: the agent's resolved ``TruncationConfig``. The tail is
+    ``config.capture.tail`` chars (``None``: half). The whole stream also
+    goes to an overflow file only when ``config.overflow_files`` (the off
+    switch) and ``config.capture.file_backed`` are both on: in the folder
+    the session set in ``capture_overflow``, else ``OverflowDir.default()``
+    (none, memory only, when that cannot be created). With
+    ``overflow_files`` off it never touches ``nooa.overflow``.
+    Read it with ``_render_capture``.
     """
-    return CaptureBuffer(
-        limit,
-        capture.tail,
-        file_backed=capture.file_backed and overflow_files,
-        unrecoverable_hint=capture.unrecoverable_hint,
-    )
+    capture = config.capture
+    tail = capture.tail if capture.tail is not None else limit // 2
+    folder = None
+    if config.overflow_files and capture.file_backed:
+        from nooa.overflow import OverflowDir
+
+        folder = capture_overflow.get()
+        if folder is None:
+            folder = OverflowDir.default()
+    return SharedTextStream(unit="chars", head=limit - tail, tail=tail, overflow=folder)
+
+
+def _render_capture(stream: Any, capture: "CaptureConfig") -> str:
+    """A capture stream (or a lease of one) in ``render_output``'s notation, with the config's note."""
+    return render_output(stream.snapshot(), note=capture.unrecoverable_hint)
 
 
 def _extract_captured_locals(exec_globals: dict[str, Any]) -> dict[str, Any]:
@@ -1754,8 +1768,8 @@ class ActorRuntime:
             # leaking to the terminal as "<unknown>:N: SyntaxWarning: ..."
             #
             # Each async task gets its own buffers via contextvars, so parallel
-            # executions are isolated. CaptureBuffer prevents LLMs from
-            # filling the context window.
+            # executions are isolated. The bounded capture streams keep LLMs
+            # from filling the context window.
             truncation_config = self.truncation_config
             if execution_namespace is not None:
                 from nooa.runtime.capture_scope import CaptureScope
@@ -1766,13 +1780,8 @@ class ActorRuntime:
                 media_buffer = capture_scope.media
             else:
                 capture = truncation_config.capture
-                files = truncation_config.overflow_files
-                stdout_buffer = _make_capture_buffer(
-                    capture.max_stdout, capture, overflow_files=files
-                )
-                stderr_buffer = _make_capture_buffer(
-                    capture.max_stderr, capture, overflow_files=files
-                )
+                stdout_buffer = _make_capture_stream(capture.max_stdout, truncation_config)
+                stderr_buffer = _make_capture_stream(capture.max_stderr, truncation_config)
                 stdout_token = _stdout_buffer_var.set(stdout_buffer)
                 stderr_token = _stderr_buffer_var.set(stderr_buffer)
                 # Block stdin reads for this async task (prevents hangs from input(), etc.)
@@ -1869,8 +1878,8 @@ class ActorRuntime:
                 if capture_scope is not None:
                     capture_scope.finish()
                 return {
-                    "stdout": stdout_buffer.getvalue(),
-                    "stderr": stderr_buffer.getvalue(),
+                    "stdout": _render_capture(stdout_buffer, truncation_config.capture),
+                    "stderr": _render_capture(stderr_buffer, truncation_config.capture),
                     "images": media_buffer.blocks if media_buffer is not None else [],
                 }
 
@@ -2186,7 +2195,7 @@ class ActorRuntime:
 
             # A capture scope leases the buffer: check the buffer it wraps.
             captured = capture_scope.stdout.buffer if capture_scope is not None else stdout_buffer
-            if isinstance(captured, CaptureBuffer) and captured.was_truncated:
+            if isinstance(captured, SharedTextStream) and not captured.snapshot().complete:
                 from nooa.agentdoc._format_observation import record_truncation
 
                 record_truncation("capture.max_stdout")
@@ -2207,9 +2216,9 @@ class ActorRuntime:
             # stdout_buffer/stderr_buffer may not be defined if an early return
             # (validation, SyntaxError) exited before buffer creation.
             try:
-                if isinstance(stdout_buffer, CaptureBuffer):
+                if isinstance(stdout_buffer, SharedTextStream):
                     stdout_buffer.close()
-                if isinstance(stderr_buffer, CaptureBuffer):
+                if isinstance(stderr_buffer, SharedTextStream):
                     stderr_buffer.close()
             except NameError:
                 pass

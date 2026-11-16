@@ -28,7 +28,7 @@ to follow semantic versioning.
   results (`[... N bytes omitted; full output: PATH]`), `ShellProgress`
   merges (`[... N bytes omitted; full output not kept]` instead of
   `[... progress omitted ...]`), cell stdout/stderr
-  (`nooa.runtime.output_capture.CaptureBuffer`: `[... N chars omitted; ...]`
+  (a `nooa.snapshot.SharedTextStream` per stream: `[... N chars omitted; ...]`
   instead of the `<truncated-output>` envelope; Atom writes them to the
   session's folder), job output tails and the core bash tool. Prefill string
   cuts render through `render_python` (same text). Cell errors (and the
