@@ -10,7 +10,8 @@ asks for a retry; later requests of the session stay under the limit.
 The counters live in the ``media`` extension of :class:`HarnessMetrics`
 (span keys ``harness.media.<name>``), not on every agent's core metrics.
 Importing this module (``nooa.runtime`` does) registers the recovery, the
-extension and the unifiedllm metric event ``media_rejected_retry``.
+extension and the unifiedllm metric events ``media_rejected_retry`` and
+``media_recovery_probe``.
 """
 
 from __future__ import annotations
@@ -41,8 +42,11 @@ class MediaHarnessMetrics(HarnessMetricsExtension):
 
     namespace: ClassVar[str] = "media"
 
-    # A provider rejected an attachment; retried with a note in its place (kind)
+    # A provider rejected an attachment; it stays replaced by a note (kind).
+    # Counted only when the request finally succeeded without it.
     rejected_retries: list[str] = Field(default_factory=list)
+    # Requests media recovery added to find a bad attachment (mode: rejected/fallback)
+    recovery_probes: list[str] = Field(default_factory=list)
     image_limit_collapses: list[int] = Field(default_factory=list)  # limit M per recovery
     image_limit_events_collapsed: int = 0
 
@@ -73,6 +77,12 @@ class MediaHarnessMetrics(HarnessMetricsExtension):
             lambda m: len(m.rejected_retries),
         ),
         SchemaEntry(
+            "recovery_probes.count",
+            "Requests media recovery added to find a bad attachment",
+            "Media Recovery",
+            lambda m: len(m.recovery_probes),
+        ),
+        SchemaEntry(
             "rejected_retry.kinds",
             "Rejected attachment kinds",
             "Media Recovery",
@@ -90,12 +100,21 @@ class MediaHarnessMetrics(HarnessMetricsExtension):
         """The provider rejected an attachment; the request was retried without it."""
         self._append(self.rejected_retries, str(kind or "unknown"))
 
+    def recovery_probe(self, mode: Any) -> None:
+        """Media recovery sent one more request to find the attachment at fault."""
+        self._append(self.recovery_probes, str(mode or "unknown"))
+
 
 def _record_rejected_retry(metrics: HarnessMetrics, kind: Any) -> None:
     metrics.extension(MediaHarnessMetrics).rejected_retry(kind)
 
 
+def _record_recovery_probe(metrics: HarnessMetrics, mode: Any) -> None:
+    metrics.extension(MediaHarnessMetrics).recovery_probe(mode)
+
+
 register_llm_metric_event("media_rejected_retry", _record_rejected_retry)
+register_llm_metric_event("media_recovery_probe", _record_recovery_probe)
 
 
 def image_block_count(event: Any) -> int:

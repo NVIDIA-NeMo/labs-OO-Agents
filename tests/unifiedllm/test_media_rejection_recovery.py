@@ -143,13 +143,24 @@ async def test_newest_attachment_goes_first_then_history_media():
     history = {"role": "user", "content": [OTHER]}
     fresh = {"role": "user", "content": [IMAGE]}
     messages = [history, {"role": "assistant", "content": "seen"}, fresh]
+
+    def wire_reply(**kwargs):
+        sent = [
+            b for m in kwargs["messages"] if isinstance(m["content"], list) for b in m["content"]
+        ]
+        if OTHER in sent:  # the history image is the bad one
+            raise bad_request(BEDROCK)
+        return ok(False)
+
     with CompletionClient("openai/test", media_inputs=["image"], cache_breakpoint=None) as client:
         with patch("litellm.acompletion", new_callable=AsyncMock) as wire:
-            wire.side_effect = [bad_request(BEDROCK), bad_request(BEDROCK), ok(False)]
+            wire.side_effect = wire_reply
             await client.acall(messages)
             sent = [call.kwargs["messages"] for call in wire.call_args_list]
-            assert [len(images(m[0]["content"] + m[2]["content"])) for m in sent] == [2, 1, 0]
+            # original, newest excluded, all excluded, then only the history image excluded
+            assert [len(images(m[0]["content"] + m[2]["content"])) for m in sent] == [2, 1, 0, 1]
             assert images(sent[1][0]["content"]) == [OTHER]  # the newest went first
+            assert images(sent[-1][2]["content"]) == [IMAGE]  # the good new image is kept
 
 
 async def test_exclusion_is_cleared_when_the_connection_changes():
@@ -197,19 +208,21 @@ async def test_an_unnamed_bad_older_image_never_costs_good_images_on_failure(max
         with patch("litellm.acompletion", new_callable=AsyncMock) as wire:
             wire.side_effect = wire_reply
             if max_retries == 1:
-                # One retry (the newest image) is not enough: the request fails
-                # and no good image stays replaced for later requests.
+                # A budget of 4 recovery requests is not enough to find the
+                # oldest of six: the request fails and no good image stays
+                # replaced for later requests.
                 with pytest.raises(litellm.BadRequestError):
                     await client.acall(messages)
-                assert wire.call_count == 2
+                assert wire.call_count == 5
                 view = client._prepare_media_messages(messages, client._prepare_call_config({}))
                 assert NOTE not in texts([b for m in view for b in m["content"]])
             else:
-                # Newest first, then every remaining image at once: it succeeds.
+                # Newest first, then all, then bisect: only the bad image goes.
                 assert (await client.acall(messages)).content == "UNREADABLE"
                 sent = [sent_blocks(call, False) for call in wire.call_args_list]
-                assert [len(images(blocks)) for blocks in sent] == [6, 5, 0]
-                assert texts(sent[-1]).count(NOTE) == 6
+                assert [len(images(blocks)) for blocks in sent] == [6, 5, 0, 3, 2, 1, 5]
+                assert texts(sent[-1]).count(NOTE) == 1
+                assert bad not in sent[-1] and all(g in sent[-1] for g in good)
 
 
 def test_a_still_failing_sync_request_undoes_its_exclusions():
