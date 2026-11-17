@@ -664,9 +664,36 @@ def _occurrences(messages, enabled: tuple[MediaInput, ...]):
         if not isinstance(content, (list, tuple)):
             continue
         for position, block in enumerate(content):
-            found = occurrence(index, position, block) if isinstance(block, Mapping) else None
+            if not isinstance(block, Mapping):
+                continue
+            nested = _tool_result_blocks(block)
+            if nested is not None:
+                # Anthropic's user ``tool_result`` block carries its own content list.
+                for inner, nested_block in enumerate(nested):
+                    found = (
+                        occurrence(index, (position, inner), nested_block)
+                        if isinstance(nested_block, Mapping)
+                        else None
+                    )
+                    if found:
+                        yield found
+                continue
+            found = occurrence(index, position, block)
             if found:
                 yield found
+
+
+def _tool_result_blocks(block: Mapping[str, Any]):
+    """The content list of an Anthropic ``tool_result`` block, else None.
+
+    Documented shape: ``{"type": "tool_result", "tool_use_id": ..., "content":
+    [{"type": "text", ...}, {"type": "image", "source": {...}}]}``. Only this
+    shape is looked into; tool arguments are never scanned.
+    """
+    if block.get("type") != "tool_result":
+        return None
+    content = block.get("content")
+    return content if isinstance(content, (list, tuple)) else None
 
 
 def media_occurrences(messages, enabled: tuple[MediaInput, ...]):
@@ -736,7 +763,8 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...], excluded=fr
     ``removed_media_notice``) so the model knows something was removed. Three
     places are checked: a message that is itself an attachment item (Responses
     input allows these at the top level), an assistant ``audio`` field, and the
-    blocks of a ``content`` list (``output`` for ``function_call_output`` items).
+    blocks of a ``content`` list (``output`` for ``function_call_output`` items),
+    including the content list of an Anthropic ``tool_result`` block.
     ``excluded`` holds keys from ``media_occurrences`` that the current
     connection rejected; each such attachment becomes a ``rejected_media_notice``.
     An enabled inline image in a format models do not accept (such as SVG)
@@ -789,18 +817,29 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...], excluded=fr
         content = item.get(slot)
         if isinstance(content, list):
             blocks = []
-            for position, block in enumerate(content):
+            text_type = "input_text" if slot == "output" else "text"
+
+            def filtered(block, where, message_index=message_index, text_type=text_type):
                 kind = attachment_kind(block) if isinstance(block, Mapping) else None
                 notice = (
                     None
                     if kind is None
-                    else _replacement(kind, block, (message_index, position) in rejected, enabled)
+                    else _replacement(kind, block, (message_index, where) in rejected, enabled)
                 )
                 if notice is not None:
-                    text_type = "input_text" if slot == "output" else "text"
-                    blocks.append({"type": text_type, "text": notice})
-                else:
-                    blocks.append(_sendable_block(kind, block) if kind is not None else block)
+                    return {"type": text_type, "text": notice}
+                return _sendable_block(kind, block) if kind is not None else block
+
+            for position, block in enumerate(content):
+                nested = _tool_result_blocks(block) if isinstance(block, Mapping) else None
+                if nested is not None:
+                    inner_blocks = [
+                        filtered(inner, (position, index)) for index, inner in enumerate(nested)
+                    ]
+                    changed = any(a is not b for a, b in zip(inner_blocks, nested, strict=True))
+                    blocks.append({**block, "content": inner_blocks} if changed else block)
+                    continue
+                blocks.append(filtered(block, position))
             item[slot] = blocks
         result.append(item)
     return result
@@ -819,9 +858,10 @@ def check_replayed_native_media(
     apply media permissions keep their existing contract. Otherwise two checks
     run in order:
 
-    1. If ``native`` contains a media kind that is not in ``enabled``, raise
-       ``ReasoningReplayError``. The caller must replay a portable version of the
-       turn instead.
+    1. If ``native`` contains a media kind that is not in ``enabled``, or an
+       attachment in a form models do not accept (an SVG image, URL audio; see
+       ``_unsendable``), raise ``ReasoningReplayError``. The caller must replay
+       a portable version of the turn instead.
     2. Raise ``ValueError`` if ``native`` contains media that ``interface`` cannot
        send (see ``nooa.media_policy``).
     """
@@ -834,6 +874,19 @@ def check_replayed_native_media(
     if any(kind is not None and kind not in enabled for kind in kinds):
         raise ReasoningReplayError(
             "Cannot remove disabled media from opaque assistant state; "
+            "supply a portable assistant turn instead."
+        )
+    if isinstance(content, (list, tuple)) and any(
+        isinstance(block, Mapping)
+        and (kind := attachment_kind(block)) is not None
+        and _unsendable(kind, block) is not None
+        for block in content
+    ):
+        # An SVG (or URL audio) inside opaque state cannot be replaced by a
+        # note either: the caller falls back to the portable replay, whose
+        # media the filter can replace.
+        raise ReasoningReplayError(
+            "Opaque assistant state holds media in a form models do not accept; "
             "supply a portable assistant turn instead."
         )
     from nooa.media_policy import reject_unsupported_media

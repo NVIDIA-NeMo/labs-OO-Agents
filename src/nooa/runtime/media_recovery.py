@@ -118,12 +118,26 @@ register_llm_metric_event("media_recovery_probe", _record_recovery_probe)
 
 
 def image_block_count(event: Any) -> int:
-    """The image content blocks (``image_url``) an event sends to the model."""
+    """The image blocks an event actually sends to the model.
+
+    Counts ``image_url``, ``input_image`` and native ``image`` blocks that are
+    images (``attachment_kind``) the request filter does not replace anyway: an
+    SVG or an image of unknown type becomes a note, so it does not use the
+    provider's per-request image budget. Images a connection rejected are not
+    known here and still count.
+    """
+    from nooa.media_inputs import attachment_kind
+    from nooa.unifiedllm.media_inputs import unsendable_image_type
+
     images = getattr(event, "images", None)
     if not isinstance(images, list):
         return 0
     return sum(
-        1 for block in images if isinstance(block, dict) and block.get("type") == "image_url"
+        1
+        for block in images
+        if isinstance(block, dict)
+        and attachment_kind(block) == "image"
+        and unsendable_image_type(block) is None
     )
 
 
