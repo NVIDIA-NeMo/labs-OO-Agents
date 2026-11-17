@@ -174,7 +174,8 @@ class InspectInputsPrefill:
 
         Args:
             call: CurrentCall with method details and arguments
-            config: TruncationConfig with max_length, max_string, max_depth settings
+            config: TruncationConfig whose ``prefill_format`` gives max_length,
+                max_string, max_depth (``None``: ``effective_truncation()``)
 
         Returns:
             Python code to execute, or None if no parameters to inspect
@@ -186,16 +187,15 @@ class InspectInputsPrefill:
 
         method_name = call.method_name
 
-        # Use config values (literals so LLM sees what was called)
-        if config is not None:
-            max_length = config.prefill_format.max_length
-            max_string = config.prefill_format.max_string
-            max_depth = config.prefill_format.max_depth
-        else:
-            # Defaults if no config provided
-            max_length = 50
-            max_string = 500
-            max_depth = 4
+        # Use config values (literals so LLM sees what was called). Without a
+        # config: the prefill limits in force (nooa.config.effective_truncation).
+        if config is None:
+            from nooa.config.effective import effective_truncation
+
+            config = effective_truncation()
+        max_length = config.prefill_format.max_length
+        max_string = config.prefill_format.max_string
+        max_depth = config.prefill_format.max_depth
 
         code_lines = [
             f"# Inspecting inputs for {method_name}().",
