@@ -81,7 +81,9 @@ class DecisionAttachment:
         """
         url = self.image_url
         remote_without_type = (
-            isinstance(url, str) and not url.startswith("data:") and not self.media_type
+            isinstance(url, str)
+            and url[:8].lower().startswith(("http://", "https://"))
+            and not self.media_type
         )
         # Image.from_url sends no type when the URL does not say one (#597);
         # the provider reads a remote image's type when it fetches it.

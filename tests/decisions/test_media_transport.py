@@ -144,7 +144,10 @@ async def test_actual_decide_strategy_transports_native_image_and_named_dedup(st
         (Image("data:image/png;base64,!", "image/png"), "base64"),
         (Image("data:image/png;base64,", "image/png"), "nonempty"),
         (Image("data:image/png,hello", "image/png"), "base64"),
-        (Image.from_url("file:///etc/passwd"), "URI"),
+        # Only an http(s) URL may leave its type to the provider (#597).
+        (Image.from_url("file:///etc/passwd"), "MIME"),
+        (Image.from_url("images/chart"), "MIME"),
+        (Image.from_url("file:///etc/passwd", media_type="image/png"), "URI"),
         (Image.from_url("https:///missing"), "URI"),
         (Image.from_url("https://u:p@host/image"), "URI"),
         (Image.from_url("https://host:bad/image"), "URI"),
