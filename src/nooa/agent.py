@@ -577,6 +577,7 @@ Inspect in REPL: print(doc(self.events))
         """
         import string
 
+        from nooa.config.effective import effective_truncation
         from nooa.runtime.placeholders import render_placeholder
 
         # Walk MRO to find nearest docstring (Python doesn't inherit __doc__).
@@ -591,6 +592,7 @@ Inspect in REPL: print(doc(self.events))
         if not doc or "{" not in doc:
             return doc
         # Resolve {expr} placeholders using the agent's namespace
+        truncation = effective_truncation(self)
         formatter = string.Formatter()
         parts = []
         for literal, field, fmt_spec, conversion in formatter.parse(doc):
@@ -604,8 +606,8 @@ Inspect in REPL: print(doc(self.events))
                             value,
                             conversion,
                             fmt_spec or "",
-                            max_chars=self._truncation.placeholder_chars,
-                            prefill=self._truncation.prefill_format,
+                            max_chars=truncation.placeholder_chars,
+                            prefill=truncation.prefill_format,
                         )
                     )
                 except Exception:

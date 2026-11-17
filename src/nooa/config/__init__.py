@@ -6,6 +6,9 @@ Two flavours live here, both as typed objects:
 
 - **In-code configs** you construct and pass to agents/strategies:
   ``CodeActConfig``, ``PredictConfig``, ``TruncationConfig``, …
+  Every configurable size limit on text a model or user reads is a
+  ``TruncationConfig`` field; code reads the one in force through
+  :func:`effective_truncation` (method override > agent > defaults).
 - **File-based configs** resolved from the layered YAML files
   (``settings.yaml`` / ``secrets.yaml`` / ``llm_config.yaml``): ``ModelConfig``,
   ``Secrets``, and :func:`resolved_config` (the programmatic ``config show``),
@@ -18,6 +21,7 @@ note that importing the ``nooa`` package itself already loads
 litellm via ``strategies``.
 """
 
+from nooa.config.effective import effective_truncation
 from nooa.config.execution_config import ExecutionConfig
 from nooa.config.model_config import ModelConfig
 from nooa.config.resolved import (
@@ -55,6 +59,7 @@ __all__ = [
     "CaptureConfig",
     "MediaCaptureConfig",
     "FormatConfig",
+    "effective_truncation",
     # File-based configs (typed) + loaders
     "ModelConfig",
     "Secrets",

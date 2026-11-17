@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from nooa.agentdoc.introspect import methods, variables
+from nooa.config.effective import _current_truncation_config_var
 from nooa.context_blocks import (
     DynamicContext,
     ResolvedBlock,
@@ -432,10 +433,10 @@ _current_llm_selection_source_var: contextvars.ContextVar[str | None] = contextv
 
 # Context variable for the resolved truncation config for the current generation call.
 # Set by _execute_with_generation() so that method-level @strategy(truncation=...)
-# overrides are visible to runtime.truncation_config throughout strategy execution.
-_current_truncation_config_var: contextvars.ContextVar[Any] = contextvars.ContextVar(
-    "current_truncation_config", default=None
-)
+# overrides are visible to nooa.config.effective_truncation() (and so to
+# runtime.truncation_config) throughout strategy execution. Defined in
+# nooa.config.effective, the one place that encodes the override rule
+# (imported above as _current_truncation_config_var).
 
 # Context variable for current strategy being executed
 _current_strategy_var: contextvars.ContextVar[Any] = contextvars.ContextVar(
@@ -955,13 +956,13 @@ class ActorRuntime:
     def truncation_config(self) -> "TruncationConfig":
         """Truncation configuration for the current generation call (RuntimeServices protocol).
 
-        Returns the method-level override (set by @strategy(truncation=...)) if active,
-        otherwise falls back to the agent-level config.
+        ``nooa.config.effective_truncation(self.agent)``: the method-level
+        override (set by @strategy(truncation=...)) if active, otherwise the
+        agent-level config.
         """
-        override = _current_truncation_config_var.get()
-        if override is not None:
-            return override
-        return self.agent._truncation
+        from nooa.config.effective import effective_truncation
+
+        return effective_truncation(self.agent)
 
     async def decision_state_inputs(
         self,

@@ -196,6 +196,13 @@ class TruncationConfig(BaseModel):
     ``media_capture``, ``event_format``, ``prefill_format``,
     ``context_block_format``) cover the distinct mechanisms / rendering
     moments; the top-level fields are cross-cutting (token budgets).
+
+    Where it is set, later wins: these defaults, ``class MyAgent(Agent,
+    truncation=...)``, ``MyAgent(truncation=...)``, then a method's
+    ``@strategy(truncation=...)`` while that method runs. Each level names
+    only the fields it changes (``merge_with``). Code that applies a limit
+    reads the config in force with ``nooa.config.effective_truncation()`` at
+    the time it applies it; it does not read ``DEFAULT_TRUNCATION_CONFIG``.
     """
 
     model_config = ConfigDict(frozen=True)

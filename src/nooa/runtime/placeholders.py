@@ -48,9 +48,9 @@ def _value_text(value: Any, prefill: FormatConfig | None, max_chars: int | None)
 
     limits = prefill
     if limits is None:
-        from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
+        from nooa.config.effective import effective_truncation
 
-        limits = DEFAULT_TRUNCATION_CONFIG.prefill_format
+        limits = effective_truncation().prefill_format
     snapshot = capture(value, _value_limits(limits.max_length, limits.max_string, limits.max_depth))
     return bound_placeholder_text(render_python(snapshot), max_chars)
 
