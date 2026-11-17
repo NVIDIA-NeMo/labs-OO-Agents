@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from functools import lru_cache
@@ -23,6 +24,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from nooa.layered_config import load_layered_yaml
+from nooa.workspace_trust import USER_SKILL_DIRS, user_skill_roots
 
 SETTINGS_FILENAME = "settings.yaml"
 SETTINGS_ENV_VAR = "NEMO_OO_SETTINGS"
@@ -39,17 +41,13 @@ _WORKSPACE_SKILL_DIRS = (
     Path(".claude/skills"),
     Path(".claude/commands"),
 )
-_USER_SKILL_DIRS = (
-    Path(".agents/skills"),
-    Path(".claude/skills"),
-    Path(".claude/commands"),
-)
 
 
 def load_skills_dirs(
     workspace: str | Path,
     *,
     explicit: Iterable[str | Path] = (),
+    trusted: bool | None = None,
 ) -> list[Path]:
     """Return existing skill roots for one Atom workspace.
 
@@ -57,24 +55,25 @@ def load_skills_dirs(
     ``tui.additional_skills_dirs`` is read when it is absent. Relative
     configured paths are resolved against the active workspace, not the ACP
     server process's checkout.
+
+    ``trusted`` (default: ``nooa.workspace_trust.is_trusted(workspace)``)
+    False leaves out the directories the workspace itself names (its
+    project settings layer and legacy ``config.toml``); the user and
+    ``NEMO_OO_SETTINGS`` layers still apply.
+
+    The paths are absolute but not resolved: a workspace directory that is a
+    symlink is still reported inside the workspace, so the trust gate
+    (``nooa.workspace_trust.is_inside``) sees where it was found.
     """
     root = Path(workspace).expanduser().resolve()
-    copy_coding_settings(root / ".nooa")
-    settings = load_settings_layers(root / ".nooa")
+    if trusted is None:
+        from nooa.workspace_trust import is_trusted
 
-    configured: list[str | Path] = []
-    atom = settings.get(SETTINGS_SECTION)
-    section = (
-        SETTINGS_SECTION
-        if isinstance(atom, Mapping) and "additional_skills_dirs" in atom
-        else "tui"
-    )
-    if section == "tui" and isinstance(settings.get("tui"), Mapping):
-        if "additional_skills_dirs" in settings["tui"]:
-            logger.warning(
-                "Reading legacy tui.additional_skills_dirs; use atom.additional_skills_dirs"
-            )
-    configured.extend(_setting_paths(settings, section))
+        trusted = is_trusted(root)
+    copy_coding_settings(root / ".nooa")
+    settings = load_settings_layers(root / ".nooa", include_project=trusted)
+
+    configured: list[str | Path] = list(_configured_skills_dirs(settings))
     # A workspace's old config.toml is still a workspace layer. Do not let an
     # unrelated user-level settings.yaml silently suppress it. A modern
     # workspace settings file supersedes the legacy file, and an explicit
@@ -88,33 +87,69 @@ def load_skills_dirs(
         and "additional_skills_dirs" in project_settings[section]
         for section in (SETTINGS_SECTION, "tui")
     )
-    if not os.environ.get(SETTINGS_ENV_VAR) and not modern_key_set:
+    if trusted and not os.environ.get(SETTINGS_ENV_VAR) and not modern_key_set:
         configured.extend(_legacy_project_paths(root / ".nooa" / _LEGACY_CONFIG_FILENAME))
 
     candidates: list[Path] = []
     candidates.extend(_resolve_configured(path, root) for path in explicit)
     candidates.extend(_resolve_configured(path, root) for path in configured)
     candidates.extend(root / path for path in _WORKSPACE_SKILL_DIRS)
-    candidates.extend(Path.home() / path for path in _USER_SKILL_DIRS)
+    candidates.extend(Path.home() / path for path in USER_SKILL_DIRS)
 
     result: list[Path] = []
     seen: set[Path] = set()
     for candidate in candidates:
-        resolved = candidate.expanduser().resolve()
+        found = Path(os.path.abspath(candidate.expanduser()))
+        resolved = found.resolve()
         if resolved in seen or not resolved.is_dir():
             continue
         seen.add(resolved)
-        result.append(resolved)
+        result.append(found)
     return result
 
 
-def load_settings_layers(project_dir: Path | None = None) -> dict[str, Any]:
+def _configured_skills_dirs(settings: Mapping[str, Any]) -> list[str | Path]:
+    """``atom.additional_skills_dirs``, else the legacy ``tui`` one."""
+    atom = settings.get(SETTINGS_SECTION)
+    section = (
+        SETTINGS_SECTION
+        if isinstance(atom, Mapping) and "additional_skills_dirs" in atom
+        else "tui"
+    )
+    if section == "tui" and isinstance(settings.get("tui"), Mapping):
+        if "additional_skills_dirs" in settings["tui"]:
+            logger.warning(
+                "Reading legacy tui.additional_skills_dirs; use atom.additional_skills_dirs"
+            )
+    return _setting_paths(settings, section)
+
+
+def load_user_skill_roots() -> list[Path]:
+    """The user's own skill roots, whose code loads in any workspace.
+
+    ``nooa.workspace_trust.user_skill_roots`` plus the absolute
+    ``atom.additional_skills_dirs`` of the user and ``NEMO_OO_SETTINGS``
+    settings layers.
+    """
+    settings = load_settings_layers(None, include_project=False)
+    return user_skill_roots(_configured_skills_dirs(settings))
+
+
+def load_settings_layers(
+    project_dir: Path | None = None, *, include_project: bool = True
+) -> dict[str, Any]:
     """Merge every ``settings.yaml`` layer for the project ``.nooa`` directory *project_dir*.
 
     The user file, the project file and ``NEMO_OO_SETTINGS``, highest
     priority last (``nooa.layered_config.load_layered_yaml``).
+    ``include_project=False`` leaves the project file out.
     """
-    return load_layered_yaml(SETTINGS_FILENAME, SETTINGS_ENV_VAR, project_dir=project_dir)
+    return load_layered_yaml(
+        SETTINGS_FILENAME,
+        SETTINGS_ENV_VAR,
+        project_dir=project_dir,
+        include_project=include_project,
+    )
 
 
 def _setting_paths(settings: Mapping[str, Any], section: str) -> list[str | Path]:
@@ -190,13 +225,17 @@ def behavior_fields() -> frozenset[str]:
         "working_dir",
         "skills_dirs",
         "agent_spec",
+        # A repository must not trust itself: only code sets it (AtomOptions.load).
+        "trust_workspace",
     }
 
 
-def load_settings_data(workspace: str | Path | None = None) -> dict[str, Any]:
+def load_settings_data(
+    workspace: str | Path | None = None, *, include_project: bool = True
+) -> dict[str, Any]:
     project = Path(workspace).expanduser().resolve() / ".nooa" if workspace is not None else None
     copy_coding_settings(project)
-    return load_settings_layers(project)
+    return load_settings_layers(project, include_project=include_project)
 
 
 def load_acp_verbosity(workspace: str | Path) -> Literal["silent", "concise", "verbose"]:
@@ -210,8 +249,12 @@ def load_acp_verbosity(workspace: str | Path) -> Literal["silent", "concise", "v
     return "verbose"
 
 
-def load_behavior_settings(workspace: str | Path) -> dict[str, Any]:
+def load_behavior_settings(
+    workspace: str | Path, *, include_project: bool = True
+) -> dict[str, Any]:
     """The workspace's resolved behaviour settings; the defaults if they are invalid.
+
+    ``include_project=False`` leaves the project layer out.
 
     A value of the wrong type (``active_skills: "one"``) must not stop a
     session from starting: a warning names the settings file and the error,
@@ -220,7 +263,9 @@ def load_behavior_settings(workspace: str | Path) -> dict[str, Any]:
     from pydantic import ValidationError
 
     try:
-        return resolve_behavior_settings(load_settings_data(workspace))
+        return resolve_behavior_settings(
+            load_settings_data(workspace, include_project=include_project)
+        )
     except ValidationError as exc:
         errors = "; ".join(
             f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
@@ -332,12 +377,38 @@ def write_settings_updates(
     ``updates`` maps dotted-path tuples like ``("atom", "default_model")``
     to YAML-friendly values. Existing sibling keys are preserved. When
     ``dry_run`` is true, the returned data is what would be written.
+    The write holds the file's lock and replaces it atomically.
     """
     import yaml
 
     path = settings_path(scope, workspace=workspace)
-    if not dry_run:
-        _copy_coding_section(path)
+    if dry_run:
+        return path, _apply_settings_updates(path, updates)
+    from nooa._filelock import file_write_lock
+
+    # The same lock nooa.workspace_trust.trust() holds on the user file, so
+    # neither writer drops the other's change.
+    with file_write_lock(path) as locked:
+        _copy_coding_section(locked)
+        data = _apply_settings_updates(locked, updates)
+        fd, temporary = tempfile.mkstemp(
+            dir=locked.parent, prefix=f".{locked.name}.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(yaml.safe_dump(data, sort_keys=False))
+            if locked.exists():
+                os.chmod(temporary, locked.stat().st_mode & 0o777)
+            os.replace(temporary, locked)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+    return path, data
+
+
+def _apply_settings_updates(path: Path, updates: dict[tuple[str, ...], Any]) -> dict[str, Any]:
+    """``path``'s data with ``updates`` applied (see ``write_settings_updates``)."""
+    import yaml
+
     data: dict[str, Any] = {}
     if path.exists():
         loaded = yaml.safe_load(path.read_text())
@@ -355,11 +426,7 @@ def write_settings_updates(
                 if isinstance(inherited, dict):
                     _set_mapping_path(data, list(canonical[:2]), deepcopy(inherited))
         _set_mapping_path(data, list(canonical), value)
-
-    if not dry_run:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(yaml.safe_dump(data, sort_keys=False))
-    return path, data
+    return data
 
 
 def _set_mapping_path(data: dict[str, Any], path: list[str], value: Any) -> None:

@@ -1071,6 +1071,8 @@ class SessionRegistry:
         return root_id
 
     def _stored_options(self, info: SessionInfo, overrides: dict[str, Any]) -> SessionOptions:
+        if "agent_spec" not in overrides:
+            _refuse_untrusted_agent_file(info.agent, info.workspace or ".")
         values: dict[str, Any] = {
             "workspace": info.workspace or ".",
             "agent_spec": info.agent,
@@ -1262,6 +1264,34 @@ class SessionRegistry:
                 await session.close()
             except Exception:
                 logger.exception("Closing session %s failed", session.id)
+
+
+def _refuse_untrusted_agent_file(spec: str | None, workspace: str | Path) -> None:
+    """Refuse a stored ``file.py:Class`` agent spec inside an untrusted workspace.
+
+    The spec comes from the session record, which lives in the workspace by
+    default, so the workspace could name its own code. A spec the host
+    passes (the CLI ``--agent`` flag) is an override and is not checked.
+    """
+    from nooa.workspace_trust import is_inside, is_trusted
+    from nooa_atom.session.loader import AgentSpecError, canonical_agent_spec, is_file_spec
+
+    if not spec:
+        return
+    module_name = canonical_agent_spec(spec).rpartition(":")[0]
+    if not module_name or not is_file_spec(module_name):
+        return
+    root = Path(workspace).expanduser().resolve()
+    file_path = Path(module_name).expanduser()
+    if not file_path.is_absolute():
+        file_path = root / file_path
+    # Where the spec names it, or where a symlink there points.
+    if is_inside(file_path, root) and not is_trusted(root):
+        raise AgentSpecError(
+            f"This session's agent {str(file_path)!r} is code inside {root}, which is not "
+            "trusted. Type /trust in a new session in this folder (or add it to "
+            "trusted_folders in your user settings.yaml), then open this session again."
+        )
 
 
 def _admit_delegate(parent: Session, item: Any, source: str) -> Receipt:

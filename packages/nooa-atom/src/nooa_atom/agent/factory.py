@@ -107,6 +107,11 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
                 ", ".join(missing),
                 "them" if len(missing) > 1 else "it",
             )
+    if atom_options is not None:
+        # Trust is decided once here (AtomOptions.workspace_trusted()) and
+        # gates the agent's code skills (its __init__).
+        if "workspace_trusted" in parameters or accepts_any:
+            kwargs["workspace_trusted"] = atom_options.workspace_trusted()
     agent = agent_class(**kwargs)
 
     if atom_options is not None and isinstance(agent, AtomAgentBase):

@@ -1212,6 +1212,15 @@ class Session:
             for command in registry.commands()
         ]
 
+    def workspace_untrusted_notice(self) -> str | None:
+        """The agent's untrusted-workspace notice (``workspace_untrusted_notice()``), or None.
+
+        Set when the workspace is not trusted and its code skills or model
+        settings were skipped (``nooa.workspace_trust``).
+        """
+        notice = getattr(self._agent, "workspace_untrusted_notice", None)
+        return notice() if callable(notice) else None
+
     async def invoke_command(self, name: str, raw_args: str) -> CommandResult:
         """Run a slash command through the agent's registry; ``KeyError`` if unknown."""
         registry = getattr(self._agent, "slash_commands", None)

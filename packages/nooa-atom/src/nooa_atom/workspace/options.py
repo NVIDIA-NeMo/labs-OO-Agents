@@ -35,12 +35,22 @@ class AtomOptions(BaseModel):
     mcp_servers: dict[str, dict[str, Any]] = Field(default_factory=dict)
     mcp_auto_connect: list[str] = Field(default_factory=list)
     reflection: ReflectionConfig = Field(default_factory=ReflectionConfig)
+    trust_workspace: bool | None = None
+    """Whether the workspace counts as trusted for what these options decide;
+    ``None`` asks ``nooa.workspace_trust.is_trusted``. Code only: settings
+    files cannot set it. It covers the options' ``skills_dirs`` and
+    ``active_skills`` (``load``) and the ``workspace_trusted()`` value the
+    session factory passes to the agent (its code skills). Stored
+    ``file.py:Class`` agent specs and the workspace ``llm_config.yaml``
+    follow ``trusted_folders`` only."""
 
     @classmethod
     def load(cls, workspace: str | Path, **overrides: Any) -> AtomOptions:
         """Load the workspace's ``atom`` settings (and the legacy ``tui`` ones).
 
-        Invalid settings are reported and replaced by the defaults.
+        Invalid settings are reported and replaced by the defaults. In an
+        untrusted workspace the skill directories and ``active_skills`` of
+        its own settings file are left out.
         """
         root = Path(workspace).expanduser().resolve()
         from .settings import load_behavior_settings
@@ -48,8 +58,22 @@ class AtomOptions(BaseModel):
         values = load_behavior_settings(root)
         values.update({key: value for key, value in overrides.items() if value is not None})
         values["working_dir"] = str(root)
-        values["skills_dirs"] = load_skills_dirs(root)
-        return cls(**values)
+        options = cls(**values)
+        trusted = options.workspace_trusted()
+        options.skills_dirs = load_skills_dirs(root, trusted=trusted)
+        if not trusted and overrides.get("active_skills") is None:
+            # A folder that is not trusted must not choose which skills run.
+            user = load_behavior_settings(root, include_project=False)
+            options.active_skills = list(user.get("active_skills", []))
+        return options
+
+    def workspace_trusted(self) -> bool:
+        """``trust_workspace`` when set, else ``nooa.workspace_trust.is_trusted(working_dir)``."""
+        if self.trust_workspace is not None:
+            return self.trust_workspace
+        from nooa.workspace_trust import is_trusted
+
+        return is_trusted(self.working_dir)
 
 
 async def connect_session_mcp(agent: Any, options: AtomOptions) -> list[str]:
