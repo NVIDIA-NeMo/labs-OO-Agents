@@ -95,9 +95,14 @@ async def test_one_bad_image_among_sixteen_is_found_with_log2_requests(error, ba
         assert response.content == "saw 15 images"  # the final request's own reply
         requests = wire.call_count - 1  # after the original request
         # newest alone, (all or probe), bisect over 16, final: log2(16) + 3;
-        # the fallback first re-sends the original once: one more
+        # the fallback (no media named) confirms with the original: one more
         assert requests <= math.ceil(math.log2(16)) + 3 + (error == UNNAMED)
-        last = sent_images(wire.call_args.kwargs)
+        calls = wire.call_args_list
+        if error == UNNAMED:
+            # The confirmation: the original request unchanged, failing again.
+            assert len(sent_images(calls[-1].kwargs)) == 16
+            calls = calls[:-1]
+        last = sent_images(calls[-1].kwargs)
         assert bad not in last and len(last) == 15
     # The exclusion is kept for later requests on this connection.
     with patch("litellm.acompletion", new_callable=AsyncMock) as wire:
@@ -113,8 +118,16 @@ async def test_two_bad_images_are_both_found_and_good_ones_kept(error):
     with client() as c, patch("litellm.acompletion", new_callable=AsyncMock) as wire:
         wire.side_effect = fake_provider(bad, error)
         assert (await c.acall(messages_with(images))).content == "saw 8 images"
-        last = sent_images(wire.call_args.kwargs)
+        calls = wire.call_args_list
+        if error == UNNAMED:  # the confirmation re-sent the original, failing again
+            assert len(sent_images(calls[-1].kwargs)) == 10
+            calls = calls[:-1]
+        last = sent_images(calls[-1].kwargs)
         assert all(b not in last for b in bad) and len(last) == 8
+    with patch("litellm.acompletion", new_callable=AsyncMock) as wire:
+        wire.side_effect = fake_provider(bad, error)
+        assert (await c.acall(messages_with(images))).content == "saw 8 images"
+        assert wire.call_count == 1  # both exclusions were kept
 
 
 def test_sync_call_uses_the_same_search():
@@ -134,7 +147,7 @@ async def test_a_failed_probe_raises_the_original_error_and_excludes_nothing():
         wire.side_effect = wire_reply
         with pytest.raises(litellm.BadRequestError, match="malformed"):
             await c.acall(messages_with(images))
-        assert wire.call_count == 3  # the request, the same request again, one probe
+        assert wire.call_count == 2  # the request, then one probe: exactly one extra
         assert sent_images(wire.call_args.kwargs) == []  # the probe carried no media
         view = c._prepare_media_messages(messages_with(images), c._prepare_call_config({}))
         assert NOTE not in str(view)
@@ -146,7 +159,7 @@ async def test_the_probe_has_no_endpoint_retries_and_its_reply_is_discarded():
 
     def wire_reply(**kwargs):
         calls.append(len(sent_images(kwargs)))
-        if len(calls) == 3:  # the probe: a retryable 500 must not be retried
+        if len(calls) == 2:  # the probe: a retryable 500 must not be retried
             raise litellm.InternalServerError(message="boom", model="m", llm_provider="openai")
         raise bad_request(UNNAMED)
 
@@ -154,7 +167,7 @@ async def test_the_probe_has_no_endpoint_retries_and_its_reply_is_discarded():
         wire.side_effect = wire_reply
         with pytest.raises(litellm.BadRequestError):
             await c.acall(messages_with(images))
-    assert calls == [2, 2, 0]  # the request, re-sent once, the probe
+    assert calls == [2, 0]  # the request, then the probe (not retried)
 
     # When the probe succeeds its reply ("PROBE") is never returned.
     def probe_ok(**kwargs):
@@ -367,8 +380,13 @@ async def test_one_image_in_fallback_mode_reuses_the_probe_reply():
     with client() as c, patch("litellm.acompletion", new_callable=AsyncMock) as wire:
         wire.side_effect = fake_provider(images, UNNAMED)
         assert (await c.acall(messages_with(images))).content == "saw 0 images"
-        # The request, re-sent once, the probe (its reply is the answer).
-        assert [len(sent_images(call.kwargs)) for call in wire.call_args_list] == [1, 1, 0]
+        # The request, the probe (its reply is the answer), then the
+        # confirmation: the original unchanged fails again, so the image goes.
+        assert [len(sent_images(call.kwargs)) for call in wire.call_args_list] == [1, 0, 1]
+    with patch("litellm.acompletion", new_callable=AsyncMock) as wire:
+        wire.side_effect = fake_provider(images, UNNAMED)
+        assert (await c.acall(messages_with(images))).content == "saw 0 images"
+        assert wire.call_count == 1  # the exclusion was kept
 
 
 async def test_a_bad_image_and_a_bad_pdf_are_both_found():

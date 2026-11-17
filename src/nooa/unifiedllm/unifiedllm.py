@@ -1565,19 +1565,26 @@ class UnifiedLLM(ABC):
         searched (a bad image and a bad PDF), the attachments of that kind
         join the pool and the round starts again, within the same budget.
 
-        ``mode="fallback"`` (no narrow rule matched) first re-sends the
-        original request once: if that succeeds, its reply is returned and
-        nothing is excluded (the first failure was a one-off). Only if it fails
-        again the same way does one probe go out with every candidate
-        excluded; its reply is stored and returned only if the search ends on
-        that same set. If that probe fails too, the media is not the problem:
-        the original error is raised and nothing changes. No exclusion set is
+        ``mode="fallback"`` (no narrow rule matched) first sends one probe
+        with every candidate excluded; its reply is stored and returned only if
+        the search ends on that same set. If that probe fails too, the media is
+        not the problem: the original error is raised and nothing changes (a
+        persistent ordinary 400 costs one extra request). No exclusion set is
         sent twice: each outcome is stored and reused.
+
+        Only a 4xx that names a media kind (or a local adapter error) is
+        definitive. Otherwise (a fallback, a media-worded 5xx) the first
+        failure may have been a one-off, so a found set is confirmed before
+        it is kept: the original request is re-sent unchanged once. If that
+        succeeds, its reply is returned and nothing is excluded; if it fails
+        again as a media error, the exclusions are kept and the stored reply
+        of the found set is returned. The search leaves one request of the
+        budget for this confirmation.
 
         At most ``budget`` requests are made after the original one, counted
         as endpoint requests (``media_recovery_probes``): a recovery request
-        gets no endpoint retries, and a retryable error (a plain 5xx, a 429)
-        re-sends the same request from this budget. Only the
+        gets no endpoint or SDK retries, and a retryable error (a plain 5xx, a
+        429) re-sends the same request from this budget. Only the
         exclusions of a final request that succeeded are kept (added to
         ``rejected``, the connection's set) and counted as
         ``media_rejected_retry``; the reply of that final request is returned.
@@ -1602,23 +1609,18 @@ class UnifiedLLM(ABC):
                 return is_media_rejection(err)
             return _media_fallback_eligible(err) and _http_status(err) == _http_status(original)
 
+        status = _http_status(original)
+        # Only a 4xx naming a media kind (or a local adapter error) is
+        # definitive; anything else may be a one-off and is confirmed by
+        # re-sending the original once before exclusions are kept.
+        confirm = mode == "fallback" or (status is not None and status >= 500)
+        limit = budget - 1 if confirm else budget  # keep one request for the confirmation
+
         if mode == "fallback":
-            # The error names no attachment: it may be a one-off. Re-send the
-            # original request once (no endpoint retries); only a second
-            # failure of the same kind starts the search, so an exclusion the
-            # fallback finds is kept only if the original set failed twice.
-            if used + 2 > budget:
-                raise original
-            used += 1
-            _record_llm_metric("media_recovery_probe", "fallback")
-            response, error = yield frozenset()
-            if error is None:
-                logger.warning(
-                    "Request failed once (%s) and succeeded when re-sent; nothing excluded",
-                    type(original).__name__,
-                )
-                return response
-            if not still_media(error):
+            # The error names no attachment: probe once with every candidate
+            # excluded (no endpoint retries). If that fails too, the media is
+            # not the problem: raise the original, one extra request in all.
+            if used + 1 > limit:
                 raise original
             used += 1
             _record_llm_metric("media_recovery_probe", "fallback")
@@ -1648,7 +1650,7 @@ class UnifiedLLM(ABC):
                 return True, None
             if excluded in failures:
                 return False, failures[excluded]
-            if used >= budget:
+            if used >= limit:
                 logger.warning(
                     "Media recovery stopped after %d requests without finding the attachment(s)",
                     used,
@@ -1657,7 +1659,7 @@ class UnifiedLLM(ABC):
             used += 1
             _record_llm_metric("media_recovery_probe", mode)
             response, error = yield excluded
-            while error is not None and _retryable(error) and used < budget:
+            while error is not None and _retryable(error) and used < limit:
                 used += 1  # an endpoint retry of the same request, from the budget
                 _record_llm_metric("media_recovery_probe", mode)
                 response, error = yield excluded
@@ -1720,6 +1722,26 @@ class UnifiedLLM(ABC):
             pool = pool[: high - 1]  # older candidates are fine
             top_ok = True
         final = frozenset(found)
+        if confirm:
+            # The first failure may have been a one-off: re-send the original
+            # unchanged once (no endpoint retries) before keeping anything.
+            used += 1
+            _record_llm_metric("media_recovery_probe", "confirm")
+            response, error = yield frozenset()
+            if error is None:
+                logger.warning(
+                    "Request failed once (%s) and succeeded when re-sent; nothing excluded",
+                    type(original).__name__,
+                )
+                return response
+            if not still_media(error):
+                # Not the same failure again: the found set's reply is valid,
+                # but nothing proves the attachments are bad, so keep none.
+                logger.warning(
+                    "Confirmation request failed differently (%s); nothing excluded",
+                    type(error).__name__,
+                )
+                return replies[final]
         for key in found:
             rejected.add(key)
             _record_llm_metric("media_rejected_retry", kinds[key])

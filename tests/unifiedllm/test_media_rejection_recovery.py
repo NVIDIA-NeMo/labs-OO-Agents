@@ -300,7 +300,7 @@ def test_an_unsupported_format_500_is_not_retried_by_the_endpoint_retry_layer():
 
 @pytest.mark.parametrize("client_type", [CompletionClient, ResponsesClient])
 @pytest.mark.parametrize("asynchronous", [False, True])
-async def test_unsupported_format_500_is_sent_twice_then_a_note(client_type, asynchronous):
+async def test_unsupported_format_500_is_confirmed_then_a_note(client_type, asynchronous):
     responses = client_type is ResponsesClient
     method = ("a" if asynchronous else "") + ("responses" if responses else "completion")
     messages = [{"role": "user", "content": [{"type": "text", "text": "Read this:"}, IMAGE]}]
@@ -323,9 +323,20 @@ async def test_unsupported_format_500_is_sent_twice_then_a_note(client_type, asy
                 assert (await client.acall(messages)).content == "UNREADABLE"
             else:
                 assert client.call(messages).content == "UNREADABLE"
-            assert wire.call_count == 2  # no unchanged resend of the refused image
-            last = sent_blocks(wire.call_args_list[-1], responses)
-            assert images(last) == [] and NOTE in texts(last)
+            # The request, the note (no endpoint retry of the refused image),
+            # then one confirmation: a 500 may be a one-off, so the original
+            # is re-sent once before the exclusion is kept.
+            assert wire.call_count == 3
+            first, note, confirm = (sent_blocks(c, responses) for c in wire.call_args_list)
+            assert images(first) and images(confirm)
+            assert images(note) == [] and NOTE in texts(note)
+            # Kept: the next call sends the note at once.
+            wire.reset_mock()
+            if asynchronous:
+                assert (await client.acall(messages)).content == "UNREADABLE"
+            else:
+                assert client.call(messages).content == "UNREADABLE"
+            assert wire.call_count == 1
 
 
 SVG = {"type": "image_url", "image_url": {"url": "data:image/svg+xml;base64,PHN2Zy8+"}}

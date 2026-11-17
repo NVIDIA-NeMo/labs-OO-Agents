@@ -99,8 +99,12 @@ async def test_an_image_500_on_a_request_with_an_image_goes_to_media_recovery():
     with client() as c, patch("litellm.acompletion", new_callable=AsyncMock) as wire:
         wire.side_effect = wire_reply
         assert (await c.acall(WITH_IMAGE)).content == "ok"
-        # No endpoint retry of the refused image: the request, then the note.
-        assert [images_sent(call.kwargs) for call in wire.call_args_list] == [1, 0]
+        # No endpoint retry of the refused image: the request, the note, then
+        # one confirmation (a 500 may be a one-off) that fails again.
+        assert [images_sent(call.kwargs) for call in wire.call_args_list] == [1, 0, 1]
+        assert (await c.acall(WITH_IMAGE)).content == "ok"
+        # Kept: the next call sends the note at once.
+        assert [images_sent(call.kwargs) for call in wire.call_args_list] == [1, 0, 1, 0]
 
 
 UNNAMED = "Provided request is malformed."
@@ -118,4 +122,92 @@ async def test_a_one_off_unnamed_400_drops_no_image():
         wire.side_effect = wire_reply
         assert (await c.acall(messages)).content == "saw 4 images"
         assert (await c.acall(messages)).content == "saw 4 images"
-    assert calls == [4, 4, 4]  # failed, re-sent once unchanged, the next call sends all
+    # Failed, the probe without media, the newest image excluded, then the
+    # confirmation (the original unchanged) succeeds: its reply, nothing
+    # excluded, and the next call sends all four.
+    assert calls == [4, 0, 3, 4, 4]
+
+
+def _run(c, messages, asynchronous):
+    if asynchronous:
+        return c.acall(messages)
+
+    async def done():
+        return c.call(messages)
+
+    return done()
+
+
+def _patch_wire(asynchronous):
+    if asynchronous:
+        return patch("litellm.acompletion", new_callable=AsyncMock)
+    return patch("litellm.completion")
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_a_one_off_media_worded_500_keeps_the_image(asynchronous):
+    # #597 re-review P1: "Could not process image" once, then fine.
+    wire_reply, calls = fails_first(server_error("Could not process image"))
+    with client() as c, _patch_wire(asynchronous) as wire:
+        wire.side_effect = wire_reply
+        assert (await _run(c, WITH_IMAGE, asynchronous)).content == "saw 1 images"
+        assert (await _run(c, WITH_IMAGE, asynchronous)).content == "saw 1 images"
+    # The 500, the note (succeeds), the confirmation with the image (succeeds:
+    # a one-off, its reply is returned, nothing kept), the next call keeps it.
+    assert calls == [1, 0, 1, 1]
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_a_persistent_media_worded_500_drops_the_image(asynchronous):
+    def wire_reply(**kwargs):
+        if images_sent(kwargs):
+            raise server_error("Could not process image")
+        return reply("ok")
+
+    with client() as c, _patch_wire(asynchronous) as wire:
+        wire.side_effect = wire_reply
+        assert (await _run(c, WITH_IMAGE, asynchronous)).content == "ok"
+        assert (await _run(c, WITH_IMAGE, asynchronous)).content == "ok"
+        assert [images_sent(call.kwargs) for call in wire.call_args_list] == [1, 0, 1, 0]
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+@pytest.mark.parametrize("text", [UNNAMED, "Request contains an invalid argument."])
+async def test_a_persistent_unnamed_400_costs_exactly_one_extra_request(asynchronous, text):
+    error = litellm.BadRequestError(message=text, model="test", llm_provider="openai")
+    wire_reply, calls = fails_first(error, times=100)
+    with client() as c, _patch_wire(asynchronous) as wire:
+        wire.side_effect = wire_reply
+        for _ in range(2):
+            with pytest.raises(litellm.BadRequestError):
+                await _run(c, WITH_IMAGE, asynchronous)
+    # Each call: the request, then the probe without media; never a re-send.
+    assert calls == [1, 0, 1, 0]
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_a_one_off_unnamed_400_with_one_image_commits_nothing(asynchronous):
+    error = litellm.BadRequestError(message=UNNAMED, model="test", llm_provider="openai")
+    wire_reply, calls = fails_first(error)
+    with client() as c, _patch_wire(asynchronous) as wire:
+        wire.side_effect = wire_reply
+        assert (await _run(c, WITH_IMAGE, asynchronous)).content == "saw 1 images"
+        assert (await _run(c, WITH_IMAGE, asynchronous)).content == "saw 1 images"
+    assert calls == [1, 0, 1, 1]  # the probe, the confirmation wins, the image stays
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+async def test_a_named_4xx_is_definitive_and_not_confirmed(asynchronous):
+    error = litellm.BadRequestError(
+        message="Unsupported image format: svg+xml", model="test", llm_provider="openai"
+    )
+
+    def wire_reply(**kwargs):
+        if images_sent(kwargs):
+            raise error
+        return reply("ok")
+
+    with client() as c, _patch_wire(asynchronous) as wire:
+        wire.side_effect = wire_reply
+        assert (await _run(c, WITH_IMAGE, asynchronous)).content == "ok"
+        assert [images_sent(call.kwargs) for call in wire.call_args_list] == [1, 0]
