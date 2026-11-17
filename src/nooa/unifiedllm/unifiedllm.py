@@ -43,6 +43,7 @@ from nooa.unifiedllm.media_inputs import (
     _error_texts,
     _http_status,
     _param_kind,
+    _param_names_other_field,
     attachment_kind,
     filter_media_messages,
     image_limit,
@@ -118,7 +119,7 @@ def _media_fallback_eligible(exc: BaseException) -> bool:
         return False
     text = _error_texts(exc)
     param = _error_param(exc)
-    if param and _param_kind(param) is None:
+    if param and (_param_names_other_field(param) or _param_kind(param) is None):
         return False  # the provider named another parameter (model, temperature, tools, ...)
     named = re.search(r"\binvalid (?:value|type) for ['\"`]?([\w.\[\]]+)", text)
     if named and _param_kind(named.group(1)) is None:

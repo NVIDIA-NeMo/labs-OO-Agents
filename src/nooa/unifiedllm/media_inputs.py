@@ -521,6 +521,23 @@ _MEDIA_FIELD_PATH_RE = re.compile(
 )
 
 
+def _param_names_other_field(param: str | None) -> bool:
+    """True if a structured error ``param`` names a request field that is not an attachment.
+
+    A path whose root is not a conversation field (``tools[0].function.parameters
+    .properties.image_url``, ``response_format``, ``max_tokens``) never points at
+    an attachment, whatever its descendants are called. A content path
+    (``messages[0].content[1].image_url``) or a bare media part name
+    (``image_url``) may.
+    """
+    if not param:
+        return False
+    if _param_root(param) in _CONTENT_ROOTS:
+        return False
+    bare = re.fullmatch(r"\s*\w+\s*", param) is not None
+    return not (bare and _param_kind(param) is not None)
+
+
 def _param_kind(param: str | None) -> str | None:
     """The kind of the wire part a structured error ``param`` points at, if any."""
     if not param:
@@ -612,9 +629,10 @@ def rejected_media_kinds(exc) -> frozenset[str]:
     if _is_image_fetch_error(exc):
         return frozenset({"image"})
     param = _error_param(exc)
-    if param and _param_root(param) not in _CONTENT_ROOTS and _param_kind(param) is None:
+    if _param_names_other_field(param):
         # The provider named another parameter (tools[0].function.parameters,
-        # max_tokens, model, ...): that wins over media words in the text.
+        # max_tokens, model, ...): that wins over media words in the text,
+        # even when a descendant is called ``image_url`` (a tool schema).
         return frozenset()
     if status in {400, 415, 422}:
         strict, server = True, True
