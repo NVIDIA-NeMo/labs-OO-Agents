@@ -250,6 +250,16 @@ The reason is required. A few older hand-written cuts remain; they are tracked
 for PR 2d (issue #96). New code must not add more: when you change one, move it
 onto `nooa.snapshot` instead of copying it.
 
+**Limits are config.** A size, length or count limit on text a model or user
+reads (prompts, tool results, cell, shell or job output, context blocks,
+previews) is a `TruncationConfig` field in `nooa.config`, with today's value
+as its default. Read it through `nooa.config.effective_truncation()` when you
+apply it. Do not use a module constant or a literal, do not read
+`DEFAULT_TRUNCATION_CONFIG`, and do not write your own method > agent >
+defaults lookup. Internal protocol, safety and performance bounds (frame or
+queue sizes, work caps, timeouts) stay constants. The fields are listed in
+`docs/concepts/prompts-and-context.md`.
+
 ### Quality & Testing
 
 - **Evidence before assertions.** Run tests/verification before claiming work is done. Enforce in the orchestrator.
