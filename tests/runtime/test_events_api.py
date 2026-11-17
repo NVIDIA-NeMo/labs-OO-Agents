@@ -302,7 +302,8 @@ def test_collapse_hint_names_the_real_parameters():
 
 @pytest.mark.parametrize("backend", ["memory", "sqlite"])
 def test_recollapse_of_a_summary_range_rewrites_its_text_in_place(backend, tmp_path):
-    """Collapsing a summary's own range again keeps the summary (SQLite used to raise IntegrityError after archiving it)."""
+    """Collapsing a summary's own range again keeps the summary (SQLite used to raise
+    IntegrityError after archiving it)."""
     from nooa.storage.sqlite import SQLiteStorageManager
 
     agent = _TestAgent()
