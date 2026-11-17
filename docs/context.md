@@ -165,8 +165,9 @@ agent = MyAgent(
 `XMLBlockFormatter` is the XML alternative. Neither XML nor Markdown enables
 caching: both preserve the boundary chosen by the view. `RenderConfig` chooses
 serialization and client message shape; it does not choose context sources,
-history membership, order, or eviction. The former `CachedBlockFormatter` was
-removed upstream; use `XMLBlockFormatter` with explicit view cache boundaries.
+history membership, order, or eviction. `CachedBlockFormatter` remains as a
+compatibility wrapper with XML-equivalent serialization; cache placement stays
+view-owned, so use explicit view cache boundaries.
 
 `Agent`'s base instructions are format-neutral. Built-in context views include
 the selected formatter's `format_description()` in the built-in Agent prompt.
@@ -255,7 +256,7 @@ Keep `agent.context`, context managers, event creation, strategy/scoped override
 
 These are the default application's context APIs, not requirements of `ContextView`. A custom view may use an independent state API. Native iterative strategies still use NOOA events unless replaced together with the strategy.
 
-Legacy implicit policy is removed: `cache_control_injection_points` raises `ValueError`; `CachedBlockFormatter` is removed (views choose placement; `XMLBlockFormatter` is the default); and `render_context()` takes no context limit: it counts blocks the view marked evicted and never evicts.
+Legacy implicit policy is removed: `cache_control_injection_points` raises `ValueError`; `CachedBlockFormatter` remains only as an XML-serialization compatibility wrapper and does not choose cache placement; and `render_context()` takes no context limit: it counts blocks the view marked evicted and never evicts.
 
 Direct UnifiedLLM callers place boundaries explicitly; without one, NOOA adds no explicit cache marker:
 
