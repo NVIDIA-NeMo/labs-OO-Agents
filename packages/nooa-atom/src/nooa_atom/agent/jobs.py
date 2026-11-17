@@ -38,7 +38,7 @@ from nooa.context_blocks import EventBase
 from nooa.skill import Skill
 from nooa.snapshot import Overflow, TextStream, render_output
 from nooa.tools import StreamDone, StreamEvent
-from nooa_atom.agent.lines import LineSplitter, bounded_lines
+from nooa_atom.agent.lines import LineSplitter, bounded_lines, name_job_log
 from nooa_atom.session.names import ROOT_PATH, check_name, child_path
 
 if TYPE_CHECKING:
@@ -54,7 +54,8 @@ _TAIL_CHARS = 20_000
 # Longest delivered line (run progress, tail), in characters: a longer line is
 # its first _LINE_CHARS characters, then nooa.snapshot's render_output line
 # "[... N chars omitted; full output not kept]" (LineSplitter), or
-# "full output: PATH" when a log_path= log holds it.
+# "full output (stdout and stderr together, in arrival order): PATH" when a
+# log_path= log holds it (lines.name_job_log).
 _LINE_CHARS = 8_000
 # Bytes read from a pipe or a tailed file at a time.
 _CHUNK_BYTES = 64 * 1024
@@ -794,6 +795,7 @@ class JobsApi(Skill):
                 # The log holds the whole output (both streams): the cut line names it.
                 size = _file_size(job.log_path)
                 text = dataclasses.replace(text, full=Overflow(job.log_path, size, size))
+                return name_job_log(render_output(text), job.log_path)
             return render_output(text)
 
         def finish() -> dict[str, Any]:
@@ -984,7 +986,8 @@ class JobsApi(Skill):
         ``log_path=``: stdout and stderr are written there as they arrive
         (interleaved, as raw bytes; relative to the command's directory;
         overwritten), the done update and ``JobInfo`` carry the path, and a
-        cut line says ``full output: PATH`` instead. In a pipe
+        cut line says ``full output (stdout and stderr together, in arrival
+        order): PATH`` instead. In a pipe
         (``cmd | tail``) the exit code is the last command's, so a failing
         command can look green; use ``log_path=`` instead of piping into
         ``tail``. With ``items``/``seconds`` it also sends progress while

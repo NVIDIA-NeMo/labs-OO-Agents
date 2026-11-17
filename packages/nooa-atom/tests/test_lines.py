@@ -26,6 +26,13 @@ class TestLineSplitter:
         assert lines == ["xxxxx\n[... 9,995 chars omitted; full output not kept]\n", "next\n"]
         assert bytes(seen) == b"x" * 10_000 + b"\nnext\n"
 
+    def test_a_cut_line_says_the_job_log_holds_both_streams_in_arrival_order(self):
+        splitter = LineSplitter(5, full_path="/tmp/job.log")
+        assert splitter.feed(b"x" * 20 + b"\n") == [
+            "xxxxx\n[... 15 chars omitted; full output (stdout and stderr together, "
+            "in arrival order): /tmp/job.log]\n"
+        ]
+
     def test_a_character_split_across_chunks_decodes_whole(self):
         data = "é\n".encode()
         splitter = LineSplitter(10)

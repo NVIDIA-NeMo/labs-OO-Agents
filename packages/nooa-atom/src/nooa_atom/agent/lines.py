@@ -20,6 +20,18 @@ from nooa.snapshot import Overflow, TextStream, render_output
 if TYPE_CHECKING:
     import asyncio
 
+JOB_LOG_LABEL = "full output (stdout and stderr together, in arrival order)"
+"""What a cut line calls a job's ``log_path=`` log: one file, both streams as they arrived."""
+
+
+def name_job_log(rendered: str, path: str) -> str:
+    """``rendered`` (``render_output`` of a ``Text`` whose ``full`` is the job log at ``path``) with its cut line saying what the log holds.
+
+    ``[... N chars omitted; full output: PATH]`` becomes
+    ``[... N chars omitted; full output (stdout and stderr together, in arrival order): PATH]``.
+    """
+    return rendered.replace(f"; full output: {path}]", f"; {JOB_LOG_LABEL}: {path}]", 1)
+
 
 class LineSplitter:
     """Split byte chunks into text lines, each bounded to its first ``max_line_chars``.
@@ -33,8 +45,9 @@ class LineSplitter:
     Memory stays at one bounded line plus the chunk being split. ``on_bytes``,
     if given, receives every input byte, in order, one line piece at a time
     (e.g. for a full log). ``full_path`` (keyword-only), if given, names the
-    file that holds the whole input (that log): a cut line then says
-    ``[... N chars omitted; full output: PATH]``. Text is decoded as UTF-8
+    file that holds the whole input (that job log, both streams): a cut line
+    then says ``[... N chars omitted; full output (stdout and stderr
+    together, in arrival order): PATH]``. Text is decoded as UTF-8
     with replacement characters.
     """
 
@@ -64,11 +77,14 @@ class LineSplitter:
 
     def _take(self, newline: str) -> str:
         text = self._line.close()
+        line = None
         if not text.complete and self._full_path is not None:
             # The whole line is in the file that receives every byte (on_bytes).
             size = self._line_bytes
             text = dataclasses.replace(text, full=Overflow(self._full_path, size, size))
-        line = render_output(text)
+            line = name_job_log(render_output(text), self._full_path)
+        if line is None:
+            line = render_output(text)
         self._line, self._started, self._line_bytes = self._new_line(), False, 0
         return line + newline
 

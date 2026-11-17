@@ -146,7 +146,10 @@ async def test_run_log_path_cut_tail_names_the_log(agent, tmp_path):
     assert item.log_path == str(log)
     assert log.read_text() == "".join(f"{i}\n" for i in range(1, 20001))
     first = item.stdout.splitlines()[0]
-    assert first == f"[... 88,894 chars omitted; full output: {log}]"
+    assert first == (
+        f"[... 88,894 chars omitted; full output (stdout and stderr together, "
+        f"in arrival order): {log}]"
+    )
 
 
 async def test_run_log_path_long_line_names_the_log_which_holds_it_whole(agent, tmp_path):
@@ -159,7 +162,9 @@ async def test_run_log_path_long_line_names_the_log_which_holds_it_whole(agent, 
     log = tmp_path / "wide.log"
     assert log.read_text() == "x" * 20_000 + "\nshort\n"
     assert item.stdout == (
-        "x" * 8_000 + f"\n[... 12,000 chars omitted; full output: {log}]\nshort\n"
+        "x" * 8_000
+        + "\n[... 12,000 chars omitted; full output (stdout and stderr together, "
+        + f"in arrival order): {log}]\nshort\n"
     )
 
 
