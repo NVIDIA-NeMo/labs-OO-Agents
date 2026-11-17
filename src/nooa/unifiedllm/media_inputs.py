@@ -178,6 +178,25 @@ _FORMAT_NOUN = {
     "pdf": "(?:pdf|file|document)",
 }
 
+# The words that name each kind of attachment in a provider's error message.
+_KIND_NAMES = {
+    "image": r"images?|vision inputs?",
+    "audio": r"audio|wav",
+    "video": r"videos?",
+    "pdf": r"pdfs?|documents?|files?",
+}
+
+# The wire part (or its field) that carries each kind; an error ``param`` such
+# as ``messages[0].content[1].input_audio.format`` names it.
+_KIND_PARTS = {
+    "image": {"image_url", "input_image"},
+    "audio": {"input_audio", "audio_url"},
+    "video": {"video_url"},
+    "pdf": {"file", "input_file", "document"},
+}
+
+MEDIA_KINDS: tuple[str, ...] = ("image", "audio", "video", "pdf")
+
 
 def _error_message(exc) -> str:
     """The provider's error message in lower case: ``body.error.message`` if set, else ``str(exc)``."""
@@ -186,6 +205,27 @@ def _error_message(exc) -> str:
     if isinstance(error, dict):
         return str(error.get("message", str(exc))).lower()
     return str(exc).lower()
+
+
+def _error_texts(exc) -> str:
+    """``str(exc)`` and the body's message, lower case, for pattern matching."""
+    texts = [str(exc).lower()]
+    message = _error_message(exc)
+    if message not in texts[0]:
+        texts.append(message)
+    return "\n".join(texts)
+
+
+def _error_param(exc) -> str | None:
+    body = getattr(exc, "body", None)
+    error = body.get("error", body) if isinstance(body, dict) else {}
+    param = error.get("param") if isinstance(error, dict) else None
+    return param if isinstance(param, str) else None
+
+
+def _http_status(exc) -> int | None:
+    status = getattr(exc, "_connect_http_status", getattr(exc, "status_code", None))
+    return status if isinstance(status, int) and not isinstance(status, bool) else None
 
 
 def _unsupported_format(exc, kind) -> bool:
@@ -198,63 +238,130 @@ def _unsupported_format(exc, kind) -> bool:
     followed by the formats that are supported, so "unsupported image format
     conversion plugin" does not count.
     """
+    return _unsupported_format_text(_error_texts(exc), kind)
+
+
+def _unsupported_format_text(text: str, kind) -> bool:
     noun = _FORMAT_NOUN.get(kind, "file")
     return bool(
         re.search(
             rf"\bunsupported {noun} (?:format|type)s?"
             r"(?:\s*[:=]|\s+['\"`]|\b[^.]{0,80}\b(?:supported|allowed|accepted) (?:formats|types)\b)",
-            _error_message(exc),
+            text,
         )
     )
 
 
-def unsupported_attachment_format(exc) -> bool:
-    """True if ``exc`` is an HTTP 500 that says an attachment's format is unsupported.
+# The request as a whole is too long: never one attachment's fault.
+_CONTEXT_LENGTH_RE = re.compile(
+    r"context[ _](?:length|window)|maximum context|too many (?:input )?tokens|prompt is too long"
+    r"|tokens? (?:exceed|limit)|reduce the length of the messages"
+)
+# A 500 with these words is the server being busy, not the attachment.
+_TRANSIENT_RE = re.compile(
+    r"\btemporar(?:y|ily)\b|\boverloaded\b|\btry again later\b|\bunavailable\b|\brate.?limit"
+    r"|\bcapacity\b"
+)
 
-    Such an error is about the request, not the server: the retry layer must
-    not resend it unchanged, so the client's media recovery can replace the
-    attachment with a note at once.
+
+def _size_rejected(text: str, kind) -> bool:
+    """The attachment is too big: per-item byte, pixel or page limits.
+
+    Wording examples from Anthropic's documentation and the #597 reviews (not
+    checked against a live provider): "image exceeds 5 MB maximum", "image
+    dimensions exceed max allowed size: 8000 pixels", "A maximum of 100 PDF
+    pages may be provided". Request-wide limits (context length, too many
+    images) are handled elsewhere and are not matched here.
     """
-    status = getattr(exc, "_connect_http_status", getattr(exc, "status_code", None))
-    return status == 500 and any(_unsupported_format(exc, kind) for kind in _FORMAT_NOUN)
+    names = _KIND_NAMES.get(kind, r"files?")
+    if re.search(
+        rf"\b(?:{names})(?: (?:size|dimensions?|file|data|payload|resolution|width|height))?\b"
+        r".{0,60}?\b(?:exceeds?|exceeded|exceeding|too large|too big|larger than)\b",
+        text,
+    ):
+        return True
+    return kind == "pdf" and bool(
+        re.search(
+            r"\bpdf (?:pages?|page count)\b.{0,40}?\b(?:exceed|maximum|limit|too many)"
+            r"|\bmaximum of \d+ pdf pages\b|\btoo many (?:pdf )?pages\b",
+            text,
+        )
+    )
 
 
-def explicitly_rejected(exc, kind):
-    """Return True if ``exc`` is the provider refusing this kind of media.
+def _media_type_enum_kind(text: str) -> str | None:
+    """Anthropic's schema error for a ``media_type`` it does not take.
 
-    Requires HTTP 400/415/422 and an error message that is specifically about
-    the media (or the content part used to send it), for example "image input
-    is not supported" or "Unsupported content part type: 'file'". A generic
-    400, or an error about another parameter (model, max_tokens, ...), does
-    not count. A per-request image limit (``image_limit``) is not a rejection
-    of one image: the runtime collapses the oldest images instead.
+    "messages.0.content.1.image.source.base64.media_type: Input should be
+    'image/jpeg', 'image/png', 'image/gif' or 'image/webp'" (wording from the
+    #597 issue; not captured from a live provider).
     """
-    status = getattr(exc, "_connect_http_status", getattr(exc, "status_code", None))
-    if status not in {400, 415, 422} and not (status == 500 and _unsupported_format(exc, kind)):
-        return False
-    if image_limit(exc) is not None:
-        return False
-    body = getattr(exc, "body", None)
-    error = body.get("error", body) if isinstance(body, dict) else {}
-    param = error.get("param") if isinstance(error, dict) else None
-    text = _error_message(exc)
-    if isinstance(param, str) and param.split(".")[0] in {
-        "model",
-        "include",
-        "store",
-        "max_tokens",
-        "max_output_tokens",
-        "api_key",
-    }:
-        return False
-    # Match a statement about the media/input itself. A media-looking model
-    # name plus an unrelated 'invalid' parameter is not explicit rejection.
-    names = {
-        "image": r"images?|vision inputs?",
-        "audio": r"audio|wav",
-        "video": r"videos?",
-        "pdf": r"pdfs?|documents?|files?",
-    }.get(kind, r"files?")
+    match = re.search(
+        r"\bmedia_type\b.{0,20}?input should be\s*['\"]?(image|application|audio|video)/", text
+    )
+    if not match:
+        return None
+    return {"application": "pdf"}.get(match.group(1), match.group(1))
+
+
+def _mime_type_kind(text: str) -> str | None:
+    """'Unsupported MIME type: image/gif' (Gemini-style wording from the #597 review, unverified)."""
+    match = re.search(
+        r"\bunsupported mime[ _-]?type\s*:?\s*['\"`]?(image|audio|video|application/pdf)\b", text
+    )
+    if not match:
+        return None
+    return "pdf" if match.group(1) == "application/pdf" else match.group(1)
+
+
+def _processing_failed(text: str, kind) -> bool:
+    """The server could not read the attachment's bytes ("Could not process image")."""
+    names = _KIND_NAMES.get(kind, r"files?")
+    noun = rf"(?:{names}|media)(?: (?:input|content|format|type|data|url|attachment|file)s?)?"
+    return bool(
+        re.search(
+            r"\b(?:does not|doesn't|cannot|can't|could not|couldn't|unable to|failed to) "
+            rf"(?:process|decode|load|read|parse) (?:the )?{noun}\b",
+            text,
+        )
+        # OpenAI: "The image data you provided does not represent a valid image."
+        or re.search(rf"\bnot (?:\w+ ){{0,2}}an? valid {noun}\b", text)
+        # Anthropic (docs/review wording): "The PDF specified was not valid."
+        or re.search(rf"\b{noun}(?: \w+)? (?:is|was) not valid\b", text)
+        # Bedrock: "Could not process image"; gateways: "Media could not be processed".
+        or re.search(
+            rf"\b{noun} (?:could not|couldn't|cannot|can't) be (?:processed|decoded|loaded|read|parsed)\b",
+            text,
+        )
+        or re.search(rf"\b(?:corrupt(?:ed)?|malformed|truncated) {noun}\b", text)
+        or re.search(rf"\b{noun}\b (?:is |was )?(?:corrupt(?:ed)?|truncated|malformed)\b", text)
+        or (
+            kind == "pdf"
+            and re.search(
+                r"\b(?:password[- ]protected|encrypted) (?:pdf|document|file)s?\b"
+                r"|\b(?:pdf|document|file)s?\b.{0,40}?\b(?:password[- ]protected|encrypted)\b",
+                text,
+            )
+        )
+    )
+
+
+def _param_kind(param: str | None) -> str | None:
+    """The kind of the wire part a structured error ``param`` points at, if any."""
+    if not param:
+        return None
+    fields = set(re.split(r"[.\[\]]+", param.lower()))
+    for kind in MEDIA_KINDS:
+        if fields & (_KIND_PARTS[kind] - {"file", "document"}) or (
+            kind == "pdf" and "file_data" in fields
+        ):
+            return kind
+    return None
+
+
+def _strict_media_statement(text: str, kind) -> bool:
+    """Wording a provider uses only when it refuses this kind of media (HTTP 4xx)."""
+    names = _KIND_NAMES.get(kind, r"files?")
     # "media" names whichever attachment the request carries (one gateway
     # says "Media could not be processed ... Failed to load image").
     noun = rf"(?:{names}|media)(?: (?:input|content|format|type|data|url|attachment|processing|file)s?)?"
@@ -265,37 +372,130 @@ def explicitly_rejected(exc, kind):
     part = re.search(
         r"unsupported (?:chat )?(?:content(?: part)?|media) type:?\s*[\\'\"]*([a-z_]+)", text
     )
-    parts = {
-        "image": {"image_url", "input_image"},
-        "audio": {"input_audio", "audio_url"},
-        "video": {"video_url"},
-        "pdf": {"file", "input_file", "document"},
-    }.get(kind, set())
-    if part and part.group(1) in parts:
+    if part and part.group(1) in _KIND_PARTS.get(kind, set()):
         return True
     # A strict server whose message schema has no variant for this media part.
     if "did not match any variant of untagged enum" in text and "messagecontent" in text:
         return True
     return bool(
         re.search(
-            rf"\b{noun}\b (?:is |are |was |were )?(?:not supported|unsupported|not allowed|rejected|invalid"
-            r"|corrupt(?:ed)?|truncated|malformed)\b",
+            rf"\b{noun}\b (?:is |are |was |were )?(?:not supported|unsupported|not allowed|rejected|invalid)\b",
             text,
         )
         or re.search(rf"\b(?:unsupported|invalid|rejected) {noun}\b(?![-\w])", text)
         or re.search(
             r"\b(?:does not|doesn't|cannot|can't|could not|couldn't|unable to|failed to) "
-            rf"(?:support|accept|process|decode|load|read) {noun}\b",
+            rf"(?:support|accept) {noun}\b",
             text,
         )
-        # OpenAI: "The image data you provided does not represent a valid image."
-        or re.search(rf"\bnot (?:\w+ ){{0,2}}an? valid {noun}\b", text)
-        # Bedrock: "Could not process image"; gateways: "Media could not be processed".
-        or re.search(
-            rf"\b{noun} (?:could not|couldn't|cannot|can't) be (?:processed|decoded|loaded|read)\b",
-            text,
+        # OpenAI audio (wording from the #597 review): "audio format mpeg is not supported".
+        or (
+            kind == "audio"
+            and re.search(r"\baudio format\b.{0,40}?\b(?:not supported|unsupported)\b", text)
         )
     )
+
+
+def rejected_media_kinds(exc) -> frozenset[str]:
+    """The media kinds ``exc`` says the provider refused; empty if it is not a media rejection.
+
+    The one predicate both the endpoint retry layer (``retry.py``: never resend
+    a refused attachment unchanged) and the client's media recovery (replace it
+    with a note) use. It is narrow and depends on the HTTP status:
+
+    - 400/415/422: any wording that is specifically about the media (or the
+      content part that carries it), its size, its format, or a structured
+      ``param`` that points at a media part.
+    - 413: only when the message says the attachment itself is too large.
+    - 500: only wording that says the server could not read this attachment
+      (unsupported format, "Could not process image", a size limit, a failed
+      download) and nothing that sounds transient ("temporarily", "overloaded").
+      Other 5xx statuses (502/503/504: gateways, outages) never count.
+    - No status: only a local ``ValueError`` (LiteLLM's Bedrock adapter raises
+      ``ValueError("Unsupported image format: ...")`` before sending).
+
+    A generic error, one about another parameter (model, max_tokens, ...),
+    a per-request image limit (``image_limit``) or a context-length error does
+    not count.
+    """
+    status = _http_status(exc)
+    text = _error_texts(exc)
+    if image_limit(exc) is not None or _CONTEXT_LENGTH_RE.search(text):
+        return frozenset()
+    param = _error_param(exc)
+    if param is not None and param.split(".")[0] in {
+        "model",
+        "include",
+        "store",
+        "max_tokens",
+        "max_output_tokens",
+        "api_key",
+        "tools",
+        "tool_choice",
+    }:
+        return frozenset()
+    if status in {400, 415, 422}:
+        strict, server = True, True
+    elif status == 413:
+        strict, server = False, False
+    elif status == 500 and not _TRANSIENT_RE.search(text):
+        strict, server = False, True
+    elif status is None and isinstance(exc, ValueError):
+        return frozenset(k for k in MEDIA_KINDS if _unsupported_format_text(text, k))
+    else:
+        return frozenset()
+    kinds = set()
+    if status != 413:
+        for found in (_media_type_enum_kind(text), _mime_type_kind(text)):
+            if found:
+                kinds.add(found)
+        if strict:
+            # A structured ``param`` or a field path in the message, e.g. OpenAI's
+            # "Invalid value: 'mpeg'. Supported values are: 'wav' and 'mp3'." with
+            # param ``messages[0].content[1].input_audio.format``.
+            for path in (
+                param,
+                *re.findall(
+                    r"[\w\[\].]*\b(?:input_audio|audio_url|image_url|input_image|video_url|input_file|file_data)\b[\w\[\].]*",
+                    text,
+                ),
+            ):
+                if found := _param_kind(path):
+                    kinds.add(found)
+    for kind in MEDIA_KINDS:
+        if (
+            _size_rejected(text, kind)
+            or (server and (_unsupported_format_text(text, kind) or _processing_failed(text, kind)))
+            or (strict and _strict_media_statement(text, kind))
+        ):
+            kinds.add(kind)
+    return frozenset(kinds)
+
+
+def is_media_rejection(exc) -> bool:
+    """True if ``exc`` is a provider refusing an attachment (see ``rejected_media_kinds``).
+
+    Such an error is about the request, not the server: the retry layer must
+    not resend it unchanged, so the client's media recovery can replace the
+    attachment with a note at once.
+    """
+    return bool(rejected_media_kinds(exc))
+
+
+def unsupported_attachment_format(exc) -> bool:
+    """True if ``exc`` is an HTTP 5xx media rejection (kept for callers of the #595 API)."""
+    status = _http_status(exc)
+    return status is not None and status >= 500 and is_media_rejection(exc)
+
+
+def explicitly_rejected(exc, kind):
+    """Return True if ``exc`` is the provider refusing this kind of media.
+
+    ``kind in rejected_media_kinds(exc)``; see there for the status rules. A
+    per-request image limit (``image_limit``) is not a rejection of one image:
+    the runtime collapses the oldest images instead.
+    """
+    return kind in rejected_media_kinds(exc)
 
 
 def _occurrences(messages, enabled: tuple[MediaInput, ...]):

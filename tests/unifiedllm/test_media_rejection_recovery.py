@@ -250,7 +250,9 @@ def test_unsupported_format_500_is_an_explicit_rejection():
 
 
 def test_other_500s_are_not_media_rejections():
-    assert not explicitly_rejected(server_error("Could not process image"), "image")
+    # #597: a media-worded 500 ("Could not process image") is a rejection now;
+    # a plain 500 is not.
+    assert explicitly_rejected(server_error("Could not process image"), "image")
     assert not explicitly_rejected(server_error("Internal server error"), "image")
 
 
