@@ -346,6 +346,31 @@ def _processing_failed(text: str, kind) -> bool:
     )
 
 
+def _fetch_failed(text: str) -> bool:
+    """A remote image URL could not be downloaded (dead link, expired presigned URL).
+
+    LiteLLM downloads image URLs itself for Bedrock and Anthropic routes and
+    raises ``ImageFetchError`` ("Error: Unable to fetch image from URL. Status
+    code: 404, url=..."). OpenAI's server-side fetch says "Error while
+    downloading https://..." or "Timeout while downloading ..." (wording from
+    the #597 review, not captured live). The image stays in history, so every
+    later request would fail the same way.
+    """
+    return bool(
+        re.search(
+            r"\bunable to (?:fetch|download|retrieve) (?:the )?image\b"
+            r"|\b(?:error|timeout|timed out) while downloading\b"
+            r"|\bfailed to (?:fetch|download) (?:the )?image\b",
+            text,
+        )
+    )
+
+
+def _is_image_fetch_error(exc) -> bool:
+    """``litellm.ImageFetchError`` (a 400 ``BadRequestError``), without importing LiteLLM."""
+    return any(cls.__name__ == "ImageFetchError" for cls in type(exc).__mro__)
+
+
 def _param_kind(param: str | None) -> str | None:
     """The kind of the wire part a structured error ``param`` points at, if any."""
     if not param:
@@ -409,12 +434,13 @@ def rejected_media_kinds(exc) -> frozenset[str]:
     - 413: only when the message says the attachment itself is too large.
     - 500: only wording that says the server could not read this attachment
       (unsupported format, "Could not process image", a size limit, a failed
-      download) and nothing that sounds transient ("temporarily", "overloaded").
+      image download) and nothing that sounds transient ("temporarily", "overloaded").
       Other 5xx statuses (502/503/504: gateways, outages) never count.
     - No status: only a local ``ValueError`` (LiteLLM's Bedrock adapter raises
       ``ValueError("Unsupported image format: ...")`` before sending).
 
-    A generic error, one about another parameter (model, max_tokens, ...),
+    ``litellm.ImageFetchError`` (a remote image URL LiteLLM could not
+    download) is always an image rejection. A generic error, one about another parameter (model, max_tokens, ...),
     a per-request image limit (``image_limit``) or a context-length error does
     not count.
     """
@@ -422,6 +448,8 @@ def rejected_media_kinds(exc) -> frozenset[str]:
     text = _error_texts(exc)
     if image_limit(exc) is not None or _CONTEXT_LENGTH_RE.search(text):
         return frozenset()
+    if _is_image_fetch_error(exc):
+        return frozenset({"image"})
     param = _error_param(exc)
     if param is not None and param.split(".")[0] in {
         "model",
@@ -466,6 +494,7 @@ def rejected_media_kinds(exc) -> frozenset[str]:
         if (
             _size_rejected(text, kind)
             or (server and (_unsupported_format_text(text, kind) or _processing_failed(text, kind)))
+            or (server and kind == "image" and _fetch_failed(text))
             or (strict and _strict_media_statement(text, kind))
         ):
             kinds.add(kind)
