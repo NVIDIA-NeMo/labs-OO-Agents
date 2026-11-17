@@ -985,12 +985,23 @@ def _shape_fields(
     ``max_string`` / ``max_length`` bound its subtree.
     """
     overrides = _class_overrides(mro, state) if shape.fields else {}
+    omit_empty = isinstance(shape, _ObjectLike) and shape.omit_empty
     entries: list[tuple[str, Any]] = []
     for name, function in shape.fields:
         flags = overrides.get(name, {})
         if flags.get("hidden"):
             continue
-        part = _lazy(functools.partial(function, value), state)
+        read = functools.partial(function, value)
+        if omit_empty:
+            try:
+                field_value = read()
+            except Exception:
+                pass  # read() raises again in the part: Unavailable("error")
+            else:
+                if _is_empty_field(field_value):
+                    continue
+                read = functools.partial(_identity, field_value)
+        part = _lazy(read, state)
         entries.append((name, _scoped_part(part, flags)))
     max_items = state.limits.max_items
     cut = max_items is not None and len(entries) > max_items
@@ -1021,6 +1032,21 @@ def _shape_fields(
         reserves=reserves,
         capped=False,
     )
+
+
+def _is_empty_field(value: Any) -> bool:
+    """``object_like(omit_empty=True)``'s test: ``None``, ``""`` or an empty ``list`` / ``dict`` / ``tuple``, by exact type (no code of the value runs)."""
+    kind = type(value)
+    if value is None:
+        return True
+    if kind is str or kind is list or kind is dict or kind is tuple:
+        return len(value) == 0
+    return False
+
+
+def _identity(value: Any) -> Any:
+    """``value`` itself: the read of a field whose value was read already."""
+    return value
 
 
 def _class_overrides(mro: tuple[type[Any], ...], state: _State) -> dict[str, dict[str, Any]]:

@@ -133,6 +133,7 @@ class _ObjectLike:
 
     fields: tuple[tuple[str, Callable[[Any], Any]], ...]
     kind: str | None
+    omit_empty: bool = False
 
 
 @dataclass(frozen=True)
@@ -362,7 +363,12 @@ def ndarray_like(
     )
 
 
-def object_like(fields: dict[str, Callable[[Any], Any]], *, kind: str | None = None) -> _ObjectLike:
+def object_like(
+    fields: dict[str, Callable[[Any], Any]],
+    *,
+    kind: str | None = None,
+    omit_empty: bool = False,
+) -> _ObjectLike:
     """A shape for record-like values, for ``capture.register``: named fields.
 
     Arguments:
@@ -374,6 +380,13 @@ def object_like(fields: dict[str, Callable[[Any], Any]], *, kind: str | None = N
       minimal value of every later one.
     - ``kind`` (default ``None``): a ``str`` stored as ``Object.kind``; it
       selects a ``render_python`` hook.
+    - ``omit_empty`` (default ``False``): ``True`` leaves out a field whose
+      value is ``None``, ``""`` or an empty ``list``, ``dict`` or ``tuple``
+      (exact types: a subclass is kept, and no ``__len__`` or other code of
+      the value runs), before the fields are counted against
+      ``Limits.max_items`` and the budget, so the fields with content get
+      the room. Every field's accessor is then called once, up front, to
+      see its value; an accessor that raises keeps its field.
 
     The value becomes an ``Object`` (``type_name``: the class name). A field
     accessor that raises makes its field ``Unavailable("error")``.
@@ -386,7 +399,8 @@ def object_like(fields: dict[str, Callable[[Any], Any]], *, kind: str | None = N
     a ``Ref`` (a cycle).
 
     Raises ``TypeError`` when ``fields`` is not a ``dict``, an accessor is
-    not callable, or a name or ``kind`` is not a ``str``.
+    not callable, a name or ``kind`` is not a ``str``, or ``omit_empty`` is
+    not a ``bool``.
 
     >>> from nooa.snapshot import capture, object_like, render_python
     >>> class Secretive:
@@ -399,7 +413,9 @@ def object_like(fields: dict[str, Callable[[Any], Any]], *, kind: str | None = N
     """
     if not isinstance(fields, dict):
         raise TypeError("fields must be a dict of name -> accessor")
-    return _ObjectLike(_accessor_fields(fields, "object"), _kind(kind))
+    if type(omit_empty) is not bool:
+        raise TypeError("omit_empty must be a bool")
+    return _ObjectLike(_accessor_fields(fields, "object"), _kind(kind), omit_empty)
 
 
 def text_like(
