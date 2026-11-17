@@ -18,6 +18,7 @@ from pydantic import Field
 
 from nooa._bounded_text import cut_halves, text_stream
 from nooa.agentdoc import hidden, spec
+from nooa.config.effective import effective_truncation
 from nooa.context_blocks import EventBase
 from nooa.context_blocks.roles import Role
 from nooa.runtime.event_manager import EventManager
@@ -34,9 +35,6 @@ from nooa.tools.shell_tools import (
 logger = logging.getLogger(__name__)
 
 _MAX_EVENT_TEXT_CHARS = 10_000
-_MAX_COMMAND_OUTPUT_CHARS = 30_000
-"""Characters of each stream a terminal card shows: the shell's own per-stream limit
-(``MAX_OUTPUT_CHARS`` of the core shell session), so the card shows what the model got."""
 _MAX_DIFF_INPUT_CHARS = 1_000_000
 _MAX_DIFF_INPUT_LINES = 20_000
 
@@ -49,8 +47,12 @@ def _event_text(text: str) -> str:
 
 
 def _output_stream() -> TextStream:
-    """One stream of a terminal card: the first and last halves of ``_MAX_COMMAND_OUTPUT_CHARS``."""
-    return text_stream(_MAX_COMMAND_OUTPUT_CHARS)
+    """One stream of a terminal card: the first and last halves of ``capture.max_shell_output``.
+
+    The shell's own per-stream limit (``nooa.config.effective_truncation()``),
+    so the card shows what the model got.
+    """
+    return text_stream(effective_truncation().capture.max_shell_output)
 
 
 def _command_output(

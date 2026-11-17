@@ -24,6 +24,16 @@ Two layers of bounds:
      intentionally by the author, often large (e.g. ``doc(self)``,
      formatted state). Defaults to fully unlimited; whole-block eviction
      handles overflow at the assembly step.
+   - ``state_format`` (``FormatConfig``): the agent's ``state`` context block
+     (its field values, every turn).
+3. **Char budgets of other model-visible text** (top level):
+   ``placeholder_chars`` (one docstring ``{expr}``), ``instructions_file_chars``
+   / ``instructions_total_chars`` (repository instructions); in ``capture``:
+   ``max_shell_output`` (shell command results) and ``max_job_tail``
+   (background job output).
+
+Read the config in force with :func:`nooa.config.effective_truncation`, when
+the limit is applied.
 
 ``max_event_tokens`` and ``min_preserved_events`` are retained for
 configuration compatibility, but are not currently enforced because events
@@ -84,6 +94,27 @@ class CaptureConfig(BaseModel):
             ),
         ),
     ] = False
+    max_shell_output: Annotated[
+        int,
+        Field(
+            description=(
+                "Max chars kept of each of a shell command's stdout and stderr "
+                "(nooa.tools BashSession / ShellTools results; the terminal cards of "
+                "nooa-atom and nooa-cli follow it): the first and last halves around "
+                "the cut line. Not affected by capture.tail."
+            )
+        ),
+    ] = 30_000
+    max_job_tail: Annotated[
+        int,
+        Field(
+            description=(
+                "Max chars kept of the end of each of stdout and stderr on a "
+                "background shell job's done update (nooa-atom jobs). Not affected "
+                "by capture.tail."
+            )
+        ),
+    ] = 20_000
     unrecoverable_hint: Annotated[
         str | None,
         Field(
@@ -97,7 +128,7 @@ class CaptureConfig(BaseModel):
     @model_validator(mode="after")
     def _check(self) -> "CaptureConfig":
         errors = []
-        for name in ("max_stdout", "max_stderr", "max_error"):
+        for name in ("max_stdout", "max_stderr", "max_error", "max_shell_output", "max_job_tail"):
             if getattr(self, name) <= 0:
                 errors.append(f"capture.{name} must be > 0, got {getattr(self, name)}")
         if self.tail is not None:
@@ -268,6 +299,25 @@ class TruncationConfig(BaseModel):
             )
         ),
     ] = 50_000
+    instructions_file_chars: Annotated[
+        int,
+        Field(
+            description=(
+                "Most characters read from one repository instruction file "
+                "(AGENTS.md) into the repository_instructions context block "
+                "(nooa-atom, nooa-cli)."
+            )
+        ),
+    ] = 100_000
+    instructions_total_chars: Annotated[
+        int,
+        Field(
+            description=(
+                "Most characters of the whole repository_instructions context block, "
+                "headers and separators included (nooa-atom, nooa-cli)."
+            )
+        ),
+    ] = 200_000
     capture: CaptureConfig = CaptureConfig()
     media_capture: MediaCaptureConfig = MediaCaptureConfig()
     # Generous: rendered every turn, especially PythonOutput.value (the LLM
@@ -281,6 +331,9 @@ class TruncationConfig(BaseModel):
     context_block_format: FormatConfig = FormatConfig(
         max_string=None, max_length=None, max_depth=None
     )
+    # The agent's ``state`` context block (``pformat(self, ...)`` of its
+    # fields), rendered every turn.
+    state_format: FormatConfig = FormatConfig(max_string=500, max_length=50, max_depth=4)
 
     @model_validator(mode="after")
     def _check(self) -> "TruncationConfig":
@@ -291,6 +344,9 @@ class TruncationConfig(BaseModel):
                 errors.append(f"{name} must be > 0 or None, got {v}")
         if self.placeholder_chars is not None and self.placeholder_chars <= 0:
             errors.append(f"placeholder_chars must be > 0 or None, got {self.placeholder_chars}")
+        for name in ("instructions_file_chars", "instructions_total_chars"):
+            if getattr(self, name) <= 0:
+                errors.append(f"{name} must be > 0, got {getattr(self, name)}")
         if errors:
             raise ValueError("Invalid TruncationConfig:\n" + "\n".join(f"  - {e}" for e in errors))
         return self
@@ -299,7 +355,7 @@ class TruncationConfig(BaseModel):
         """Merge with another config (other takes precedence for explicitly-set fields).
 
         Sub-configs (``capture``, ``media_capture``, ``event_format``,
-        ``prefill_format``, ``context_block_format``) merge field-by-field —
+        ``prefill_format``, ``context_block_format``, ``state_format``) merge field-by-field —
         supplying ``other.event_format`` with only ``max_string`` set does NOT
         clobber the base's ``max_length``. Top-level fields use the same
         explicit-fields semantics.
@@ -318,6 +374,7 @@ class TruncationConfig(BaseModel):
             "event_format",
             "prefill_format",
             "context_block_format",
+            "state_format",
         )
         updates: dict = {
             k: getattr(other, k) for k in other.model_fields_set if k not in sub_field_names

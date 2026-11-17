@@ -36,8 +36,6 @@ from nooa._platform import require_posix
 
 logger = logging.getLogger(__name__)
 
-MAX_OUTPUT_CHARS = 30_000
-"""Characters kept of each of a command's stdout and stderr: the first and last half."""
 _DRAIN_TIMEOUT = 0.05  # Seconds to wait for remaining output after sentinel
 _SIGTERM_GRACE = 5.0  # Seconds to wait for sentinel after SIGTERM
 _SIGKILL_GRACE = 2.0  # Seconds to wait for sentinel after SIGKILL
@@ -59,13 +57,17 @@ _DRAIN_SCRIPT = (
 
 
 def _bounded(text: str) -> str:
-    """``text`` cut to ``MAX_OUTPUT_CHARS``: its head and tail around ``render_output``'s line.
+    """``text`` cut to ``capture.max_shell_output``: its head and tail around ``render_output``'s line.
 
     ``HEAD``, ``[... N chars omitted; full output not kept]``, ``TAIL`` (half
-    of ``MAX_OUTPUT_CHARS`` each). The tail matters as much as the head: a
-    failing command usually ends with its error.
+    of the limit each). The limit is ``TruncationConfig.capture.max_shell_output``
+    of the config in force (``nooa.config.effective_truncation``; 30,000 by
+    default). The tail matters as much as the head: a failing command usually
+    ends with its error.
     """
-    return cut_text(text, MAX_OUTPUT_CHARS)
+    from nooa.config.effective import effective_truncation
+
+    return cut_text(text, effective_truncation().capture.max_shell_output)
 
 
 def _process_start_time(pid: int) -> str | None:
@@ -418,7 +420,7 @@ class BashSession:
         try:
             async with self._lock:
                 # Uncapped: a large environment (HPC modules) is far over
-                # MAX_OUTPUT_CHARS, and a cut base64 blob decodes to garbage.
+                # capture.max_shell_output, and a cut base64 blob decodes to garbage.
                 out, _err, code, timed_out = await self._run_unlocked(
                     'printf "%s\\n" "$PWD"; env -0 | base64 | tr -d "\\n"',
                     timeout,
@@ -451,7 +453,7 @@ class BashSession:
         """Actual run implementation (caller must hold self._lock).
 
         Returns (stdout, stderr, exit_code, timed_out). With ``bounded=False``
-        the output is returned whole instead of cut to ``MAX_OUTPUT_CHARS``
+        the output is returned whole instead of cut to ``capture.max_shell_output``
         (for internal reads such as ``snapshot_cwd_env`` that must be complete).
         """
         if not self._ready:
