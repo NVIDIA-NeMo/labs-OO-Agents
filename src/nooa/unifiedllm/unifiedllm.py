@@ -59,7 +59,7 @@ from .errors import EmptyContentError
 from .http_config import HttpConfig
 from .limits import REPLY_CAP_KEYS, ContextLimits
 from .reasoning import ReasoningConfig, apply_reasoning_level
-from .retry import sync_retry, with_retry
+from .retry import _is_retryable_error, sync_retry, with_retry
 from .retry_config import RetryConfig
 from .structured_output import (
     StructuredOutputMode,
@@ -71,7 +71,9 @@ logger = logging.getLogger(__name__)
 
 # Most requests media recovery adds after a failed request (``_media_search``).
 _MEDIA_RECOVERY_LIMIT = 12
-# Set while a media recovery probe runs: its request gets no endpoint retries.
+# Set while a media recovery request runs (the probe and every search
+# request): it gets no endpoint retries, so the recovery budget counts
+# endpoint requests.
 _media_probe: ContextVar[bool] = ContextVar("media_probe", default=False)
 # The exclusions a media recovery request is trying, local to that request:
 # merged with the connection's committed set only when this request is
@@ -1515,8 +1517,9 @@ class UnifiedLLM(ABC):
     def _media_search(self, candidates, original: Exception, mode: str, rejected: set, budget: int):
         """Find the fewest attachments to exclude for the request to succeed.
 
-        A generator: it yields ``(excluded_keys, probe)`` for each request to
-        try and is sent back ``(response, error)``. It returns the response of
+        A generator: it yields the ``excluded_keys`` of each request to try
+        (sent by ``_media_attempt``, without endpoint retries) and is sent
+        back ``(response, error)``. It returns the response of
         the final request, or raises (the original error when the search
         fails), so a failed search changes nothing.
 
@@ -1530,17 +1533,24 @@ class UnifiedLLM(ABC):
         One bad attachment among N costs about log2(N) + 2 requests.
 
         ``mode="fallback"`` (no narrow rule matched) first sends one probe with
-        every candidate excluded, without endpoint retries; its reply is
-        discarded. If that probe fails too, the media is not the problem: the
+        every candidate excluded; its reply is discarded. If that probe fails too, the media is not the problem: the
         original error is raised and nothing changes.
 
-        At most ``budget`` requests are made after the original one. Only the
+        At most ``budget`` requests are made after the original one, counted
+        as endpoint requests (``media_recovery_probes``): a recovery request
+        gets no endpoint retries, and a retryable error (a plain 5xx, a 429)
+        re-sends the same request from this budget. Only the
         exclusions of a final request that succeeded are kept (added to
         ``rejected``, the connection's set) and counted as
         ``media_rejected_retry``; the reply of that final request is returned.
         """
         keys = [key for _, key in candidates]
         kinds = {key: kind for kind, key in candidates}
+        config = self.retry_config or RetryConfig()
+
+        def _retryable(err: BaseException) -> bool:
+            return not still_media(err) and _is_retryable_error(err, config)[0]
+
         used = 0
         replies: dict[frozenset, Any] = {}
 
@@ -1559,7 +1569,7 @@ class UnifiedLLM(ABC):
                 type(original).__name__,
                 str(original)[:300],
             )
-            _, error = yield frozenset(keys), True
+            _, error = yield frozenset(keys)
             if error is not None:
                 logger.warning(
                     "The probe without attachments failed too; giving up: %s", str(error)[:300]
@@ -1583,7 +1593,11 @@ class UnifiedLLM(ABC):
                 raise original
             used += 1
             _record_llm_metric("media_recovery_probe", mode)
-            response, error = yield excluded, False
+            response, error = yield excluded
+            while error is not None and _retryable(error) and used < budget:
+                used += 1  # an endpoint retry of the same request, from the budget
+                _record_llm_metric("media_recovery_probe", mode)
+                response, error = yield excluded
             if error is None:
                 replies[excluded] = response
                 return True, None
@@ -1646,7 +1660,7 @@ class UnifiedLLM(ABC):
         return min(_MEDIA_RECOVERY_LIMIT, 4 * retries)
 
     def _endpoint_retry_config(self) -> RetryConfig | None:
-        """The endpoint retry config of this request: none for a media recovery probe."""
+        """The endpoint retry config of this request: no retries for a media recovery request."""
         if self.retry_config is not None and _media_probe.get():
             return self.retry_config.model_copy(
                 update={"max_retries": 0, "rate_limit_extra_retries": 0}
@@ -1655,15 +1669,16 @@ class UnifiedLLM(ABC):
 
     @staticmethod
     @contextlib.contextmanager
-    def _media_attempt(excluded: frozenset, probe: bool):
-        """Send one recovery request with ``excluded`` replaced by notes.
+    def _media_attempt(excluded: frozenset):
+        """Send one recovery request with ``excluded`` replaced by notes, without endpoint retries.
 
         The trial exclusions live in a ContextVar for this request only; the
         connection's ``rejected`` set changes only when ``_media_search``
-        commits a successful recovery.
+        commits a successful recovery. No endpoint retries: each recovery
+        request is one endpoint request, which the recovery budget counts.
         """
         trial = _media_trial.set(frozenset(excluded))
-        token = _media_probe.set(probe)
+        token = _media_probe.set(True)
         try:
             yield
         finally:
@@ -2000,11 +2015,11 @@ class UnifiedLLM(ABC):
             outcome = None
             while True:
                 try:
-                    excluded, probe = search.send(outcome)
+                    excluded = search.send(outcome)
                 except StopIteration as done:
                     return done.value
                 try:
-                    with self._media_attempt(excluded, probe):
+                    with self._media_attempt(excluded):
                         outcome = (self._call_once(messages, tools, output_model, **kwargs), None)
                 except Exception as error:
                     outcome = (None, error)
@@ -2030,11 +2045,11 @@ class UnifiedLLM(ABC):
             outcome = None
             while True:
                 try:
-                    excluded, probe = search.send(outcome)
+                    excluded = search.send(outcome)
                 except StopIteration as done:
                     return done.value
                 try:
-                    with self._media_attempt(excluded, probe):
+                    with self._media_attempt(excluded):
                         outcome = (
                             await self._acall_once(messages, tools, output_model, **kwargs),
                             None,

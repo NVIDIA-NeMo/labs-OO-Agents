@@ -314,3 +314,28 @@ async def test_a_search_does_not_remove_attachments_from_a_concurrent_call():
         assert (await task_a).content == "A saw 2 images"
         # Committed only now: B's images are good, so B still sends both.
         assert (await c.acall(b_messages)).content == "B saw 2 images"
+
+
+@pytest.mark.parametrize("error", [BEDROCK, UNNAMED])
+async def test_the_budget_counts_endpoint_requests_with_500s_mid_search(error):
+    images = numbered_images(16)
+    bad = images[5]
+    seen = set()
+
+    def wire_reply(**kwargs):
+        sent = tuple(b["image_url"]["url"] for b in sent_images(kwargs))
+        if wire.call_count > 1 and sent not in seen:
+            seen.add(sent)  # each new search request fails once with a generic 500
+            raise litellm.InternalServerError(message="boom", model="m", llm_provider="openai")
+        if bad in sent_images(kwargs):
+            raise bad_request(error)
+        return reply(f"saw {len(sent)} images")
+
+    with client() as c, patch("litellm.acompletion", new_callable=AsyncMock) as wire:
+        wire.side_effect = wire_reply
+        budget = c._media_recovery_attempts()
+        try:
+            await c.acall(messages_with(images))
+        except (litellm.BadRequestError, litellm.InternalServerError):
+            pass  # the budget may run out before the search ends
+        assert wire.call_count - 1 <= budget
