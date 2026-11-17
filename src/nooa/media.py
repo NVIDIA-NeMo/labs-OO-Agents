@@ -159,10 +159,16 @@ class Audio(Media):
     _modality = "audio"
 
     @classmethod
-    def from_url(
-        cls, url: str, *, media_type: str = "audio/wav", **vendor_metadata: object
-    ) -> "Audio":
-        """Create audio from a URL."""
+    def from_url(cls, url: str, *, media_type: str = "", **vendor_metadata: object) -> "Audio":
+        """Create audio from a URL.
+
+        Model APIs take audio inline (``input_audio`` data is base64), not as a
+        URL, so such a clip is replaced by a note before each request; load it
+        with ``Audio.from_file`` or ``Audio.from_bytes`` instead. The type comes
+        from a ``data:`` URL or the file extension, else ``audio/wav``.
+        """
+        guessed = _url_media_type(url, "audio/")
+        media_type = media_type or {"audio/x-wav": "audio/wav"}.get(guessed, guessed) or "audio/wav"
         return cls(data_url=url, media_type=media_type, vendor_metadata=vendor_metadata or None)
 
 

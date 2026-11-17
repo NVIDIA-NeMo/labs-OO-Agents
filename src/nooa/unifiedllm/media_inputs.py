@@ -9,7 +9,13 @@ from collections.abc import Mapping
 from typing import Any
 
 from nooa.llm_types import CacheBoundary, LLMResponse
-from nooa.media_inputs import MediaInput, _mime_hints, attachment_kind
+from nooa.media_inputs import (
+    INPUT_AUDIO_FORMATS,
+    MediaInput,
+    _mime_hints,
+    attachment_kind,
+    audio_format_name,
+)
 from nooa.media_inputs import MediaInputs as MediaInputs
 from nooa.media_inputs import validate_media_inputs as validate_media_inputs
 from nooa.unifiedllm.errors import ReasoningReplayError
@@ -160,6 +166,50 @@ def _sendable_image_block(block: Mapping[str, Any]) -> Mapping[str, Any]:
             if node is not block[key]:
                 result = {**result, key: node}
     return result
+
+
+def unsendable_audio(block: Mapping[str, Any]) -> str | None:
+    """Why an ``input_audio`` block cannot be sent, else None.
+
+    ``"url"``: its ``data`` is a URL, not base64 (``Audio.from_url``); a URL
+    must never be sent as base64 audio. Otherwise its format name, if it is
+    not one ``input_audio`` accepts (``wav``, ``mp3``; aliases such as
+    ``mpeg`` and ``x-wav`` count as those). Other audio blocks are not checked.
+    """
+    if block.get("type") != "input_audio" or not isinstance(block.get("input_audio"), Mapping):
+        return None
+    node = block["input_audio"]
+    data = node.get("data")
+    if isinstance(data, str) and re.match(r"\s*[a-z][a-z0-9+.-]*://", data, re.I):
+        return "url"
+    fmt = node.get("format")
+    if isinstance(fmt, str) and fmt and audio_format_name(fmt) not in INPUT_AUDIO_FORMATS:
+        return audio_format_name(fmt)
+    return None
+
+
+def _sendable_audio_block(block: Mapping[str, Any]) -> Mapping[str, Any]:
+    """``block`` with its ``input_audio`` format as the provider name (``mpeg`` -> ``mp3``)."""
+    node = block.get("input_audio")
+    if block.get("type") != "input_audio" or not isinstance(node, Mapping):
+        return block
+    fmt = node.get("format")
+    if not isinstance(fmt, str) or audio_format_name(fmt) == fmt:
+        return block
+    return {**block, "input_audio": {**node, "format": audio_format_name(fmt)}}
+
+
+def unsendable_audio_notice(reason: str) -> str:
+    """The text the model sees in place of audio it cannot be sent."""
+    if reason == "url":
+        return (
+            "[An audio clip was removed here: audio given as a URL cannot be sent to a model. "
+            "Load it with Audio.from_file or Audio.from_bytes and show it again.]"
+        )
+    return (
+        f"[An audio clip was removed here: {reason} audio cannot be sent to a model. "
+        "Only WAV and MP3 are accepted; convert it and show it again.]"
+    )
 
 
 def unsendable_image_notice(media_type: str) -> str:
@@ -591,7 +641,7 @@ def _occurrences(messages, enabled: tuple[MediaInput, ...]):
 
     def occurrence(index, position, block):
         kind = attachment_kind(block)
-        if kind is None or kind not in enabled or unsendable_image_type(block) is not None:
+        if kind is None or kind not in enabled or _unsendable(kind, block) is not None:
             return None
         payload = {k: v for k, v in block.items() if k != "cache_control"}
         digest = hashlib.sha256(
@@ -628,10 +678,28 @@ def _replacement(kind, block, rejected: bool, enabled) -> str | None:
     """The notice that replaces an attachment block on the wire, or None to send it."""
     if kind not in enabled:
         return removed_media_notice(kind)
-    bad_type = unsendable_image_type(block) if kind == "image" else None
-    if bad_type is not None:
-        return unsendable_image_notice(bad_type)
+    notice = _unsendable(kind, block)
+    if notice is not None:
+        return notice
     return rejected_media_notice(kind) if rejected else None
+
+
+def _unsendable(kind, block) -> str | None:
+    """The notice for an enabled attachment no model can be sent in this form, else None."""
+    if kind == "image" and (bad_type := unsendable_image_type(block)) is not None:
+        return unsendable_image_notice(bad_type)
+    if kind == "audio" and (reason := unsendable_audio(block)) is not None:
+        return unsendable_audio_notice(reason)
+    return None
+
+
+def _sendable_block(kind, block):
+    """An accepted attachment block in canonical wire form (MIME type, audio format name)."""
+    if kind == "image":
+        return _sendable_image_block(block)
+    if kind == "audio":
+        return _sendable_audio_block(block)
+    return block
 
 
 def filter_media_messages(messages, enabled: tuple[MediaInput, ...], excluded=frozenset()):
@@ -671,9 +739,7 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...], excluded=fr
             result.append(
                 {"role": "user", "content": notice}
                 if notice is not None
-                else _sendable_image_block(item)
-                if kind == "image"
-                else item
+                else _sendable_block(kind, item)
             )
             continue
         slot = "output" if item.get("type") == "function_call_output" else "content"
@@ -707,7 +773,7 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...], excluded=fr
                     text_type = "input_text" if slot == "output" else "text"
                     blocks.append({"type": text_type, "text": notice})
                 else:
-                    blocks.append(_sendable_image_block(block) if kind == "image" else block)
+                    blocks.append(_sendable_block(kind, block) if kind is not None else block)
             item[slot] = blocks
         result.append(item)
     return result

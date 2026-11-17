@@ -106,7 +106,12 @@ def media_to_content_block(media: Any) -> dict[str, Any]:
 
     if isinstance(media, Audio):
         # LiteLLM input_audio format: {"type": "input_audio", "input_audio": {"data": base64, "format": "wav"}}
-        fmt = media.media_type.split("/")[-1] if media.media_type else "wav"
+        # OpenAI takes only "wav"/"mp3": audio/mpeg is "mp3", audio/x-wav "wav".
+        # Other formats keep their subtype; the request filter replaces them
+        # (and an Audio.from_url clip, whose data is a URL) with a note.
+        from nooa.media_inputs import audio_format_name
+
+        fmt = audio_format_name(media.media_type) if media.media_type else "wav"
         return {
             "type": "input_audio",
             "input_audio": {"data": media._base64_data(), "format": fmt},
