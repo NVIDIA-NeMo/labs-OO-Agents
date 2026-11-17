@@ -369,3 +369,34 @@ async def test_one_image_in_fallback_mode_reuses_the_probe_reply():
         assert (await c.acall(messages_with(images))).content == "saw 0 images"
         # The request, re-sent once, the probe (its reply is the answer).
         assert [len(sent_images(call.kwargs)) for call in wire.call_args_list] == [1, 1, 0]
+
+
+async def test_a_bad_image_and_a_bad_pdf_are_both_found():
+    images = numbered_images(3)
+    pdf = {"type": "file", "file": {"file_data": "data:application/pdf;base64,JVBERi0xLjQ="}}
+    good_pdf = {"type": "file", "file": {"file_data": "data:application/pdf;base64,JVBERi0xLjU="}}
+    blocks = [images[0], pdf, images[1], good_pdf, images[2]]
+
+    def wire_reply(**kwargs):
+        sent = [b for m in kwargs["messages"] for b in m["content"]]
+        if images[1] in sent:
+            raise bad_request(BEDROCK)
+        if pdf in sent:
+            raise bad_request("The PDF specified was not valid.")
+        return reply(f"saw {len(sent_images(kwargs))} images, {good_pdf in sent}")
+
+    with (
+        CompletionClient(
+            "openai/test",
+            media_inputs=["image", "pdf"],
+            cache_breakpoint=None,
+            retry_config=RetryConfig(max_retries=3),
+        ) as c,
+        patch("litellm.acompletion", new_callable=AsyncMock) as wire,
+    ):
+        wire.side_effect = wire_reply
+        assert (await c.acall(messages_with(blocks))).content == "saw 2 images, True"
+        assert wire.call_count - 1 <= c._media_recovery_attempts()
+        wire.reset_mock()
+        assert (await c.acall(messages_with(blocks))).content == "saw 2 images, True"
+        assert wire.call_count == 1  # both exclusions kept, no new search

@@ -1512,9 +1512,11 @@ class UnifiedLLM(ABC):
             return None
         if not candidates:
             return None
-        return self._media_search(candidates, exc, mode, rejected, budget)
+        return self._media_search(candidates, exc, mode, rejected, budget, newest_first)
 
-    def _media_search(self, candidates, original: Exception, mode: str, rejected: set, budget: int):
+    def _media_search(
+        self, candidates, original: Exception, mode: str, rejected: set, budget: int, available=()
+    ):
         """Find the fewest attachments to exclude for the request to succeed.
 
         A generator: it yields the ``excluded_keys`` of each request to try
@@ -1531,6 +1533,11 @@ class UnifiedLLM(ABC):
         cleared. The next round tries the attachments found so far; if that
         still fails it searches the remaining newer candidates the same way.
         One bad attachment among N costs about log2(N) + 2 requests.
+
+        ``available`` holds every attachment the request sends (newest
+        first). If a search request fails with a rejection of a kind not yet
+        searched (a bad image and a bad PDF), the attachments of that kind
+        join the pool and the round starts again, within the same budget.
 
         ``mode="fallback"`` (no narrow rule matched) first re-sends the
         original request once: if that succeeds, its reply is returned and
@@ -1550,7 +1557,10 @@ class UnifiedLLM(ABC):
         ``media_rejected_retry``; the reply of that final request is returned.
         """
         keys = [key for _, key in candidates]
-        kinds = {key: kind for kind, key in candidates}
+        available = available or candidates
+        kinds = {key: kind for kind, key in available}
+        searched_kinds = {kind for kind, _ in candidates}
+        widened: list[Any] = []  # set by attempt() when the pool grew
         config = self.retry_config or RetryConfig()
 
         def _retryable(err: BaseException) -> bool:
@@ -1631,24 +1641,39 @@ class UnifiedLLM(ABC):
             if not still_media(error):
                 raise error
             failures[excluded] = error
+            if mode == "rejected" and (new := rejected_media_kinds(error) - searched_kinds):
+                # The request now fails on another kind (a bad image and a bad
+                # PDF): add those attachments to the pool, within the budget.
+                searched_kinds.update(new)
+                pool.extend(key for kind, key in available if kind in new and key not in pool)
+                widened.append(new)
             return False, error
 
         found: list[Any] = []
         pool = list(keys)
         top_ok = mode == "fallback"  # excluding every candidate is known to succeed
         while True:
+            widened.clear()
             if found:
                 ok, _ = yield from attempt(found)
                 if ok:
                     break
+                if widened:
+                    top_ok = False
+                    continue
             if not pool:
                 raise original
             low, high = 0, len(pool)  # excluding pool[:low] fails
             ok, _ = yield from attempt([*found, pool[0]])
+            if widened:
+                top_ok = False
+                continue  # another kind is refused too: search the larger pool
             if ok:
                 high = 1
             elif high > 1 and not top_ok:
                 ok, _ = yield from attempt([*found, *pool])
+                if widened:
+                    continue
                 if not ok:
                     raise original  # even without all of them it fails: not these attachments
             if high > 1:
@@ -1656,10 +1681,15 @@ class UnifiedLLM(ABC):
             while high - low > 1:
                 mid = (low + high) // 2
                 ok, _ = yield from attempt([*found, *pool[:mid]])
+                if widened:
+                    break
                 if ok:
                     high = mid
                 else:
                     low = mid
+            if widened:
+                top_ok = False
+                continue
             found.append(pool[high - 1])
             pool = pool[: high - 1]  # older candidates are fine
             top_ok = True
