@@ -14,11 +14,10 @@ Entries must be absolute paths (``~`` is expanded); relative entries are
 ignored with a warning. The project layer (``<workspace>/.nooa/settings.yaml``)
 is never read here: a repository must not be able to trust itself.
 
-Interactive hosts (the coding agent behind ``nooa-acp`` and Atom) do not run
-code from an untrusted workspace (code skills in ``.nooa/skills``,
-``.claude/skills`` and similar directories). A path counts as workspace code
-when it was found in the workspace or points into it (symlinks), unless it is
-under one of the user's own skill roots (``user_skill_roots``). Plain agents
+Interactive hosts (the coding agent behind ``nooa-acp`` and Atom) load
+nothing from the skill directories of an untrusted workspace (``.nooa/skills``,
+``.claude/skills`` and similar directories, and the ones its own settings
+name), and tell the user, not the agent (``untrusted_notice``). Plain agents
 and the skill registry used directly are not affected.
 """
 
@@ -27,7 +26,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -36,8 +35,6 @@ logger = logging.getLogger(__name__)
 SETTINGS_FILENAME = "settings.yaml"
 SETTINGS_ENV_VAR = "NEMO_OO_SETTINGS"
 TRUSTED_FOLDERS_KEY = "trusted_folders"
-USER_SKILL_DIRS = (Path(".agents/skills"), Path(".claude/skills"), Path(".claude/commands"))
-"""The user's own skill roots, relative to the home folder."""
 HOME_REFUSAL = (
     "Open a project folder instead; trusting your home folder would trust every repository in it."
 )
@@ -47,9 +44,9 @@ class WorkspaceTrustError(ValueError):
     """``trust()`` refused: the folder cannot be trusted, or the settings file is not valid."""
 
 
-def untrusted_notice(folder: str | Path, subject: str = "Code skills") -> str:
-    """The notice a host shows when ``subject`` in the untrusted ``folder`` was skipped."""
-    notice = f"{subject} in this folder are off because it is not trusted."
+def untrusted_notice(folder: str | Path, subject: str = "skills") -> str:
+    """The message a host shows the user when ``subject`` of the untrusted ``folder`` are off."""
+    notice = f"This folder isn't trusted, so its {subject} are off."
     if can_trust(folder):
         return f"{notice} Type /trust to allow."
     return f"{notice} {HOME_REFUSAL}"
@@ -204,21 +201,6 @@ def launch_project_trusted() -> bool:
     return is_trusted(get_project_dir())
 
 
-def user_skill_roots(extra: Iterable[str | Path] = ()) -> list[Path]:
-    """The user's own skill roots: ``~/.agents/skills``, ``~/.claude/skills``, ``~/.claude/commands``.
-
-    ``extra`` adds directories from user-level configuration (the user
-    ``settings.yaml`` and ``NEMO_OO_SETTINGS``); only absolute ones (after
-    ``~`` expansion) count, since a relative one names a workspace folder.
-    """
-    roots = [Path.home() / path for path in USER_SKILL_DIRS]
-    for path in extra:
-        candidate = Path(path).expanduser()
-        if candidate.is_absolute():
-            roots.append(candidate)
-    return [_absolute(root) for root in roots]
-
-
 def is_inside(path: str | Path, root: str | Path) -> bool:
     """Whether ``path`` is in ``root``: where it was found, or where it points (symlinks)."""
     found = _absolute(path)
@@ -226,33 +208,10 @@ def is_inside(path: str | Path, root: str | Path) -> bool:
     return any(_under(candidate, item) for candidate in (found, found.resolve()) for item in roots)
 
 
-def code_allowed_outside(
-    root: str | Path, *, user_roots: Iterable[str | Path] = ()
-) -> Callable[[Path], bool]:
-    """A ``SkillRegistry.code_allowed`` predicate refusing code in ``root``.
-
-    A path is allowed when it is under one of ``user_roots`` (the user's own
-    skill roots, also when ``root`` contains them), or when neither where it
-    was found nor where it points is in ``root`` (``is_inside``).
-    """
-    allowed_roots = [_absolute(item) for item in user_roots]
-
-    def allowed(path: Path) -> bool:
-        found = _absolute(path)
-        if any(
-            _under(found, item) or _under(found.resolve(), item.resolve()) for item in allowed_roots
-        ):
-            return True
-        return not is_inside(found, root)
-
-    return allowed
-
-
 __all__ = [
     "HOME_REFUSAL",
     "WorkspaceTrustError",
     "can_trust",
-    "code_allowed_outside",
     "is_inside",
     "is_trusted",
     "launch_project_trusted",
@@ -260,5 +219,4 @@ __all__ = [
     "trusted_folders",
     "untrusted_notice",
     "user_settings_file",
-    "user_skill_roots",
 ]

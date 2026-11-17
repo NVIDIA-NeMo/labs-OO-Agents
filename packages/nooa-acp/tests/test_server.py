@@ -1698,3 +1698,33 @@ async def test_load_session_with_an_unreadable_snapshot_starts_a_fresh_agent(tmp
     assert replayed == ["remember this\n"]
     await second.prompt(session_id, [text_block("still usable")])
     await second.close()
+
+
+async def test_untrusted_workspace_loads_no_skills_and_tells_the_user(tmp_path, untrusted_folders):
+    """An untrusted folder: no skills from it, one message for the user, /trust loads them."""
+    workspace = tmp_path / "workspace"
+    hello = workspace / ".claude" / "skills" / "hello"
+    hello.mkdir(parents=True)
+    (hello / "SKILL.md").write_text("---\nname: hello\ndescription: Say hello.\n---\n\nHello.\n")
+    client = _RecordingClient()
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    session = await adapter.new_session(str(workspace))
+    runtime = await _session(adapter, session.session_id)
+    await asyncio.sleep(0)
+    await runtime.bridge.flush()
+
+    messages = [u.content.text for u in client.updates if isinstance(u, AgentMessageChunk)]
+    assert messages == ["This folder isn't trusted, so its skills are off. Type /trust to allow."]
+    assert "cmd.hello" not in runtime.agent.skills.discovered()
+    assert "trust" not in runtime.agent.skills.status().lower()
+
+    response = await adapter.prompt(session.session_id, [text_block("/trust")])
+    await runtime.bridge.flush()
+    assert response.stop_reason == "end_turn"
+    messages = [u.content.text for u in client.updates if isinstance(u, AgentMessageChunk)]
+    assert messages[-1] == f"Trusted {workspace.resolve()}. Its skills are loaded now."
+    assert "cmd.hello" in runtime.agent.skills.discovered()
+    # The reply went to the user only: the model did not answer (no "ACP response").
+    assert "ACP response" not in messages
+    await adapter.close()

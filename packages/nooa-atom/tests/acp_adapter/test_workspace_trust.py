@@ -45,8 +45,7 @@ async def test_untrusted_session_gets_the_notice_and_no_question_without_forms(
     session_id = (await adapter.new_session(str(workspace))).session_id
     await client.wait_for(lambda: client.texts(AgentMessageChunk, session_id))
     notice = client.texts(AgentMessageChunk, session_id)[0]
-    assert "Code skills and model settings (.nooa/llm_config.yaml) in this folder are off" in notice
-    assert "Type /trust to allow." in notice
+    assert notice == "This folder isn't trusted, so its skills are off. Type /trust to allow."
     await adapter.prompt(session_id, [text_block("hello")])
     assert not [entry for entry in client.log if entry[0] in ("elicitation", "ext")]
     assert not untrusted.exists()

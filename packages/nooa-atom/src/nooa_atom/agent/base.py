@@ -30,13 +30,7 @@ from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActV2, PredictStrategy
 from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager
 from nooa.tools.shell_tools import ShellTools
-from nooa.workspace_trust import (
-    WorkspaceTrustError,
-    code_allowed_outside,
-    is_trusted,
-    trust,
-    untrusted_notice,
-)
+from nooa.workspace_trust import WorkspaceTrustError, is_inside, is_trusted, trust
 from nooa_atom.agent.activity import ActivityShellTools
 from nooa_atom.agent.instructions import RepositoryInstructions
 from nooa_atom.agent.jobs import JobInfo, JobsApi, JobUpdate  # noqa: F401  (visible to cells)
@@ -98,9 +92,6 @@ _V2_CONTEXT: Annotated[dict[str, Any], hidden] = {
     "execution_context": None,
     "self": Context(expr="doc(type(self), concise=True)", prefix=True),
 }
-# What an untrusted workspace has switched off in Atom (nooa.workspace_trust).
-_UNTRUSTED_SUBJECT = "Code skills and model settings (.nooa/llm_config.yaml)"
-_LLM_CONFIG = Path(".nooa/llm_config.yaml")
 
 
 class AtomAgentBase(InteractiveAgent):
@@ -191,7 +182,7 @@ class AtomAgentBase(InteractiveAgent):
     # AtomAgent's self.files; it reports commands and edits as activity events.
     # The model runs its own commands in Shell()s, never in this one.
     _workspace_shell: Annotated[ActivityShellTools, hidden, nosnapshot]
-    # Whether self.cwd may run its own code (nooa.workspace_trust).
+    # Whether self.cwd is a trusted folder (nooa.workspace_trust).
     _workspace_trusted: Annotated[bool, hidden, nosnapshot]
     _instructions: Annotated[RepositoryInstructions, hidden, nosnapshot]
     _summarizers: Annotated[list[Any], hidden, nosnapshot]
@@ -220,14 +211,8 @@ class AtomAgentBase(InteractiveAgent):
         summarization: SummarizationConfig | None = None,
         skills_dirs: list[Path] | None = None,
         libs_dir: Path | None = None,
-        workspace_trusted: bool | None = None,
         **kwargs: Any,
     ) -> None:
-        """``workspace_trusted``: whether ``cwd`` may run its own code (code
-        skills under it, its model settings); ``None`` asks
-        ``nooa.workspace_trust.is_trusted(cwd)``. The session factory passes
-        ``AtomOptions.workspace_trusted()``.
-        """
         super().__init__(llm=llm, **kwargs)
         # Jobs are cancelled through self.jobs; the model never sees queue_manager.
         self.queue_manager.set_default_cancel_hint(None)
@@ -246,17 +231,7 @@ class AtomAgentBase(InteractiveAgent):
         self._jobs_running = {}
         self.jobs = JobsApi(self)
         self.skills = SkillManager(self)
-        # An untrusted workspace runs none of its own code: SKILL.md text
-        # skills load, code skills under self.cwd are not imported.
-        self._workspace_trusted = (
-            is_trusted(self.cwd) if workspace_trusted is None else workspace_trusted
-        )
-        if not self._workspace_trusted:
-            from nooa_atom.workspace.settings import load_user_skill_roots
-
-            self.skills.registry.code_allowed = code_allowed_outside(
-                self.cwd, user_roots=load_user_skill_roots()
-            )
+        self._workspace_trusted = is_trusted(self.cwd)
         # Skills the agent writes live at <project>/.nooa/skills (an older
         # <project>/.nooa/libs is not loaded). get_project_dir() resolves that
         # per process, which is what a one-workspace host like the TUI wants.
@@ -279,8 +254,16 @@ class AtomAgentBase(InteractiveAgent):
         # SkillWriting loads the saved local.* skills while it is built, so it
         # is built after the tools above: a saved skill named like one of them
         # is then refused instead of taking the name and failing this install.
+        # An untrusted workspace's saved skills do not load (the host leaves
+        # its skill directories out of skills_dirs); the ones the agent
+        # writes in this session do. /trust loads the rest.
+        load_existing = self._workspace_trusted or not is_inside(skills_dir, self.cwd)
         self.skills.registry.activate(
-            {"nemo.skill_writing": SkillWriting(self, path=skills_dir, shell=self._workspace_shell)}
+            {
+                "nemo.skill_writing": SkillWriting(
+                    self, path=skills_dir, shell=self._workspace_shell, load_existing=load_existing
+                )
+            }
         )
         # Installed ``nooa.skills`` entry points are part of the shared host
         # surface. Load them so hosts can expose ``@slash_command`` methods,
@@ -304,8 +287,6 @@ class AtomAgentBase(InteractiveAgent):
             self.skills.load(installed)
         if skills_dirs:
             self.skills.discover_skills_dirs(skills_dirs)
-        if self.skills.registry.skipped_code():
-            self.skills.registry.add_notice(untrusted_notice(self.cwd, _UNTRUSTED_SUBJECT))
         self.slash_commands = SlashCommandRegistry(self, skills_dirs=skills_dirs or ())
 
         self.context["python_cell_tools"] = Context(
@@ -331,18 +312,9 @@ class AtomAgentBase(InteractiveAgent):
         self._summarization = summarization or SummarizationConfig()
         install_summarizer(self._summarization, self)
 
-    @hidden
-    @no_trace
-    def workspace_untrusted_notice(self) -> str | None:
-        """The notice a host shows when this untrusted workspace's code or model settings were skipped."""
-        if self._workspace_trusted:
-            return None
-        skipped = self.skills.registry.skipped_code() or (self.cwd / _LLM_CONFIG).is_file()
-        return untrusted_notice(self.cwd, _UNTRUSTED_SUBJECT) if skipped else None
-
     @no_trace
     def _trust_folder(self) -> str:
-        """``/trust``: trust ``cwd`` (``nooa.workspace_trust.trust``) and load its code skills now.
+        """``/trust``: trust ``cwd`` (``nooa.workspace_trust.trust``) and load its skills now.
 
         Returns the reply for the user. Private: the user trusts a folder
         with ``/trust`` or the host's form, not the model through its API.
@@ -351,25 +323,18 @@ class AtomAgentBase(InteractiveAgent):
 
         if self._workspace_trusted:
             return f"This folder is already trusted: {self.cwd}"
-        notice = untrusted_notice(self.cwd, _UNTRUSTED_SUBJECT)
         try:
             trust(self.cwd)
         except WorkspaceTrustError as exc:
             return str(exc)
         self._workspace_trusted = True
-        self.skills.registry.code_allowed = None  # also clears skipped_code()
-        self.skills.registry.remove_notice(notice)
-        self.skill_writing.enable_code()
-        registry = self.slash_commands
-        # Discover again: the roots already known now load their code too.
-        for path in dict.fromkeys(
-            [*registry.skills_dirs, *load_skills_dirs(self.cwd, trusted=True)]
-        ):
-            registry.add_skills_dir(path)
+        self.skill_writing._load_existing()
+        for path in load_skills_dirs(self.cwd, trusted=True):
+            self.slash_commands.add_skills_dir(path)
         return (
-            f"Trusted {self.cwd}. Its code skills are loaded (skills in .nooa/skills are "
-            "active; others: /skills activate). Its model settings (.nooa/llm_config.yaml) "
-            "apply from the next session."
+            f"Trusted {self.cwd}. Its skills are loaded (skills in .nooa/skills are active; "
+            "others: /skills activate). Its model settings (.nooa/llm_config.yaml) apply "
+            "from the next session."
         )
 
     @no_trace

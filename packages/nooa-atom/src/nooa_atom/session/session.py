@@ -1213,13 +1213,13 @@ class Session:
         ]
 
     def workspace_untrusted_notice(self) -> str | None:
-        """The agent's untrusted-workspace notice (``workspace_untrusted_notice()``), or None.
+        """The message for the user when the workspace is untrusted and its skills or model settings are off.
 
-        Set when the workspace is not trusted and its code skills or model
-        settings were skipped (``nooa.workspace_trust``).
+        ``nooa_atom.workspace.settings.untrusted_workspace_notice``; None otherwise.
         """
-        notice = getattr(self._agent, "workspace_untrusted_notice", None)
-        return notice() if callable(notice) else None
+        from nooa_atom.workspace.settings import untrusted_workspace_notice
+
+        return untrusted_workspace_notice(self.options.workspace)
 
     async def invoke_command(self, name: str, raw_args: str) -> CommandResult:
         """Run a slash command through the agent's registry; ``KeyError`` if unknown."""

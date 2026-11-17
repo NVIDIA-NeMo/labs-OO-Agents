@@ -438,17 +438,18 @@ root, so it is hidden from model-facing docs. Discovery still accepts a list of
 skill directories. Individual skills retain their own `source_dir`, and text
 skills retain `read_file(path)` for their files.
 
-In a folder you have not trusted, Atom loads no code from it: code skills in
-`.nooa/skills` and in the workspace's `.agents`/`.cursor`/`.claude` skill
-directories are skipped (text skills still load), skill directories and
-`active_skills` from the workspace's own settings do not bring code in, its
-`.nooa/llm_config.yaml` is not used, and a stored session whose agent is a
-`file.py:Class` in the folder does not load. The session shows one notice; an
-ACP client that can show forms is asked at the first prompt whether to trust
-the folder, and `/trust` trusts it at any time. Headless sessions are untrusted
-unless the folder is in `trusted_folders` (user `settings.yaml` or a
-`NEMO_OO_SETTINGS` file). Your own skill directories (`~/.claude/skills` and
-the like) load everywhere. See
+In a folder you have not trusted, Atom loads no skills from it: nothing in
+`.nooa/skills` or the workspace's `.agents`/`.cursor`/`.claude` skill
+directories loads (no code skills, text skills or Markdown slash commands),
+skill directories and `active_skills` from the workspace's own settings are
+ignored, its `.nooa/llm_config.yaml` is not used, and a stored session whose
+agent is a `file.py:Class` in the folder does not load. The agent sees
+nothing about it; skills it writes in the session still work. The user gets
+one message at session start; an ACP client that can show forms is asked at
+the first prompt whether to trust the folder, and `/trust` trusts it at any
+time. Headless sessions log a warning and stay untrusted unless the folder is
+in `trusted_folders` (user `settings.yaml` or a `NEMO_OO_SETTINGS` file). Your
+own skill directories (`~/.claude/skills` and the like) load everywhere. See
 [workspace trust](../../docs/workspace-trust.md).
 
 `/skills list` shows every skill with its kind and state; `/skills activate`

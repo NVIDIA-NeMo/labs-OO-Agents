@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Workspace trust (nooa.workspace_trust) and the code gate in SkillRegistry/SkillWriting."""
+"""Workspace trust (nooa.workspace_trust) and SkillWriting(load_existing=False)."""
 
 import sys
 from pathlib import Path
@@ -16,11 +16,10 @@ from nooa.tools import SkillWriting
 from nooa.workspace_trust import (
     HOME_REFUSAL,
     WorkspaceTrustError,
-    code_allowed_outside,
     is_inside,
     is_trusted,
     trust,
-    user_skill_roots,
+    untrusted_notice,
 )
 
 
@@ -100,62 +99,58 @@ def test_nemo_oo_settings_trusts_a_folder(user_dir, tmp_path, monkeypatch):
     assert is_trusted(work)
 
 
-def test_untrusted_skill_writing_loads_text_skills_but_imports_no_code(user_dir, tmp_path):
+def test_skill_writing_without_load_existing_loads_nothing_already_saved(user_dir, tmp_path):
     skills = tmp_path / "work" / ".nooa" / "skills"
     marker = tmp_path / "marker"
     _code_skill(skills, "evil", marker)
     _text_skill(skills, "notes")
     agent = _Agent()
-    agent.skills.code_allowed = code_allowed_outside(tmp_path / "work")
-    writing = SkillWriting(agent, path=skills)
+    writing = SkillWriting(agent, path=skills, load_existing=False)
 
     assert not marker.exists()
     assert str(skills) not in sys.path
-    assert "local.notes" in agent.skills.loaded()
-    assert "local.evil" not in agent.skills.loaded()
-    assert agent.skills.skipped_code() == [skills / "evil"]
+    assert not [name for name in agent.skills.loaded() if name.startswith("local.")]
+    assert agent.skills.notices() == []
 
-    agent.skills.code_allowed = None
-    assert agent.skills.skipped_code() == []  # a new policy clears the skip list
-    writing.enable_code()
+    writing._load_existing()  # what /trust does
     try:
         assert marker.read_text() == "imported"
-        assert "local.evil" in agent.skills.activated()
+        assert {"local.evil", "local.notes"} <= set(agent.skills.activated())
         assert str(skills) in sys.path
     finally:
         sys.path.remove(str(skills))
         sys.modules.pop("evil", None)
 
 
-async def test_untrusted_skill_writing_refuses_to_reload_a_code_skill(user_dir, tmp_path):
+async def test_skill_writing_without_load_existing_loads_new_skills(user_dir, tmp_path):
+    """Skills the agent creates in this session load; the saved ones next to them do not."""
     skills = tmp_path / "skills"
-    marker = tmp_path / "marker"
-    _code_skill(skills, "evil", marker)
+    _code_skill(skills, "evil", tmp_path / "evil-marker")
+    _text_skill(skills, "old_notes")
     agent = _Agent()
-    agent.skills.code_allowed = code_allowed_outside(tmp_path)
-    writing = SkillWriting(agent, path=skills)
-    report = await writing.reload("evil")
-    assert "not trusted" in report
-    assert not marker.exists()
+    writing = SkillWriting(agent, path=skills, shell=object(), load_existing=False)
+
+    assert "Created text skill" in await writing.create("notes", "Notes.", text="Be brief.")
+    assert "local.notes" in agent.skills.activated()
+    await writing.create("stats", "Stats.")
+    report = await writing.reload("stats")
+    assert "loaded" in report.lower() and "error" not in report.lower(), report
+    assert agent.stats is not None  # attached as on main (LibraryManager)
+    assert not (tmp_path / "evil-marker").exists()
+    assert "local.evil" not in agent.skills.loaded()
+    assert "local.old_notes" not in agent.skills.loaded()
+    assert str(skills) not in sys.path
+    sys.modules.pop("stats", None)
 
 
-def test_registry_refuses_loose_python_and_packages_under_an_untrusted_root(user_dir, tmp_path):
-    root = tmp_path / "work"
-    skills = root / ".claude" / "skills"
-    skills.mkdir(parents=True)
-    marker = tmp_path / "py-marker"
-    (skills / "probe.py").write_text(
-        f"from pathlib import Path\nPath({str(marker)!r}).write_text('x')\n"
-    )
-    _code_skill(skills, "pkg", tmp_path / "pkg-marker")
-    _text_skill(skills, "hello")
+def test_discover_libs_names_loads_only_those(tmp_path):
+    _code_skill(tmp_path, "evil", tmp_path / "marker")
+    _text_skill(tmp_path, "a")
+    _text_skill(tmp_path, "b")
     agent = _Agent()
-    agent.skills.code_allowed = code_allowed_outside(root)
-    agent.skills.discover_skills_dirs([skills])
-    assert not marker.exists()
-    assert not (tmp_path / "pkg-marker").exists()
-    assert "cmd.hello" in agent.skills.discovered()
-    assert len(agent.skills.skipped_code()) == 2
+    agent.skills.discover_libs(tmp_path, names=["a"])
+    assert [name for name in agent.skills.loaded() if name.startswith("local.")] == ["local.a"]
+    assert not (tmp_path / "marker").exists()
 
 
 def test_project_layer_can_be_left_out_of_layered_config(user_dir, tmp_path, monkeypatch):
@@ -187,62 +182,26 @@ def _loose_skill(path: Path, marker: Path) -> None:
     )
 
 
-def test_symlinks_in_the_workspace_that_point_outside_are_still_refused(user_dir, tmp_path):
-    """Security review #2 (p1): a link found in the workspace is workspace code."""
-    repo = tmp_path / "repo"
-    work = repo / "pkg"
-    skills = work / ".claude" / "skills"
-    skills.mkdir(parents=True)
-    elsewhere = repo / "elsewhere"
-    elsewhere.mkdir()
-    _loose_skill(elsewhere / "viafile.py", tmp_path / "file-marker")
-    _code_skill(elsewhere, "viapkg", tmp_path / "pkg-marker")
-    (skills / "linked.py").symlink_to(elsewhere / "viafile.py")
-    (skills / "linkedpkg").symlink_to(elsewhere / "viapkg")
-    agentsdir = elsewhere / "agentsdir"
-    agentsdir.mkdir()
-    _loose_skill(agentsdir / "a.py", tmp_path / "root-marker")
-    (work / ".agents").mkdir()
-    (work / ".agents" / "skills").symlink_to(agentsdir)
-
-    agent = _Agent()
-    agent.skills.code_allowed = code_allowed_outside(work)
-    agent.skills.discover_skills_dirs([work / ".agents" / "skills", skills])
-    assert not (tmp_path / "file-marker").exists()
-    assert not (tmp_path / "pkg-marker").exists()
-    assert not (tmp_path / "root-marker").exists()
-    assert len(agent.skills.skipped_code()) == 3
-
-
-def test_a_path_outside_that_points_into_the_workspace_is_refused(tmp_path):
+def test_is_inside_follows_where_a_path_was_found_and_where_it_points(tmp_path):
     work = tmp_path / "work"
     work.mkdir()
     (work / "x.py").write_text("")
+    (tmp_path / "elsewhere.py").write_text("")
+    (work / "out.py").symlink_to(tmp_path / "elsewhere.py")
     (tmp_path / "link.py").symlink_to(work / "x.py")
     assert is_inside(tmp_path / "link.py", work)
+    assert is_inside(work / "out.py", work)
     assert not is_inside(tmp_path / "other.py", work)
-    assert not code_allowed_outside(work)(tmp_path / "link.py")
 
 
-def test_user_skill_roots_load_code_even_inside_the_workspace(user_dir, tmp_path, monkeypatch):
-    """Security review #6 / quality M2: workspace == $HOME keeps the user's own skills."""
+def test_untrusted_notice_is_for_the_user(user_dir, tmp_path, monkeypatch):
     home = tmp_path / "home"
+    home.mkdir()
     monkeypatch.setenv("HOME", str(home))
-    mine = home / ".claude" / "skills"
-    mine.mkdir(parents=True)
-    _loose_skill(mine / "mine.py", tmp_path / "mine-marker")
-    extra = tmp_path / "home" / "my-skills"
-    extra.mkdir()
-    roots = user_skill_roots([extra, "relative/dir"])
-    assert mine in roots and extra in roots
-    assert all(root.is_absolute() for root in roots) and len(roots) == 4
-
-    agent = _Agent()
-    agent.skills.code_allowed = code_allowed_outside(home, user_roots=roots)
-    agent.skills.discover_skills_dirs([mine])
-    assert (tmp_path / "mine-marker").exists()
-    assert agent.skills.skipped_code() == []
-    assert not code_allowed_outside(home, user_roots=roots)(home / ".nooa" / "skills" / "x")
+    assert untrusted_notice(home / "p") == (
+        "This folder isn't trusted, so its skills are off. Type /trust to allow."
+    )
+    assert untrusted_notice(home).endswith(HOME_REFUSAL)
 
 
 def test_trust_refuses_the_home_folder_and_filesystem_roots(user_dir, tmp_path, monkeypatch):
@@ -290,11 +249,3 @@ def test_relative_trusted_folders_entries_are_ignored(user_dir, tmp_path, monkey
     assert folders == [(Path.home() / "abs").resolve()]
     assert not is_trusted(tmp_path / "proj")
     assert "relative trusted_folders entry 'proj'" in caplog.text
-
-
-def test_remove_notice():
-    agent = _Agent()
-    agent.skills.add_notice("a")
-    agent.skills.remove_notice("a")
-    agent.skills.remove_notice("missing")
-    assert agent.skills.notices() == []

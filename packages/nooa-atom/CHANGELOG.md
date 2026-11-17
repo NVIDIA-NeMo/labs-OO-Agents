@@ -7,19 +7,19 @@ based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-- Workspace trust (#231). In a folder you have not trusted, Atom loads no code
-  from it (code skills in `.nooa/skills` and the workspace's
-  `.agents`/`.cursor`/`.claude` skill directories, skill directories from its
-  own settings) and ignores its `.nooa/llm_config.yaml` and the `active_skills`
-  of its own settings; a stored session whose agent is a `file.py:Class` in
-  the folder (also through a symlink) does not load. One notice says so; ACP
-  clients that show forms are asked at the first prompt of a root session
-  (not in the home folder); `/trust` trusts the folder and loads its code
-  skills without a restart. `AtomOptions.trust_workspace` (code only, ignored
-  in settings files) decides the options' skill directories and
-  `active_skills` and the agent's code skills; see the docs for what it does
-  not cover. `write_settings_updates` now locks and replaces the file
-  atomically. **Existing users must trust their folders once.**
+- Workspace trust (#231). In a folder you have not trusted, Atom loads no
+  skills from it (nothing from `.nooa/skills`, the workspace's
+  `.agents`/`.cursor`/`.claude` skill directories or the skill directories of
+  its own settings: no code skills, text skills or Markdown slash commands),
+  ignores the `active_skills` of its own settings and its
+  `.nooa/llm_config.yaml`, and does not load a stored session whose agent is
+  a `file.py:Class` in the folder (also through a symlink). The agent sees
+  nothing about it. The user gets one ACP message at session start (headless:
+  a logging warning); ACP clients that show forms are asked at the first
+  prompt of a root session (not in the home folder); `/trust` trusts the
+  folder and loads its skills without a restart. `write_settings_updates` now
+  locks and replaces the file atomically. **Existing users must trust their
+  folders once.**
 
 - `nooa-atom`: reflection. The `nemo.reflection` skill posts a housekeeping
   message on a root session's `system_messages` queue when one is due (20

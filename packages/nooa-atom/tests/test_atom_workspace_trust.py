@@ -16,7 +16,7 @@ from nooa_atom.workspace.options import AtomOptions
 
 from nooa.storage import InMemoryStorageManager
 from nooa.unifiedllm import FakeLLMClient
-from nooa.workspace_trust import is_trusted, untrusted_notice
+from nooa.workspace_trust import is_trusted
 
 _SKILL_CLASS = 'from nooa.skill import Skill\n\n\nclass {name}(Skill):\n    """Probe."""\n'
 
@@ -62,6 +62,12 @@ def workspace(tmp_path):
         f"Path({str(tmp_path / 'probe-marker')!r}).write_text('x')\n"
         + _SKILL_CLASS.format(name="Probe")
     )
+    hello = claude / "hello"
+    hello.mkdir()
+    (hello / "SKILL.md").write_text("---\nname: hello\ndescription: Say hello.\n---\n\nHello.\n")
+    notes = root / ".nooa" / "skills" / "notes"
+    notes.mkdir()
+    (notes / "SKILL.md").write_text("---\nname: notes\ndescription: Notes.\n---\n\nHi.\n")
     yield root
     sys.modules.pop("evil", None)
     skills = str(root / ".nooa" / "skills")
@@ -74,7 +80,17 @@ async def _close(agent):
     await agent.aclose()
 
 
-async def test_untrusted_session_agent_runs_no_workspace_code(user_dir, workspace, tmp_path):
+def _workspace_skills(agent) -> list[str]:
+    return [
+        name
+        for name in agent.skills.registry.discovered()
+        if name.startswith(("local.", "cmd.", "ext."))
+    ]
+
+
+async def test_untrusted_session_agent_loads_nothing_from_the_workspace(
+    user_dir, workspace, tmp_path
+):
     (workspace / ".nooa" / "settings.yaml").write_text("atom:\n  active_skills: [evil, probe]\n")
     options = SessionOptions(workspace=workspace, agent_spec=ATOM_SPEC, llm=FakeLLMClient())
     agent = create_session_agent(options, InMemoryStorageManager())
@@ -82,36 +98,65 @@ async def test_untrusted_session_agent_runs_no_workspace_code(user_dir, workspac
         assert not (tmp_path / "evil-marker").exists()
         assert not (tmp_path / "probe-marker").exists()
         assert str(workspace / ".nooa" / "skills") not in sys.path
-        assert "local.evil" not in agent.skills.activated()
-        assert "ext.probe" not in agent.skills.activated()
-        notice = untrusted_notice(
-            workspace, "Code skills and model settings (.nooa/llm_config.yaml)"
-        )
-        assert agent.workspace_untrusted_notice() == notice
-        assert notice in agent.skills.registry.notices()
-        assert agent.slash_commands.get("trust") is not None
-        # Security review #7: no public trust method in the model's API.
+        # Not even text skills or their Markdown slash commands.
+        assert _workspace_skills(agent) == []
+        assert agent.slash_commands.get("hello") is None
+        # The agent sees nothing about trust.
+        assert agent.skills.registry.notices() == []
+        assert "trust" not in agent.skills.status().lower()
+        assert not hasattr(agent, "workspace_untrusted_notice")
         assert not hasattr(agent, "trust_workspace")
+        assert agent.slash_commands.get("trust") is not None
 
         result = await agent.slash_commands.invoke("trust", "")
         assert "Trusted" in str(result)
         assert is_trusted(workspace)
         assert (tmp_path / "evil-marker").exists()
         assert (tmp_path / "probe-marker").exists()
-        assert "local.evil" in agent.skills.activated()
-        assert agent.workspace_untrusted_notice() is None
-        # Quality M1: the notice and the skip list are gone.
-        assert notice not in agent.skills.registry.notices()
-        assert agent.skills.registry.skipped_code() == []
+        assert {"local.evil", "local.notes"} <= set(agent.skills.activated())
+        assert {"ext.probe", "cmd.hello"} <= set(agent.skills.registry.discovered())
+        assert agent.slash_commands.get("hello") is not None
+        assert "trust" not in agent.skills.status().lower()
     finally:
         await _close(agent)
 
 
-async def test_trust_workspace_option_is_code_only(user_dir, workspace, tmp_path):
-    (workspace / ".nooa" / "settings.yaml").write_text("atom:\n  trust_workspace: true\n")
-    assert AtomOptions.load(workspace).trust_workspace is None
-    assert not AtomOptions.load(workspace).workspace_trusted()
-    assert AtomOptions.load(workspace, trust_workspace=True).workspace_trusted()
+async def test_skills_the_agent_creates_still_work(user_dir, workspace):
+    options = SessionOptions(workspace=workspace, agent_spec=ATOM_SPEC, llm=FakeLLMClient())
+    agent = create_session_agent(options, InMemoryStorageManager())
+    try:
+        reply = await agent.skill_writing.create("fresh", "Fresh.", text="Be fresh.")
+        assert reply.startswith("Created text skill")
+        assert "local.fresh" in agent.skills.activated()
+        assert "local.notes" not in agent.skills.registry.loaded()
+    finally:
+        await _close(agent)
+
+
+def test_the_user_notice(user_dir, workspace, tmp_path):
+    from nooa_atom.workspace.settings import untrusted_workspace_notice
+
+    assert untrusted_workspace_notice(workspace) == (
+        "This folder isn't trusted, so its skills are off. Type /trust to allow."
+    )
+    (workspace / ".nooa" / "llm_config.yaml").write_text("models: {}\n")
+    assert untrusted_workspace_notice(workspace).startswith(
+        "This folder isn't trusted, so its skills and model settings are off."
+    )
+    assert untrusted_workspace_notice(tmp_path / "empty") is None
+    (user_dir / "settings.yaml").write_text(f"trusted_folders: [{workspace}]\n")
+    assert untrusted_workspace_notice(workspace) is None
+
+
+async def test_untrusted_session_logs_a_warning(user_dir, workspace, caplog):
+    """Headless hosts: the notice is a logging warning."""
+    options = SessionOptions(workspace=workspace, agent_spec=ATOM_SPEC, llm=FakeLLMClient())
+    with caplog.at_level("WARNING", logger="nooa_atom.agent.factory"):
+        agent = create_session_agent(options, InMemoryStorageManager())
+    try:
+        assert "isn't trusted, so its skills are off" in caplog.text
+    finally:
+        await _close(agent)
 
 
 def test_workspace_llm_config_is_ignored_when_untrusted(user_dir, workspace):
@@ -149,13 +194,20 @@ async def test_stored_file_agent_spec_inside_an_untrusted_workspace_is_refused(
         await registry.close_all()
 
 
-def test_untrusted_project_active_skills_are_ignored(user_dir, workspace):
+def test_untrusted_project_settings_choose_no_skills(user_dir, workspace, tmp_path):
     """Security review #3: an untrusted folder does not choose which skills run."""
-    (workspace / ".nooa" / "settings.yaml").write_text("atom:\n  active_skills: [evil]\n")
+    (workspace / ".nooa" / "settings.yaml").write_text(
+        f"atom:\n  active_skills: [evil]\n  additional_skills_dirs: [{tmp_path}]\n"
+        "  trust_workspace: true\n"
+    )
     (user_dir / "settings.yaml").write_text("atom:\n  active_skills: [mine]\n")
-    assert AtomOptions.load(workspace).active_skills == ["mine"]
-    assert AtomOptions.load(workspace, trust_workspace=True).active_skills == ["evil"]
+    options = AtomOptions.load(workspace)
+    assert options.active_skills == ["mine"]
+    assert options.skills_dirs == []
+    assert not is_trusted(workspace)
     assert AtomOptions.load(workspace, active_skills=["x"]).active_skills == ["x"]
+    (user_dir / "settings.yaml").write_text(f"trusted_folders: [{workspace}]\n")
+    assert AtomOptions.load(workspace).active_skills == ["evil"]
 
 
 async def test_symlinked_skill_is_neither_run_nor_activated(user_dir, tmp_path):
@@ -175,8 +227,7 @@ async def test_symlinked_skill_is_neither_run_nor_activated(user_dir, tmp_path):
     agent = create_session_agent(options, InMemoryStorageManager())
     try:
         assert not (tmp_path / "link-marker").exists()
-        assert not [name for name in agent.skills.registry.activated() if "linked" in name]
-        assert agent.skills.registry.skipped_code() == [work / ".claude" / "skills" / "linked.py"]
+        assert not [name for name in agent.skills.registry.discovered() if "linked" in name]
     finally:
         await _close(agent)
 

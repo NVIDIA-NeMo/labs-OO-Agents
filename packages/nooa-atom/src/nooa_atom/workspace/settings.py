@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from nooa.layered_config import load_layered_yaml
-from nooa.workspace_trust import USER_SKILL_DIRS, user_skill_roots
+from nooa.workspace_trust import is_trusted, untrusted_notice
 
 SETTINGS_FILENAME = "settings.yaml"
 SETTINGS_ENV_VAR = "NEMO_OO_SETTINGS"
@@ -41,6 +41,12 @@ _WORKSPACE_SKILL_DIRS = (
     Path(".claude/skills"),
     Path(".claude/commands"),
 )
+_USER_SKILL_DIRS = (
+    Path(".agents/skills"),
+    Path(".claude/skills"),
+    Path(".claude/commands"),
+)
+_LLM_CONFIG = Path(".nooa/llm_config.yaml")
 
 
 def load_skills_dirs(
@@ -56,24 +62,21 @@ def load_skills_dirs(
     configured paths are resolved against the active workspace, not the ACP
     server process's checkout.
 
-    ``trusted`` (default: ``nooa.workspace_trust.is_trusted(workspace)``)
-    False leaves out the directories the workspace itself names (its
-    project settings layer and legacy ``config.toml``); the user and
-    ``NEMO_OO_SETTINGS`` layers still apply.
-
-    The paths are absolute but not resolved: a workspace directory that is a
-    symlink is still reported inside the workspace, so the trust gate
-    (``nooa.workspace_trust.is_inside``) sees where it was found.
+    ``trusted`` defaults to ``nooa.workspace_trust.is_trusted(workspace)``.
+    An untrusted workspace contributes no directory: its own skill
+    directories, its project settings layer, its legacy ``config.toml`` and
+    relative configured paths are left out. The user's own roots (``~/.claude/skills``
+    ...) and the absolute paths of the user and ``NEMO_OO_SETTINGS`` layers stay.
     """
     root = Path(workspace).expanduser().resolve()
     if trusted is None:
-        from nooa.workspace_trust import is_trusted
-
         trusted = is_trusted(root)
     copy_coding_settings(root / ".nooa")
     settings = load_settings_layers(root / ".nooa", include_project=trusted)
 
     configured: list[str | Path] = list(_configured_skills_dirs(settings))
+    if not trusted:
+        configured = [path for path in configured if Path(path).expanduser().is_absolute()]
     # A workspace's old config.toml is still a workspace layer. Do not let an
     # unrelated user-level settings.yaml silently suppress it. A modern
     # workspace settings file supersedes the legacy file, and an explicit
@@ -93,19 +96,39 @@ def load_skills_dirs(
     candidates: list[Path] = []
     candidates.extend(_resolve_configured(path, root) for path in explicit)
     candidates.extend(_resolve_configured(path, root) for path in configured)
-    candidates.extend(root / path for path in _WORKSPACE_SKILL_DIRS)
-    candidates.extend(Path.home() / path for path in USER_SKILL_DIRS)
+    if trusted:
+        candidates.extend(root / path for path in _WORKSPACE_SKILL_DIRS)
+    candidates.extend(Path.home() / path for path in _USER_SKILL_DIRS)
 
     result: list[Path] = []
     seen: set[Path] = set()
     for candidate in candidates:
-        found = Path(os.path.abspath(candidate.expanduser()))
-        resolved = found.resolve()
+        resolved = candidate.expanduser().resolve()
         if resolved in seen or not resolved.is_dir():
             continue
         seen.add(resolved)
-        result.append(found)
+        result.append(resolved)
     return result
+
+
+def untrusted_workspace_notice(workspace: str | Path) -> str | None:
+    """The message for the user when ``workspace`` is untrusted and has skills or model settings that are off.
+
+    None when it is trusted, or has none of its own: no skill directory that
+    ``load_skills_dirs`` leaves out, nothing in ``.nooa/skills`` and no
+    ``.nooa/llm_config.yaml``.
+    """
+    root = Path(workspace).expanduser().resolve()
+    if is_trusted(root):
+        return None
+    off = set(load_skills_dirs(root, trusted=True)) - set(load_skills_dirs(root, trusted=False))
+    saved = root / ".nooa" / "skills"
+    parts = []
+    if off or (saved.is_dir() and any(saved.iterdir())):
+        parts.append("skills")
+    if (root / _LLM_CONFIG).is_file():
+        parts.append("model settings")
+    return untrusted_notice(root, " and ".join(parts)) if parts else None
 
 
 def _configured_skills_dirs(settings: Mapping[str, Any]) -> list[str | Path]:
@@ -122,17 +145,6 @@ def _configured_skills_dirs(settings: Mapping[str, Any]) -> list[str | Path]:
                 "Reading legacy tui.additional_skills_dirs; use atom.additional_skills_dirs"
             )
     return _setting_paths(settings, section)
-
-
-def load_user_skill_roots() -> list[Path]:
-    """The user's own skill roots, whose code loads in any workspace.
-
-    ``nooa.workspace_trust.user_skill_roots`` plus the absolute
-    ``atom.additional_skills_dirs`` of the user and ``NEMO_OO_SETTINGS``
-    settings layers.
-    """
-    settings = load_settings_layers(None, include_project=False)
-    return user_skill_roots(_configured_skills_dirs(settings))
 
 
 def load_settings_layers(
@@ -225,8 +237,6 @@ def behavior_fields() -> frozenset[str]:
         "working_dir",
         "skills_dirs",
         "agent_spec",
-        # A repository must not trust itself: only code sets it (AtomOptions.load).
-        "trust_workspace",
     }
 
 

@@ -111,8 +111,8 @@ _VERBOSITY_HELP = (
     "silent: no activity; concise: one-line notices; verbose: full activity (default)."
 )
 _TRUST_QUESTION = (
-    "Do you trust this folder? It can run its own code (skills in .nooa/skills, "
-    ".claude/skills ...) and use its own model settings."
+    "Do you trust this folder? Trusting it turns on its skills (.nooa/skills, "
+    ".claude/skills ...) and its model settings."
 )
 _TRUST_HELP = "Yes: trust it now and remember it (like /trust). No: ask again next session."
 
@@ -900,8 +900,8 @@ class AtomACPAgent:
     async def _ask_trust(self, session: Session, bridge: ACPEventBridge) -> bool:
         """At a session's first prompt in an untrusted workspace, ask whether to trust it.
 
-        Asked once per root session, only when the workspace's code skills or
-        model settings were skipped, the folder can be trusted (not the home
+        Asked once per root session, only when the workspace's skills or
+        model settings are off, the folder can be trusted (not the home
         folder or a filesystem root) and the client can show a form. Yes runs
         ``/trust``; No (or dismissing the form) keeps the session untrusted.
         Returns False when Stop ended the form: the prompt is then cancelled.

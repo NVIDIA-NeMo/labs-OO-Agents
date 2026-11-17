@@ -109,17 +109,18 @@ drives it. `--model` accepts any LiteLLM model name or configured NOOA alias.
 ## Opening a repository runs code from it
 
 **Only in a folder you trust.** In an untrusted folder, creating a session
-imports no Python from the workspace: code skills (packages in `.nooa/skills`,
-`.py` files and packages in `.agents/skills`, `.cursor/skills`,
-`.claude/skills` and `.claude/commands`) are skipped, the skill directories
-named by `<workspace>/.nooa/settings.yaml` or the legacy `.nooa/config.toml`
-are ignored, and `SKILL.md` text skills still load. A symlink in the folder
-counts as the folder, wherever it points. Your own skill directories
-(`~/.agents/skills`, `~/.claude/skills`, `~/.claude/commands`) load in every
-folder. The session shows one notice when code skills were skipped; type `/trust` to trust the folder and load
-its code skills. List folders under `trusted_folders` in your user
-`settings.yaml` (or in a `NEMO_OO_SETTINGS` file, for CI) to trust them up
-front. See [workspace trust](../../docs/workspace-trust.md).
+loads no skills from the workspace: nothing in `.nooa/skills`,
+`.agents/skills`, `.cursor/skills`, `.claude/skills` or `.claude/commands`
+(no code skills, no `SKILL.md` text skills, no slash commands), and the skill
+directories named by `<workspace>/.nooa/settings.yaml` or the legacy
+`.nooa/config.toml` are ignored. `AGENTS.md` still loads. Your own skill
+directories (`~/.agents/skills`, `~/.claude/skills`, `~/.claude/commands`)
+load in every folder. The agent sees nothing about it; the client gets one
+message, "This folder isn't trusted, so its skills are off. Type /trust to
+allow." `/trust` trusts the folder and loads its skills. List folders under
+`trusted_folders` in your user `settings.yaml` (or in a `NEMO_OO_SETTINGS`
+file, for CI) to trust them up front. See
+[workspace trust](../../docs/workspace-trust.md).
 
 In a trusted folder, opening it is enough to execute code it contains: treat
 it as running its build.

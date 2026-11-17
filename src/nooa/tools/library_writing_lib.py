@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from nooa.agentdoc import hidden
 from nooa.library_manager import LibraryManager
 from nooa.skill import Skill
 from nooa.skill_registry import _RESERVED_ATTRS
@@ -181,16 +180,20 @@ class SkillWriting(Skill):
 
     requires = ("nemo.shell",)
 
-    def __init__(self, agent: Any, path: Path, *, shell: Any = None) -> None:
+    def __init__(
+        self, agent: Any, path: Path, *, shell: Any = None, load_existing: bool = True
+    ) -> None:
         """Save new skills in ``path`` and load the skills already there.
 
         ``run_tests()`` runs in ``shell`` (an object with an async ``run()``);
         without one it uses the agent's ``nemo.shell`` skill, ``agent.shell``.
-        When the agent's registry has a ``code_allowed`` policy that refuses
-        ``path`` (an untrusted workspace), only the text skills load: code
-        skills are neither imported nor activated, and ``path`` is not put on
-        ``sys.path``. New skills can still be created; ``enable_code()``
-        loads the code skills once the policy allows them.
+
+        ``load_existing=False`` (needs the agent's SkillRegistry) loads none of
+        the skills already in ``path`` and does not put ``path`` on
+        ``sys.path``; a skill loads when ``create()`` or ``reload()`` is called
+        for it. Hosts pass it for an untrusted workspace
+        (``nooa.workspace_trust``) and call ``_load_existing()`` once the
+        workspace is trusted.
         """
         self._agent = agent
         self._shell = shell
@@ -198,7 +201,17 @@ class SkillWriting(Skill):
             self.requires = ()
         self._path = Path(path)
         self._path.mkdir(parents=True, exist_ok=True)
-        self._add_to_sys_path()
+        registry = self._registry()
+        if registry is None or load_existing:
+            self._load_existing()
+        elif _has_legacy_libs_dir(self._path):
+            registry.add_notice(LEGACY_LIBS_NOTICE)
+        super().__init__()
+
+    def _load_existing(self) -> None:
+        """Put ``path`` on ``sys.path``, then load and activate the skills in it."""
+        if str(self._path) not in sys.path:
+            sys.path.insert(0, str(self._path))
         # Discover and register skills via the SkillRegistry if the agent has
         # one (an Atom agent's SkillManager wraps it as ``registry``).
         registry = self._registry()
@@ -209,25 +222,6 @@ class SkillWriting(Skill):
                 registry.add_notice(LEGACY_LIBS_NOTICE)
         else:
             LibraryManager.install(self._agent, libs_dir=self._path)
-        super().__init__()
-
-    @hidden
-    def enable_code(self) -> None:
-        """Load and activate the code skills that the registry's ``code_allowed`` now allows."""
-        self._add_to_sys_path()
-        registry = self._registry()
-        if registry is not None:
-            registry.discover_libs(self._path)
-            registry.activate(["local.*"])
-
-    def _code_allowed(self) -> bool:
-        """Whether the registry's ``code_allowed`` policy (if any) allows code in ``path``."""
-        policy = getattr(self._registry(), "code_allowed", None)
-        return policy is None or bool(policy(self._path))
-
-    def _add_to_sys_path(self) -> None:
-        if self._code_allowed() and str(self._path) not in sys.path:
-            sys.path.insert(0, str(self._path))
 
     def _registry(self) -> Any:
         """The agent's SkillRegistry, or None."""
@@ -367,7 +361,7 @@ class SkillWriting(Skill):
             if f"local.{lib_name}" in registry.loaded():
                 await registry.reload(f"local.{lib_name}")
             else:
-                registry.discover_libs(self._path)
+                registry.discover_libs(self._path, names=[lib_name])
             registry.activate([f"local.{lib_name}"])
             if f"local.{lib_name}" not in registry.loaded():
                 return (
@@ -445,15 +439,10 @@ class SkillWriting(Skill):
         registry = self._registry()
         lib_dir = self._dir(lib_name)
         is_code = (lib_dir / "pyproject.toml").exists()
-        if is_code and not self._code_allowed():
-            return (
-                f"Not loaded: '{lib_name}' is a code skill and this folder is not trusted; "
-                "the user can type /trust to allow code skills"
-            )
         if registry is not None:
             if f"local.{lib_name}" not in registry.loaded() and not is_code:
                 # A text skill (SKILL.md only): register it from its directory.
-                registry.discover_libs(lib_dir.parent)
+                registry.discover_libs(lib_dir.parent, names=[lib_name])
                 registry.activate([f"local.{lib_name}"])
                 if f"local.{lib_name}" in registry.loaded():
                     return f"Reloaded local.{lib_name}"
@@ -475,7 +464,15 @@ class SkillWriting(Skill):
         if conflict is not None:
             return f"Not loaded: {conflict}; choose another name for the skill"
         mgr = LibraryManager(self._agent, lib_dir.parent)
-        mgr._reload(lib_name)
+        entry = str(lib_dir.parent)
+        added = entry not in sys.path  # load_existing=False: only while importing this skill
+        if added:
+            sys.path.insert(0, entry)
+        try:
+            mgr._reload(lib_name)
+        finally:
+            if added and entry in sys.path:
+                sys.path.remove(entry)
         return f"Reloaded local.{lib_name}"
 
     async def repo_tree(self, directory: str = ".") -> str:
