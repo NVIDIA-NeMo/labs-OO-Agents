@@ -110,11 +110,11 @@ file here. The entry-point name becomes the subcommand name:
 ```toml
 # pyproject.toml of your package
 [project.entry-points."nooa_cli.commands"]
-tui  = "my_package.cli.tui:command"
-term = "my_package.cli.term:command"
+hello   = "my_package.cli.hello:command"
+goodbye = "my_package.cli.goodbye:command"
 ```
 
-`my_package.cli.tui:command` must be a `click.Command` or `click.Group` — the
+`my_package.cli.hello:command` must be a `click.Command` or `click.Group` — the
 same contract as an in-repo command module.
 
 - **Built-ins win name collisions.** A plugin can't shadow `eval`, `config`,

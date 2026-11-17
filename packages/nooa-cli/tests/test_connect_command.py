@@ -65,7 +65,7 @@ def args(path):
     ]
 
 
-def test_working_dir_saves_under_its_nooa_directory_like_the_tui(tmp_path):
+def test_working_dir_saves_under_its_nooa_directory(tmp_path):
     workspace = tmp_path / "myproject"
     workspace.mkdir()
     options = [
