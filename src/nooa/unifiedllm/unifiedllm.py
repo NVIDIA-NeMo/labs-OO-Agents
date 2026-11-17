@@ -48,6 +48,7 @@ from nooa.unifiedllm.media_inputs import (
     is_media_rejection,
     media_occurrences,
     rejected_media_kinds,
+    sent_media_kinds,
     unsendable_occurrences,
     validate_media_inputs,
 )
@@ -1432,7 +1433,14 @@ class UnifiedLLM(ABC):
         # Media the interface cannot send is rejected after projection, by
         # _validate_implemented_media: only the projected request also shows the
         # native content of replayed assistant turns.
-        return filter_media_messages(messages, enabled, self._rejected_media(call_config))
+        excluded = self._rejected_media(call_config)
+        # The retry layer reads which kinds this request really sends.
+        sent_media_kinds.set(
+            frozenset(
+                kind for kind, key in media_occurrences(messages, enabled) if key not in excluded
+            )
+        )
+        return filter_media_messages(messages, enabled, excluded)
 
     def _record_unsendable_media(self, messages, enabled) -> None:
         """Count ``media_unsendable`` once per attachment the filter replaces before sending.
@@ -1971,24 +1979,28 @@ class UnifiedLLM(ABC):
         - json.JSONDecodeError: if JSON parsing fails
         - Other exceptions for API errors
         """
+        token = sent_media_kinds.set(frozenset())  # this call's own; see retry.py
         try:
-            return self._call_once(messages, tools, output_model, **kwargs)
-        except Exception as exc:
-            search = self._media_recovery(messages, kwargs, exc)
-            if search is None:
-                raise
-            rejected = self._rejected_media(self._prepare_call_config(kwargs))
-        outcome = None
-        while True:
             try:
-                excluded, probe = search.send(outcome)
-            except StopIteration as done:
-                return done.value
-            try:
-                with self._media_attempt(rejected, excluded, probe):
-                    outcome = (self._call_once(messages, tools, output_model, **kwargs), None)
-            except Exception as error:
-                outcome = (None, error)
+                return self._call_once(messages, tools, output_model, **kwargs)
+            except Exception as exc:
+                search = self._media_recovery(messages, kwargs, exc)
+                if search is None:
+                    raise
+                rejected = self._rejected_media(self._prepare_call_config(kwargs))
+            outcome = None
+            while True:
+                try:
+                    excluded, probe = search.send(outcome)
+                except StopIteration as done:
+                    return done.value
+                try:
+                    with self._media_attempt(rejected, excluded, probe):
+                        outcome = (self._call_once(messages, tools, output_model, **kwargs), None)
+                except Exception as error:
+                    outcome = (None, error)
+        finally:
+            sent_media_kinds.reset(token)
 
     async def acall(
         self,
@@ -1998,27 +2010,31 @@ class UnifiedLLM(ABC):
         **kwargs,
     ) -> LLMResponse:
         """Async version of call"""
+        token = sent_media_kinds.set(frozenset())  # this call's own; see retry.py
         try:
-            return await self._acall_once(messages, tools, output_model, **kwargs)
-        except Exception as exc:
-            search = self._media_recovery(messages, kwargs, exc)
-            if search is None:
-                raise
-            rejected = self._rejected_media(self._prepare_call_config(kwargs))
-        outcome = None
-        while True:
             try:
-                excluded, probe = search.send(outcome)
-            except StopIteration as done:
-                return done.value
-            try:
-                with self._media_attempt(rejected, excluded, probe):
-                    outcome = (
-                        await self._acall_once(messages, tools, output_model, **kwargs),
-                        None,
-                    )
-            except Exception as error:
-                outcome = (None, error)
+                return await self._acall_once(messages, tools, output_model, **kwargs)
+            except Exception as exc:
+                search = self._media_recovery(messages, kwargs, exc)
+                if search is None:
+                    raise
+                rejected = self._rejected_media(self._prepare_call_config(kwargs))
+            outcome = None
+            while True:
+                try:
+                    excluded, probe = search.send(outcome)
+                except StopIteration as done:
+                    return done.value
+                try:
+                    with self._media_attempt(rejected, excluded, probe):
+                        outcome = (
+                            await self._acall_once(messages, tools, output_model, **kwargs),
+                            None,
+                        )
+                except Exception as error:
+                    outcome = (None, error)
+        finally:
+            sent_media_kinds.reset(token)
 
     @abstractmethod
     def _call_once(

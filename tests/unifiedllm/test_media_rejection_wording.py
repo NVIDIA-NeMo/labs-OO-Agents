@@ -16,8 +16,18 @@ from nooa.unifiedllm.media_inputs import (
     explicitly_rejected,
     is_media_rejection,
     rejected_media_kinds,
+    sent_media_kinds,
 )
 from nooa.unifiedllm.retry import _is_retryable_error
+
+
+def retryable(exc, sent=frozenset({"image"})):
+    """``_is_retryable_error`` for a request that sent media of the ``sent`` kinds."""
+    token = sent_media_kinds.set(frozenset(sent))
+    try:
+        return _is_retryable_error(exc, RetryConfig())
+    finally:
+        sent_media_kinds.reset(token)
 
 
 def bad_request(text, body=None):
@@ -112,7 +122,10 @@ def test_413_counts_only_with_media_wording():
 def test_media_worded_500_is_a_rejection_and_not_retried(text):
     exc = server_error(text)
     assert explicitly_rejected(exc, "image")
-    assert _is_retryable_error(exc, RetryConfig()) == (False, False)
+    assert retryable(exc) == (False, False)
+    # Retried as usual when the request sent no image (text only, or only a PDF).
+    assert retryable(exc, sent=()) == (True, False)
+    assert retryable(exc, sent={"pdf"}) == (True, False)
 
 
 @pytest.mark.parametrize(
@@ -172,7 +185,7 @@ def test_local_bedrock_value_error_is_a_format_rejection():
         llm_provider="bedrock",
     )
     assert explicitly_rejected(wrapped, "image")
-    assert _is_retryable_error(wrapped, RetryConfig()) == (False, False)
+    assert retryable(wrapped) == (False, False)
 
 
 @pytest.mark.parametrize(

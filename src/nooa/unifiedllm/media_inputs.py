@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
+from contextvars import ContextVar
 from typing import Any
 
 from nooa.llm_types import CacheBoundary, LLMResponse
@@ -643,6 +644,12 @@ def rejected_media_kinds(exc) -> frozenset[str]:
         ):
             kinds.add(kind)
     return frozenset(kinds)
+
+
+# The media kinds the request being sent carries after filtering, set by the
+# client for each request it prepares. The retry layer stops retrying a
+# media-worded 5xx only if the request really sent that kind of media.
+sent_media_kinds: ContextVar[frozenset[str]] = ContextVar("sent_media_kinds", default=frozenset())
 
 
 def is_media_rejection(exc) -> bool:

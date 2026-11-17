@@ -8,8 +8,18 @@ import litellm
 import pytest
 
 from nooa.unifiedllm import CompletionClient, RetryConfig
-from nooa.unifiedllm.media_inputs import attachment_kind, rejected_media_kinds
+from nooa.unifiedllm.media_inputs import attachment_kind, rejected_media_kinds, sent_media_kinds
 from nooa.unifiedllm.retry import _is_retryable_error
+
+
+def retryable(exc, sent=frozenset({"image"})):
+    """``_is_retryable_error`` for a request that sent media of the ``sent`` kinds."""
+    token = sent_media_kinds.set(frozenset(sent))
+    try:
+        return _is_retryable_error(exc, RetryConfig())
+    finally:
+        sent_media_kinds.reset(token)
+
 
 DEAD = {"type": "image_url", "image_url": {"url": "https://example.invalid/gone.png"}}
 NOTE = "[An image was removed here because the model provider could not read it.]"
@@ -51,7 +61,7 @@ def test_image_fetch_error_is_an_image_rejection():
 )
 def test_download_failures_are_image_rejections_and_not_retried(exc):
     assert rejected_media_kinds(exc) == {"image"}
-    assert _is_retryable_error(exc, RetryConfig()) == (False, False)
+    assert retryable(exc) == (False, False)
 
 
 @pytest.mark.parametrize(
