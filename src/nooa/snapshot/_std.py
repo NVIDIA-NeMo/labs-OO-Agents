@@ -185,21 +185,30 @@ def _qualified_type_name(value: Any, state: _State) -> str:
 # --- functions ----------------------------------------------------------------------
 
 
+_MAX_DEFAULT_NESTING = 2
+"""How many default texts may be built one inside another; a deeper default is ``...``."""
+
+
 def _default_text(value: Any, state: _State) -> str:
     """A parameter default as short ``render_python`` text.
 
     The default is captured with small fixed limits and the default
-    ``"opaque"`` fallback, and rendered without registered hooks, so no user
-    code runs and the text stays short.
+    ``"opaque"`` fallback, inside the enclosing capture (``_walk._nested``:
+    its work budget, cycle detection and namespaces), and rendered without
+    registered hooks, so no user code runs and the text stays short. A
+    default reached through ``_MAX_DEFAULT_NESTING`` other defaults (a
+    function that is its own default) is ``...``.
     """
-    from nooa.snapshot._capture import capture
     from nooa.snapshot._limits import Limits
     from nooa.snapshot._render import PythonRenderer
+    from nooa.snapshot._walk import _nested
 
-    limits = Limits(max_chars=400, max_nodes=50, max_depth=1, max_items=3, max_string=40)
+    if state.nesting >= _MAX_DEFAULT_NESTING:
+        return "..."
+    limits = Limits(max_chars=400, max_depth=1, max_items=3, max_string=40)
     # The standard notation only: a registered ``render_python`` hook is user
     # code, and capture runs none (the hooks still apply when the result renders).
-    return PythonRenderer({}).render(capture(value, limits))
+    return PythonRenderer({}).render(_nested(value, limits, state))
 
 
 def _signature(function: types.FunctionType, state: _State, skip_first: bool) -> str:

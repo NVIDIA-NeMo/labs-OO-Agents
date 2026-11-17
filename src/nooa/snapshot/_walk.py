@@ -653,6 +653,26 @@ class _Fill:
         return True
 
 
+def _nested(value: Any, limits: Limits, state: _State) -> Snapshot:
+    """A small capture of ``value`` inside this one (a parameter default's text, a node key).
+
+    It is built under ``limits`` (their ``max_nodes`` is not used) on the
+    enclosing capture's own ``state``: the same work budget
+    (``nodes_left``), the same cycle detection (``active``) and the same
+    checked namespaces, so a value reached again through it (a function
+    that is its own default) does not start over. ``state.nesting`` counts
+    the nested captures in progress.
+    """
+    saved = state.limits
+    state.limits = limits
+    state.nesting += 1
+    try:
+        return _build(value, limits.max_chars, 0, "", state).node
+    finally:
+        state.limits = saved
+        state.nesting -= 1
+
+
 _KEY_LIMITS = Limits(max_chars=400, max_nodes=50, max_depth=2, max_items=8, max_string=50)
 """The bounds of a node key (a tuple or enum member used as a dict key): a key is a label, so it is kept small."""
 

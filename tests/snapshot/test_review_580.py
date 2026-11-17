@@ -136,6 +136,45 @@ def test_a_readable_multiline_string_stays_triple_quoted() -> None:
     assert render_python(capture("line one\nline two")) == Q3 + "line one\nline two" + Q3
 
 
+def test_a_function_that_is_its_own_default_stays_bounded(monkeypatch) -> None:
+    # 4584541213: each default's text started a fresh capture (its own budget),
+    # so a function whose default is itself re-read its signature over and
+    # over (143 times under max_nodes=5), bounded by no limit of the capture.
+    from nooa.snapshot import _std
+
+    def function(a=None):
+        return a
+
+    function.__defaults__ = (function,)
+    calls: list[object] = []
+    signature = _std._signature
+
+    def counted(*args: Any, **kwargs: Any) -> str:
+        calls.append(args[0])
+        return signature(*args, **kwargs)
+
+    monkeypatch.setattr(_std, "_signature", counted)
+    capture(function, Limits(max_nodes=5))
+    assert len(calls) <= 3  # the function, then _MAX_DEFAULT_NESTING (2) defaults
+    calls.clear()
+    text = render_python(capture(function))
+    assert text.startswith("<function ") and len(text) < 2_000
+    assert len(calls) <= 3  # the function, then _MAX_DEFAULT_NESTING (2) defaults
+
+
+def test_a_default_shares_the_enclosing_work_budget() -> None:
+    # 4584541213: a default's capture had its own fresh budget of 50 nodes.
+    from nooa.snapshot._limits import _State
+    from nooa.snapshot._std import _default_text
+
+    state = _State(Limits())
+    before = state.nodes_left
+    assert _default_text(list(range(10)), state) == "list(len=10, [:3]=[0, 1, 2])"
+    assert 0 < before - state.nodes_left < 10
+    state.nodes_left = 0
+    assert _default_text([1, 2], state) != "[1, 2]"  # no work left: nothing is read
+
+
 def test_capture_runs_no_render_hook_for_a_default() -> None:
     # 4584541215: the default's text was rendered with the registered hooks.
     calls: list[object] = []

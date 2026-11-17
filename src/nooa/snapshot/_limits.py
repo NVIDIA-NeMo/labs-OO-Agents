@@ -133,6 +133,8 @@ class _State:
       this capture, with the hints that resolved one by one.
     - ``annotations``: the annotations of classes that keep them lazily
       (PEP 649, Python 3.14), evaluated once per capture (see ``_fields``).
+    - ``nesting``: how many small captures inside this one are being built
+      (a parameter default's text, a node key; ``_walk._nested``).
 
     Args:
         limits: the capture's checked ``Limits``.
@@ -152,6 +154,7 @@ class _State:
         # id(class) -> (class, its evaluated lazy annotations, None when they
         # could not be read) for this capture; see ``_fields._class_annotations``.
         self.annotations: dict[int, tuple[type[Any], dict[str, Any] | None]] = {}
+        self.nesting = 0
 
     def take_node(self) -> bool:
         """Spend one unit of ``max_nodes`` work.
