@@ -70,3 +70,29 @@ def test_audio_from_a_data_url_is_sent():
     assert block["input_audio"] == {"data": "UklGRg==", "format": "wav"}
     (sent,) = filter_media_messages([{"role": "user", "content": [block]}], ALL)[0]["content"]
     assert sent == block
+
+
+@pytest.mark.parametrize("media_type", ["audio/ogg", "audio/flac"])
+def test_inline_audio_formats_are_route_specific(media_type):
+    from nooa.unifiedllm import CompletionClient
+
+    block = media_to_content_block(Audio.from_bytes(b"OggS", media_type=media_type))
+    url_block = media_to_content_block(Audio.from_url("https://example.com/clip.ogg"))
+    messages = [{"role": "user", "content": [block, url_block]}]
+    for model, restricted in (
+        ("gemini/gemini-2.5-flash", False),
+        ("vertex_ai/gemini-2.5-flash", False),
+        ("openai/gpt-4o-audio-preview", True),
+        ("azure/gpt-4o-audio", True),
+        ("hosted_vllm/qwen-omni", True),
+    ):
+        with CompletionClient(model, media_inputs=["audio"], cache_breakpoint=None) as client:
+            sent, sent_url = client._prepare_media_messages(
+                messages, client._prepare_call_config({})
+            )[0]["content"]
+        # A URL is never sent as audio data, on any route.
+        assert sent_url["type"] == "text" and "URL cannot be sent" in sent_url["text"]
+        if restricted:  # OpenAI input_audio: WAV and MP3 only
+            assert sent["type"] == "text" and "WAV and MP3" in sent["text"], model
+        else:  # Gemini and other routes: the adapter receives the block unchanged
+            assert sent == block, model

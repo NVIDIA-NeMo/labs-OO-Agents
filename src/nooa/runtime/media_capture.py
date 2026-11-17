@@ -186,6 +186,8 @@ def _unsendable_warning(block: dict[str, Any]) -> str:
 
     Uses the same check as the request filter, which replaces such a block
     with a note on every request; ``show()`` still keeps the block in history.
+    The audio format check is the strictest route's (OpenAI ``input_audio``);
+    other routes, such as Gemini, may still receive the clip.
     """
     from nooa.media_inputs import attachment_kind
     from nooa.unifiedllm.media_inputs import unsendable_audio, unsendable_image_type
@@ -206,7 +208,10 @@ def _unsendable_warning(block: dict[str, Any]) -> str:
         if reason == "url":
             return "audio given as a URL cannot be sent; use Audio.from_file or Audio.from_bytes"
         if reason:
-            return f"{reason} audio cannot be sent to the model; convert it to WAV or MP3"
+            return (
+                f"{reason} audio cannot be sent on OpenAI-style audio routes (WAV and MP3 "
+                "only); convert it to WAV or MP3 unless the model takes it inline"
+            )
     return ""
 
 

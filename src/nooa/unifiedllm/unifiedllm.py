@@ -37,6 +37,7 @@ from nooa.unifiedllm.cache_policy import (
 )
 from nooa.unifiedllm.media_inputs import (
     _CONTEXT_LENGTH_RE,
+    INPUT_AUDIO_FORMATS,
     MediaInput,
     _error_param,
     _error_texts,
@@ -1433,9 +1434,32 @@ class UnifiedLLM(ABC):
             return ()
         return validate_media_inputs(self.media_inputs)
 
+    def _input_audio_formats(self, call_config) -> frozenset[str] | None:
+        """The audio formats this request's route accepts inline, or None for no limit.
+
+        Routes that send audio as OpenAI ``input_audio`` (OpenAI, Azure and
+        hosted OpenAI-compatible chat endpoints) take only WAV and MP3. Other
+        routes (Gemini, Vertex AI, ...) get their audio blocks unchanged; the
+        adapter decides. URL audio is never sent on any route.
+        """
+        try:
+            _, provider, _, _ = litellm.get_llm_provider(
+                model=self._effective_model(call_config),
+                custom_llm_provider=call_config.get("custom_llm_provider"),
+                api_base=call_config.get("api_base") or call_config.get("base_url"),
+            )
+        except Exception:
+            return None  # LiteLLM cannot route it: not an OpenAI input_audio route either
+        if provider in {"openai", "azure", "text-completion-openai"} or provider in getattr(
+            litellm, "openai_compatible_providers", []
+        ):
+            return INPUT_AUDIO_FORMATS
+        return None
+
     def _prepare_media_messages(self, messages, call_config):
         enabled = self._request_media_inputs(call_config)
-        self._record_unsendable_media(messages, enabled)
+        audio_formats = self._input_audio_formats(call_config) if "audio" in enabled else None
+        self._record_unsendable_media(messages, enabled, audio_formats)
         # Media the interface cannot send is rejected after projection, by
         # _validate_implemented_media: only the projected request also shows the
         # native content of replayed assistant turns.
@@ -1443,14 +1467,13 @@ class UnifiedLLM(ABC):
         # (a media recovery attempt) tries; see _media_attempt.
         excluded = self._rejected_media(call_config) | _media_trial.get()
         # The retry layer reads which kinds this request really sends.
-        sent_media_kinds.set(
-            frozenset(
-                kind for kind, key in media_occurrences(messages, enabled) if key not in excluded
-            )
-        )
-        return filter_media_messages(messages, enabled, excluded)
+        sent = media_occurrences(messages, enabled, audio_formats)
+        sent_media_kinds.set(frozenset(kind for kind, key in sent if key not in excluded))
+        return filter_media_messages(messages, enabled, excluded, audio_formats)
 
-    def _record_unsendable_media(self, messages, enabled) -> None:
+    def _record_unsendable_media(
+        self, messages, enabled, audio_formats=INPUT_AUDIO_FORMATS
+    ) -> None:
         """Count ``media_unsendable`` once per attachment the filter replaces before sending.
 
         The filter runs on every request and history repeats, so each
@@ -1459,7 +1482,7 @@ class UnifiedLLM(ABC):
         if not enabled:
             return
         reported = self._unsendable_reported
-        for reason, key in unsendable_occurrences(messages, enabled):
+        for reason, key in unsendable_occurrences(messages, enabled, audio_formats):
             if key not in reported:
                 if len(reported) >= 10_000:
                     reported.clear()  # bounded; a recount after this many is harmless
@@ -1499,7 +1522,9 @@ class UnifiedLLM(ABC):
         except Exception:
             return None  # The request itself is invalid; re-raise the original error.
         rejected = self._rejected_media(call_config)
-        sent = media_occurrences(messages, self._request_media_inputs(call_config))
+        enabled = self._request_media_inputs(call_config)
+        audio_formats = self._input_audio_formats(call_config) if "audio" in enabled else None
+        sent = media_occurrences(messages, enabled, audio_formats)
         newest_first = [(kind, key) for kind, key in reversed(sent) if key not in rejected]
         kinds = rejected_media_kinds(exc)
         if kinds:
