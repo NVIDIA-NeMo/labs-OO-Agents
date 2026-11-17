@@ -78,7 +78,8 @@ def _get_prefill(strategy: Any, call: Any, truncation_config: Any) -> tuple[str 
     For strategies that don't have explicit prefill support, ``pre_ellipsis``
     is still returned so that code the user wrote is never silently discarded.
     """
-    from nooa.config.effective import effective_truncation
+    from nooa.config.effective import effective
+    from nooa.config.truncation_config import TruncationConfig
     from nooa.strategies.codeact import CodeActStrategy
     from nooa.strategies.pure_python import PurePythonStrategy
 
@@ -88,12 +89,12 @@ def _get_prefill(strategy: Any, call: Any, truncation_config: Any) -> tuple[str 
         prefill = strategy.config.prefill
         if prefill is None:
             return None, pre_ellipsis
-        resolved_config = truncation_config or effective_truncation()
+        resolved_config = truncation_config or effective(TruncationConfig)
         return prefill.get_code(call, config=resolved_config), pre_ellipsis
 
     if isinstance(strategy, PurePythonStrategy):
         # PurePythonStrategy always has a prefill (InspectInputsPrefill by default)
-        resolved_config = truncation_config or effective_truncation()
+        resolved_config = truncation_config or effective(TruncationConfig)
         return strategy.prefill.get_code(call, config=resolved_config), pre_ellipsis
 
     return None, pre_ellipsis

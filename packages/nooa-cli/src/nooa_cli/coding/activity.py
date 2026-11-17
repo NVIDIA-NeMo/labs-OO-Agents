@@ -18,7 +18,8 @@ from pydantic import Field
 
 from nooa._bounded_text import cut_halves, text_stream
 from nooa.agentdoc import hidden, spec
-from nooa.config.effective import effective_truncation
+from nooa.config.effective import effective
+from nooa.config.truncation_config import TruncationConfig
 from nooa.context_blocks import EventBase
 from nooa.context_blocks.roles import Role
 from nooa.runtime.event_manager import EventManager
@@ -51,9 +52,9 @@ def _output_stream() -> TextStream:
     """One stream of a terminal card: half of ``capture.max_shell_output``, both ends kept.
 
     The shell's per-stream limit of the config in force
-    (``nooa.config.effective_truncation()``).
+    (``nooa.config.effective(TruncationConfig)``).
     """
-    return text_stream(effective_truncation().capture.max_shell_output // 2)
+    return text_stream(effective(TruncationConfig).capture.max_shell_output // 2)
 
 
 def _command_output(

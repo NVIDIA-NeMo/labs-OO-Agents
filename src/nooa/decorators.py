@@ -14,6 +14,10 @@ from nooa.context_blocks import ScopedContext
 from nooa.ellipsis_detection import has_ellipsis_body, has_ellipsis_marker
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from pydantic import BaseModel
+
     from nooa.config.truncation_config import TruncationConfig
     from nooa.decisions import UnifiedDecisionModel
     from nooa.strategies import GenerationStrategy as GenerationStrategyABC
@@ -30,6 +34,7 @@ def strategy(
     llm: "UnifiedLLM | str | Callable[[Any], UnifiedLLM] | None" = None,
     decision_model: "UnifiedDecisionModel | str | Callable[[Any], UnifiedDecisionModel] | None" = None,
     truncation: "TruncationConfig | None" = None,
+    configs: "Iterable[BaseModel] | None" = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Strategy decorator for agent methods.
 
@@ -65,6 +70,10 @@ def strategy(
         truncation: Optional TruncationConfig override for this method. Fields set
             here take precedence over the agent-level truncation config. Unset fields
             inherit from the agent-level config.
+        configs: Optional overrides of other config models for this method (a
+            package's own limits model), one instance per model, merged over
+            the agent's ``configs=`` the same way while the method runs; read
+            with ``nooa.config.effective(Model)``.
 
     Examples:
         from nooa import Context
@@ -107,6 +116,10 @@ def strategy(
                     f"Use context={{...}} or ScopedContext(context={{...}}, events={{...}})"
                 )
 
+        from nooa.config.effective import config_overrides
+
+        final_configs = config_overrides(configs, f"@strategy on {func.__name__}")
+
         # Attach metadata for metaclass to read (when used at class definition time)
         setattr(func, "_strategy_override", strategy_instance)  # noqa: B010
         setattr(func, "_strategy_llm", llm)  # noqa: B010
@@ -114,6 +127,7 @@ def strategy(
         setattr(func, "_strategy_context", final_context)  # noqa: B010
         setattr(func, "_strategy_events", final_events)  # noqa: B010
         setattr(func, "_strategy_truncation", truncation)  # noqa: B010
+        setattr(func, "_strategy_configs", final_configs)  # noqa: B010
 
         # @strategy has a unary, single-result contract. Deterministic
         # generators need no strategy, while generated streams require a
@@ -199,6 +213,7 @@ def strategy(
         setattr(wrapper, "_strategy_context", final_context)  # noqa: B010
         setattr(wrapper, "_strategy_events", final_events)  # noqa: B010
         setattr(wrapper, "_strategy_truncation", truncation)  # noqa: B010
+        setattr(wrapper, "_strategy_configs", final_configs)  # noqa: B010
 
         # Also attach to original function (needed for _execute_task)
         setattr(func, "_agent_decorator", "auto")  # noqa: B010

@@ -184,12 +184,12 @@ def test_repository_instructions_are_read_boundedly(tmp_path, monkeypatch):
         return stream
 
     monkeypatch.setattr(Path, "open", spying_open)
-    from nooa.config import TruncationConfig
+    from nooa_cli.coding.limits import CodingLimits
 
     (tmp_path / "AGENTS.md").write_text("x" * 10_000)
 
     rendered = instructions.render_agent_instructions(
-        tmp_path, TruncationConfig(instructions_file_chars=100)
+        tmp_path, CodingLimits(instructions_file_chars=100)
     )
 
     # Positive sizes only: an unbounded .read() records -1, which satisfies

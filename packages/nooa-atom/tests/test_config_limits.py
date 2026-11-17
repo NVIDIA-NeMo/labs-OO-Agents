@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """nooa-atom's configurable limits honour agent-level and method-level overrides.
 
-``capture.max_shell_output`` (terminal cards), ``capture.max_job_tail``
-(a background run's done update) and ``instructions_file_chars`` /
-``instructions_total_chars`` (repository instructions), all read through
-``nooa.config.effective_truncation``. With no override the output is the one
-of the old constants.
+Core's ``TruncationConfig.capture.max_shell_output`` (terminal cards) and
+nooa-atom's own ``AtomLimits``: ``max_job_tail`` (a background run's done
+update) and ``instructions_file_chars`` / ``instructions_total_chars``
+(repository instructions), all read through ``nooa.config.effective``. With no
+override the output is the one of the old constants.
 """
 
 import asyncio
@@ -17,6 +17,8 @@ from typing import Any
 from nooa_atom.agent.activity import ActivityShellTools, TerminalCommandOutput
 from nooa_atom.agent.instructions import RepositoryInstructions, render_agent_instructions
 from nooa_atom.agent.jobs import JobsApi
+from nooa_atom.limits import AtomLimits
+from pydantic import BaseModel
 
 from nooa import Agent, CodeActStrategy, strategy
 from nooa.config import CaptureConfig, TruncationConfig
@@ -26,16 +28,21 @@ from nooa.tools import ShellTools
 from nooa.unifiedllm import FakeLLMClient
 
 CARD = TruncationConfig(capture=CaptureConfig(max_shell_output=100))
-JOB = TruncationConfig(capture=CaptureConfig(max_job_tail=50))
-INSTRUCTIONS = TruncationConfig(instructions_file_chars=60, instructions_total_chars=500)
+JOB = AtomLimits(max_job_tail=50)
+INSTRUCTIONS = AtomLimits(instructions_file_chars=60, instructions_total_chars=500)
 
 
-def _probe_agent(method_truncation: TruncationConfig | None, **agent_kwargs: Any) -> Any:
+def _override(config: BaseModel) -> dict[str, Any]:
+    """The keyword that sets ``config``: ``truncation=`` or ``configs=[...]``."""
+    return {"truncation": config} if isinstance(config, TruncationConfig) else {"configs": [config]}
+
+
+def _probe_agent(method_config: BaseModel | None, **agent_kwargs: Any) -> Any:
     """``implemented(probe)`` and a generated ``generated(probe)`` that await ``probe()``."""
     llm = FakeLLMClient.with_tool_call(
         "execute_python", {"code": "return_result(await probe())"}, strict_exhaustion=False
     )
-    kwargs: dict[str, Any] = {} if method_truncation is None else {"truncation": method_truncation}
+    kwargs: dict[str, Any] = {} if method_config is None else _override(method_config)
 
     class Probe(Agent, llm=llm):
         async def implemented(self, probe: Callable[..., Any]) -> Any:
@@ -49,10 +56,10 @@ def _probe_agent(method_truncation: TruncationConfig | None, **agent_kwargs: Any
     return Probe(**agent_kwargs)
 
 
-async def _three(probe: Callable[..., Any], config: TruncationConfig) -> list[Any]:
+async def _three(probe: Callable[..., Any], config: BaseModel) -> list[Any]:
     """``probe()`` with no override, with ``config`` on the agent, and on the method only."""
     results = []
-    for method, agent_kwargs in ((None, {}), (None, {"truncation": config}), (config, {})):
+    for method, agent_kwargs in ((None, {}), (None, _override(config)), (config, {})):
         agent = _probe_agent(method, **agent_kwargs)
         try:
             call = agent.implemented if method is None else agent.generated
@@ -88,7 +95,7 @@ async def test_the_card_follows_max_shell_output(tmp_path):
     assert 100 < method_level < 200
 
 
-# capture.max_job_tail: a background run's done update
+# AtomLimits.max_job_tail: a background run's done update
 
 
 def _job_probe(tmp_path: Path) -> Callable[..., Any]:
@@ -125,7 +132,7 @@ async def test_a_job_tail_follows_max_job_tail(tmp_path):
         assert text == f"[... {len(whole) - 50:,} {omitted}" + whole[-50:]
 
 
-# instructions_file_chars / instructions_total_chars
+# AtomLimits.instructions_file_chars / instructions_total_chars
 
 
 def _instructions_probe(tmp_path: Path) -> Callable[..., Any]:
@@ -161,3 +168,23 @@ def test_instruction_defaults_are_the_old_constants(tmp_path):
     (tmp_path / "sub" / "AGENTS.md").write_text("s" * 150_000)
     both = render_agent_instructions(tmp_path / "sub")
     assert len(both) == 200_000
+
+
+def test_atom_limits_defaults_and_validation():
+    import pytest
+
+    from nooa.config import effective
+
+    assert effective(AtomLimits) == AtomLimits(
+        max_job_tail=20_000, instructions_file_chars=100_000, instructions_total_chars=200_000
+    )
+    for name in ("max_job_tail", "instructions_file_chars", "instructions_total_chars"):
+        with pytest.raises(ValueError, match=name):
+            AtomLimits(**{name: 0})
+
+
+def test_core_truncation_config_has_no_atom_fields():
+    assert not {"instructions_file_chars", "instructions_total_chars"} & set(
+        TruncationConfig.model_fields
+    )
+    assert "max_job_tail" not in CaptureConfig.model_fields

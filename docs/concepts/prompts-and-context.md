@@ -70,37 +70,65 @@ Raise that capture budget explicitly, or arrange to inspect the input in
 smaller pieces. Warnings do not include parameter contents or enter the model's
 captured stderr, and can be filtered with Python's standard warnings filters.
 
-## Output limits: `TruncationConfig`
+## Output limits: `TruncationConfig` and package config models
 
-Every configurable limit on text a model or user reads is a field of
-`nooa.config.TruncationConfig`. Set it on the agent class
+Every configurable limit core applies to text a model or user reads is a field
+of `nooa.config.TruncationConfig`. Set it on the agent class
 (`class MyAgent(Agent, truncation=...)`), the instance
 (`MyAgent(truncation=...)`) or one method (`@strategy(..., truncation=...)`,
 while that method runs). Later levels win, and each names only the fields it
-changes. Code that applies a limit reads the config in force with
-`nooa.config.effective_truncation()` when it applies it. This is the one place
-that encodes those precedence rules. It uses context variables: asyncio tasks
-and `asyncio.to_thread` keep the caller's limits, but a plain
-`threading.Thread` does not. Run its target in
+changes (sub-configs merge field by field). Code that applies a limit reads the
+config in force with `nooa.config.effective(TruncationConfig)` when it applies
+it. This is the one place that encodes those precedence rules. It uses context
+variables: asyncio tasks and `asyncio.to_thread` keep the caller's limits, but
+a plain `threading.Thread` does not. Run its target in
 `contextvars.copy_context().run(...)`.
 
+A package's own limits are fields of that package's own pydantic config model,
+not of `TruncationConfig`; core never imports or names them. They follow the
+same rule and are set with `configs=`, a list of config instances (one per
+model, matched by exact type):
+
+```python
+from nooa import strategy
+from nooa.config import effective
+from nooa_atom.limits import AtomLimits
+
+class MyAgent(AtomAgent, configs=[AtomLimits(max_job_tail=5_000)]): ...   # class
+agent = MyAgent(configs=[AtomLimits(instructions_file_chars=20_000)])      # instance
+# method: @strategy(CodeActStrategy(), configs=[AtomLimits(max_job_tail=500)])
+effective(AtomLimits).max_job_tail   # read where the limit is applied
+```
+
+Outside any agent `effective(Model)` is the model's defaults (`Model()`). A
+subclass's `configs=` instance of a model replaces the inherited one, as
+`truncation=` does; models it does not name are inherited.
+`nooa.config.merge_config(base, override)` is the field merge all levels use.
+
+| Field | Default | Bounds |
 | Field | Default | Bounds |
 |---|---|---|
 | `max_context_tokens` | `None` | whole-context token budget |
 | `response_reserve_tokens` | 4,096 | planning reserve when no reply cap is known |
 | `overflow_files` | `True` | whether cut output may go to a file |
 | `placeholder_chars` | 50,000 | one docstring `{expr}` placeholder (method docstrings, Task prompts, the system prompt) |
-| `instructions_file_chars` | 100,000 | one repository instruction file (`AGENTS.md`; nooa-atom, nooa-cli) |
-| `instructions_total_chars` | 200,000 | the whole `repository_instructions` block |
 | `capture.max_stdout` / `max_stderr` / `max_error` | 50,000 / 2,000 / 10,000 | one `execute_python` cell's streams and error |
 | `capture.tail` | `None` (half) | tail share of the three cell streams above |
 | `capture.max_shell_output` | 30,000 | each stream of a shell command result (`ShellTools`, `BashSession`; the nooa-atom terminal card shows the same, the nooa-cli card half) |
-| `capture.max_job_tail` | 20,000 | the end of each stream on a background job's done update (nooa-atom) |
 | `media_capture.max_attachments_per_execution` | 5 | `show()` attachments per cell |
 | `event_format` | 10,000 chars / 200 items / depth 5 | event fields in the conversation |
 | `prefill_format` | 2,000 / 25 / 4 | input inspection previews and non-string placeholders |
 | `context_block_format` | unlimited | non-string `self.context[...]` values |
 | `state_format` | 500 / 50 / 4 | the agent's `state` block. The prompt shows its expression, so it is fixed when the agent is built: the class and instance levels apply, a method level does not |
+
+Package limits:
+
+| Model | Field | Default | Bounds |
+|---|---|---|---|
+| `nooa_atom.limits.AtomLimits` | `max_job_tail` | 20,000 | the end of each stream on a background job's done update |
+| `nooa_atom.limits.AtomLimits` | `instructions_file_chars` | 100,000 | one repository instruction file (`AGENTS.md`) |
+| `nooa_atom.limits.AtomLimits` | `instructions_total_chars` | 200,000 | the whole `repository_instructions` block |
+| `nooa_cli.coding.limits.CodingLimits` | `instructions_file_chars` / `instructions_total_chars` | 100,000 / 200,000 | the same for the nooa-cli coding agent |
 
 `max_event_tokens` and `min_preserved_events` are accepted but not enforced.
 Per-field `Annotated[T, spec(...)]` limits on an event or parameter type

@@ -252,13 +252,16 @@ onto `nooa.snapshot` instead of copying it.
 
 **Limits are config.** A size, length or count limit on text a model or user
 reads (prompts, tool results, cell, shell or job output, context blocks,
-previews) is a `TruncationConfig` field in `nooa.config`, with today's value
-as its default. Read it through `nooa.config.effective_truncation()` when you
-apply it. Do not use a module constant or a literal, do not read
-`DEFAULT_TRUNCATION_CONFIG`, and do not write your own method > agent >
-defaults lookup. Internal protocol, safety and performance bounds (frame or
-queue sizes, work caps, timeouts) stay constants. The fields are listed in
-`docs/concepts/prompts-and-context.md`.
+previews) is a config field with today's value as its default: a core limit is
+a `TruncationConfig` field in `nooa.config`; a package's limit is a field of
+that package's own config model (nooa-atom: `nooa_atom.limits.AtomLimits`).
+Read either through `nooa.config.effective(ConfigType)` when you apply it
+(`effective(TruncationConfig)`, `effective(AtomLimits)`). Core code never
+imports or names a package's config. Do not use a module constant or a
+literal, do not read `DEFAULT_TRUNCATION_CONFIG`, and do not write your own
+method > agent > defaults lookup or field merge. Internal protocol, safety and
+performance bounds (frame or queue sizes, work caps, timeouts) stay constants.
+The fields and the override API are in `docs/concepts/prompts-and-context.md`.
 
 ### Quality & Testing
 

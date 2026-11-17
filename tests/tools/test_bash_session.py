@@ -89,11 +89,11 @@ class TestBashSession:
 
     def test_bounded_matches_one_write_and_keeps_both_ends(self):
         """Chunked feeding gives the same text as one write, for every size around the limit."""
-        from nooa.config import effective_truncation
+        from nooa.config import TruncationConfig, effective
         from nooa.snapshot import TextStream, render_output
         from nooa.tools._bash_session import _bounded
 
-        MAX_OUTPUT_CHARS = effective_truncation().capture.max_shell_output
+        MAX_OUTPUT_CHARS = effective(TruncationConfig).capture.max_shell_output
         assert MAX_OUTPUT_CHARS == 30_000  # the limit is unchanged
         for size in (MAX_OUTPUT_CHARS, MAX_OUTPUT_CHARS + 1, 65_536, 65_537, 300_000):
             text = "".join(chr(ord("a") + i % 26) for i in range(size))

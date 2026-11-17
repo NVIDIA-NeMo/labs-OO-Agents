@@ -9,12 +9,9 @@ import os
 import stat
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from nooa.config.effective import effective_truncation
-
-if TYPE_CHECKING:
-    from nooa.config.truncation_config import TruncationConfig
+from nooa.config.effective import effective
+from nooa_atom.limits import AtomLimits
 
 logger = logging.getLogger(__name__)
 
@@ -126,15 +123,15 @@ def _read_instruction_file(path: Path, limit: int, resolved_boundary: Path) -> t
 
 
 def render_agent_instructions(
-    working_directory: str | Path, truncation: TruncationConfig | None = None
+    working_directory: str | Path, limits: AtomLimits | None = None
 ) -> str:
     """Render applicable repository instructions as one bounded context block.
 
     The bounds are ``instructions_file_chars`` per file and
-    ``instructions_total_chars`` in all of ``truncation`` (``None``: the
-    config in force, ``nooa.config.effective_truncation()``).
+    ``instructions_total_chars`` in all of ``limits`` (``None``: the
+    config in force, ``nooa.config.effective(AtomLimits)``).
     """
-    config = truncation if truncation is not None else effective_truncation()
+    config = limits if limits is not None else effective(AtomLimits)
     file_chars = config.instructions_file_chars
     total_chars = config.instructions_total_chars
     preamble = (
@@ -219,9 +216,9 @@ class RepositoryInstructions:
         """Return the current guidance, re-reading only files (or limits) that changed.
 
         The limits are ``instructions_file_chars`` / ``instructions_total_chars``
-        of the config in force (``nooa.config.effective_truncation()``).
+        of the config in force (``nooa.config.effective(AtomLimits)``).
         """
-        config = effective_truncation()
+        config = effective(AtomLimits)
         files = _signature(discover_agent_instruction_files(self._working_directory))
         signature = (files, config.instructions_file_chars, config.instructions_total_chars)
         if signature != self._signature:

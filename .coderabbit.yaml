@@ -33,20 +33,29 @@ reviews:
         Comment only; do not request changes for this rule alone.
     - path: "{src,packages/*/src}/**/*.py"
       instructions: |
-        Configurable limits live in `nooa.config` (`TruncationConfig` and its
-        sub-configs; docs/concepts/prompts-and-context.md lists the fields).
+        Configurable limits are config fields. Core limits are fields of
+        `nooa.config.TruncationConfig` and its sub-configs
+        (docs/concepts/prompts-and-context.md lists them); a package's limits
+        are fields of that package's own config model (for example nooa-atom's
+        `nooa_atom.limits.AtomLimits`). Both are read through
+        `nooa.config.effective(ConfigType)` (`effective(TruncationConfig)`,
+        `effective(AtomLimits)`) when the limit is applied, not once at import
+        or construction time.
         Flag a NEW hard-coded size, length or count limit, as a module constant
         or a literal, that bounds text a model or user reads: prompts and
         docstring placeholders, tool results, cell, shell or job output, context
         blocks, previews or listings shown to the model. Ask the author to add a
-        `TruncationConfig` field with the current value as its default and read
-        it through `nooa.config.effective_truncation()` when the limit is
-        applied, not once at import or construction time.
-        Also flag consumer code that reads `DEFAULT_TRUNCATION_CONFIG` directly
-        (it skips agent- and method-level overrides; use
-        `effective_truncation()`), and code that re-implements the precedence
-        rule (method `@strategy(truncation=...)` > agent instance > class >
-        defaults) instead of calling `effective_truncation()`.
+        field to the config model of the package that applies it, with the
+        current value as its default.
+        Also flag: core code (src/nooa/) that imports or names a package's
+        config model, or a package limit added to `TruncationConfig`;
+        `effective_truncation` (removed; use `effective(TruncationConfig)`);
+        consumer code that reads `DEFAULT_TRUNCATION_CONFIG` or builds a
+        default config model directly (it skips agent- and method-level
+        overrides); and code that re-implements the precedence rule (method
+        `@strategy(truncation=..., configs=[...])` > agent instance > class >
+        the model's defaults) or the field-merge rule instead of calling
+        `effective()` / `nooa.config.merge_config()`.
         Internal protocol, safety or performance bounds are fine as constants:
         frame and queue sizes, IPC ceilings, work or retry caps, timeouts,
         memory and file sizes nobody reads.

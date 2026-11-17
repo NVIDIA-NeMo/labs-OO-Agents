@@ -14,6 +14,10 @@ from nooa.runtime.context_vars import _parent_agent_var
 from nooa.storage.markers import nosnapshot
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from pydantic import BaseModel
+
     from nooa.agentdoc.ext import TypeInfo
     from nooa.config.execution_config import ExecutionConfig
     from nooa.config.truncation_config import TruncationConfig
@@ -111,6 +115,8 @@ class Agent(metaclass=AgentMeta):
     _llm: Annotated["UnifiedLLM | None", hidden, nosnapshot]
     _decision_model: Annotated["UnifiedDecisionModel | None", hidden, nosnapshot]
     _truncation: Annotated["TruncationConfig", hidden, nosnapshot]
+    # Resolved configs=[...] of other config models, by type (nooa.config.effective).
+    _configs: Annotated["dict[type[BaseModel], BaseModel]", hidden, nosnapshot]
     context: Annotated["ContextApi", hidden, nosnapshot]
     events: Annotated["EventsApi", hidden, nosnapshot]
 
@@ -135,6 +141,7 @@ class Agent(metaclass=AgentMeta):
     # Per-class cache of clients resolved from agent-level decision_model aliases.
     _agent_decision_alias_cache: Annotated["dict[str, UnifiedDecisionModel]", hidden, nosnapshot]
     _agent_truncation: Annotated["TruncationConfig", hidden]
+    _agent_configs: Annotated["dict[type[BaseModel], BaseModel]", hidden]
     _agent_context_blocks: Annotated["dict[str, str | DynamicContext | None]", hidden]
     _agent_event_query: Annotated["EventQuery | None", hidden]
 
@@ -149,6 +156,7 @@ class Agent(metaclass=AgentMeta):
         execution: "ExecutionConfig | None" = None,
         context: "dict[str, str | DynamicContext | None] | None" = None,
         event_query: "EventQuery | None" = None,
+        configs: "Iterable[BaseModel] | None" = None,
         **kwargs: Any,
     ):
         """Configure agent class with metaclass.
@@ -166,6 +174,11 @@ class Agent(metaclass=AgentMeta):
                 - DynamicContext("expr"): DynamicContext expression, re-evaluated each turn
                 - None: Remove block
             event_query: Default EventQuery for filtering events in context.
+            configs: Overrides of other config models (a package's own limits
+                model), one instance per model;
+                read with ``nooa.config.effective(Model)``. A subclass's
+                instance of a model replaces the inherited one (as
+                ``truncation=`` does); models it does not name are inherited.
             **kwargs: Additional arguments for multiple inheritance support.
         """
         _validate_llm_param(llm, cls.__name__)
@@ -182,6 +195,13 @@ class Agent(metaclass=AgentMeta):
             cls._agent_context_blocks = context  # type: ignore[attr-defined]
         if event_query is not None:
             cls._agent_event_query = event_query  # type: ignore[attr-defined]
+        if configs is not None:
+            from nooa.config.effective import config_overrides
+
+            cls._agent_configs = {  # type: ignore[attr-defined]
+                **getattr(cls, "_agent_configs", {}),
+                **config_overrides(configs, f"class {cls.__name__}"),
+            }
 
         from nooa.config.execution_config import ExecutionConfig as _EC
 
@@ -197,6 +217,7 @@ class Agent(metaclass=AgentMeta):
         context: "dict[str, str | DynamicContext | None] | None" = None,
         event_query: "EventQuery | None" = None,
         storage: "StorageManager | None" = None,
+        configs: "Iterable[BaseModel] | None" = None,
     ):
         """Initialize agent with its own runtime.
 
@@ -215,6 +236,9 @@ class Agent(metaclass=AgentMeta):
             event_query: Instance-level EventQuery for filtering events in context.
             storage: Optional StorageManager for persistence. Defaults to
                 InMemoryStorageManager (no persistence, same as current behavior).
+            configs: Instance-level overrides of other config models, one
+                instance per model, merged over the class level's
+                (``nooa.config.effective``).
 
         Core attributes (all hidden from LLM):
         - context_manager: ContextManager — raw context block state
@@ -253,6 +277,7 @@ class Agent(metaclass=AgentMeta):
 
         # Resolve and store truncation config (with merge semantics)
         self._truncation = self._resolve_truncation(truncation)
+        self._configs = self._resolve_configs(configs)
 
         # Resolve render config (instance overrides class default)
         from nooa.context_blocks.render_config import RenderConfig as _RC
@@ -459,6 +484,20 @@ class Agent(metaclass=AgentMeta):
 
     @no_trace
     @hidden
+    def _resolve_configs(
+        self, instance_configs: "Iterable[BaseModel] | None"
+    ) -> "dict[type[BaseModel], BaseModel]":
+        """Resolve ``configs=`` by type: the defaults, the class level, then the instance level."""
+        from nooa.config.effective import config_overrides, layer_configs
+
+        class_configs = getattr(self.__class__, "_agent_configs", None) or {}
+        resolved = layer_configs({}, class_configs)
+        return layer_configs(
+            resolved, config_overrides(instance_configs, type(self).__name__ + "()")
+        )
+
+    @no_trace
+    @hidden
     def _resolve_event_query(
         self, instance_event_query: "EventQuery | None"
     ) -> "EventQuery | None":
@@ -570,14 +609,15 @@ Inspect in REPL: print(doc(self.events))
         """The ``state`` context block's expression: ``pformat(self, ...)`` under ``state_format``.
 
         The limits are the agent's ``TruncationConfig.state_format``
-        (``nooa.config.effective_truncation(self)``), by default
+        (``nooa.config.effective(TruncationConfig, self)``), by default
         ``max_length=50, max_string=500, max_depth=4``. The prompt shows the
         expression, so it is built once with the values as literals; a
         method-level ``@strategy(truncation=...)`` does not change it.
         """
-        from nooa.config.effective import effective_truncation
+        from nooa.config.effective import effective
+        from nooa.config.truncation_config import TruncationConfig
 
-        limits = effective_truncation(self).state_format
+        limits = effective(TruncationConfig, self).state_format
         return (
             f"pformat(self, max_length={limits.max_length}, "
             f"max_string={limits.max_string}, max_depth={limits.max_depth})"
@@ -596,7 +636,8 @@ Inspect in REPL: print(doc(self.events))
         """
         import string
 
-        from nooa.config.effective import effective_truncation
+        from nooa.config.effective import effective
+        from nooa.config.truncation_config import TruncationConfig
         from nooa.runtime.placeholders import render_placeholder
 
         # Walk MRO to find nearest docstring (Python doesn't inherit __doc__).
@@ -611,7 +652,7 @@ Inspect in REPL: print(doc(self.events))
         if not doc or "{" not in doc:
             return doc
         # Resolve {expr} placeholders using the agent's namespace
-        truncation = effective_truncation(self)
+        truncation = effective(TruncationConfig, self)
         formatter = string.Formatter()
         parts = []
         for literal, field, fmt_spec, conversion in formatter.parse(doc):

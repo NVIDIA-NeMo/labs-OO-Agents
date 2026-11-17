@@ -61,13 +61,14 @@ def _bounded(text: str) -> str:
 
     ``HEAD``, ``[... N chars omitted; full output not kept]``, ``TAIL`` (half
     of the limit each). The limit is ``TruncationConfig.capture.max_shell_output``
-    of the config in force (``nooa.config.effective_truncation``; 30,000 by
+    of the config in force (``nooa.config.effective(TruncationConfig)``; 30,000 by
     default). The tail matters as much as the head: a failing command usually
     ends with its error.
     """
-    from nooa.config.effective import effective_truncation
+    from nooa.config.effective import effective
+    from nooa.config.truncation_config import TruncationConfig
 
-    return cut_text(text, effective_truncation().capture.max_shell_output)
+    return cut_text(text, effective(TruncationConfig).capture.max_shell_output)
 
 
 def _process_start_time(pid: int) -> str | None:

@@ -6,12 +6,9 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
 
-from nooa.config.effective import effective_truncation
-
-if TYPE_CHECKING:
-    from nooa.config.truncation_config import TruncationConfig
+from nooa.config.effective import effective
+from nooa_cli.coding.limits import CodingLimits
 
 logger = logging.getLogger(__name__)
 
@@ -38,13 +35,13 @@ _SECTION_SEPARATOR = "\n\n---\n\n"
 
 
 def render_agent_instructions(
-    working_directory: str | Path, truncation: TruncationConfig | None = None
+    working_directory: str | Path, limits: CodingLimits | None = None
 ) -> str:
     """Render applicable repository instructions as one bounded context block.
 
     The caps are ``instructions_file_chars`` per file and
-    ``instructions_total_chars`` in all of ``truncation`` (``None``: the
-    config in force, ``nooa.config.effective_truncation()``). The content is
+    ``instructions_total_chars`` in all of ``limits`` (``None``: the
+    config in force, ``nooa.config.effective(CodingLimits)``). The content is
     workspace-controlled and lands in a prefix context block on every turn, so
     an unbounded read is a memory and context-window risk at session setup.
 
@@ -54,7 +51,7 @@ def render_agent_instructions(
     the memory. The budget covers the rendered text — headers, separators and
     truncation markers included — not just the retained file content.
     """
-    config = truncation if truncation is not None else effective_truncation()
+    config = limits if limits is not None else effective(CodingLimits)
     sections: list[str] = []
     remaining = config.instructions_total_chars
     for path in discover_agent_instruction_files(working_directory):

@@ -3,8 +3,9 @@
 """nooa-cli's configurable limits honour agent-level and method-level overrides.
 
 ``capture.max_shell_output`` (terminal cards: half of it per stream, as
-before) and ``instructions_file_chars`` / ``instructions_total_chars``
-(repository instructions), read through ``nooa.config.effective_truncation``.
+before; core's ``TruncationConfig``) and the coding agent's own
+``CodingLimits.instructions_file_chars`` / ``instructions_total_chars``
+(repository instructions), read through ``nooa.config.effective``.
 With no override the output is the one of the old constants.
 """
 
@@ -15,6 +16,8 @@ from typing import Any
 from nooa_cli.coding import CodingAgent
 from nooa_cli.coding.activity import ActivityShellTools, TerminalCommandOutput
 from nooa_cli.coding.instructions import render_agent_instructions
+from nooa_cli.coding.limits import CodingLimits
+from pydantic import BaseModel
 
 from nooa import Agent, CodeActStrategy, strategy
 from nooa.config import CaptureConfig, TruncationConfig
@@ -23,15 +26,20 @@ from nooa.tools import ShellTools
 from nooa.unifiedllm import FakeLLMClient
 
 CARD = TruncationConfig(capture=CaptureConfig(max_shell_output=200))
-INSTRUCTIONS = TruncationConfig(instructions_file_chars=60, instructions_total_chars=500)
+INSTRUCTIONS = CodingLimits(instructions_file_chars=60, instructions_total_chars=500)
 
 
-def _probe_agent(method_truncation: TruncationConfig | None, **agent_kwargs: Any) -> Any:
+def _override(config: BaseModel) -> dict[str, Any]:
+    """The keyword that sets ``config``: ``truncation=`` or ``configs=[...]``."""
+    return {"truncation": config} if isinstance(config, TruncationConfig) else {"configs": [config]}
+
+
+def _probe_agent(method_config: BaseModel | None, **agent_kwargs: Any) -> Any:
     """``implemented(probe)`` and a generated ``generated(probe)`` that await ``probe()``."""
     llm = FakeLLMClient.with_tool_call(
         "execute_python", {"code": "return_result(await probe())"}, strict_exhaustion=False
     )
-    kwargs: dict[str, Any] = {} if method_truncation is None else {"truncation": method_truncation}
+    kwargs: dict[str, Any] = {} if method_config is None else _override(method_config)
 
     class Probe(Agent, llm=llm):
         async def implemented(self, probe: Callable[..., Any]) -> Any:
@@ -45,10 +53,10 @@ def _probe_agent(method_truncation: TruncationConfig | None, **agent_kwargs: Any
     return Probe(**agent_kwargs)
 
 
-async def _three(probe: Callable[..., Any], config: TruncationConfig) -> list[Any]:
+async def _three(probe: Callable[..., Any], config: BaseModel) -> list[Any]:
     """``probe()`` with no override, with ``config`` on the agent, and on the method only."""
     results = []
-    for method, agent_kwargs in ((None, {}), (None, {"truncation": config}), (config, {})):
+    for method, agent_kwargs in ((None, {}), (None, _override(config)), (config, {})):
         agent = _probe_agent(method, **agent_kwargs)
         try:
             call = agent.implemented if method is None else agent.generated
@@ -109,8 +117,8 @@ def test_instruction_defaults_are_the_old_constants(tmp_path):
 async def test_the_coding_agent_builds_its_block_under_its_own_config(tmp_path):
     (tmp_path / ".git").mkdir()
     (tmp_path / "AGENTS.md").write_text("r" * 5_000)
-    for truncation, whole in ((None, True), (INSTRUCTIONS, False)):
-        agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, truncation=truncation)
+    for configs, whole in ((None, True), ([INSTRUCTIONS], False)):
+        agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, configs=configs)
         try:
             block = agent.context_manager._blocks["repository_instructions"]
             text = block.value if hasattr(block, "value") else str(block)

@@ -99,8 +99,6 @@ async def test_shell_output_default_is_the_old_constant_outside_an_agent():
 def test_max_shell_output_must_be_positive():
     with pytest.raises(ValueError, match="max_shell_output"):
         CaptureConfig(max_shell_output=0)
-    with pytest.raises(ValueError, match="max_job_tail"):
-        CaptureConfig(max_job_tail=0)
 
 
 def test_tail_does_not_constrain_the_shell_and_job_limits():
