@@ -258,6 +258,11 @@ class GenerationStrategy(ABC, metaclass=AgentMeta):
         return ManagedContextView()
 
     @property
+    def context_strategy(self) -> "GenerationStrategy":
+        """The strategy context views see as ``call.strategy``; wrappers return their base."""
+        return self
+
+    @property
     def traceable(self) -> bool:
         """Whether generation hooks should fire for this strategy.
 

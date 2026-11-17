@@ -24,8 +24,7 @@ from nooa.context_blocks.events import (
 from nooa.context_blocks.exceptions import (
     BlockError,
     BlockSyntaxError,
-    DynamicNotResolvedError,
-    ProtectedBlockError,
+    ContextAssemblyError,
     UnsupportedContextLayout,
 )
 from nooa.context_blocks.formatter import (
@@ -100,7 +99,6 @@ __all__ = [
     # Exceptions
     "BlockError",
     "BlockSyntaxError",
-    "DynamicNotResolvedError",
-    "ProtectedBlockError",
+    "ContextAssemblyError",
     "UnsupportedContextLayout",
 ]

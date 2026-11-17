@@ -653,11 +653,14 @@ class TestPlainFormatterNoOutput:
     """format_event() returns '(no output)' when all fields are empty (line 50)."""
 
     def test_empty_event_returns_no_output(self):
-        from nooa.events import LLMResponse
+        from nooa.context_blocks.events import EventBase
         from nooa.plain_formatter import PlainBlockFormatter
 
-        # LLMResponse with empty content and no reasoning → all repr fields are empty/None
-        event = LLMResponse(content="", reasoning=None)
+        class EmptyEvent(EventBase):
+            pass
+
+        # Ordinary events with no printable fields still receive a placeholder.
+        event = EmptyEvent()
         formatter = PlainBlockFormatter()
         result = formatter.format_event(event)
         assert result == "(no output)"
@@ -1171,7 +1174,6 @@ class TestReflexionNoResult:
         mock_base = AsyncMock()
         mock_base.name = "MOCK"
         mock_base.requires_lock = False
-        mock_base.get_block_overrides.return_value = {}
 
         config = ReflexionConfig(max_iterations=1)
         strategy_inst = ReflexionStrategy(base=mock_base, config=config)
@@ -1387,31 +1389,9 @@ class TestDefaultContextViewNoneContent:
             {"my_key": DynamicContext("None")},
             agent=agent,
             call=call,
-            static_expr=lambda key: f'context["{key}"]',
         )
         assert len(result) == 1
         assert result[0].content == "None"
-
-    async def test_protected_block_static_meta(self):
-        """Protected static block gets expr=f'self.context["{key}"]' meta and user_block=False."""
-        from nooa.default_context_view import materialize_manager_blocks
-        from nooa.runtime.context_manager import ContextManager
-        from nooa.strategies.current_call import CurrentCall
-
-        # Create a context manager with a static protected block
-        cm = ContextManager()
-        cm.set_static_protected("my_key", "static value")
-
-        result = await materialize_manager_blocks(
-            cm,
-            object(),
-            CurrentCall(id="1", method_name="run", decorator="plan"),
-        )
-        assert len(result) == 1
-        assert result[0].key == "my_key"
-        # Meta should contain a static expr and user_block=False (protected)
-        assert "my_key" in result[0].metadata.expr
-        assert result[0].metadata.user_block is False
 
 
 # =============================================================================

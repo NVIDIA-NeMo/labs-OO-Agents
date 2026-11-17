@@ -732,7 +732,9 @@ async def run_inference(request: InferenceRequest):
         }
     except ImportError as e:
         raise HTTPException(
-            status_code=500, detail="litellm not installed. Run: pip install litellm"
+            status_code=500,
+            detail="litellm not installed. "
+            "Install it in the environment running NOOA with: uv pip install litellm",
         ) from e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Inference error: {str(e)}") from e

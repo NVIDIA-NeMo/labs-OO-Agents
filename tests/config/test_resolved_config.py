@@ -30,8 +30,6 @@ def _isolate(tmp_path, monkeypatch):
     monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(proj))
     for v in ("NEMO_OO_SETTINGS", "NEMO_OO_SECRETS", "NEMO_OO_LLM_CONFIG"):
         monkeypatch.delenv(v, raising=False)
-    # Stub bundled providers empty so the registry view is deterministic.
-    monkeypatch.setattr("nooa.llm_config.bundled_config_paths", lambda: [])
     return user
 
 

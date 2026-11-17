@@ -20,7 +20,6 @@ This split keeps the "format" axis (XML / Markdown / Plain) orthogonal to the
 message-shape axis. Neither knows about the other.
 """
 
-import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from enum import StrEnum
@@ -40,8 +39,6 @@ from nooa.context_blocks.models import (
     ToolCallInfo,
 )
 from nooa.llm_types import assistant_message
-
-logger = logging.getLogger(__name__)
 
 
 def _is_llm_response(event: EventBase | None) -> TypeGuard["LLMResponse"]:
@@ -81,9 +78,9 @@ class BlockFormatter(ABC):
     Subclasses serialize its ordered inputs without repartitioning by role.
     Stock implementations coalesce adjacent materialized blocks of the same
     role and expand canonical tool-call responses with their linked results
-    atomically at the response position. Incomplete replay groups may be
-    omitted; missing results are not invented. Wrapper customizations should
-    reuse the stock formatting path to retain these replay rules.
+    atomically at the response position. Incomplete replay groups are
+    rejected; select history through replayable() to repair incomplete turns.
+    Wrapper customizations should reuse the stock formatting path to retain these replay rules.
     """
 
     @property
@@ -175,14 +172,8 @@ class BlockFormatter(ABC):
 
 
 def _xml_system_block(block: ResolvedBlock) -> str:
-    """Wrap a system block's content in an XML tag.
-
-    ``expr=`` is emitted only when metadata marks a dynamic source, including
-    expression context and default framework sources. Literal declarations
-    and value overrides omit the attribute.
-    """
-    show_expr = block.metadata.source_dynamic and block.metadata.expr
-    attrs = f' expr="{block.metadata.expr}"' if show_expr else ""
+    """Wrap a system block's content in an XML tag, labelled with its ``expr`` if set."""
+    attrs = f' expr="{block.metadata.expr}"' if block.metadata.expr else ""
     return f"<{block.key}{attrs}>\n{block.content}\n</{block.key}>"
 
 
@@ -208,7 +199,7 @@ def _xml_message_content(block: ResolvedBlock) -> str:
         return block.content
     role_label = "sys" if block.role == Role.USER else f"{block.role.value}_message"
     attrs: list[str] = []
-    if block.metadata.source_dynamic and block.metadata.expr:
+    if block.metadata.expr:
         attrs.append(f'expr="{block.metadata.expr}"')
     if block.metadata.tag:
         attrs.append(f'tag="{block.metadata.tag}"')
@@ -219,7 +210,7 @@ def _xml_message_content(block: ResolvedBlock) -> str:
 def _markdown_system_block(block: ResolvedBlock) -> str:
     header = block.key.replace("_", " ").title()
     inline_meta = ""
-    if block.metadata.source_dynamic and block.metadata.expr:
+    if block.metadata.expr:
         inline_meta = ' `{"expr": "' + block.metadata.expr + '"}`'
     return f"# {header}{inline_meta}\n\n{block.content}"
 
@@ -227,7 +218,7 @@ def _markdown_system_block(block: ResolvedBlock) -> str:
 def _markdown_message_content(block: ResolvedBlock) -> str:
     role_label = block.role.value.replace("_", " ").title() + " Message"
     meta_parts: list[str] = []
-    if block.metadata.source_dynamic and block.metadata.expr:
+    if block.metadata.expr:
         meta_parts.append(f'"expr": "{block.metadata.expr}"')
     if block.metadata.tag:
         meta_parts.append(f'"tag": "{block.metadata.tag}"')
@@ -237,18 +228,11 @@ def _markdown_message_content(block: ResolvedBlock) -> str:
 
 def _tool_result_message(event: ToolCallEvent) -> RenderedMessage:
     """Project one execution event into a provider-neutral tool result."""
-    if event.result is not None:
-        content = event.result.content
-    else:
-        logger.warning(
-            "ToolCallEvent %s has result=None — emitting placeholder tool_result "
-            "to prevent context corruption.",
-            event.tool_call_id,
-        )
-        content = "(no result recorded)"
+    if event.result is None:
+        raise UnsupportedContextLayout(f"ToolCallEvent {event.tool_call_id!r} has no result")
     return RenderedMessage(
         role=Role.TOOL,
-        content=content,
+        content=event.result.content,
         tool_call_id=event.tool_call_id,
     )
 
@@ -359,7 +343,7 @@ def _event_block_projections(
     call batch followed by all linked results in call order, even when their
     stored positions are interleaved with other items. Linked execution
     sidecars then project to an empty list at their stored positions. Missing
-    or incomplete canonical groups are omitted without inventing results.
+    or incomplete canonical groups are rejected without inventing results.
     This replay exception does not authorize arbitrary history reordering.
     Wrapper customizations can reuse this helper through _build_messages().
     """
@@ -390,13 +374,10 @@ def _event_block_projections(
                 call.id not in by_call_id or by_call_id[call.id].result is None
                 for call in event.replay_tool_calls
             ):
-                logger.warning(
-                    "LLMResponse %s has an incomplete visible execution batch — "
-                    "omitting the assistant tool-call turn from replay.",
-                    event.id,
+                raise UnsupportedContextLayout(
+                    f"LLMResponse {event.id!r} has an incomplete execution batch; "
+                    "select history through replayable()"
                 )
-                projections.append([])
-                continue
             projection = [
                 RenderedMessage(
                     role=Role.ASSISTANT,
@@ -414,10 +395,14 @@ def _event_block_projections(
             projections.append(projection)
             continue
 
-        # A linked execution is not an independent assistant turn. If its
-        # source response was filtered out (or its batch is incomplete), fail
-        # closed instead of fabricating provider history from the sidecar.
+        # A linked execution renders inside its response's batch. Without that
+        # response it would be a result for a call the model never sees.
         if isinstance(event, ToolCallEvent) and event.llm_response_id is not None:
+            if event.llm_response_id not in replayable_turn_ids:
+                raise UnsupportedContextLayout(
+                    f"ToolCallEvent {event.tool_call_id!r} is linked to a response "
+                    "outside the selection; select history through replayable()"
+                )
             projections.append([])
             continue
 
@@ -509,9 +494,8 @@ class XMLBlockFormatter(BlockFormatter):
     def format_description(self) -> str:
         return (
             "Your prompt is organized in XML context blocks: `<name>CONTENT</name>`.\n"
-            "Expression context blocks carry an "
-            '`expr="..."` attribute whose value is the Python expression '
-            "re-evaluated each turn.\n"
+            'A block with an `expr="..."` attribute shows the Python expression '
+            "that produces its content.\n"
             'Event history: system entries in `<sys tag="N">`; '
             'reference via `self.events["N"]`. Your own messages appear '
             "as plain assistant turns."
@@ -550,9 +534,8 @@ class MarkdownBlockFormatter(BlockFormatter):
         return (
             "Your prompt is organized in context blocks with markdown headers: "
             "`# Block Name`.\n"
-            "Expression context blocks carry an inline "
-            '`{"expr": "..."}` annotation whose value is the Python expression '
-            "re-evaluated each turn.\n"
+            'A block with an inline `{"expr": "..."}` annotation shows the Python '
+            "expression that produces its content.\n"
             'Event history carries `{"tag": "N"}` metadata; '
             'reference entries via `self.events["N"]`. Your own messages '
             "retain their original assistant text and replay data."

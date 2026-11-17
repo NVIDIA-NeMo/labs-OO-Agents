@@ -35,6 +35,11 @@ accreted over time**, modeled on how the brain uses memory.
 When `enabled=False` (or not installed), the agent is byte-for-byte unchanged — the
 *additive guarantee* (regression-tested).
 
+A disabled installation does not construct an embedder or open its database.
+Explicitly accessing the manager's store or calling its operations initializes
+the resources on demand; agent-facing memory tools remain disabled. Uninstalling
+an unused disabled manager does not create resources either.
+
 ---
 
 ## Quick start
@@ -205,6 +210,13 @@ If no anchor can be derived (e.g. empty turn) **nothing is injected** — it nev
 "retrieves from nothing". Spontaneous recall uses **`touch=False`**: passively surfaced
 memories are *not* reinforced (only memories the agent deliberately `recall()`s get their
 recency/strength bumped), so the ACT-R signal stays meaningful.
+
+Injection IDs, per-memory injection counters, and `MemoryInjected.n_memories`
+describe records retained after the character budget is applied. A partially
+rendered record counts once its complete `[type#id]` marker is visible (including
+the status in a todo marker); a cut inside that marker does not count. Omitted
+records are not logged as injected. This rule applies to both recalled memories
+and the additional open-todo section, without changing passive ACT-R behavior.
 
 **How to configure** (`SpontaneousConfig`):
 

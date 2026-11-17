@@ -11,14 +11,13 @@ from nooa.context_blocks.events import (
     ToolResult,
     UserEvent,
 )
-from nooa.context_blocks.formatter import OpenAIProviderFormatter
+from nooa.context_blocks.formatter import OpenAIProviderFormatter, XMLBlockFormatter
 from nooa.context_blocks.models import (
     BlockMetadata,
     DynamicContext,
     Role,
 )
 from nooa.context_blocks.renderer import render_context
-from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.context_view import ContextItem
 from nooa.events import LLMResponse
 
@@ -41,7 +40,6 @@ def _dynamic_block(key: str, content: str, expr: str | None = None) -> Block:
             expr=expr,
             static=False,
             user_block=True,
-            source_dynamic=expr is not None,
         ),
     )
 
@@ -64,7 +62,7 @@ class TestImmutableMetadata:
         assert repr(DynamicContext("x")) == "DynamicContext('x')"
 
 
-class TestCachedBlockFormatterPartition:
+class TestXMLBlockFormatterPartition:
     def test_renderer_preserves_explicit_boundary_between_same_role_blocks(self):
         output = render_context(
             [
@@ -72,14 +70,14 @@ class TestCachedBlockFormatterPartition:
                 CacheBoundary(),
                 Block(key="second", content="second", role=Role.USER),
             ],
-            block_formatter=CachedBlockFormatter(),
+            block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         assert len(output) == 3
         assert output[1] == CacheBoundary()
 
     def test_all_static_single_system_message(self):
-        fmt = CachedBlockFormatter()
+        fmt = XMLBlockFormatter()
         messages = render_context(
             [_static_block("a", "A"), _static_block("b", "B")],
             block_formatter=fmt,
@@ -90,7 +88,7 @@ class TestCachedBlockFormatterPartition:
         assert "<a>" in messages[0].content and "<b>" in messages[0].content
 
     def test_trailing_blocks_keep_user_role(self):
-        fmt = CachedBlockFormatter()
+        fmt = XMLBlockFormatter()
         messages = render_context(
             [_dynamic_block("plan", "do stuff")],
             block_formatter=fmt,
@@ -102,7 +100,7 @@ class TestCachedBlockFormatterPartition:
         assert "</plan>" in messages[0].content
 
     def test_mixed_preserves_exact_order(self):
-        fmt = CachedBlockFormatter()
+        fmt = XMLBlockFormatter()
         messages = render_context(
             [
                 _static_block("sys", "S"),
@@ -129,11 +127,9 @@ class TestCachedBlockFormatterPartition:
 
 class TestCachedRendererEndToEndOpenAI:
     def test_static_becomes_system_message(self):
-        # Non-dynamic-source block: ``expr=`` is suppressed even if provided
-        # in metadata. Only ``self.context.set_dynamic()`` blocks render it.
         result = render_context(
-            [_static_block("sys", "You are X.", expr="self._system_prompt()")],
-            block_formatter=CachedBlockFormatter(),
+            [_static_block("sys", "You are X.")],
+            block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         assert result == [{"role": "system", "content": "<sys>\nYou are X.\n</sys>"}]
@@ -145,7 +141,7 @@ class TestCachedRendererEndToEndOpenAI:
                 CacheBoundary(),
                 _dynamic_block("plan", "P", expr="self.context['plan']"),
             ],
-            block_formatter=CachedBlockFormatter(),
+            block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         assert len(result) == 3
@@ -171,7 +167,7 @@ class TestCachedRendererEndToEndOpenAI:
         ]
         result = render_context(
             blocks,
-            block_formatter=CachedBlockFormatter(),
+            block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         roles = [m["role"] for m in result]
@@ -206,7 +202,7 @@ class TestCachedRendererEndToEndOpenAI:
             ]
             return render_context(
                 blocks,
-                block_formatter=CachedBlockFormatter(),
+                block_formatter=XMLBlockFormatter(),
                 provider_formatter=OpenAIProviderFormatter(),
             ).output
 
@@ -253,7 +249,7 @@ class TestCachedRendererEndToEndOpenAI:
                 CacheBoundary(),
                 _dynamic_block("live_state", "version one"),
             ],
-            block_formatter=CachedBlockFormatter(),
+            block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
 
@@ -275,7 +271,7 @@ class TestCachedRendererEndToEndOpenAI:
                 CacheBoundary(),
                 _dynamic_block("live_state", "version two"),
             ],
-            block_formatter=CachedBlockFormatter(),
+            block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
 
@@ -299,7 +295,7 @@ class TestCachedRendererEndToEndOpenAI:
         ]
         result = render_context(
             blocks,
-            block_formatter=CachedBlockFormatter(),
+            block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         roles = [m["role"] for m in result]
@@ -309,7 +305,7 @@ class TestCachedRendererEndToEndOpenAI:
     def test_no_volatile_no_trailing_message(self):
         result = render_context(
             [_static_block("sys", "S")],
-            block_formatter=CachedBlockFormatter(),
+            block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         assert len(result) == 1 and result[0]["role"] == "system"
@@ -317,7 +313,39 @@ class TestCachedRendererEndToEndOpenAI:
     def test_empty_input(self):
         result = render_context(
             [],
-            block_formatter=CachedBlockFormatter(),
+            block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         assert result == []
+
+
+class TestCacheLayoutLoneSurrogates:
+    """Escaping a lone surrogate keeps the cache layout and prefix stable."""
+
+    def _render(self, status: str) -> list:
+        return render_context(
+            [
+                _static_block("sys", "Stable prefix 🎉"),
+                CacheBoundary(),
+                _dynamic_block("todo_status", status, expr="self.todo.status()"),
+            ],
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+
+    def test_surrogate_in_dynamic_suffix_leaves_prefix_and_boundary_intact(self):
+        clean = self._render("note ok")
+        poisoned = self._render("note ::1%\ud800.x")
+
+        assert poisoned[0] == clean[0]
+        assert isinstance(poisoned[1], CacheBoundary)
+        assert "note ::1%\\ud800.x" in poisoned[2]["content"]
+        json.dumps(poisoned[2], ensure_ascii=False).encode("utf-8")
+
+    def test_escaping_is_deterministic_across_turns(self):
+        """The same poisoned context renders identically every turn, so it can be cached."""
+        first = self._render("note ::1%\ud800.x")
+        second = self._render("note ::1%\ud800.x")
+
+        assert first[0] == second[0]
+        assert first[2] == second[2]

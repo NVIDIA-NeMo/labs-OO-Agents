@@ -7,6 +7,8 @@ them via BlockFormatter + ProviderFormatter. No eval function, no expression
 evaluation, no class — just a pure function.
 """
 
+import json
+
 import pytest
 
 from nooa import Block, CacheBoundary
@@ -19,10 +21,11 @@ from nooa.context_blocks.formatter import (
 )
 from nooa.context_blocks.models import (
     BlockMetadata,
+    RenderedMessage,
     ResolvedBlock,
     Role,
 )
-from nooa.context_blocks.renderer import render_context
+from nooa.context_blocks.renderer import _utf8_safe, render_context
 from nooa.events import LLMResponse
 from nooa.unifiedllm import ToolCall
 
@@ -74,23 +77,40 @@ class TestRenderContextBasic:
         assert result[0]["role"] == "system"
         assert result[1] == CacheBoundary()
 
-    def test_leading_and_consecutive_boundaries_are_preserved(self):
+    def test_leading_boundary_is_preserved(self):
         result = render_context(
-            [CacheBoundary(), CacheBoundary(), Block(key="only", content="only")],
+            [CacheBoundary(), Block(key="only", content="only")],
             block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
-        assert result[:2] == [CacheBoundary(), CacheBoundary()]
-        assert len(result) == 3
-        assert result[2]["role"] == "system"
+        assert result[0] == CacheBoundary()
+        assert len(result) == 2
+        assert result[1]["role"] == "system"
+
+    def test_second_boundary_is_rejected(self):
+        with pytest.raises(UnsupportedContextLayout, match="at most one CacheBoundary"):
+            render_context(
+                [CacheBoundary(), CacheBoundary(), Block(key="only", content="only")],
+                block_formatter=XMLBlockFormatter(),
+                provider_formatter=OpenAIProviderFormatter(),
+            )
 
     def test_boundary_survives_omitted_incomplete_history(self):
+        from nooa import replayable
+
         response = LLMResponse(
             tool_calls=[ToolCall(id="missing", name="execute_python", arguments="{}")],
             finish_reason="tool_calls",
         )
+        task = Block(key="task", content="continue", role=Role.USER)
+        with pytest.raises(UnsupportedContextLayout, match="incomplete execution batch"):
+            render_context(
+                [response, CacheBoundary(), task],
+                block_formatter=XMLBlockFormatter(),
+                provider_formatter=OpenAIProviderFormatter(),
+            )
         result = render_context(
-            [response, CacheBoundary(), Block(key="task", content="continue", role=Role.USER)],
+            [*replayable([response]), CacheBoundary(), task],
             block_formatter=XMLBlockFormatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
@@ -183,7 +203,7 @@ class TestRenderContextBasic:
             Block(
                 key="notes",
                 content="My notes",
-                metadata=BlockMetadata(expr="self.context['notes']", source_dynamic=True),
+                metadata=BlockMetadata(expr="self.context['notes']"),
             )
         ]
 
@@ -362,7 +382,7 @@ class TestRenderContextNoMutation:
 
         # Original block must be unchanged
         assert block.content == original_content
-        assert block.metadata.truncated is False
+        assert block.metadata.evicted is False
 
     def test_event_block_truncation_preserves_original(self):
         """Truncating message blocks must not modify the original ResolvedBlock."""
@@ -382,7 +402,7 @@ class TestRenderContextNoMutation:
 
         # Original block must be unchanged
         assert block.content == original_content
-        assert block.metadata.truncated is False
+        assert block.metadata.evicted is False
 
     def test_render_twice_produces_same_result(self):
         """Calling render_context() twice must produce identical results (no state leakage)."""
@@ -411,7 +431,7 @@ class TestFormatMessageContent:
     """Tests for format_message_content() — wraps message blocks with metadata."""
 
     def test_xml_with_expr(self):
-        """``expr=`` is only rendered for source_dynamic blocks (set_dynamic).
+        """``expr=`` is rendered only when the block carries one.
 
         USER-role events wrap in ``<sys>``; assistant events pass through bare.
         """
@@ -421,20 +441,14 @@ class TestFormatMessageContent:
             key="msg",
             content="Hello",
             role=Role.USER,
-            metadata=BlockMetadata(expr="self.events['1']", source_dynamic=True),
+            metadata=BlockMetadata(expr="self.events['1']"),
         )
         result = format_message_content(dynamic, "xml")
         assert "<sys expr=\"self.events['1']\">" in result
         assert "Hello" in result
         assert "</sys>" in result
 
-        # Non-dynamic block: expr is suppressed.
-        static = ResolvedBlock(
-            key="msg",
-            content="Hello",
-            role=Role.USER,
-            metadata=BlockMetadata(expr="self.events['1']"),
-        )
+        static = ResolvedBlock(key="msg", content="Hello", role=Role.USER, metadata=BlockMetadata())
         assert "expr=" not in format_message_content(static, "xml")
 
     def test_assistant_events_render_bare(self):
@@ -458,7 +472,7 @@ class TestFormatMessageContent:
             key="msg",
             content="content",
             role=Role.USER,
-            metadata=BlockMetadata(expr="self.events['1']", tag="1", source_dynamic=True),
+            metadata=BlockMetadata(expr="self.events['1']", tag="1"),
         )
         result = format_message_content(block, "xml")
         assert "expr=\"self.events['1']\"" in result
@@ -471,7 +485,7 @@ class TestFormatMessageContent:
             key="msg",
             content="Hello",
             role=Role.USER,
-            metadata=BlockMetadata(expr="self.events['1']", source_dynamic=True),
+            metadata=BlockMetadata(expr="self.events['1']"),
         )
         result = format_message_content(block, "markdown")
         assert "### User Message" in result
@@ -695,15 +709,6 @@ class TestRenderContextEventSerialization:
 class TestRendererContract:
     """Rendering reports limits but owns no budget policy."""
 
-    def test_accepts_context_limit_without_counter(self):
-        result = render_context(
-            [],
-            block_formatter=XMLBlockFormatter(),
-            provider_formatter=OpenAIProviderFormatter(),
-            context_limit=10_000,
-        )
-        assert result.output == []
-
     def test_accepts_no_token_limits(self):
         """No error when context_limit is not set."""
         result = render_context(
@@ -729,3 +734,111 @@ class TestRendererContract:
                 provider_formatter=OpenAIProviderFormatter(),
                 count_tokens=len,
             )
+
+
+class TestRenderContextLoneSurrogates:
+    """A lone surrogate in the context must not make the request unencodable."""
+
+    def test_system_block_surrogate_is_escaped_in_output_and_messages(self):
+        """A status block holding "\\ud800" renders as the six characters ``\\ud800``."""
+        content = "Notes:\n10. probe ::1%\ud800.synthetic-secret passes"
+        block = Block(key="todo_status", content=content)
+
+        result = render_context(
+            [block],
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        )
+
+        system_content = result.output[0]["content"]
+        system_content.encode("utf-8")
+        assert "::1%\\ud800.synthetic-secret" in system_content
+        assert result.messages[0].content == system_content
+        assert block.content == content
+
+    def test_tool_result_surrogate_is_escaped(self):
+        """Event-derived messages are made safe, not only context blocks."""
+        event = ToolCallEvent(
+            tool_call_id="call_1",
+            name="python_cell",
+            arguments={"code": "print(name)"},
+            result=ToolResult(tool_call_id="call_1", content="bad-\udcff-name"),
+        )
+
+        output = render_context(
+            [event],
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        ).output
+
+        json.dumps(output, ensure_ascii=False).encode("utf-8")
+        tool_messages = [message for message in output if message.get("role") == "tool"]
+        assert [message["content"] for message in tool_messages] == ["bad-\\udcff-name"]
+        assert event.result is not None
+        assert event.result.content == "bad-\udcff-name"
+
+    def test_replay_message_renders_escaped_content(self):
+        """A replay turn is handed the escaped content, and its object is not rewritten."""
+        seen = []
+
+        class Replay:
+            def render_message(self, content, tool_calls, reasoning=None):
+                seen.append(content)
+                return {"role": "assistant", "content": content}
+
+        replay = Replay()
+
+        class ReplayFormatter(XMLBlockFormatter):
+            def format(self, blocks):
+                return [
+                    RenderedMessage(role=Role.ASSISTANT, content="x\udc80y", replay_message=replay)
+                ]
+
+        result = render_context(
+            [Block(key="any", content="any")],
+            block_formatter=ReplayFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        )
+
+        assert seen == ["x\\udc80y"]
+        assert result.output[0]["content"] == "x\\udc80y"
+        assert result.messages[0].replay_message is replay
+
+    def test_dict_tool_arguments_are_left_to_json_encoding(self):
+        """Dict arguments keep their exact keys; json.dumps escapes them for the wire."""
+        from nooa.context_blocks.models import ToolCallInfo
+
+        arguments = {"\ud800": "lone", "\\ud800": "literal"}
+        message = RenderedMessage(
+            role=Role.ASSISTANT,
+            tool_calls=(ToolCallInfo(id="call_1", name="python_cell", arguments=arguments),),
+        )
+
+        class Formatter(XMLBlockFormatter):
+            def format(self, blocks):
+                return [message]
+
+        result = render_context(
+            [Block(key="any", content="any")],
+            block_formatter=Formatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        )
+
+        assert result.messages[0].tool_calls[0].arguments == arguments
+        sent = result.output[0]["tool_calls"][0]["function"]["arguments"]
+        sent.encode("utf-8")
+        assert json.loads(sent) == arguments
+
+    def test_valid_unicode_is_returned_unchanged(self):
+        """Encodable text, emoji included, passes through as the same objects."""
+        blocks = [Block(key="persona", content="Héllo 🎉 — ok")]
+
+        result = render_context(
+            blocks,
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+        )
+
+        assert "Héllo 🎉 — ok" in result.output[0]["content"]
+        assert _utf8_safe(result.output) is result.output
+        assert _utf8_safe(result.messages) is result.messages

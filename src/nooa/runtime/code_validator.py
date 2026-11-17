@@ -71,7 +71,9 @@ import types
 from dataclasses import dataclass, field
 from typing import Annotated, Any, ForwardRef, Literal, Protocol, get_args, get_origin
 
+from nooa.errors import CodeSyntaxError
 from nooa.errors import RestrictedCodeError as ValidationError
+from nooa.errors.hints import RUN_COMMAND, lookup_hint
 from nooa.runtime.restrictions import (
     RestrictionsConfig,
     match_blocked_module,
@@ -138,6 +140,83 @@ class Validator(Protocol):
     def validate(self, tree: ast.AST, context: ValidationContext) -> list[ValidationIssue]:
         """Validate AST and return list of issues."""
         ...
+
+
+# =============================================================================
+# Capability-aware fix hints (wording only; never changes what is allowed)
+# =============================================================================
+_PROCESS_MODULES = frozenset({"subprocess", "pty"})
+_PROCESS_CALLS = frozenset({("os", "system"), ("os", "popen")})
+_NETWORK_MODULES = frozenset(
+    {
+        "socket",
+        "http.client",
+        "urllib.request",
+        "ftplib",
+        "smtplib",
+        "imaplib",
+        "poplib",
+        "telnetlib",
+        "xmlrpc.client",
+    }
+)
+# Modules an HTTP request is usually made with (or raw sockets); httpx replaces them.
+_HTTP_MODULES = frozenset({"socket", "telnetlib", "http.client", "urllib.request", "xmlrpc.client"})
+_HTTP_HINT = "use `httpx.AsyncClient` (`async with httpx.AsyncClient() as c: r = await c.get(url)`)"
+_AWAIT_HINT = (
+    "await instead: `await asyncio.to_thread(fn)` for blocking work, "
+    "asyncio.Event/Lock/Queue to wait"
+)
+
+
+def _module_fix_hint(
+    module_name: str,
+    shell: str | None,
+    call: str | None = None,
+    denied: frozenset[str] = frozenset(),
+    unavailable: frozenset[str] = frozenset(),
+) -> str | None:
+    """Point a blocked module/call at an alternative the agent actually has.
+
+    ``shell`` is how the agent runs a command (its ``RUN_COMMAND`` hint from
+    :mod:`nooa.errors.hints`), None if it registered none.
+    ``denied``: the active deny lists; a denied ``httpx`` is not recommended.
+    ``unavailable``: modules stripped from the cell namespace (``blocked_modules``);
+    a stripped ``asyncio`` is not recommended. A merely restricted import keeps
+    the preloaded ``asyncio`` binding, so it does not belong here.
+    """
+    root = match_blocked_module(module_name, _PROCESS_MODULES)
+    if root is not None or (module_name, call) in _PROCESS_CALLS:
+        return shell
+    if match_blocked_module(module_name, _NETWORK_MODULES) is not None:
+        if match_blocked_module(module_name, _HTTP_MODULES) is None:
+            return f"curl: {shell}" if shell else None  # FTP and mail are not HTTP
+        if match_blocked_module("httpx", denied) is not None:
+            return f"curl: {shell}" if shell else None
+        return f"{_HTTP_HINT}, or curl: {shell}" if shell else _HTTP_HINT
+    if module_name == "os" and call in ("wait", "waitpid", "waitid"):
+        return shell
+    if match_blocked_module("asyncio", unavailable) is not None:
+        return None  # every hint below needs the asyncio the cell no longer has
+    if module_name == "asyncio" and call in ("run", "run_until_complete"):
+        return (
+            "cells already run inside an event loop: `await coro` directly, "
+            "or `await asyncio.gather(a(), b())` for several"
+        )
+    if module_name == "time" and call == "sleep":
+        return "`await asyncio.sleep(seconds)`"
+    if module_name in ("threading", "multiprocessing"):
+        return _AWAIT_HINT
+    return None
+
+
+def _builtin_fix_hint(name: str) -> str | None:
+    """Alternatives for forbidden builtins that have a direct, allowed equivalent."""
+    if name == "__import__":
+        return "use a normal import statement, e.g. `import json`"
+    if name in ("exec", "eval", "compile"):
+        return "write the code directly in the cell; it is already executed as Python"
+    return None
 
 
 # =============================================================================
@@ -290,6 +369,7 @@ class _SecurityVisitor(ast.NodeVisitor):
                         col=node.col_offset,
                         message=f"{func_name}() is forbidden - it blocks or allows code execution",
                         code="E001",
+                        fix_hint=_builtin_fix_hint(func_name),
                     )
                 )
             # Check aliased forbidden calls
@@ -306,6 +386,7 @@ class _SecurityVisitor(ast.NodeVisitor):
                             col=node.col_offset,
                             message=f"{func_name}() is forbidden (alias for {original})",
                             code="E001",
+                            fix_hint=_builtin_fix_hint(original),
                         )
                     )
             # Check setattr/delattr/getattr with dunder names or forbidden attr calls
@@ -557,6 +638,12 @@ class _SecurityVisitor(ast.NodeVisitor):
             col=node.col_offset,
             message=msg,
             code="E002",
+            fix_hint=_module_fix_hint(
+                module_name,
+                lookup_hint(RUN_COMMAND, self.context.agent),
+                denied=self.context.blocked_modules | self.context.restricted_imports,
+                unavailable=self.context.blocked_modules,
+            ),
         )
 
 
@@ -568,6 +655,7 @@ class REPLPolicyValidator:
 
     Checks for:
     - Missing await on async method calls
+    - Infinite ``while True`` loops
     """
 
     def validate(self, tree: ast.AST, context: ValidationContext) -> list[ValidationIssue]:
@@ -1242,6 +1330,7 @@ class BlockingCallValidator:
         visitor = _BlockingCallVisitor(
             exec_globals=context.exec_globals,
             restrictions=self.restrictions,
+            shell_hint=lookup_hint(RUN_COMMAND, context.agent),
         )
         visitor.visit(tree)
         return visitor.issues
@@ -1254,9 +1343,12 @@ class _BlockingCallVisitor(ast.NodeVisitor):
         self,
         exec_globals: dict[str, Any],
         restrictions: RestrictionsConfig,
+        shell_hint: str | None = None,
     ):
         self.exec_globals = exec_globals
+        self.shell_hint = shell_hint  # how the agent runs a command, if it can
         self.blocked_modules = restrictions.blocked_modules
+        self.denied_modules = restrictions.blocked_modules | restrictions.restricted_imports
         self.blocked_calls = restrictions.blocked_calls
         self.issues: list[ValidationIssue] = []
         # Track local variables assigned from constructors on blocked-call modules.
@@ -1303,6 +1395,13 @@ class _BlockingCallVisitor(ast.NodeVisitor):
                 ),
                 code="E310",
                 severity="error",
+                fix_hint=_module_fix_hint(
+                    module_name,
+                    self.shell_hint,
+                    call_name,
+                    denied=self.denied_modules,
+                    unavailable=self.blocked_modules,
+                ),
             )
         )
 
@@ -1452,7 +1551,9 @@ class UnifiedCodeValidator:
         try:
             tree = ast.parse(code, filename=cell_filename)
         except SyntaxError as e:
-            raise ValidationError(f"Syntax error: {e}", original_exception=e) from e
+            # Parser rejection, not a policy rejection: keep the SyntaxError so the
+            # formatter can render source line, caret and syntax hints.
+            raise CodeSyntaxError(e) from e
 
         # Run validators
         all_issues: list[ValidationIssue] = []
@@ -1501,7 +1602,21 @@ class UnifiedCodeValidator:
 # =============================================================================
 # Import Pre-processing
 # =============================================================================
-def strip_redundant_imports(code: str, available_names: set[str]) -> tuple[str, list[str]]:
+def _module_is_unresolvable(module: str | None) -> bool:
+    """True when ``module`` names no importable module (e.g. the habitual ``strategy``)."""
+    if not module:
+        return False
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(module) is None
+    except (ImportError, ValueError):
+        return True
+
+
+def strip_redundant_imports(
+    code: str, available_names: set[str], *, only_unresolvable: bool = False
+) -> tuple[str, list[str]]:
     """Remove import statements where all imported names are already in scope.
 
     LLMs habitually prepend imports (``from typing import Literal``,
@@ -1513,6 +1628,11 @@ def strip_redundant_imports(code: str, available_names: set[str]) -> tuple[str, 
     present in ``available_names``.  Imports that bring genuinely new names
     are left untouched (and will be caught by the security validator if
     the module is forbidden).
+
+    ``only_unresolvable`` (the owned execution namespace): imports are real
+    writes there, so only an import that could not run at all (its module is
+    not importable, e.g. ``from strategy import PredictStrategy``) is
+    stripped; ``from typing import Literal`` runs and rebinds as written.
 
     Returns:
         Tuple of (cleaned_code, stripped_statements) where stripped_statements
@@ -1531,7 +1651,10 @@ def strip_redundant_imports(code: str, available_names: set[str]) -> tuple[str, 
             all_present = all(
                 (alias.asname or alias.name) in available_names for alias in node.names
             )
-            if all_present:
+            if all_present and (
+                not only_unresolvable
+                or all(_module_is_unresolvable(alias.name) for alias in node.names)
+            ):
                 indices_to_remove.add(i)
 
         elif isinstance(node, ast.ImportFrom):
@@ -1541,7 +1664,9 @@ def strip_redundant_imports(code: str, available_names: set[str]) -> tuple[str, 
             all_present = all(
                 (alias.asname or alias.name) in available_names for alias in node.names
             )
-            if all_present:
+            if all_present and (
+                not only_unresolvable or (node.level == 0 and _module_is_unresolvable(node.module))
+            ):
                 indices_to_remove.add(i)
 
     if not indices_to_remove:

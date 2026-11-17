@@ -26,7 +26,7 @@ from nooa.events import (
     EventBase,
     Summary,
 )
-from nooa.runtime.context_vars import _current_event_format_var, _get_agent_call_stack
+from nooa.runtime.context_vars import _current_event_format_var, _generation_call_var
 from nooa.runtime.event_backend import EventBackend, InMemoryBackend
 
 if TYPE_CHECKING:
@@ -117,7 +117,7 @@ class EventManager:
     backend). Active tags (``_active_tags``) track display order — which
     may differ after summarization collapses a range into a single tag.
 
-    Events are automatically tagged with call_id from the agent call stack.
+    Events are automatically tagged with the call_id of the active generation call.
     """
 
     def __init__(
@@ -163,11 +163,12 @@ class EventManager:
         Returns:
             The assigned string tag (e.g., "1", "2", or "2..40" for summaries).
         """
-        # Auto-inject call_id from the agent call stack context variable.
-        # This tags every event with the current method invocation ID.
-        stack = _get_agent_call_stack()
-        if stack and event.call_id is None:
-            event.call_id = stack[-1]
+        # Tag the event with the active generation call this manager owns.
+        # Deterministic helpers record into the enclosing generation call;
+        # outside any generation call of this agent, call_id stays None.
+        active = _generation_call_var.get()
+        if active is not None and active[0] is self and event.call_id is None:
+            event.call_id = active[1]
         event_format = _current_event_format_var.get()
         if event_format is not None and "truncation_event_format" not in event.metadata:
             event.metadata["truncation_event_format"] = event_format
@@ -198,6 +199,29 @@ class EventManager:
             return tag
 
         return str(event.id)
+
+    def record_batch(self, events: list[EventBase]) -> list[str]:
+        """Atomically append fresh durable events, without observer delivery.
+
+        This explicit recorder path is for mandatory ledger transitions.
+        A backend without atomic append support fails rather than degrading
+        to partial single-event writes. Runtime events and summaries are not
+        accepted. Tags are assigned with the model's own setter before storage;
+        a failing setter fails the batch with nothing stored and every tag
+        reset to None. Use add() for ordinary context/observer events.
+        """
+        if any(
+            not isinstance(event, EventBase)
+            or event._role == Role.RUNTIME_EVENT
+            or isinstance(event, Summary)
+            for event in events
+        ):
+            raise ValueError("record_batch requires fresh durable non-summary events")
+        append = getattr(self._backend, "append_batch", None)
+        if append is None:
+            raise TypeError("backend does not support atomic batch recording")
+        # The backend validates the whole batch once, under its own lock.
+        return append(events)
 
     def register_event_type(self, cls: type[EventBase]) -> None:
         """Register a custom EventBase subclass for deserialization.
@@ -321,13 +345,13 @@ class EventManager:
         for handler in list(self._handlers[event_type]):
             try:
                 handler(event)
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 logger.warning("Event handler %r raised", handler, exc_info=True)
 
         for handler in list(self._handlers["*"]):
             try:
                 handler(event)
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 logger.warning("Wildcard handler %r raised", handler, exc_info=True)
 
     # === Middleware (intercept) ===
@@ -802,7 +826,7 @@ class EventManager:
         except ValueError as e:
             raise ValueError(
                 f"Invalid tag format '{tag}': tags must be numeric (e.g., '5') "
-                f"or ranges (e.g., '2..40')"
+                f"or ranges (e.g., '2..40'); use the number N from <sys tag=\"N\">"
             ) from e
 
     def _parse_tag_end(self, tag: str) -> int:
@@ -818,7 +842,7 @@ class EventManager:
         except ValueError as e:
             raise ValueError(
                 f"Invalid tag format '{tag}': tags must be numeric (e.g., '5') "
-                f"or ranges (e.g., '2..40')"
+                f"or ranges (e.g., '2..40'); use the number N from <sys tag=\"N\">"
             ) from e
 
     def _validate_tag(self, tag: str) -> None:

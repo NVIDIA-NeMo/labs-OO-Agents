@@ -25,7 +25,6 @@ from nooa.context_blocks.formatter import (
 )
 from nooa.context_blocks.models import BlockMetadata, Role
 from nooa.context_blocks.renderer import render_context
-from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.context_view import Block, ContextItem
 from nooa.nemo_relay_middleware import _reconcile_messages
 from nooa.plain_formatter import PlainBlockFormatter
@@ -192,7 +191,7 @@ def _render(turn, state):
         )
     )
     return render_context(
-        blocks, block_formatter=CachedBlockFormatter(), provider_formatter=OpenAIProviderFormatter()
+        blocks, block_formatter=XMLBlockFormatter(), provider_formatter=OpenAIProviderFormatter()
     ).output
 
 

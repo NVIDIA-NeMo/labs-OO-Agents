@@ -18,13 +18,12 @@ from nooa.context_blocks import (
 from nooa.context_blocks.events import EventBase, ToolCallEvent, ToolResult
 from nooa.context_blocks.exceptions import UnsupportedContextLayout
 from nooa.context_blocks.models import BlockPart, RenderedMessage, ResolvedBlock
-from nooa.context_blocks.renderers import CachedBlockFormatter
 from nooa.default_context_view import ManagedContextView
 from nooa.llm_types import AssistantReasoning, AssistantText, LLMResponse, ToolCall
 from nooa.plain_formatter import PlainBlockFormatter
 from nooa.strategies.current_call import CurrentCall
 
-FORMATTERS = [XMLBlockFormatter, MarkdownBlockFormatter, CachedBlockFormatter]
+FORMATTERS = [XMLBlockFormatter, MarkdownBlockFormatter]
 
 
 class CustomWrapper(BlockFormatter):
@@ -62,27 +61,21 @@ async def test_default_guidance_matches_render_config(formatter_type):
         await agent.aclose()
 
 
-@pytest.mark.parametrize(
-    "source", ["manager", "view", "decorator", "scoped", "disable", "class", "resolver"]
-)
+@pytest.mark.parametrize("source", ["manager", "view", "decorator", "scoped", "disable", "class"])
 async def test_default_guidance_respects_prompt_ownership(source):
     class CustomPrompt(Agent):
         """user prompt"""
 
-    class CustomResolver(Agent):
-        def _resolve_system_prompt(self):
-            return "user prompt"
-
     class CustomInstructions(ManagedContextView):
-        def instruction_blocks(self, call):
+        async def instruction_blocks(self, owner, call):
             return {"system_prompt": "user prompt"}
 
-    cls = CustomPrompt if source == "class" else CustomResolver if source == "resolver" else Agent
+    cls = CustomPrompt if source == "class" else Agent
     agent = cls(llm=object())
     kwargs = {}
     view = ManagedContextView()
     if source == "manager":
-        agent.context_manager.apply_override("system_prompt", "user prompt")
+        agent.context["system_prompt"] = "user prompt"
     elif source == "disable":
         agent.context_manager.disable("system_prompt")
     elif source == "view":
@@ -92,7 +85,11 @@ async def test_default_guidance_respects_prompt_ownership(source):
     try:
         items = await collect_context_items(view, agent, call_for(agent, **kwargs))
         prompts = [item.content for item in items if getattr(item, "key", None) == "system_prompt"]
-        assert prompts == ([] if source == "disable" else ["user prompt"])
+        if source in {"view", "class"}:
+            assert prompts == ["user prompt"]
+        else:
+            assert agent.render_config.block_formatter.format_description() in prompts[0]
+            assert prompts[1:] == ([] if source == "disable" else ["user prompt"])
     finally:
         await agent.aclose()
 
@@ -164,6 +161,14 @@ def test_format_changes_retain_atomic_native_replay_and_boundary(formatter_type,
     items += [boundary, Block(key="live", content="live", role=Role.USER)]
     formatter = formatter_type()
     config = RenderConfig(block_formatter=formatter)
+    if not complete:
+        with pytest.raises(UnsupportedContextLayout, match="incomplete execution batch"):
+            render_context(
+                items, block_formatter=formatter, provider_formatter=config.provider_formatter
+            )
+        from nooa.context_view import replayable
+
+        items = list(replayable(items))
     rendered = render_context(
         items, block_formatter=formatter, provider_formatter=config.provider_formatter
     )
@@ -184,12 +189,6 @@ def test_format_changes_retain_atomic_native_replay_and_boundary(formatter_type,
         assert not any(isinstance(item, LLMResponse) for item in output)
         assert not any(item["role"] == "tool" for item in output)
     assert response.model_dump() == archived
-    if formatter_type is CachedBlockFormatter:
-        assert formatter.format_description() == XMLBlockFormatter().format_description()
-        xml_output = render_context(
-            items, block_formatter=XMLBlockFormatter(), provider_formatter=config.provider_formatter
-        ).output
-        assert output == xml_output
 
 
 def test_context_text_bounds_non_strings_but_passes_strings_unchanged():
@@ -243,7 +242,7 @@ async def test_default_view_membership_and_boundary_do_not_depend_on_format():
             snapshots.append(
                 [(item.key, item.role) if isinstance(item, Block) else type(item) for item in items]
             )
-        assert snapshots[0] == snapshots[1] == snapshots[2]
+        assert snapshots[0] == snapshots[1]
         assert CacheBoundary in snapshots[0]
     finally:
         await agent.aclose()
@@ -355,7 +354,7 @@ async def test_subclass_hierarchy_prompt_guidance_ownership():
 
 
 @pytest.mark.parametrize("formatter_type", [*FORMATTERS, PlainBlockFormatter, CustomWrapper])
-def test_duplicate_tool_call_ids_in_llm_response_omits_group_atomically(formatter_type):
+def test_duplicate_tool_call_ids_in_llm_response_rejected_atomically(formatter_type):
     response = LLMResponse(
         parts=(
             AssistantText(text="duplicate calls"),
@@ -373,12 +372,12 @@ def test_duplicate_tool_call_ids_in_llm_response_omits_group_atomically(formatte
     )
     formatter = formatter_type()
     config = RenderConfig(block_formatter=formatter)
-    rendered = render_context(
-        [Block(key="sys", content="rules"), response, execution],
-        block_formatter=formatter,
-        provider_formatter=config.provider_formatter,
-    )
-    assert [item["role"] for item in rendered.output] == ["system"]
+    with pytest.raises(UnsupportedContextLayout, match="incomplete execution batch"):
+        render_context(
+            [Block(key="sys", content="rules"), response, execution],
+            block_formatter=formatter,
+            provider_formatter=config.provider_formatter,
+        )
 
 
 @pytest.mark.parametrize("formatter_type", FORMATTERS)
@@ -420,46 +419,73 @@ def test_adjacent_materialized_blocks_coalesce_by_role_without_reordering():
         assert [p.key for p in messages[2].parts if isinstance(p, BlockPart)] == ["sys_e"]
 
 
-async def test_instance_prompt_resolver_override_owns_guidance():
-    formatter = MarkdownBlockFormatter()
-    agent = Agent(llm=object(), render_config=RenderConfig(block_formatter=formatter))
-    # Exercise the supported instance resolver override without method binding.
-    agent.__dict__["_resolve_system_prompt"] = lambda: "instance-owned prompt"
-    try:
-        items = await collect_context_items(ManagedContextView(), agent, call_for(agent))
-        prompt = next(
-            item.content for item in items if getattr(item, "key", None) == "system_prompt"
-        )
-        assert prompt == "instance-owned prompt"
-        assert formatter.format_description() not in prompt
-    finally:
-        await agent.aclose()
-
-
-@pytest.mark.parametrize("source", ["view", "decorator", "scoped"])
 @pytest.mark.parametrize(
-    "replacement",
-    [None, "owner-selected prompt", Context(expr="self._resolve_system_prompt()")],
-    ids=["removed", "replaced", "same-text-expression"],
+    "replacement", [None, "owner-selected prompt", Context(expr="'expression prompt'")]
 )
-async def test_replaced_prompt_does_not_evaluate_unused_guidance(source, replacement):
+async def test_view_replaced_prompt_does_not_evaluate_unused_guidance(replacement):
     class UnusedFormatter(XMLBlockFormatter):
         def format_description(self):
-            raise AssertionError("An overridden prompt must not evaluate default guidance")
+            raise AssertionError("A replaced view prompt must not evaluate default guidance")
 
     class OverrideView(ManagedContextView):
-        def instruction_blocks(self, call):
+        async def instruction_blocks(self, owner, call):
             return {"system_prompt": replacement}
 
-    view = OverrideView() if source == "view" else ManagedContextView()
-    kwargs = {} if source == "view" else {f"_{source}_context": {"system_prompt": replacement}}
     agent = Agent(llm=object(), render_config=RenderConfig(block_formatter=UnusedFormatter()))
     try:
-        items = await collect_context_items(view, agent, call_for(agent, **kwargs))
+        items = await collect_context_items(OverrideView(), agent, call_for(agent))
         prompts = [item.content for item in items if getattr(item, "key", None) == "system_prompt"]
-        expected = (
-            agent._resolve_system_prompt() if isinstance(replacement, Context) else replacement
-        )
+        expected = "expression prompt" if isinstance(replacement, Context) else replacement
         assert prompts == ([] if expected is None else [expected])
     finally:
         await agent.aclose()
+
+
+@pytest.mark.parametrize("formatter_type", [*FORMATTERS, PlainBlockFormatter, CustomWrapper])
+@pytest.mark.parametrize("batch_size", [1, 2, 8, 64])
+def test_large_reversed_execution_batch_preserves_native_calls_and_input(
+    formatter_type, batch_size
+):
+    """Sidecar arrival order and intervening blocks must not corrupt replay."""
+    response = LLMResponse(
+        parts=(
+            AssistantReasoning(text="reasoning", native={"signature": "opaque"}),
+            AssistantText(text="original text"),
+            *(
+                ToolCall(id=f"call-{i}", name="run", arguments=f'{{ "n": {i}.00 }}')
+                for i in range(batch_size)
+            ),
+        ),
+        finish_reason="tool_calls",
+        replay_scope="responses:openai:test",
+    )
+    executions = [
+        ToolCallEvent(
+            tool_call_id=call.id,
+            name=call.name,
+            arguments={"n": i},
+            llm_response_id=response.id,
+            result=ToolResult(tool_call_id=call.id, content=f"result-{i}"),
+        )
+        for i, call in enumerate(response.tool_calls)
+    ]
+    boundary = CacheBoundary()
+    middle = Block(key="middle", content="keep this after the atomic batch", role=Role.USER)
+    items = [Block(key="rules", content="rules"), response, middle, *reversed(executions), boundary]
+    before = response.model_dump(), [event.model_dump() for event in executions]
+    config = RenderConfig(block_formatter=formatter_type())
+    rendered = render_context(
+        items, block_formatter=config.block_formatter, provider_formatter=config.provider_formatter
+    )
+    output = rendered.output
+    assert output[1] is response
+    assert [message["tool_call_id"] for message in output[2 : 2 + batch_size]] == [
+        call.id for call in response.tool_calls
+    ]
+    assert [message["content"] for message in output[2 : 2 + batch_size]] == [
+        f"result-{i}" for i in range(batch_size)
+    ]
+    assert middle.content in output[-2]["content"]
+    assert isinstance(output[-1], CacheBoundary)
+    assert output[-1] is rendered.messages[-1].replay_message
+    assert (response.model_dump(), [event.model_dump() for event in executions]) == before

@@ -41,7 +41,7 @@ class Notifier(Agent, llm=llm):
 | Knob | Default | Verified semantics |
 |---|---|---|
 | `max_iterations` | `None` | **Unlimited.** The loop then stops only on completion, the error budget, or a hard abort. |
-| `max_retries` | `3` | **Cumulative session error budget, not consecutive** (the counter is never reset). LLM API errors, bad tool JSON, empty code, and `return_result` validation failures all count. |
+| `max_retries` | `3` | Error budget with two counters. **LLM API errors count only while consecutive**: any model response (including a malformed one) resets them. **Other errors are cumulative** across the call (never reset): bad tool JSON, unknown tools, empty code, empty replies, and `return_result` validation failures. Either counter reaching `max_retries` fails the call. |
 | `max_consecutive_text_only` | `3` | Consecutive no-tool-call text replies before hard abort; `0` disables. Any real tool call resets the counter. |
 | `cell_timeout` | `None` | Per-cell `asyncio.wait_for` limit in seconds; `None` = unlimited. Cannot interrupt a truly blocking sync syscall — that's what the blocking-call AST validation is for. |
 | `max_tokens` / `temperature` / `top_p` | `None` | Passed to every generation call when set (model defaults otherwise). On empty responses with `finish_reason="length"` CodeAct aborts and tells you to raise `max_tokens` (16384+ for reasoning models). |
@@ -185,16 +185,22 @@ CodeActConfig(restrictions=RestrictionsConfig(
 
 ## Overriding the strategy prompt
 
-Not a config field — use the decorator's scoped-context:
+Not a config field, and not something `self.context` or `context=` can change: the context view owns the strategy blocks. Override the view's `instruction_blocks`:
 
 ```python
-from nooa.context_blocks import ScopedContext
+from nooa import CodeActView, Context
 
-@strategy(CodeActStrategy(), ScopedContext(context={"strategy_prompt": "My leaner instructions..."}))
+class LeanView(CodeActView):
+    async def instruction_blocks(self, owner, call):
+        blocks = dict(await super().instruction_blocks(owner, call))
+        blocks["strategy_prompt"] = Context("My leaner instructions...", prefix=True)
+        return blocks
+
+@strategy(CodeActStrategy(), context_view=LeanView())
 async def solve(self, q: str) -> str: ...
 ```
 
-Block order is `[system_prompt, strategy_prompt, execution_context, self]`; both strategy blocks are dynamic expressions you can replace per method.
+Block order is `[system_prompt, strategy_prompt, sandbox, execution_context, self]`.
 
 ## Advanced PredictStrategy (`PredictConfig`)
 

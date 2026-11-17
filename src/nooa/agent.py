@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from nooa.runtime.context_manager import ContextManager
     from nooa.runtime.event_manager import EventManager
     from nooa.runtime.events import EventsApi
+    from nooa.runtime.execution_namespace import ExecutionNamespace
     from nooa.storage.manager import StorageManager
     from nooa.unifiedllm import UnifiedLLM
 
@@ -91,7 +92,7 @@ class Agent(metaclass=AgentMeta):
     - Structured instances (dataclasses, Pydantic, custom classes) render as `ClassName(field=value, ...)`; a trailing `...` means fields were elided:
         Config(name='foo', enabled=True, ...)
     - The variable itself is **not** truncated — index/iterate it directly to operate on the full data.
-    - `<truncated>...</truncated>` in captured stdout/stderr is **not recoverable**.
+    - Output cut to fit is wrapped in `<truncated-output>`...`</truncated-output>`: it says the cut part is **not recoverable**, or, when file-backed capture is on, names the file with the full output.
     """
 
     # Agent instances should never be serialized as nested values inside other objects.
@@ -251,19 +252,6 @@ class Agent(metaclass=AgentMeta):
         # Initialize context state (always present, hidden)
         self.context_manager = ContextManager()
 
-        # Reserve framework block names and their default placement. The default
-        # view derives their content directly from the agent; declarations here
-        # are therefore overrides only.
-        cm = self.context_manager
-        cm.protect("system_prompt", static=True, expression="self._resolve_system_prompt()")
-        cm.protect("self", static=True, expression="doc(type(self))")
-        cm.protect("events_api", static=True, expression="self._events_api_prompt()")
-        cm.protect(
-            "state",
-            static=False,
-            expression="pformat(self, max_length=50, max_string=500, max_depth=4)",
-        )
-
         # Apply class-level context blocks (from __init_subclass__)
         class_context = getattr(self.__class__, "_agent_context_blocks", None)
         if class_context:
@@ -297,20 +285,16 @@ class Agent(metaclass=AgentMeta):
     @no_trace
     @hidden
     def _apply_context_dict(self, blocks: "dict[str, str | DynamicContext | None]") -> None:
-        """Apply a dict of context block overrides.
-
-        Used by __init__ to apply class-level and instance-level context.
-        Routing between protected and unprotected APIs is handled by
-        ContextManager.apply_override().
+        """Store class-level and instance-level context blocks.
 
         Args:
-            blocks: Dict of overrides:
-                - str: Static content
-                - DynamicContext("expr"): DynamicContext expression
-                - None: Remove block (including protected blocks)
+            blocks: Dict of user blocks, as accepted by ``self.context[key] = value``:
+                - str: Literal content
+                - Context(...) / DynamicContext("expr"): Literal or expression block
+                - None: Suppress a user, skill, or decorator/scoped block by name
         """
         for key, value in blocks.items():
-            self.context_manager.apply_override(key, value)
+            self.context_manager[key] = value
 
     @no_trace
     @hidden
@@ -494,25 +478,18 @@ class Agent(metaclass=AgentMeta):
 
     @no_trace
     @hidden
-    def _events_api_prompt(self) -> str:
-        """Expose event guidance only when the instance exposes its events API."""
-        from nooa.agentdoc.visibility import is_hidden_field
+    def execution_namespace_for(self, call: Any) -> "ExecutionNamespace":
+        """Hook: the owned namespace this method call's cells run in.
 
-        if is_hidden_field(self, "events"):
-            return ""
-        return """self.events: Query past events by type, tag, text, or call ID. Like a database, not an array.
-BEFORE starting any task, check if this skill applies.
-You MUST call doc(self.events) before using it — do not assume you know the API.
-Inspect in REPL: print(doc(self.events))
-"""
+        CodeAct's in-process backend calls it once per call (``call`` is the
+        :class:`~nooa.strategies.current_call.CurrentCall`). The default is a
+        fresh :class:`~nooa.runtime.execution_namespace.ExecutionNamespace` per
+        call (the call's arguments and the runtime names are reserved); override
+        it to share one namespace across calls.
+        """
+        from nooa.runtime.execution_namespace import default_execution_namespace
 
-    @no_trace
-    @hidden
-    def _resolve_system_prompt(self) -> str:
-        """Compatibility wrapper for the default view's prompt helper."""
-        from nooa.default_context_view import resolve_agent_system_prompt
-
-        return resolve_agent_system_prompt(self)
+        return default_execution_namespace(call)
 
     def __setattr__(self, name: str, value: Any) -> None:
         from nooa.runtime.method_guard import guard_dynamic_method

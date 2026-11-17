@@ -134,7 +134,7 @@ async def exercise_summarization(client, family, monkeypatch):
         await asyncio.wait_for(started.wait(), 5)
         assert not parent_call.done(), "Parent advanced before summary completed"
         assert not any(isinstance(e, Summary) for e in parent.event_manager.values())
-        source = {tag: identity for tag, identity, _ in summarizer._pending_source}
+        source = dict(summarizer._pending_source)
         recent = {tag: e.id for tag, e in parent.event_manager.items() if tag not in source}
         release.set()
         assert "READY" in await asyncio.wait_for(parent_call, 150)

@@ -6,6 +6,8 @@ This tests the critical path where PurePythonStrategy generates code with
 @strategy decorators that need to be detected as needing generation.
 """
 
+import pytest
+
 from nooa.decorators import strategy
 from nooa.ellipsis_detection import has_ellipsis_body, has_ellipsis_marker
 from nooa.strategies import PredictStrategy
@@ -63,6 +65,24 @@ async def my_method(self, x: int) -> str:
 
         # Should detect ellipsis body via _generated_source
         assert has_ellipsis_body(func) is True
+        assert has_ellipsis_body(func, require_source=True) is True
+
+    @pytest.mark.parametrize(
+        "body", ["...", "pass", "return", "return None", "return 1", '"Doc only."']
+    )
+    def test_source_confirmation_does_not_guess_from_short_bytecode(self, body):
+        """Strict standalone detection must not promote ambiguous bytecode to proof."""
+        code = f"async def fn():\n    {body}\n"
+        namespace = {}
+        exec(compile(code, "<strict-ellipsis-confirmation>", "exec"), namespace)
+        func = namespace["fn"]
+
+        assert has_ellipsis_body(func, require_source=True) is False
+        # Preserve the existing fallback for callers such as Agent methods.
+        assert has_ellipsis_body(func) is True
+
+        func._generated_source = code
+        assert has_ellipsis_body(func, require_source=True) is (body == "...")
 
 
 class TestHasEllipsisMarkerExec:

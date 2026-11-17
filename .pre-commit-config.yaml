@@ -1,7 +1,8 @@
 # Pre-commit hooks for nemo-oo-agents
 # All hooks use local system commands — no network access needed.
-# Install: pip install pre-commit && pre-commit install
-# Run manually: pre-commit run --all-files
+# Install dependencies: uv sync --group dev
+# Install hooks: uv run pre-commit install
+# Run manually: uv run pre-commit run --all-files
 
 # Paths no hook should touch. CyberGym task artifacts are generated benchmark
 # fixtures (PoC blobs, run logs) — whitespace/EOF fixing corrupts byte-exact

@@ -19,6 +19,7 @@ with _hidden:
     from nooa_bench.bench_agent import (
         _SOLVE_CONTEXT,
         _SOLVE_STRATEGY,
+        _SOLVE_VIEW,
         BenchAgent,
         TaskResult,
         _TaskDescription,
@@ -42,6 +43,7 @@ class RLMBenchAgent(BenchAgent):
     @strategy(
         _SOLVE_STRATEGY,
         context=_SOLVE_CONTEXT,
+        context_view=_SOLVE_VIEW,
     )
     async def _solve_task(
         self, description: _TaskDescription, supplied_context: Any = None

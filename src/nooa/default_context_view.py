@@ -2,13 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 """Default context policy implemented against public framework interfaces."""
 
+import ast
 import inspect
 import logging
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from nooa.context_blocks import BlockMetadata, Context, DynamicContext, Role
-from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent, ToolResult
+from nooa.context_blocks.events import EventBase
 from nooa.context_view import (
     Block,
     CacheBoundary,
@@ -18,6 +19,7 @@ from nooa.context_view import (
     context_text,
     evaluate_context_expression,
     is_model_visible,
+    replayable,
 )
 
 if TYPE_CHECKING:
@@ -26,8 +28,6 @@ if TYPE_CHECKING:
     from nooa.strategies.current_call import CurrentCall
 
 logger = logging.getLogger(__name__)
-
-_FRAMEWORK_KEYS = frozenset({"system_prompt", "self", "state", "events_api"})
 
 
 def active_skills(agent: "Agent") -> tuple["Skill", ...]:
@@ -80,14 +80,16 @@ async def _resolve_value(
     key: str,
     value: Any,
     *,
-    agent: "Agent",
+    owner: Any,
     call: "CurrentCall",
 ) -> str:
-    """Resolve one declaration using the framework expression environment."""
+    """Resolve one declaration with ``self`` bound to its declaring owner."""
+    if isinstance(value, Context):
+        value = value.value if value.expr is None else DynamicContext(value.expr)
     if not isinstance(value, DynamicContext):
         return context_text(value, call=call)
     try:
-        resolved = await evaluate_context_expression(value.expr, owner=agent, call=call)
+        resolved = await evaluate_context_expression(value.expr, owner=owner, call=call)
     except Exception as exc:
         logger.warning(
             "Dynamic context block %r failed to resolve: %s: %s (expr: %s)",
@@ -104,33 +106,21 @@ async def materialize_manager_blocks(
     manager: Any,
     agent: "Agent",
     call: "CurrentCall",
-    *,
-    include: frozenset[str] | None = None,
-    exclude: frozenset[str] = frozenset(),
 ) -> tuple[Block, ...]:
-    """Materialize selected declarations from one ContextManager snapshot."""
+    """Materialize the enabled user blocks of one ContextManager snapshot."""
     blocks: list[Block] = []
-    resolved_cache: dict[str, Any] = {}
     for key, value in manager.declarations():
-        if (include is not None and key not in include) or key in exclude:
-            continue
         if manager.is_disabled(key):
             continue
 
         is_dynamic = isinstance(value, DynamicContext)
-        content = await _resolve_value(key, value, agent=agent, call=call)
-        if is_dynamic:
-            resolved_cache[key] = content
-        protected = manager.is_protected(key)
+        content = await _resolve_value(key, value, owner=agent, call=call)
         metadata = BlockMetadata(
-            expr=value.expr if is_dynamic else f'self.context["{key}"]',
-            user_block=not protected,
+            expr=value.expr if is_dynamic else None,
+            user_block=True,
             static=manager.is_static(key),
-            source_dynamic=is_dynamic,
         )
         blocks.append(_block(key, content, metadata))
-
-    manager.update_resolved(resolved_cache)
     return tuple(blocks)
 
 
@@ -138,7 +128,10 @@ def resolve_agent_system_prompt(agent: "Agent") -> str:
     """Resolve the nearest agent class docstring as a prompt template."""
     import string
 
-    prompt = next((cls.__doc__ for cls in type(agent).__mro__ if cls.__doc__), "")
+    # cleandoc: Python 3.13+ strips docstring indentation at compile time and
+    # 3.12 keeps it, so the raw ``__doc__`` would make the prompt depend on the
+    # interpreter version.
+    prompt = next((inspect.cleandoc(cls.__doc__) for cls in type(agent).__mro__ if cls.__doc__), "")
     if not prompt or "{" not in prompt:
         return prompt
 
@@ -172,24 +165,20 @@ def _source_error(key: str, exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+_EVENTS_API_PROMPT = """self.events: Query past events by type, tag, text, or call ID. Like a database, not an array.
+BEFORE starting any task, check if this skill applies.
+You MUST call doc(self.events) before using it — do not assume you know the API.
+Inspect in REPL: print(doc(self.events))
+"""
+
+
 async def system_prompt_block(agent: "Agent", call: "CurrentCall") -> Block | None:
     """Build the default system prompt directly from the agent."""
     try:
-        value = agent._resolve_system_prompt()
-        if inspect.isawaitable(value):
-            value = await value
-        content = context_text(value, call=call)
+        content = context_text(resolve_agent_system_prompt(agent), call=call)
     except Exception as exc:
         content = _source_error("system_prompt", exc)
-    return _block(
-        "system_prompt",
-        content,
-        BlockMetadata(
-            expr="self._resolve_system_prompt()",
-            static=True,
-            source_dynamic=True,
-        ),
-    )
+    return _block("system_prompt", content, BlockMetadata(static=True))
 
 
 async def agent_interface_block(agent: "Agent", call: "CurrentCall") -> Block | None:
@@ -203,20 +192,17 @@ async def agent_interface_block(agent: "Agent", call: "CurrentCall") -> Block | 
     return _block(
         "self",
         content,
-        BlockMetadata(expr="doc(type(self))", static=True, source_dynamic=True),
+        BlockMetadata(expr="doc(type(self))", static=True),
     )
 
 
 async def events_api_block(agent: "Agent", call: "CurrentCall") -> Block | None:
     """Describe the events API only when it is exposed to the model."""
-    content = agent._events_api_prompt()
-    if not content:
+    from nooa.agentdoc.visibility import is_hidden_field
+
+    if is_hidden_field(agent, "events"):
         return None
-    return _block(
-        "events_api",
-        content,
-        BlockMetadata(expr="self._events_api_prompt()", static=True, source_dynamic=True),
-    )
+    return _block("events_api", _EVENTS_API_PROMPT, BlockMetadata(static=True))
 
 
 async def agent_state_block(agent: "Agent", call: "CurrentCall") -> Block | None:
@@ -234,7 +220,6 @@ async def agent_state_block(agent: "Agent", call: "CurrentCall") -> Block | None
             expr="pformat(self, max_length=50, max_string=500, max_depth=4)",
             user_block=False,
             static=False,
-            source_dynamic=True,
         ),
     )
 
@@ -245,11 +230,12 @@ async def apply_block_overrides(
     *,
     agent: "Agent",
     call: "CurrentCall",
-    static_expr: Callable[[str], str],
-    static_keys: set[str] | None = None,
     disabled: set[str] | None = None,
 ) -> tuple[Block, ...]:
-    """Replace, append, or remove named blocks using one override source."""
+    """Replace, append, or remove named blocks using one override source.
+
+    Only expression overrides carry an ``expr`` label.
+    """
     if not overrides:
         return tuple(blocks)
 
@@ -280,14 +266,13 @@ async def apply_block_overrides(
             is_static = explicit_static
         elif existing_static is not None:
             is_static = existing_static
-        elif static_keys and key in static_keys:
-            is_static = True
         else:
-            is_static = not isinstance(value, DynamicContext)
+            # A new bare value lands in the volatile suffix, as with self.context.
+            is_static = False
 
-        content = await _resolve_value(key, value, agent=agent, call=call)
+        content = await _resolve_value(key, value, owner=agent, call=call)
         metadata = BlockMetadata(
-            expr=value.expr if isinstance(value, DynamicContext) else static_expr(key),
+            expr=value.expr if isinstance(value, DynamicContext) else None,
             static=is_static,
         )
         replacement = _block(key, content, metadata)
@@ -336,24 +321,24 @@ def partition_blocks(blocks: Sequence[Block]) -> tuple[tuple[Block, ...], tuple[
 
 
 def visible_events(agent: "Agent") -> tuple[EventBase, ...]:
-    """Select active history, projecting unavailable tool results without changing state."""
-    events = [event for event in agent.event_manager.values() if is_model_visible(event)]
+    """Select active model-visible history. Pass the selection through ``replayable``."""
+    return tuple(event for event in agent.event_manager.values() if is_model_visible(event))
 
-    def unavailable(call_id: str) -> ToolResult:
-        return ToolResult(
-            tool_call_id=call_id,
-            content="Tool result unavailable in the active history; execution outcome is unknown.",
-            result_status=ResultStatus.ERROR,
-        )
 
-    projected: list[EventBase] = []
-    for event in events:
-        if isinstance(event, ToolCallEvent) and event.result is None:
-            event = event.model_copy(update={"result": unavailable(event.tool_call_id)})
-        projected.append(event)
-    # Do not reconstruct absent execution records: they may be deliberately
-    # archived. Incomplete canonical batches remain omitted by atomic replay.
-    return tuple(projected)
+class _SelfToAttribute(ast.NodeTransformer):
+    def __init__(self, attr: str):
+        self.attr = attr
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        if node.id != "self":
+            return node
+        attribute = ast.Attribute(value=ast.Name("self", ast.Load()), attr=self.attr, ctx=node.ctx)
+        return ast.copy_location(attribute, node)
+
+
+def _rebind_self(expr: str, attr: str) -> str:
+    """Rewrite a skill's ``self.status()`` as the agent's ``self.<attr>.status()``."""
+    return ast.unparse(_SelfToAttribute(attr).visit(ast.parse(expr, mode="eval")))
 
 
 async def collect_skill_blocks(
@@ -364,172 +349,125 @@ async def collect_skill_blocks(
     declaration_keys: frozenset[str],
 ) -> tuple[Block, ...]:
     """Evaluate active skill declarations without selecting their global placement."""
+    attrs: dict[int, str] = {}
+    for attr, value in agent.__instance_values__().items():
+        attrs.setdefault(id(value), attr)
     blocks: tuple[Block, ...] = ()
     for skill in active_skills(agent):
         if skill.context_block is None:
             continue
-        key, expression = skill.context_block
-        if key in disabled or key in declaration_keys or agent.context_manager.is_protected(key):
+        key, declaration = skill.context_block
+        if key in disabled or key in declaration_keys:
             continue
-        value = await _resolve_value(key, DynamicContext(expression), agent=agent, call=call)
-        block = _block(
-            key, value, BlockMetadata(expr=expression, user_block=True, source_dynamic=True)
+        content = await _resolve_value(key, declaration, owner=skill, call=call)
+        expr = declaration.expr
+        metadata = BlockMetadata(
+            expr=_rebind_self(expr, attrs[id(skill)]) if expr is not None else None,
+            static=declaration.prefix,
+            user_block=True,
         )
+        block = _block(key, content, metadata)
         blocks = replace_blocks_by_key(blocks, [block])
     return blocks
 
 
 class ManagedContextView(ContextView["Agent"]):
-    """Reusable assembly for the built-in manager-backed context policies."""
+    """Reusable assembly for the built-in manager-backed context policies.
+
+    The view builds its own blocks: the agent's system prompt, its documented
+    interface (``self``), the events API when exposed, the agent state, and the
+    strategy instruction blocks. User blocks from ``self.context``, skill blocks,
+    and decorator/scoped context are added next to them; a block with the same
+    name is an extra block and never replaces or hides one the view builds.
+
+    Args:
+        state: Include the ``state`` block, the agent's current field values.
+    """
 
     block_order: tuple[str, ...] | None = None
-    static_keys: frozenset[str] = frozenset()
+    state: bool = True
+    # Whether the strategy can run code, so the model can follow the events
+    # API guidance (``print(doc(self.events))``). A view property, not an option.
+    events_api: bool = True
 
-    def instruction_blocks(self, call: "CurrentCall") -> Mapping[str, Any]:
-        """Return this view's instruction declarations."""
+    def __init__(self, *, state: bool = True) -> None:
+        self.state = state
+
+    async def instruction_blocks(self, owner: "Agent", call: "CurrentCall") -> Mapping[str, Any]:
+        """Return this view's strategy instruction blocks."""
         return {}
 
-    async def _materialize_agent_blocks(
-        self,
-        owner: "Agent",
-        call: "CurrentCall",
-        *,
-        disabled: set[str],
-        declaration_keys: frozenset[str],
-    ) -> tuple[Block, ...]:
-        manager = owner.context_manager
-        default_builders = (
-            ("system_prompt", system_prompt_block),
-            ("self", agent_interface_block),
-            ("events_api", events_api_block),
-            ("state", agent_state_block),
+    def history(self, owner: "Agent", call: "CurrentCall") -> Iterable[EventBase]:
+        """Select the events this view replays; blocks and placement are unchanged.
+
+        ``assemble`` passes the selection through ``replayable``.
+        """
+        return visible_events(owner)
+
+    async def view_blocks(self, owner: "Agent", call: "CurrentCall") -> tuple[Block, ...]:
+        """Build the blocks this view owns from the agent and the strategy.
+
+        Owners that are not an ``Agent``, such as standalone functions, get only
+        the strategy blocks.
+        """
+        from nooa.agent import Agent
+
+        builders = []
+        if isinstance(owner, Agent):
+            builders = [system_prompt_block, agent_interface_block]
+            if self.events_api:
+                builders.append(events_api_block)
+            if self.state:
+                builders.append(agent_state_block)
+        blocks = [block for build in builders if (block := await build(owner, call)) is not None]
+        default_prompt = next((block for block in blocks if block.key == "system_prompt"), None)
+        blocks = await apply_block_overrides(
+            blocks, await self.instruction_blocks(owner, call), agent=owner, call=call
         )
-        blocks_list: list[Block] = []
-        for key, build in default_builders:
-            if key in disabled:
-                continue
-            if key in declaration_keys:
-                overrides = await materialize_manager_blocks(
-                    manager, owner, call, include=frozenset({key})
+        # User blocks are assembled separately and cannot replace view-owned blocks.
+        prompt_class = next((cls for cls in type(owner).__mro__ if cls.__doc__), None)
+        if (
+            prompt_class is Agent
+            and default_prompt is not None
+            and any(block is default_prompt for block in blocks)
+        ):
+            guidance = owner.render_config.block_formatter.format_description().strip()
+            if guidance:
+                guided = default_prompt.model_copy(
+                    update={
+                        "content": context_text(default_prompt.content, call=call)
+                        + "\n\n## Context format\n"
+                        + guidance
+                    }
                 )
-                block = overrides[0] if overrides else None
-            elif not manager.is_protected(key):
-                continue
-            else:
-                block = await build(owner, call)
-                if block is not None:
-                    manager.update_resolved({key: block.content})
-            if block is not None:
-                blocks_list.append(block)
-
-        blocks: tuple[Block, ...] = tuple(blocks_list)
-        blocks += await materialize_manager_blocks(manager, owner, call, exclude=_FRAMEWORK_KEYS)
+                blocks = tuple(guided if block is default_prompt else block for block in blocks)
         return blocks
 
-    async def _apply_override_layers(
-        self,
-        owner: "Agent",
-        call: "CurrentCall",
-        blocks: tuple[Block, ...],
-        *,
-        disabled: set[str],
-    ) -> tuple[Block, ...]:
-        blocks = await apply_block_overrides(
-            blocks,
-            self.instruction_blocks(call),
-            agent=owner,
-            call=call,
-            static_expr=lambda key: f"strategy.{key}",
-            static_keys=set(self.static_keys),
-            disabled=disabled,
-        )
-
-        blocks = await apply_block_overrides(
-            blocks,
-            call.decorator_context,
-            agent=owner,
-            call=call,
-            static_expr=lambda key: f'@strategy.context["{key}"]',
-            disabled=disabled,
-        )
-        blocks = await apply_block_overrides(
-            blocks,
-            call.scoped_context,
-            agent=owner,
-            call=call,
-            static_expr=lambda key: f'self.context["{key}"]',
-            disabled=disabled,
-        )
-        return blocks
-
-    async def assemble(self, owner: "Agent", call: "CurrentCall") -> AsyncIterator[ContextItem]:
+    async def context_blocks(self, owner: "Agent", call: "CurrentCall") -> tuple[Block, ...]:
+        """Materialize user, skill, and decorator/scoped blocks."""
         manager = owner.context_manager
         disabled = manager.disabled()
-        from nooa.agentdoc.visibility import is_hidden_field
-
-        if is_hidden_field(owner, "events"):
-            disabled = disabled | {"events_api"}
-        declaration_keys = frozenset(key for key, _ in manager.declarations())
-
-        blocks = await self._materialize_agent_blocks(
-            owner,
-            call,
-            disabled=disabled,
-            declaration_keys=declaration_keys,
-        )
-        default_prompt = next(
-            (
-                block
-                for block in blocks
-                if block.key == "system_prompt" and "system_prompt" not in declaration_keys
-            ),
-            None,
-        )
+        blocks = await materialize_manager_blocks(manager, owner, call)
         skill_blocks = await collect_skill_blocks(
             owner,
             call,
             disabled=disabled,
-            declaration_keys=declaration_keys,
+            declaration_keys=frozenset(key for key, _ in manager.declarations()),
         )
         blocks = replace_blocks_by_key(blocks, skill_blocks)
-        blocks = await self._apply_override_layers(
-            owner,
-            call,
-            blocks,
-            disabled=disabled,
-        )
+        for overrides in (call.decorator_context, call.scoped_context):
+            blocks = await apply_block_overrides(
+                blocks, overrides, agent=owner, call=call, disabled=disabled
+            )
+        return blocks
 
-        # Only a surviving built-in prompt receives guidance. Wait until all
-        # overrides have run: even evaluating discarded guidance can fail or
-        # have side effects. Identity also detects a same-text replacement.
-        if default_prompt is not None and any(block is default_prompt for block in blocks):
-            from nooa.agent import Agent
-
-            prompt_class = next((cls for cls in type(owner).__mro__ if cls.__doc__), None)
-            if (
-                prompt_class is Agent
-                and type(owner)._resolve_system_prompt is Agent._resolve_system_prompt
-                and "_resolve_system_prompt" not in vars(owner)
-            ):
-                guidance = owner.render_config.block_formatter.format_description().strip()
-                if guidance:
-                    guided_prompt = default_prompt.model_copy(
-                        update={
-                            "content": context_text(default_prompt.content, call=call)
-                            + "\n\n## Context format\n"
-                            + guidance
-                        }
-                    )
-                    blocks = tuple(
-                        guided_prompt if block is default_prompt else block for block in blocks
-                    )
-                    manager.update_resolved({"system_prompt": guided_prompt.content})
-
+    async def assemble(self, owner: "Agent", call: "CurrentCall") -> AsyncIterator[ContextItem]:
+        blocks = (*await self.view_blocks(owner, call), *await self.context_blocks(owner, call))
         blocks = order_blocks(blocks, self.block_order)
         prefix, trailing = partition_blocks(blocks)
 
         items: list[ContextItem] = [*prefix]
-        items.extend(visible_events(owner))
+        items.extend(replayable(self.history(owner, call)))
         if items:
             items.append(CacheBoundary())
         items.extend(trailing)
@@ -548,61 +486,59 @@ class CodeActView(ManagedContextView):
     """Execution protocol, environment, agent context, and active history."""
 
     block_order = ("system_prompt", "strategy_prompt", "sandbox", "execution_context", "self")
-    static_keys = frozenset({"execution_context", "strategy_prompt", "sandbox"})
 
-    def instruction_blocks(self, call: "CurrentCall") -> Mapping[str, Any]:
-        assert call.strategy is not None
-        blocks: dict[str, Any] = {
-            "strategy_prompt": DynamicContext("strategy.strategy_instructions(runtime)"),
-            "execution_context": DynamicContext("strategy.execution_context(runtime)"),
+    async def instruction_blocks(self, owner: "Agent", call: "CurrentCall") -> Mapping[str, Any]:
+        strategy, runtime = call.strategy, owner.runtime
+        assert strategy is not None
+        return {
+            "strategy_prompt": Context(await strategy.strategy_instructions(runtime), prefix=True),
+            "execution_context": Context(await strategy.execution_context(runtime), prefix=True),
+            **await _sandbox_block(strategy, runtime),
         }
-        config = call.strategy.config
-        if config.execution_backend == "sandbox" and config.sandbox.context_block:
-            blocks["sandbox"] = DynamicContext("strategy.sandbox_context(runtime)")
-        return blocks
+
+
+async def _sandbox_block(strategy: Any, runtime: Any) -> dict[str, Context]:
+    config = strategy.config
+    if config.execution_backend == "sandbox" and config.sandbox.context_block:
+        return {"sandbox": Context(await strategy.sandbox_context(runtime), prefix=True)}
+    return {}
 
 
 class PredictView(ManagedContextView):
-    """Structured-answer instructions, agent context, and active history."""
+    """Structured-answer instructions, agent context, and active history.
 
-    def instruction_blocks(self, call: "CurrentCall") -> Mapping[str, Any]:
-        return {"strategy_prompt": DynamicContext("strategy.strategy_instructions(runtime)")}
+    There is no REPL, so the view leaves out the events API guidance.
+    """
+
+    events_api = False
+
+    async def instruction_blocks(self, owner: "Agent", call: "CurrentCall") -> Mapping[str, Any]:
+        assert call.strategy is not None
+        instructions = await call.strategy.strategy_instructions(owner.runtime)
+        return {"strategy_prompt": Context(instructions, prefix=True)}
 
 
-class PurePythonView(ManagedContextView):
+class PurePythonView(PredictView):
     """Python-only execution instructions, agent context, and active history."""
 
-    def instruction_blocks(self, call: "CurrentCall") -> Mapping[str, Any]:
-        return {"strategy_prompt": DynamicContext("strategy.strategy_instructions(runtime)")}
+    events_api = True
 
 
 class CodeActV2View(CodeActView):
     """Single-tool execution context; protocol instructions live on the tool."""
 
     block_order = ("system_prompt", "sandbox", "python_cell_context", "python_cell_state", "self")
-    static_keys = frozenset({"sandbox", "python_cell_context"})
 
-    def instruction_blocks(self, call: "CurrentCall") -> Mapping[str, Any]:
-        blocks = dict(super().instruction_blocks(call))
-        blocks["strategy_prompt"] = None
-        blocks["execution_context"] = None
-        blocks["python_cell_context"] = DynamicContext("strategy.python_cell_context(runtime)")
-        blocks["python_cell_state"] = DynamicContext("strategy.python_cell_state_context(runtime)")
-        return blocks
-
-
-class ReflexionView(ContextView["Agent"]):
-    """Delegate context assembly to a wrapped strategy using its call environment."""
-
-    def __init__(self, base_strategy: Any):
-        self.base_strategy = base_strategy
-
-    async def assemble(self, owner: "Agent", call: "CurrentCall") -> AsyncIterator[ContextItem]:
-        from dataclasses import replace
-
-        base_call = replace(call, strategy=self.base_strategy)
-        async for item in self.base_strategy.default_context_view.assemble(owner, base_call):
-            yield item
+    async def instruction_blocks(self, owner: "Agent", call: "CurrentCall") -> Mapping[str, Any]:
+        strategy, runtime = call.strategy, owner.runtime
+        assert strategy is not None
+        return {
+            **await _sandbox_block(strategy, runtime),
+            "python_cell_context": Context(
+                await strategy.python_cell_context(runtime), prefix=True
+            ),
+            "python_cell_state": Context(await strategy.python_cell_state_context(runtime)),
+        }
 
 
 __all__ = [
@@ -611,7 +547,6 @@ __all__ = [
     "PredictView",
     "PurePythonView",
     "CodeActV2View",
-    "ReflexionView",
     "collect_skill_blocks",
     "agent_interface_block",
     "agent_state_block",

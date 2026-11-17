@@ -10,7 +10,12 @@ serialized execution, and complete transparency.
 import logging as _logging
 import typing as _typing
 
+from nooa._platform_policy import check_platform as _check_platform
 from nooa._version import __version__
+
+# Native Windows is unsupported: stop here, before any other nooa module loads,
+# unless NOOA_SKIP_PLATFORM_CHECK=1 (see nooa._platform_policy).
+_check_platform()
 
 # ---------------------------------------------------------------------------
 # Library logging: add NullHandler so applications that don't configure
@@ -26,7 +31,12 @@ from nooa._logging import enable_logging  # noqa: E402
 from nooa._visible import visible  # noqa: E402
 from nooa.agent import Agent  # noqa: E402
 from nooa.agentdoc import hidden, spec  # noqa: E402
-from nooa.context_blocks import Context, ContextWindowStats, DynamicContext  # noqa: E402
+from nooa.context_blocks import (  # noqa: E402
+    Context,
+    ContextAssemblyError,
+    ContextWindowStats,
+    DynamicContext,
+)
 from nooa.context_view import (  # noqa: E402
     Block,
     CacheBoundary,
@@ -37,6 +47,7 @@ from nooa.context_view import (  # noqa: E402
     context_text,
     evaluate_context_expression,
     is_model_visible,
+    replayable,
 )
 from nooa.decisions import (  # noqa: E402
     BooleanDecision,
@@ -59,6 +70,7 @@ from nooa.default_context_view import CodeActView, PredictView  # noqa: E402
 
 # Export errors
 from nooa.errors import (  # noqa: E402
+    CodeSyntaxError,
     DynamicMethodAdditionError,
     GenerationError,
     NemoOOAgentsError,
@@ -163,6 +175,7 @@ __all__ = [
     # Types
     "ContextWindowStats",  # Re-exported from context_blocks
     "Context",  # Re-exported from context_blocks
+    "ContextAssemblyError",  # Re-exported from context_blocks
     "DynamicContext",  # Re-exported from context_blocks (deprecated, use Context)
     "Block",
     "CacheBoundary",
@@ -176,6 +189,7 @@ __all__ = [
     "context_text",
     "evaluate_context_expression",
     "is_model_visible",
+    "replayable",
     "ContextApi",  # LLM-facing context API wrapper (Skill)
     "ContextManager",  # Context block state backend
     "EventsApi",  # Runtime events query API
@@ -249,6 +263,7 @@ __all__ = [
     "GenerationError",
     "ValidationError",
     "RestrictedCodeError",
+    "CodeSyntaxError",
     "NemoOOAgentsRuntimeError",
     "DynamicMethodAdditionError",
     "SerializationError",

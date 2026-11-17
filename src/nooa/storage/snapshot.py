@@ -79,10 +79,7 @@ class AgentSnapshot(BaseModel):
         all_allowlist: set[str] = set()
 
         context_blocks: list[StaticContextBlock | DynamicContextBlock] = []
-        protected = agent.context_manager.protected_keys
         for key, value in agent.context_manager.declarations():
-            if key in protected:
-                continue  # Framework blocks are recreated by __init__
             if isinstance(value, DynamicContext):
                 context_blocks.append(DynamicContextBlock(key=key, expr=value.expr))
             else:
@@ -132,7 +129,7 @@ class AgentSnapshot(BaseModel):
             type_allowlist=all_allowlist,
         )
 
-    def restore(self, agent: Any) -> None:
+    def restore(self, agent: Any) -> dict[str, str]:
         """Restore this snapshot's state into an agent, mutating it in place.
 
         Note: this performs additive restoration — it does not clear
@@ -144,8 +141,19 @@ class AgentSnapshot(BaseModel):
         Args:
             agent: A freshly constructed Agent instance to restore into.
 
+        An attribute that fails to deserialize is skipped with a warning; the
+        other attributes are still restored. Last, if the agent has a callable
+        ``after_restore`` (``InteractiveAgent`` and its subclasses), it runs
+        once, so every restore path repairs what did not survive the restart;
+        hosts do not call it again.
+
+        Returns:
+            The skipped attributes: name mapped to a short reason
+            (``"<ExceptionType>: <message>"``). Empty when everything restored.
+
         Raises:
             SerializationError: If the snapshot version doesn't match.
+            DeserializationError: If a static context block can't be restored.
         """
         if self.version != SNAPSHOT_VERSION:
             raise SerializationError(
@@ -153,28 +161,33 @@ class AgentSnapshot(BaseModel):
             )
 
         for block in self.context:
-            # ``from_agent`` skips protected (framework) keys, so snapshots
-            # produced by this codebase never carry them and the
-            # ``is_protected`` branches below are unreachable for round-tripped
-            # data. They are kept deliberately as defensive handling for
-            # externally-supplied snapshot JSON — hand-edited or legacy
-            # payloads that may still contain protected keys — so such keys are
-            # restored via the protected setters rather than corrupting state.
-            is_protected = block.key in agent.context_manager.protected_keys
             if isinstance(block, DynamicContextBlock):
-                if is_protected:
-                    agent.context_manager.set_dynamic_protected(block.key, block.expr)
-                else:
-                    agent.context_manager.set_dynamic(block.key, block.expr)
+                agent.context_manager.set_dynamic(block.key, block.expr)
             else:
-                value = deserialize(block.value, self.type_allowlist)
-                if is_protected:
-                    agent.context_manager.set_static_protected(block.key, value)
-                else:
-                    agent.context_manager[block.key] = value
+                agent.context_manager[block.key] = deserialize(block.value, self.type_allowlist)
 
         if self.disabled_context:
             agent.context_manager.disable(*self.disabled_context)
 
+        skipped: dict[str, str] = {}
         for attr_name, attr_value in self.attributes.items():
-            setattr(agent, attr_name, deserialize(attr_value, self.type_allowlist))
+            try:
+                value = deserialize(attr_value, self.type_allowlist)
+            except Exception as exc:
+                # Mirror ``from_agent``: one unrestorable attribute (e.g. nested
+                # deeper than ``MAX_SNAPSHOT_DEPTH`` in an older checkpoint, a
+                # schema-drifted model, or a failing ``__restore_snapshot__``)
+                # must not abort the whole restore. Skip it and warn.
+                logger.warning(
+                    "Snapshot: skipping non-restorable attribute %r: %s",
+                    attr_name,
+                    exc,
+                    exc_info=True,
+                )
+                skipped[attr_name] = f"{type(exc).__name__}: {exc}"
+                continue
+            setattr(agent, attr_name, value)
+        after_restore = getattr(agent, "after_restore", None)
+        if callable(after_restore):
+            after_restore()
+        return skipped

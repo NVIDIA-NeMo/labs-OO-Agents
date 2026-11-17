@@ -23,6 +23,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from functools import cached_property
 from typing import Any
 
 from nooa.agent import Agent
@@ -141,24 +142,7 @@ class MemoryManager:
         # the TUI pass their stable per-agent key; "" writes to the shared
         # namespace); the honest library default is the agent's class name.
         self.owner = self.config.owner if self.config.owner is not None else type(agent).__name__
-        self.embedder = embedder or get_embedder(self.config.embedding)
-        self.store = self._make_store(agent)
-        self.retrieval = RetrievalEngine(
-            self.store,
-            self.embedder,
-            self.config.retrieval,
-            access_log_cap=self.config.observability.access_log_cap,
-        )
-        # Engines consolidate at ROLE scope: instance scope would fragment
-        # knowledge per session (and reflection must fold across instances).
-        self.reflection_engine = ReflectionEngine(
-            self.store,
-            self.embedder,
-            self.config.reflection,
-            self.config.forget,
-            owner=self.role,
-        )
-        self.forgetting = ForgettingEngine(self.store, self.config.forget, owner=self.role)
+        self._provided_embedder = embedder
         self._reasoner = reasoner
         self._reconciler = reconciler
         self.stats = MemoryStats()
@@ -174,9 +158,50 @@ class MemoryManager:
         self._last_query_hash: int | None = None
         self._primed = False
 
+        if self.config.enabled:
+            # Keep enabled installs eager, including backend validation.
+            _ = self.retrieval, self.reflection_engine, self.forgetting
         self._install_hooks()
 
+    @cached_property
+    def embedder(self) -> Embedder:
+        """Reuse the supplied embedder or construct the configured backend on first use."""
+        return self._provided_embedder or get_embedder(self.config.embedding)
+
+    @cached_property
+    def store(self) -> MemoryStore:
+        """Open the configured memory database once, only when storage is needed."""
+        return self._make_store(self.agent)
+
+    @cached_property
+    def retrieval(self) -> RetrievalEngine:
+        """Build the recall engine against this manager's shared store and embedder."""
+        return RetrievalEngine(
+            self.store,
+            self.embedder,
+            self.config.retrieval,
+            access_log_cap=self.config.observability.access_log_cap,
+        )
+
+    @cached_property
+    def reflection_engine(self) -> ReflectionEngine:
+        """Initialize role-scoped reflection lazily, sharing the manager's resources."""
+        # Engines consolidate at ROLE scope, folding knowledge across instances.
+        return ReflectionEngine(
+            self.store,
+            self.embedder,
+            self.config.reflection,
+            self.config.forget,
+            owner=self.role,
+        )
+
+    @cached_property
+    def forgetting(self) -> ForgettingEngine:
+        """Initialize role-scoped forgetting against the cached memory store."""
+        return ForgettingEngine(self.store, self.config.forget, owner=self.role)
+
     def _make_store(self, agent: Agent) -> MemoryStore:
+        """Open explicit or agent-default storage using the configured embedding dimension."""
         path = self.config.path or self._default_path(agent)
         return MemoryStore(path, vector_config=self.config.vector, embedding_dim=self.embedder.dim)
 
@@ -244,7 +269,10 @@ class MemoryManager:
             if not task.done():
                 task.cancel()
         self._pending.clear()
-        self.store.close()
+        # Uninstalling an unused disabled manager must not initialize its store.
+        store = self.__dict__.get("store")
+        if store is not None:
+            store.close()
         if getattr(self.agent, "_memory", None) is self:
             del self.agent._memory  # type: ignore[attr-defined]
 
@@ -403,14 +431,16 @@ class MemoryManager:
         status: str | None = None,
         references: list[str] | None = None,
     ) -> bool:
-        """Refine an existing memory in place (re-embeds if content changed)."""
+        """Refine a memory, refreshing derived metadata and changed embedding input."""
         m = self._find(memory_id)
         if m is None:
             return False
         self._assert_writable(m)
-        content_changed = content is not None and content != m.content
-        if content is not None:
-            m.content = content
+        embedding_before = m.embedding_text()
+        if content is not None and content != m.content:
+            # Reuse the schema's derivation rules without losing record history.
+            data = m.model_dump(exclude={"size_chars", "token_len", "sentence_count"})
+            m = Memory.model_validate({**data, "content": content})
         if importance is not None:
             m.importance = max(0.0, min(10.0, importance))
         if type is not None:
@@ -434,7 +464,7 @@ class MemoryManager:
             reinforce=False,
             cap=self.config.observability.access_log_cap,
         )
-        if content_changed:
+        if m.embedding_text() != embedding_before:
             self.store.add(m, self.embedder.embed(m.embedding_text()))  # re-embed + replace
         else:
             self.store.save(m)
@@ -603,10 +633,14 @@ class MemoryManager:
         queries = derive_queries(self.agent, self.config.spontaneous)
         return self._format_recall(queries)
 
+    @staticmethod
+    def _identity_marker(m: Memory) -> str:
+        tag = f"{m.type.value}:{m.status}" if m.type is MemoryType.TODO else m.type.value
+        return f"- [{tag}#{m.id[:8]}]"
+
     def _memory_lines(self, m: Memory) -> list[str]:
         head = (m.title or m.content).replace("\n", " ").strip()
-        tag = f"{m.type.value}:{m.status}" if m.type is MemoryType.TODO else m.type.value
-        lines = [f"- [{tag}#{m.id[:8]}] {head}"]
+        lines = [f"{self._identity_marker(m)} {head}"]
         # References resolve fresh against live state (pass-by-reference).
         for ref in m.references[:4]:
             resolved = resolve(self.agent, self.store, ref)
@@ -625,6 +659,12 @@ class MemoryManager:
         return todos[:k]
 
     def _format_recall(self, queries: list[str]) -> str:
+        """Render recall, then account only for memories identifiable in the result.
+
+        A partial record counts as injected once its complete ``[type#id]``
+        marker survives the budget. A cut inside that marker does not count.
+        """
+        self._last_injected_ids = []
         if not queries:
             return ""
         sp = self.config.spontaneous
@@ -637,9 +677,11 @@ class MemoryManager:
                 seen.setdefault(m.id, m)
         shown = list(seen.values())[:k]
         lines: list[str] = []
+        record_lines: list[tuple[Memory, int]] = []
         if shown:
             lines.append("## Recalled memories (associative)")
             for m in shown:
+                record_lines.append((m, len(lines)))
                 lines.extend(self._memory_lines(m))
         extra: list[Memory] = []
         if sp.inject_open_todos == "always":
@@ -648,20 +690,32 @@ class MemoryManager:
             if extra:
                 lines.append("## Open todos")
                 for t in extra:
+                    record_lines.append((t, len(lines)))
                     lines.extend(self._memory_lines(t))
         if not lines:
-            self._last_injected_ids = []
             return ""
-        injected = shown + extra
+        text = "\n".join(lines)
+        visible_end = len(text)
+        if len(text) > sp.context_char_budget:
+            prefix = text[: sp.context_char_budget].rstrip()
+            visible_end = len(prefix)
+            text = prefix + " …"
+        offsets: list[int] = []
+        position = 0
+        for line in lines:
+            offsets.append(position)
+            position += len(line) + 1  # newline between rendered lines
+        injected = [
+            memory
+            for memory, line_index in record_lines
+            if offsets[line_index] + len(self._identity_marker(memory)) <= visible_end
+        ]
         self._last_injected_ids = [m.id for m in injected]
         if self.config.observability.log_injections:
             # Logged WITHOUT touching: injection stays invisible to ACT-R.
             for m in injected:
                 m.log_access(self._access("injected"), cap=self.config.observability.access_log_cap)
                 self.store.save(m)
-        text = "\n".join(lines)
-        if len(text) > sp.context_char_budget:
-            text = text[: sp.context_char_budget].rstrip() + " …"
         return text
 
     def _on_task(self, event: object) -> None:
@@ -691,12 +745,14 @@ class MemoryManager:
             self.stats.injected_chars += len(text)
             self._emit(
                 MemoryInjected(
-                    n_memories=text.count("\n- "),
+                    n_memories=len(self._last_injected_ids),
                     chars=len(text),
                     memory_ids=list(self._last_injected_ids),
                 )
             )
-            mem_logger.debug("memory.inject %d chars (%d memories)", len(text), text.count("\n- "))
+            mem_logger.debug(
+                "memory.inject %d chars (%d memories)", len(text), len(self._last_injected_ids)
+            )
         elif key in cm:
             del cm[key]
         self._last_query_hash = qhash

@@ -472,7 +472,9 @@ class SummarizationAgent(Agent):
 
     @hidden
     @no_trace
-    def _render_range_to_markdown(self, start_tag: str, end_tag: str) -> str:
+    def _render_range_to_markdown(
+        self, start_tag: str, end_tag: str, *, model_visible_only: bool = False
+    ) -> str:
         """Render events in range to markdown for LLM consumption.
 
         Uses context-blocks MarkdownBlockFormatter for consistent rendering
@@ -481,6 +483,8 @@ class SummarizationAgent(Agent):
         Args:
             start_tag: First event tag in the range
             end_tag: Last event tag in the range
+            model_visible_only: Skip records the model never sees (metadata,
+                runtime and empty events).
 
         Returns:
             Markdown-formatted events section
@@ -489,6 +493,10 @@ class SummarizationAgent(Agent):
             return ""
 
         events = self._get_events_in_range(start_tag, end_tag)
+        if model_visible_only:
+            from nooa.context_view import is_model_visible
+
+            events = [(tag, event) for tag, event in events if is_model_visible(event)]
 
         if not events:
             return ""
@@ -516,7 +524,7 @@ class SummarizationAgent(Agent):
                 key=f"event_{tag}",
                 content=body,
                 role=event_role,
-                metadata=BlockMetadata(expr=f'self.events["{tag}"]', tag=str(tag)),
+                metadata=BlockMetadata(tag=str(tag)),
             )
             rendered.append(format_message_content(block, "markdown"))
 
@@ -629,18 +637,16 @@ def context_budget(
 class TokenBudgetSummarizer(SummarizationAgent):
     """Compact stored history when provider input usage exceeds the budget.
 
-    Summary input is a frozen, bounded range of public stored-event content,
-    independent of the parent's context view. Recent events, non-model records
-    and incomplete tool-call groups stay active. Completed summaries apply only if the
-    source contents still match. The default view can reuse the parent's request
-    prefix; custom views use a dedicated Predict request built from stored events.
-    The agent waits for summary generation, then applies it at BeforeTurn.
+    Every event older than the ``preserve_recent`` most recent ones, as stored
+    before the over-budget request, collapses into one summary. The default views
+    reuse the parent's request prefix; any other view gets a dedicated request
+    built from the range's model-visible stored events, since a custom view may
+    not have shown them. The agent waits for summary generation, then applies it
+    at BeforeTurn if the range's event ids are unchanged.
     """
 
     _unsub_llm: Annotated[Callable[[], None] | None, hidden] = None
-    _pending_source: Annotated[tuple[tuple[str, str, str], ...] | None, hidden] = None
-    _pending_source_text: Annotated[str | None, hidden] = None
-    _pending_source_events: Annotated[tuple[tuple[str, "EventBase"], ...], hidden] = ()
+    _pending_source: Annotated[tuple[tuple[str, str], ...] | None, hidden] = None
     _failed_summaries: Annotated[int, hidden] = 0
     _automatic_context_budget: Annotated[bool, hidden] = False
     _automatic_context_budget_percent: Annotated[float, hidden] = 0.8
@@ -678,162 +684,33 @@ class TokenBudgetSummarizer(SummarizationAgent):
             self._unsub_llm()
             self._unsub_llm = None
         self._pending_source = None
-        self._pending_source_text = None
-        self._pending_source_events = ()
         super()._uninstall()
-
-    @staticmethod
-    @hidden
-    def _history_units(events: list["EventBase"]) -> list[tuple[int, int, bool]]:
-        """Find indivisible replay spans; hidden and unfinished units are retained."""
-        from nooa.context_blocks.events import ResultStatus, ToolCallEvent
-        from nooa.context_view import is_model_visible
-        from nooa.llm_types import LLMResponse
-
-        cuts = [True] * (len(events) + 1)
-        eligible = [is_model_visible(event) for event in events]
-        responses = {
-            event.id: index
-            for index, event in enumerate(events)
-            if isinstance(event, LLMResponse) and event.replay_tool_calls
-        }
-        executions: dict[str, list[int]] = {}
-        for index, event in enumerate(events):
-            if getattr(event, "images", None):
-                eligible[index] = False  # text-only summaries cannot preserve attachments
-            if isinstance(event, ToolCallEvent):
-                if event.llm_response_id:
-                    executions.setdefault(event.llm_response_id, []).append(index)
-                if (
-                    event.result is None
-                    or event.result.result_status == ResultStatus.RUNNING
-                    or (event.llm_response_id and event.llm_response_id not in responses)
-                ):
-                    eligible[index] = False
-            elif isinstance(event, LLMResponse) and not (
-                event.content or event.reasoning or event.replay_tool_calls
-            ):
-                eligible[index] = False  # opaque-only state has no summary text
-
-        for response_id, index in responses.items():
-            response = events[index]
-            assert isinstance(response, LLMResponse)
-            linked = executions.get(response_id, [])
-            start, end = min([index, *linked]), max([index, *linked]) + 1
-            for cut in range(start + 1, end):
-                cuts[cut] = False
-            expected = {tool.id for tool in response.replay_tool_calls}
-            actual = {
-                event.tool_call_id for i in linked if isinstance(event := events[i], ToolCallEvent)
-            }
-            if (
-                actual != expected
-                or len(linked) != len(expected)
-                or any(not eligible[i] for i in range(start, end))
-            ):
-                eligible[start:end] = [False] * (end - start)
-
-        units = []
-        start = 0
-        for end in range(1, len(events) + 1):
-            if cuts[end]:
-                units.append((start, end, all(eligible[start:end])))
-                start = end
-        return units
-
-    @staticmethod
-    @hidden
-    def _event_markdown(tag: str, event: "EventBase") -> str:
-        """Render public event content without persistence metadata or field truncation."""
-        from nooa.context_blocks import BlockMetadata, ResolvedBlock, format_message_content
-        from nooa.context_blocks.utils import truncating_pformat
-
-        block = ResolvedBlock(
-            key=f"event_{tag}",
-            content=truncating_pformat(event, max_string=None, max_length=None, max_depth=None),
-            role=event._role,
-            metadata=BlockMetadata(tag=tag),
-        )
-        return format_message_content(block, "markdown")
 
     @hidden
     @no_trace
-    def _snapshot_source(
-        self,
-        client: "UnifiedLLM",
-        pairs: Sequence[tuple[str, "EventBase"]] | None = None,
-        *,
-        render: bool = True,
-    ) -> tuple[tuple[tuple[str, str, str], ...], str]:
-        """Select a safe source range; bound and render standalone requests only."""
-        assert self.target_event_manager is not None
-        from nooa.events import Summary
-        from nooa.token_counter import char_approximate_token_counter
-
-        if pairs is None:
-            pairs = self.target_event_manager.items()
-        events = [event for _, event in pairs]
-        limit = max(0, len(events) - self.config.preserve_recent)
-        budget = context_budget(client, percent=0.7, fallback=None) if render else None
-        count = getattr(client, "count_tokens", None) or char_approximate_token_counter
-        source: list[tuple[str, str, str]] = []
-        parts: list[str] = []
-        used = 0
-        has_original = False
-        for start, end, eligible in self._history_units(events):
-            if end > limit:
-                break
-            if not eligible:
-                if source and has_original:
-                    break
-                source, parts, used, has_original = [], [], 0, False
-                continue
-            rendered = (
-                [self._event_markdown(tag, event) for tag, event in pairs[start:end]]
-                if render
-                else []
-            )
-            # Parameters use repr; include escaping and conservative separators.
-            cost = sum(count(repr(part)) + count("\n\n") for part in rendered)
-            if budget is not None and used + cost > budget:
-                if source and has_original:
-                    break
-                source, parts, used, has_original = [], [], 0, False
-                continue
-            source.extend(
-                (tag, event.id, event.model_dump_json()) for tag, event in pairs[start:end]
-            )
-            parts.extend(rendered)
-            used += cost
-            has_original |= any(not isinstance(event, Summary) for event in events[start:end])
-        if not has_original:
-            return (), ""
-        return tuple(source), "\n\n".join(parts)
+    def _select_source(
+        self, pairs: Sequence[tuple[str, "EventBase"]]
+    ) -> tuple[tuple[str, str], ...]:
+        """Select every event older than the preserved recent ones."""
+        keep = self.config.preserve_recent
+        selected = pairs[:-keep] if keep else pairs
+        return tuple((tag, event.id) for tag, event in selected)
 
     @hidden
     @no_trace
     async def _compact_after_call(self, ctx: Any, nxt: Any) -> Any:
         """Observe usage; compact stored state rather than the parent's projection."""
-        from nooa.default_context_view import (
-            CodeActV2View,
-            CodeActView,
-            PredictView,
-            PurePythonView,
-        )
+        from nooa.context_view import is_model_visible
 
         if _in_summary_fork.get() or self._pending_task is not None or self._unsub_llm is None:
             return await nxt(ctx)
-        pairs = ()
-        try:
-            if ctx.client is not None and self.target_event_manager is not None:
-                # Freeze content before dispatch, without rendering, JSON serialization,
-                # or token counting. Responses and tool work from this turn are excluded.
-                pairs = tuple(
-                    (tag, event.model_copy(deep=True))
-                    for tag, event in self.target_event_manager.items()
-                )
-        except Exception:
-            logger.warning("Could not snapshot summary source; history is unchanged", exc_info=True)
+        # Fix the candidate events before dispatch so responses and tool work from
+        # this turn are excluded. Completed events are immutable; references suffice.
+        pairs = (
+            tuple(self.target_event_manager.items())
+            if ctx.client is not None and self.target_event_manager is not None
+            else ()
+        )
         ctx = await nxt(ctx)
         if self._automatic_context_budget and ctx.client is not None:
             budget = context_budget(
@@ -853,28 +730,29 @@ class TokenBudgetSummarizer(SummarizationAgent):
             or ctx.client is None
         ):
             return ctx
-        reuse_prefix = type(ctx.context_view) in (
-            CodeActView,
-            CodeActV2View,
-            PredictView,
-            PurePythonView,
-        )
-        try:
-            source, text = self._snapshot_source(ctx.client, pairs, render=not reuse_prefix)
-        except Exception:
-            logger.warning("Could not prepare summary source; history is unchanged", exc_info=True)
-            return ctx
+        source = self._select_source(pairs)
         if not source:
             return ctx
-        self._pending_source = source
-        self._pending_source_text = text if not reuse_prefix else None
-        source_tags = {tag for tag, _, _ in source}
-        self._pending_source_events = (
-            tuple(pair for pair in pairs if pair[0] in source_tags) if reuse_prefix else ()
+        # Reuse the parent request only when it carries every event to summarize.
+        reuse_prefix = all(
+            event.id in ctx.event_ids
+            for _, event in pairs[: len(source)]
+            if is_model_visible(event)
         )
-        self._pending_range = (source[0][0], source[-1][0])
-        # Exact type intentionally excludes customized subclasses. This is only
-        # an optimization: unknown views still get independent state compaction.
+        start, end = source[0][0], source[-1][0]
+        text = ""
+        if not reuse_prefix:
+            try:
+                text = self._render_range_to_markdown(start, end, model_visible_only=True)
+            except Exception:
+                logger.warning(
+                    "Could not prepare summary source; history is unchanged", exc_info=True
+                )
+                return ctx
+            if not text:
+                return ctx
+        self._pending_source = source
+        self._pending_range = (start, end)
         if reuse_prefix:
             self._pending_task = asyncio.create_task(self._run_cached_summary(ctx))
         else:
@@ -983,37 +861,15 @@ class TokenBudgetSummarizer(SummarizationAgent):
     def _apply_pending_summary(self) -> None:
         if self._pending_task is not None and self._pending_task.done():
             if self._pending_source and self._pending_range:
-                pairs = []
                 try:
                     pairs = self._get_events_in_range(*self._pending_range)
-                    current = tuple(
-                        (tag, event.id, event.model_dump_json()) for tag, event in pairs
-                    )
+                    current = tuple((tag, event.id) for tag, event in pairs)
                 except Exception:
                     current = ()
                 if current != self._pending_source:
                     logger.warning("Discarding stale summary: source events changed")
                     self._pending_summary = None
-                else:
-                    # Persistence serialization can omit details of Python values.
-                    # Compare public source content only after identity
-                    # and serialized-state checks pass.
-                    try:
-                        text = "\n\n".join(self._event_markdown(tag, event) for tag, event in pairs)
-                        expected = self._pending_source_text
-                        if expected is None:
-                            expected = "\n\n".join(
-                                self._event_markdown(tag, event)
-                                for tag, event in self._pending_source_events
-                            )
-                    except Exception:
-                        text, expected = None, ""
-                    if text != expected:
-                        logger.warning("Discarding stale summary: source content changed")
-                        self._pending_summary = None
             self._pending_source = None
-            self._pending_source_text = None
-            self._pending_source_events = ()
         super()._apply_pending_summary()
 
     @classmethod

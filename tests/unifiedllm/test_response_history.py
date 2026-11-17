@@ -90,12 +90,10 @@ def test_hand_built_null_content_call_uses_the_same_public_builder():
         "truncated",
     ],
 )
-@pytest.mark.parametrize("cached", [False, True])
-def test_real_renderer_preserves_every_unedited_assistant_shape(shape, cached):
+def test_real_renderer_preserves_every_unedited_assistant_shape(shape):
     from nooa.context_blocks.events import ToolCallEvent, ToolResult
     from nooa.context_blocks.formatter import OpenAIProviderFormatter, XMLBlockFormatter
     from nooa.context_blocks.renderer import render_context
-    from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 
     content = (
         None if shape == "calls_null" else "" if shape in {"calls", "reasoning_calls"} else "answer"
@@ -125,9 +123,8 @@ def test_real_renderer_preserves_every_unedited_assistant_shape(shape, cached):
             result=ToolResult(tool_call_id=call.id, content="done"),
         )
         blocks.append(execution)
-    base = CachedBlockFormatter if cached else XMLBlockFormatter
 
-    class Formatter(base):
+    class Formatter(XMLBlockFormatter):
         def format_event(self, event, event_format=None):
             text = super().format_event(event, event_format)
             return text[:3] if shape == "truncated" else text

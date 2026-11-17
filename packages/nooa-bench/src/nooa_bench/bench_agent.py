@@ -19,6 +19,12 @@ from __future__ import annotations
 from nooa_cli.tools.repo_tools import RepoTools
 
 from nooa import hidden as _hidden
+
+# The core TaskResult, re-exported: bench results and the Atom agent's child
+# results are one class. Visible to generated cells.
+from nooa.errors import hints as _hints
+from nooa.interactive import TaskResult
+from nooa.tools import shell_tools as _shell_tools
 from nooa.tools.method_writing_lib import MethodWriting
 from nooa.tools.shell_tools import ShellTools
 
@@ -29,17 +35,41 @@ with _hidden:
     import os
     from typing import TYPE_CHECKING, Annotated, Any
 
-    from pydantic import BaseModel, Field
-
     from nooa import Agent, Context, no_trace, strategy
     from nooa.agentdoc import doc, spec
     from nooa.config import CodeActConfig, LoopGuardConfig
+    from nooa.context_blocks import BlockMetadata, Role
+    from nooa.context_view import Block
+    from nooa.default_context_view import CodeActV2View
     from nooa.interactive import SummarizationConfig, install_summarizer
     from nooa.strategies import CodeActV2
     from nooa.unifiedllm import FakeLLMClient
 
     # The task text is rendered in full; other inputs keep the default bounds.
     _TaskDescription = Annotated[str, spec(max_string=None)]
+
+    class _BenchView(CodeActV2View):
+        """CodeActV2's view with concise class docs and no state or cell-state inventory.
+
+        The namespace context stays; the duplicated state blocks are dropped.
+        """
+
+        async def view_blocks(self, owner: Any, call: Any) -> tuple[Block, ...]:
+            blocks = await super().view_blocks(owner, call)
+            return tuple(
+                _concise_interface(owner) if block.key == "self" else block
+                for block in blocks
+                if block.key not in {"state", "python_cell_state"}
+            )
+
+    def _concise_interface(owner: Any) -> Block:
+        return Block(
+            key="self",
+            content=doc(type(owner), concise=True),
+            role=Role.SYSTEM,
+            metadata=BlockMetadata(expr="doc(type(self), concise=True)", static=True),
+        )
+
 
 if TYPE_CHECKING:
     from nooa.unifiedllm import UnifiedLLM
@@ -57,11 +87,8 @@ _OPTIONAL_TESTBED_ACTIVATE = (
 _SOLVE_STRATEGY = CodeActV2(
     config=CodeActConfig(max_retries=10, cell_timeout=1800.0, loop_guard=LoopGuardConfig())
 )
+_SOLVE_VIEW = _BenchView()
 _SOLVE_CONTEXT = {
-    "state": None,
-    "execution_context": None,
-    "python_cell_state": None,
-    "self": Context(expr="doc(type(self), concise=True)", prefix=True),
     # Method inputs remain live even if their prefill events are summarized.
     # Honor description's unbounded string spec while keeping other inputs bounded.
     "task": Context(
@@ -69,40 +96,6 @@ _SOLVE_CONTEXT = {
         prefix=True,
     ),
 }
-
-
-class TaskResult(BaseModel):
-    """Structured result the agent must return when finishing a task."""
-
-    solution_description: str = Field(
-        description="What you did and why it solves the problem. Describe root cause and fix."
-    )
-    evidence: str = Field(
-        description=(
-            "Concrete evidence that the task is done: what tests passed, "
-            "what output was produced, what behavior changed. Not a guess -- "
-            "cite the actual results you observed."
-        )
-    )
-    how_to_verify: str = Field(
-        title="How to Verify",
-        description=(
-            "How a verifier can confirm correctness: concrete checks or steps and their "
-            "expected results. Include commands when appropriate; a shell command is not required."
-        ),
-    )
-    report: str = Field(
-        default="",
-        description="Concise human-readable report that a parent or runner shows inline.",
-    )
-    value: str = Field(
-        default="",
-        description=(
-            "The exact output the task asks for, if any, with nothing added: no label, "
-            "explanation or formatting. It is delivered verbatim, whitespace included. "
-            "Leave empty when the task only asks for actions."
-        ),
-    )
 
 
 @_hidden
@@ -268,6 +261,7 @@ class BenchAgent(
     @strategy(
         _SOLVE_STRATEGY,
         context=_SOLVE_CONTEXT,
+        context_view=_SOLVE_VIEW,
     )
     async def _solve_task(
         self,
@@ -283,3 +277,7 @@ class BenchAgent(
         in ``value`` and keep any explanation in the other fields.
         """
         ...
+
+
+# A blocked subprocess/os.system: use self.shell (installed in _install_python_tools).
+_hints.register_hint(_hints.RUN_COMMAND, _shell_tools.SHELL_RUN_HINT, owner=BenchAgent)

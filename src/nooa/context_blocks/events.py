@@ -100,7 +100,7 @@ class EventBase(BaseModel):
     _role: ClassVar[Role] = Role.USER
 
     call_id: str | None = Field(
-        default=None, repr=False, description="Originating agent-method call ID"
+        default=None, repr=False, description="Originating generation-method call ID"
     )
 
     @property

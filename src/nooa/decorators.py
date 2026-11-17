@@ -39,12 +39,17 @@ def strategy(
     1. At class definition time: Attaches metadata for AgentMeta metaclass to process
     2. At runtime (for dynamically-defined methods): Creates runtime wrapper for execution
 
+    Standalone generation functions must end with a source-verifiable ``...``.
+    For dynamically created functions, register source in ``linecache`` or
+    attach ``_generated_source`` before applying this decorator.
+
     Args:
         strategy_instance: Strategy to use (e.g., ReflexionStrategy())
         context: Context block overrides. Accepts either:
             - A plain dict ``{key: str | Context | DynamicContext | None}`` for context-only overrides.
             - A ``ScopedContext`` instance with context-block overrides.
-            Applied in _prepare_context() between strategy overrides and scoped blocks.
+            The default context views add these blocks after ``self.context`` and skill
+            blocks; scoped context applied at call time takes precedence.
         llm: Optional LLM override for this method. One of:
             - a client compatible with the selected strategy (fixed at import
               time and shared by every instance of the class)
@@ -63,15 +68,20 @@ def strategy(
         truncation: Optional TruncationConfig override for this method. Fields set
             here take precedence over the agent-level truncation config. Unset fields
             inherit from the agent-level config.
-        context_view: Complete context view for this method. Replaces the agent view.
+        context_view: Complete context view for this method. Replaces the strategy's
+            default view; a call-level ``context_view=`` takes precedence.
 
     Examples:
         from nooa import Context
         from nooa.context_blocks import ScopedContext
 
         # Simple context dict (recommended):
-        @strategy(CodeActStrategy(), context={"focus": "security", "self": None})
+        @strategy(CodeActStrategy(), context={"focus": "security", "notes": None})
         async def analyze(self): ...
+
+        # Turn off a block the view builds itself, via the view's own option:
+        @strategy(context_view=CodeActView(state=False))
+        async def summarize(self): ...
 
         # With a custom view owning event selection:
         @strategy(context_view=ResearchView())
@@ -82,10 +92,11 @@ def strategy(
 
     Raises:
         ValueError: If multiple @strategy decorators are stacked
-        TypeError: If context is not a dict or ScopedContext instance
+        TypeError: If context is invalid or the decorated function cannot use a strategy
     """
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        """Validate a strategy target and return its runtime wrapper."""
         # Check for duplicate @strategy decorators
         if hasattr(func, "_strategy_override"):
             raise ValueError(f"Cannot stack multiple @strategy decorators on {func.__name__}")
@@ -131,12 +142,19 @@ def strategy(
         if not inspect.iscoroutinefunction(func):
             raise TypeError(f"@strategy method '{func.__name__}' must be async")
 
-        needs_gen = has_ellipsis_body(func)
-
         # Detect standalone functions (no 'self' as first parameter).
         # Each call creates a fresh agent stub — no state, no history.
         _params = list(inspect.signature(func).parameters)
         is_standalone = not _params or _params[0] != "self"
+        needs_gen = has_ellipsis_body(func, require_source=is_standalone)
+
+        if is_standalone and not needs_gen:
+            raise TypeError(
+                f"@strategy(...) on standalone function '{func.__name__}' requires a "
+                f"source-verifiable '...' body — add '...' as the function body or remove "
+                f"the decorator. For dynamically created functions, register their source "
+                f"in linecache or attach _generated_source before decoration."
+            )
 
         if decision_model is not None:
             from nooa.decisions.resolution import validate_decision_model_spec
@@ -168,11 +186,9 @@ def strategy(
                 strat = get_default_strategy()
 
         if is_standalone:
-            if needs_gen:
-                from nooa.standalone import create_standalone_wrapper
+            from nooa.standalone import create_standalone_wrapper
 
-                return create_standalone_wrapper(func, strat, llm, decision_model)
-            return func  # type: ignore[return-value]  # non-generation standalone: nothing to wrap
+            return create_standalone_wrapper(func, strat, llm, decision_model)
 
         from nooa.runtime.method_wrapper import create_agent_method_wrapper
 
@@ -202,3 +218,19 @@ def strategy(
         return wrapper
 
     return decorator
+
+
+def _cell_names() -> dict[str, Any]:
+    """The strategy decorator and the strategy classes a generated method can pick."""
+    from nooa.strategies import cell_namespace_names
+
+    return {"strategy": strategy, **cell_namespace_names()}
+
+
+def _register_cell_names() -> None:
+    from nooa.runtime.namespace_providers import register_namespace_provider
+
+    register_namespace_provider("strategies", _cell_names)
+
+
+_register_cell_names()

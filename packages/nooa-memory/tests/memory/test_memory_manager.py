@@ -7,9 +7,12 @@ consolidation are exercised directly.
 """
 
 from pathlib import Path
+from unittest.mock import patch
 
+import numpy as np
 import pytest
 from nooa_memory import (
+    Memory,
     MemoryConfig,
     MemoryManager,
     MemoryToolsMixin,
@@ -64,12 +67,52 @@ def test_uninstall_removes_all_hooks(agent):
 
 
 def test_disabled_install_is_inert(agent):
+    """Disabled installation does not register hooks or enable agent-facing memory tools."""
     mgr = MemoryManager.install(agent, config=MemoryConfig(enabled=False, path=":memory:"))
     assert mgr._unsubs == []
     assert len(agent.event_manager._middleware["agent_call"]) == 0
 
 
+def test_disabled_install_does_not_create_database(agent, tmp_path):
+    """Installing and uninstalling an unused disabled manager leaves the filesystem alone."""
+    path = tmp_path / "unused" / "memory.sqlite"
+    mgr = MemoryManager.install(agent, config=MemoryConfig(enabled=False, path=str(path)))
+    try:
+        assert not path.parent.exists()
+    finally:
+        mgr.uninstall()
+    assert not path.parent.exists()
+
+
+def test_disabled_install_does_not_construct_embedder(agent, monkeypatch):
+    """An unused disabled manager never needs to construct an embedding backend."""
+
+    def unexpected_embedder(config):
+        """Fail immediately if disabled installation tries to initialize embedding resources."""
+        pytest.fail("disabled installation constructed an embedder")
+
+    monkeypatch.setattr("nooa_memory.manager.get_embedder", unexpected_embedder)
+    mgr = MemoryManager.install(agent, config=MemoryConfig(enabled=False, path=":memory:"))
+    mgr.uninstall()
+
+
+def test_disabled_manager_explicit_use_initializes_resources_once(agent, tmp_path):
+    """Direct manager operations lazily reuse resources without enabling agent-facing hooks."""
+    path = tmp_path / "memory.sqlite"
+    mgr = MemoryManager.install(agent, config=MemoryConfig(enabled=False, path=str(path)))
+    try:
+        mid = mgr.remember("explicit manager operation")
+        assert path.exists()
+        store = mgr.store
+        assert mgr.store is store
+        assert store.get(mid).content == "explicit manager operation"
+        assert mgr._unsubs == []
+    finally:
+        mgr.uninstall()
+
+
 def test_install_replaces_existing_manager_without_leaking_hooks(agent):
+    """Replacing a manager unregisters the previous hooks before installing new ones."""
     first = _install(agent)
     second = _install(agent)
 
@@ -146,12 +189,53 @@ def test_remember_and_recall_via_tools(agent):
 
 
 def test_remember_dedups_on_write(agent):
+    """Remembering an existing fact reinforces its record instead of adding a duplicate."""
     mgr = _install(agent)
     id1 = agent.remember("identical fact about shipping releases", type="info")
     id2 = agent.remember("identical fact about shipping releases", type="info")
     assert id1 == id2  # NOOP: reinforced the existing memory
     assert mgr.store.count() == 1
     assert mgr.store.get(id1).reinforcement_count >= 1
+
+
+@pytest.mark.parametrize("content", ["A longer sentence. Another sentence! A third?", "Hi.", ""])
+def test_update_refreshes_content_metadata(agent, content):
+    """Content edits recalculate size metadata while preserving identity and history."""
+    mgr = _install(agent)
+    try:
+        mid = mgr.remember("Original content to be revised.", tags=["original"])
+        before = mgr.store.get(mid)
+        assert mgr.update(mid, content=content)
+        after = mgr.store.get(mid)
+        expected = Memory(content=content)
+        assert after.content == content
+        for field in ("size_chars", "token_len", "sentence_count"):
+            assert getattr(after, field) == getattr(expected, field)
+        for field in ("id", "owner", "created_at", "tags"):
+            assert getattr(after, field) == getattr(before, field)
+        assert after.access_log[:-1] == before.access_log
+        assert after.reinforcement_count == before.reinforcement_count + 1
+    finally:
+        mgr.uninstall()
+
+
+@pytest.mark.parametrize("tags", [["aardvark", "zebra"], []])
+def test_update_reembeds_changed_tags_only_when_needed(agent, tags):
+    """Changed tags refresh the embedding, but unchanged embedding input is reused."""
+    mgr = _install(agent)
+    try:
+        mid = mgr.remember("A stored fact.", tags=["original"])
+        original = mgr.store.get_embedding(mid)
+        assert mgr.update(mid, tags=tags)
+        current = mgr.store.get(mid)
+        expected = mgr.embedder.embed(current.embedding_text())
+        assert not np.allclose(original, expected)
+        np.testing.assert_allclose(mgr.store.get_embedding(mid), expected)
+        with patch.object(mgr.embedder, "embed", wraps=mgr.embedder.embed) as embed:
+            assert mgr.update(mid, tags=tags, importance=9)
+            embed.assert_not_called()
+    finally:
+        mgr.uninstall()
 
 
 # --------------------------------------------------------------------------

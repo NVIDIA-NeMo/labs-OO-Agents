@@ -38,6 +38,17 @@ def setup(preserve=1):
     return agent, summarizer, ctx
 
 
+def carrying_source(agent, ctx, reply="summary"):
+    """A parent request that contains every stored event, so the summary can reuse it."""
+    return ctx.model_copy(
+        update={
+            "event_ids": frozenset(event.id for event in agent.event_manager.values()),
+            "params": {},
+            "client": FakeLLMClient([LLMResponse(content=reply)]),
+        }
+    )
+
+
 async def dispatch(ctx, tokens=1000):
     ctx.response = LLMResponse(content="parent", usage=LLMUsage(input_tokens=tokens))
     return ctx
@@ -53,8 +64,8 @@ async def test_under_budget_does_not_prepare_summary_source(monkeypatch):
     def unexpected(*args, **kwargs):
         pytest.fail("Summary preparation ran below the token threshold")
 
-    monkeypatch.setattr(summarizer, "_snapshot_source", unexpected)
-    monkeypatch.setattr(summarizer, "_event_markdown", unexpected)
+    monkeypatch.setattr(summarizer, "_select_source", unexpected)
+    monkeypatch.setattr(summarizer, "_render_range_to_markdown", unexpected)
     monkeypatch.setattr(Message, "model_dump_json", unexpected)
     monkeypatch.setattr(ctx.client, "count_tokens", unexpected)
     result = await agent.event_manager.run_middleware(
@@ -67,22 +78,42 @@ async def test_under_budget_does_not_prepare_summary_source(monkeypatch):
 
 async def test_cached_summary_does_not_prepare_standalone_prompt(monkeypatch):
     agent, summarizer, ctx = setup()
-    ctx = ctx.model_copy(update={"context_view": PredictView(), "params": {}})
-    ctx = ctx.model_copy(update={"client": FakeLLMClient([LLMResponse(content="summary")])})
+    ctx = carrying_source(agent, ctx)
 
     def unexpected(*args, **kwargs):
         pytest.fail("Standalone prompt preparation ran for a cached summary")
 
-    monkeypatch.setattr(summarizer, "_event_markdown", unexpected)
+    monkeypatch.setattr(summarizer, "_render_range_to_markdown", unexpected)
     monkeypatch.setattr(ctx.client, "count_tokens", unexpected)
     await trigger(agent, ctx)
     assert summarizer._pending_summary == "summary"
-    assert summarizer._pending_source_text is None
     await agent.aclose()
 
 
-@pytest.mark.parametrize("custom_view", [False, True])
-async def test_real_parent_uses_cache_only_with_default_view(custom_view):
+class HidesMessages(PredictView):
+    """Leaves stored messages out of the request."""
+
+    async def assemble(self, owner, call):
+        async for item in super().assemble(owner, call):
+            if not isinstance(item, Message):
+                yield item
+
+
+class AddsBlock(PredictView):
+    """A customized default view that still carries the full history."""
+
+    async def assemble(self, owner, call):
+        async for item in super().assemble(owner, call):
+            yield item
+        yield Block(key="extra", content="EXTRA BLOCK")
+
+
+@pytest.mark.parametrize(
+    ("view", "reuses"),
+    [(PredictView, True), (AddsBlock, True), (HidesMessages, False)],
+    ids=["default", "subclass", "hides-source"],
+)
+async def test_real_parent_reuses_request_only_when_it_carries_the_source(view, reuses):
     class RecordingClient(FakeLLMClient):
         def __init__(self):
             super().__init__(
@@ -104,10 +135,6 @@ async def test_real_parent_uses_cache_only_with_default_view(custom_view):
             ...
 
     client = RecordingClient()
-
-    class CustomView(PredictView):
-        pass
-
     agent = Parent(llm=client)
     agent.event_manager.add(Message(content="STORED_SOURCE_FACT"))
     summarizer = TokenBudgetSummarizer.install(
@@ -115,18 +142,15 @@ async def test_real_parent_uses_cache_only_with_default_view(custom_view):
     )
     try:
         with ScopedContext(context={"system_prompt": "PARENT_SCOPED_MARKER"}):
-            assert (
-                await agent.run(context_view=CustomView() if custom_view else PredictView())
-                == "parent"
-            )
+            assert await agent.run(context_view=view()) == "parent"
             await summarizer._pending_task
-        assert summarizer._pending_summary == ("summary" if custom_view else '{"value":"summary"}')
+        assert summarizer._pending_summary == ('{"value":"summary"}' if reuses else "summary")
         assert len(client.requests) == 2
         parent, summary = client.requests
         for marker in ("PARENT_DECORATOR_MARKER", "PARENT_SCOPED_MARKER"):
             assert marker in parent
-            assert (marker in summary) is not custom_view
-        if not custom_view:
+            assert (marker in summary) is reuses
+        if reuses:
             assert json.loads(summary)[:-1] == json.loads(parent)
         assert "STORED_SOURCE_FACT" in summary
     finally:
@@ -209,22 +233,12 @@ async def test_source_is_independent_of_view_and_frozen_before_dispatch():
         await agent.aclose()
 
 
-@pytest.mark.parametrize("change", ["edit", "collapse", "during_dispatch"])
-async def test_stale_source_never_replaces_history(change):
+async def test_collapsed_source_never_replaces_history():
     agent, summarizer, ctx = setup()
     summarizer.summarize = AsyncMock(return_value="summary")
-
-    async def parent(request):
-        if change == "during_dispatch":
-            agent.event_manager["1"].content = "changed"
-        return await dispatch(request)
-
-    await agent.event_manager.run_middleware("llm_call", ctx, parent)
+    await trigger(agent, ctx)
     await summarizer._pending_task
-    if change == "edit":
-        agent.event_manager["1"].content = "changed"
-    elif change == "collapse":
-        agent.event_manager.collapse("2", "3", "other")
+    agent.event_manager.collapse("2", "3", "other")
     before = agent.event_manager.keys()
     summarizer._apply_pending_summary()
     assert agent.event_manager.keys() == before
@@ -232,68 +246,32 @@ async def test_stale_source_never_replaces_history(change):
 
 
 @pytest.mark.parametrize("reuse_prefix", [False, True])
-async def test_mutated_output_hidden_by_bounded_serializer_invalidates_summary(reuse_prefix):
+@pytest.mark.parametrize(
+    "make_value",
+    [lambda: {"a": 1}.keys(), lambda: (i for i in range(3)), object],
+    ids=["not-deep-copyable", "generator", "address-repr"],
+)
+async def test_python_values_never_block_or_invalidate_compaction(reuse_prefix, make_value):
     from nooa.context_blocks.events import ResultStatus
     from nooa.events import PythonOutput
 
-    class Payload:
-        values: list[int]
-
-        def __init__(self, values):
-            self.values = values
-
     agent, summarizer, ctx = setup(preserve=0)
-    if reuse_prefix:
-        ctx = ctx.model_copy(update={"context_view": PredictView(), "params": {}})
-        ctx = ctx.model_copy(update={"client": FakeLLMClient([LLMResponse(content="summary")])})
-    payload = Payload(list(range(200)))
-    output = PythonOutput(
-        tool_call_id="python",
-        execution_status=ResultStatus.COMPLETE,
-        execution_count=1,
-        value=payload,
-    )
-    agent.event_manager.clear()
-    agent.event_manager.add(output)
-    summarizer.summarize = AsyncMock(return_value="summary")
-    await trigger(agent, ctx)
-    await summarizer._pending_task
-    serialized = output.model_dump_json()
-    payload.values[100] = 987654
-    assert output.model_dump_json() == serialized
-    summarizer._apply_pending_summary()
-    assert agent.event_manager.values() == [output]
-    await agent.aclose()
-
-
-@pytest.mark.parametrize("kind", ["task", "output"])
-async def test_image_bearing_events_remain_active(kind):
-    from nooa.context_blocks.events import ResultStatus
-    from nooa.events import PythonOutput, Task
-
-    agent, summarizer, ctx = setup(preserve=0)
-    images = [{"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}]
-    event = (
-        Task(prompt="image", images=images)
-        if kind == "task"
-        else PythonOutput(
+    agent.event_manager.add(
+        PythonOutput(
             tool_call_id="python",
             execution_status=ResultStatus.COMPLETE,
             execution_count=1,
-            images=images,
+            value=make_value(),
         )
     )
-    agent.event_manager.clear()
-    agent.event_manager.add(event)
-    agent.event_manager.add(Message(content="independent text"))
-    source, text = summarizer._snapshot_source(ctx.client)
-    assert [tag for tag, _, _ in source] == ["2"]
-    assert "independent text" in text
+    if reuse_prefix:
+        ctx = carrying_source(agent, ctx)
     summarizer.summarize = AsyncMock(return_value="summary")
     await trigger(agent, ctx)
     await summarizer._pending_task
+    assert summarizer._pending_summary == "summary"
     summarizer._apply_pending_summary()
-    assert agent.event_manager["1"] is event
+    assert agent.event_manager.keys() == ["1..5"]
     await agent.aclose()
 
 
@@ -335,21 +313,6 @@ async def test_summary_overflow_cannot_retry_without_its_source_task(caplog):
     await agent.aclose()
 
 
-def test_bounded_prefix_never_omits_a_collapsed_event():
-    agent, summarizer, ctx = setup(preserve=0)
-    first = agent.event_manager["1"]
-    text = summarizer._event_markdown("1", first)
-    # summary input budget is 70% of the effective client window.
-    cost = ctx.client.count_tokens(repr(text)) + ctx.client.count_tokens("\n\n")
-    ctx.client._context_window = int(cost / 0.7) + 2
-    source, rendered = summarizer._snapshot_source(ctx.client)
-    assert [tag for tag, _, _ in source] == ["1"]
-    assert "STORED FACT 0" in rendered and "STORED FACT 1" not in rendered
-    ctx.client._context_window = 1
-    assert summarizer._snapshot_source(ctx.client) == ((), "")
-    summarizer._uninstall()
-
-
 def add_batch(agent, *, complete=True):
     response = LLMResponse(
         tool_calls=[
@@ -380,29 +343,6 @@ def add_batch(agent, *, complete=True):
     return response
 
 
-@pytest.mark.parametrize("cut", ["recent", "budget", "unfinished", "nested", "running"])
-def test_compaction_keeps_whole_tool_batches(cut):
-    agent, summarizer, ctx = setup(preserve=0)
-    add_batch(agent, complete=cut not in {"unfinished", "nested"})
-    if cut == "recent":
-        summarizer.config = summarizer.config.model_copy(update={"preserve_recent": 1})
-    elif cut == "budget":
-        parts = [summarizer._event_markdown(tag, e) for tag, e in agent.event_manager.items()[:5]]
-        cost = sum(
-            ctx.client.count_tokens(repr(part)) + ctx.client.count_tokens("\n\n") for part in parts
-        )
-        ctx.client._context_window = int(cost / 0.7) + 2
-    elif cut == "nested":
-        agent.event_manager.add(Message(content="child task", call_id="child"))
-    elif cut == "running":
-        from nooa.context_blocks.events import ResultStatus
-
-        agent.event_manager["6"].result.result_status = ResultStatus.RUNNING
-    source, _ = summarizer._snapshot_source(ctx.client)
-    assert [tag for tag, _, _ in source] == ["1", "2", "3", "4"]
-    summarizer._uninstall()
-
-
 @pytest.mark.parametrize("bad", ["", "   ", None, RuntimeError("failed")])
 async def test_bad_summary_preserves_history(bad):
     agent, summarizer, ctx = setup()
@@ -417,30 +357,39 @@ async def test_bad_summary_preserves_history(bad):
     await agent.aclose()
 
 
-def test_overlapping_batches_recheck_the_earlier_group_after_shrinking():
-    first = LLMResponse(
-        tool_calls=[ToolCall(id="a", name="execute_python", arguments="{}")],
-        finish_reason="tool_calls",
+async def test_interleaved_hidden_records_collapse_into_one_summary():
+    from nooa.events import DebugTrace
+
+    agent = Agent(llm=FakeLLMClient())
+    for turn in range(4):
+        agent.event_manager.add(DebugTrace(content=f"session record {turn}"))
+        agent.event_manager.add(Message(content=f"turn {turn}"))
+    summarizer = TokenBudgetSummarizer.install(
+        agent, config=TokenBudgetConfig(max_tokens=1, preserve_recent=1)
     )
-    second = LLMResponse(
-        tool_calls=[ToolCall(id="b", name="execute_python", arguments="{}")],
-        finish_reason="tool_calls",
-    )
-    results = [
-        ToolCallEvent(
-            name="execute_python",
-            arguments={},
-            tool_call_id=call_id,
-            llm_response_id=response.id,
-            result=ToolResult(tool_call_id=call_id, content="done"),
-        )
-        for call_id, response in [("a", first), ("b", second)]
-    ]
-    events = [first, second, *results]
-    assert TokenBudgetSummarizer._history_units(events) == [(0, 4, True)]
+    summarizer.summarize = AsyncMock(return_value="summary")
+    await trigger(agent, LLMCallContext(client=agent.llm, runtime=agent.runtime, messages=[]))
+    await summarizer._pending_task
+    summarizer._apply_pending_summary()
+    assert agent.event_manager.keys() == ["1..7", "8"]
+    await agent.aclose()
 
 
-async def test_hidden_records_are_neither_summarized_nor_archived():
+async def test_adjacent_summaries_merge():
+    agent, summarizer, ctx = setup(preserve=1)
+    agent.event_manager.collapse("1", "2", "first summary")
+    agent.event_manager.collapse("3", "3", "second summary")
+    summarizer.summarize = AsyncMock(return_value="merged")
+    await trigger(agent, ctx)
+    await summarizer._pending_task
+    text = summarizer.summarize.call_args.args[0]
+    assert "first summary" in text and "second summary" in text
+    summarizer._apply_pending_summary()
+    assert agent.event_manager.keys() == ["1..3", "4"]
+    await agent.aclose()
+
+
+async def test_hidden_records_are_archived_with_their_range_but_not_summarized():
     from nooa.events import DebugTrace
 
     agent = Agent(llm=FakeLLMClient())
@@ -464,71 +413,8 @@ async def test_hidden_records_are_neither_summarized_nor_archived():
     assert "visible one" in text and "visible two" in text
     assert "PRIVATE" not in text
     summarizer._apply_pending_summary()
-    assert agent.event_manager.keys() == ["1", "2..3", "4", "5"]
+    assert agent.event_manager.keys() == ["1..4", "5"]
     await agent.aclose()
-
-
-def test_existing_summary_before_hidden_barrier_does_not_starve_later_history():
-    from nooa.events import DebugTrace
-
-    agent, summarizer, ctx = setup(preserve=0)
-    agent.event_manager.collapse("1", "4", "prior summary")
-    agent.event_manager.add(DebugTrace(content="private"))
-    agent.event_manager.add(Message(content="new fact one"))
-    agent.event_manager.add(Message(content="new fact two"))
-    source, text = summarizer._snapshot_source(ctx.client)
-    assert [tag for tag, _, _ in source] == ["6", "7"]
-    assert "new fact one" in text and "prior summary" not in text
-    summarizer._uninstall()
-
-
-def test_summary_text_uses_public_content_not_persistence_payloads():
-    from nooa.unifiedllm import AssistantReasoning, AssistantText
-
-    agent, summarizer, ctx = setup(preserve=0)
-    agent.event_manager.clear()
-    response = LLMResponse(
-        parts=(
-            AssistantReasoning(
-                text="public reasoning", native={"encrypted_content": "OPAQUE STATE"}
-            ),
-            AssistantText(text="public answer"),
-        ),
-        metadata={"private": "PRIVATE METADATA"},
-    )
-    agent.event_manager.add(response)
-    source, text = summarizer._snapshot_source(ctx.client)
-    assert "OPAQUE STATE" in source[0][2] and "PRIVATE METADATA" in source[0][2]
-    assert "public answer" in text and "public reasoning" in text
-    assert "OPAQUE STATE" not in text and "PRIVATE METADATA" not in text
-    summarizer._uninstall()
-
-
-def test_hidden_record_inside_tool_batch_retains_the_whole_group():
-    from nooa.events import DebugTrace
-
-    agent, summarizer, ctx = setup(preserve=0)
-    agent.event_manager.clear()
-    response = LLMResponse(
-        tool_calls=[ToolCall(id="a", name="execute_python", arguments="{}")],
-        finish_reason="tool_calls",
-    )
-    agent.event_manager.add(response)
-    agent.event_manager.add(DebugTrace(content="private"))
-    agent.event_manager.add(
-        ToolCallEvent(
-            name="execute_python",
-            arguments={},
-            tool_call_id="a",
-            llm_response_id=response.id,
-            result=ToolResult(tool_call_id="a", content="done"),
-        )
-    )
-    agent.event_manager.add(Message(content="later public record"))
-    source, text = summarizer._snapshot_source(ctx.client)
-    assert [tag for tag, _, _ in source] == ["4"]
-    assert "later public record" in text and "private" not in text
-    summarizer._uninstall()
 
 
 @pytest.mark.parametrize("finish", ["length", "error"])
@@ -666,7 +552,7 @@ async def test_aclose_cancels_and_awaits_background_work():
 
 async def test_snapshot_failure_leaves_parent_and_history_intact():
     agent, summarizer, ctx = setup()
-    summarizer._snapshot_source = lambda *args, **kwargs: (_ for _ in ()).throw(
+    summarizer._render_range_to_markdown = lambda *args, **kwargs: (_ for _ in ()).throw(
         ValueError("bad source")
     )
     result = await trigger(agent, ctx)

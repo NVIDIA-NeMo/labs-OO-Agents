@@ -127,10 +127,10 @@ class TestTemplateStrategy:
         strategy = TemplateStrategy()
         assert strategy.requires_lock is False
 
-    def test_default_view_has_no_instructions(self):
+    async def test_default_view_has_no_instructions(self):
         """TemplateStrategy does not add model instructions."""
         strategy = TemplateStrategy()
-        assert strategy.default_context_view.instruction_blocks(None) == {}
+        assert await strategy.default_context_view.instruction_blocks(None, None) == {}
 
     @pytest.mark.asyncio
     async def test_simple_variable_substitution(self):
