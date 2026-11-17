@@ -88,7 +88,9 @@ def test_openai_audio_format_error_is_an_audio_rejection_by_its_param():
     exc = bad_request(OPENAI_AUDIO_FORMAT, body)
     assert rejected_media_kinds(exc) == {"audio"}
     # The same field path in the message alone also counts.
-    assert explicitly_rejected(bad_request(f"{OPENAI_AUDIO_FORMAT} ({OPENAI_AUDIO_PARAM})"), "audio")
+    assert explicitly_rejected(
+        bad_request(f"{OPENAI_AUDIO_FORMAT} ({OPENAI_AUDIO_PARAM})"), "audio"
+    )
 
 
 def test_413_counts_only_with_media_wording():

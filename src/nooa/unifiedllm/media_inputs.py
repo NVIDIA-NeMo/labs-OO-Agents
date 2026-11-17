@@ -45,22 +45,72 @@ def _canonical_image_type(media_type: str) -> str:
     return _IMAGE_TYPE_ALIASES.get(media_type, media_type)
 
 
-def unsendable_image_type(block: Mapping[str, Any]) -> str | None:
-    """The MIME type of an inline image block models do not accept, else None.
+# Remote image types that no common model API accepts. A remote URL with one
+# of these (by its file extension or an explicit type) gets the same note as
+# an inline image; any other or unknown remote type is sent unchanged, since
+# the provider reads the real type when it downloads the image.
+CLEARLY_UNSENDABLE_IMAGE_TYPES = frozenset(
+    {"image/svg+xml", "image/bmp", "image/x-ms-bmp", "image/tiff", "image/heic", "image/heif"}
+)
+_REMOTE_EXTENSION_TYPES = {
+    "svg": "image/svg+xml",
+    "svgz": "image/svg+xml",
+    "bmp": "image/bmp",
+    "tif": "image/tiff",
+    "tiff": "image/tiff",
+    "heic": "image/heic",
+    "heif": "image/heif",
+}
 
-    Every MIME hint of the block is checked (data URL, ``format``,
-    ``media_type``, ``mime_type``; see ``nooa.media_inputs._mime_hints``),
-    after lower-casing and dropping parameters. One hint outside
-    ``SENDABLE_IMAGE_TYPES`` makes the image unsendable; two accepted hints
-    that disagree do not. Only inline images are checked: for a remote URL the
-    provider reads the real type from the server it downloads from, so a
-    ``format`` hint next to it is not trusted to be wrong.
-    """
-    if attachment_kind(block) != "image" or not _is_inline(block):
+
+def _remote_url(block: Mapping[str, Any]) -> str | None:
+    """The http(s) URL a remote image block points at, else None."""
+    candidates = [block.get("image_url"), block.get("url")]
+    for key in ("image_url", "source"):
+        if isinstance(block.get(key), Mapping):
+            candidates.extend([block[key].get("url"), block[key].get("image_url")])
+    for value in candidates:
+        if isinstance(value, str) and value[:5].lower() != "data:" and "://" in value:
+            return value
+    return None
+
+
+def remote_url_image_type(url: str) -> str | None:
+    """The image type a URL's file extension names (``.svg`` -> ``image/svg+xml``), else None."""
+    from urllib.parse import urlsplit
+
+    path = urlsplit(url).path
+    name = path.rsplit("/", 1)[-1]
+    if "." not in name:
         return None
-    refused = sorted(
-        {_canonical_image_type(hint) for hint in _mime_hints(block)} - SENDABLE_IMAGE_TYPES
-    )
+    return _REMOTE_EXTENSION_TYPES.get(name.rsplit(".", 1)[-1].lower())
+
+
+def unsendable_image_type(block: Mapping[str, Any]) -> str | None:
+    """The MIME type of an image block models do not accept, else None.
+
+    Inline images (a data URL or base64 ``source``): every MIME hint of the
+    block is checked (data URL, ``format``, ``media_type``, ``mime_type``; see
+    ``nooa.media_inputs._mime_hints``), after lower-casing and dropping
+    parameters. One hint outside ``SENDABLE_IMAGE_TYPES`` makes the image
+    unsendable; two accepted hints that disagree do not.
+
+    Remote images (an http(s) URL): only a type that is clearly unsendable
+    (``CLEARLY_UNSENDABLE_IMAGE_TYPES``: SVG, BMP, TIFF, HEIC/HEIF), named by
+    an explicit hint or by the URL's file extension, counts. A remote URL with
+    a sendable or unknown type is sent unchanged: the provider reads the real
+    type from the server.
+    """
+    if attachment_kind(block) != "image":
+        return None
+    hints = {_canonical_image_type(hint) for hint in _mime_hints(block)}
+    if _is_inline(block):
+        refused = sorted(hints - SENDABLE_IMAGE_TYPES)
+        return refused[0] if refused else None
+    url = _remote_url(block)
+    if url is not None and (by_extension := remote_url_image_type(url)):
+        hints.add(by_extension)
+    refused = sorted(hints & CLEARLY_UNSENDABLE_IMAGE_TYPES)
     return refused[0] if refused else None
 
 

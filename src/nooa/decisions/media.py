@@ -79,7 +79,13 @@ class DecisionAttachment:
         Only the URL and the base64 encoding are checked; the image content
         itself is not decoded.
         """
-        if self.media_type not in _IMAGE_MIMES:
+        url = self.image_url
+        remote_without_type = (
+            isinstance(url, str) and not url.startswith("data:") and not self.media_type
+        )
+        # Image.from_url sends no type when the URL does not say one (#597);
+        # the provider reads a remote image's type when it fetches it.
+        if self.media_type not in _IMAGE_MIMES and not remote_without_type:
             raise ValueError(
                 "Decision image MIME must be image/png, image/jpeg, image/webp or image/gif"
             )

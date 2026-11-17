@@ -15,6 +15,17 @@ import mimetypes
 from pathlib import Path
 
 
+def _url_media_type(url: str, prefix: str) -> str:
+    """The MIME type a URL names (``data:`` type or file extension) if it starts with ``prefix``, else ""."""
+    from urllib.parse import urlsplit
+
+    if url[:5].lower() == "data:":
+        declared = url[5:].split(",", 1)[0].split(";", 1)[0].strip().lower()
+        return declared if declared.startswith(prefix) else ""
+    mime, _ = mimetypes.guess_type(urlsplit(url).path)
+    return mime if mime and mime.startswith(prefix) else ""
+
+
 class Media:
     """Base class for all media attachments.
 
@@ -123,10 +134,16 @@ class Image(Media):
     _modality = "image"
 
     @classmethod
-    def from_url(
-        cls, url: str, *, media_type: str = "image/jpeg", **vendor_metadata: object
-    ) -> "Image":
-        """Create an image from a URL (no download — URL is passed directly to the LLM)."""
+    def from_url(cls, url: str, *, media_type: str = "", **vendor_metadata: object) -> "Image":
+        """Create an image from a URL (no download — URL is passed directly to the LLM).
+
+        Without ``media_type`` the type comes from the URL: a ``data:`` URL's
+        declared type, else a guess from the file extension (``.png`` ->
+        ``image/png``). When neither says, no type is sent and the provider
+        reads it from the server; no ``image/jpeg`` default is invented.
+        """
+        if not media_type:
+            media_type = _url_media_type(url, "image/")
         return cls(data_url=url, media_type=media_type, vendor_metadata=vendor_metadata or None)
 
 
