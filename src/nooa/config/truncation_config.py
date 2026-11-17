@@ -251,6 +251,16 @@ class TruncationConfig(BaseModel):
             )
         ),
     ] = True
+    placeholder_chars: Annotated[
+        int | None,
+        Field(
+            description=(
+                "Most characters one docstring {expr} placeholder inserts into a prompt "
+                "(method docstrings, Task prompts, the class-docstring system prompt); "
+                "longer text keeps its head and tail around a cut line. None: whole."
+            )
+        ),
+    ] = 50_000
     capture: CaptureConfig = CaptureConfig()
     media_capture: MediaCaptureConfig = MediaCaptureConfig()
     # Generous: rendered every turn, especially PythonOutput.value (the LLM
@@ -272,6 +282,8 @@ class TruncationConfig(BaseModel):
             v = getattr(self, name)
             if v is not None and v <= 0:
                 errors.append(f"{name} must be > 0 or None, got {v}")
+        if self.placeholder_chars is not None and self.placeholder_chars <= 0:
+            errors.append(f"placeholder_chars must be > 0 or None, got {self.placeholder_chars}")
         if errors:
             raise ValueError("Invalid TruncationConfig:\n" + "\n".join(f"  - {e}" for e in errors))
         return self

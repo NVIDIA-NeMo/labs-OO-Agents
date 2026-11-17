@@ -384,7 +384,9 @@ class PredictStrategy(GenerationStrategy):
             f"Structured output generation failed after {self.config.max_retries} attempts"
         )
 
-    @strategy(TemplateStrategy())
+    # placeholder_chars=None: the parameters reach the prompt whole;
+    # max_param_chars (_assert_param_sizes) is the one limit, and it fails loudly.
+    @strategy(TemplateStrategy(placeholder_chars=None))
     async def _build_task_message(
         self, runtime: RuntimeServices, original_call: "CurrentCall"
     ) -> str:

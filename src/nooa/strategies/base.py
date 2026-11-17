@@ -8,7 +8,7 @@ RuntimeServices Protocol - what strategies can use from the runtime.
 
 import inspect
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from nooa.metaclass import AgentMeta
 
@@ -172,6 +172,8 @@ class RuntimeServices(Protocol):
         text: str,
         extra_context: dict[str, Any] | None = None,
         error_mode: str = "show",
+        *,
+        placeholder_chars: int | None | Literal["config"] = "config",
     ) -> str:
         """Expand {expression} placeholders in text using runtime context.
 
@@ -179,6 +181,9 @@ class RuntimeServices(Protocol):
             text: Text with {expression} placeholders
             extra_context: Additional variables for evaluation
             error_mode: How to handle errors ("show", "silent", "raise")
+            placeholder_chars: Most characters one placeholder inserts
+                (``None``: whole); ``"config"``: the agent's effective
+                ``TruncationConfig.placeholder_chars``.
 
         Returns:
             Text with expressions evaluated and substituted

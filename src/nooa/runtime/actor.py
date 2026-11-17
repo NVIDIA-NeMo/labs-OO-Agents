@@ -2527,7 +2527,8 @@ class ActorRuntime:
             elif error_mode == "show":
                 from nooa.runtime.placeholders import bound_placeholder_text
 
-                return f"{{ERROR: {bound_placeholder_text(str(e))}}}"
+                limit = self.truncation_config.placeholder_chars
+                return f"{{ERROR: {bound_placeholder_text(str(e), limit)}}}"
             else:  # silent
                 return None
 
@@ -2536,6 +2537,8 @@ class ActorRuntime:
         text: str,
         extra_context: dict[str, Any] | None = None,
         error_mode: str = "show",
+        *,
+        placeholder_chars: int | None | Literal["config"] = "config",
     ) -> str:
         """
         Expand {expression} placeholders in text using runtime context.
@@ -2544,6 +2547,10 @@ class ActorRuntime:
             text: Text with {expression} placeholders
             extra_context: Additional variables for evaluation
             error_mode: How to handle errors ("show", "silent", "raise")
+            placeholder_chars: Most characters one placeholder inserts
+                (``None``: whole); ``"config"``: the agent's effective
+                ``TruncationConfig.placeholder_chars``. The ``{ERROR: ...}``
+                text of a failed expression always uses the config.
 
         Returns:
             Text with expressions evaluated and substituted
@@ -2561,6 +2568,8 @@ class ActorRuntime:
         if not text or "{" not in text:
             return text
         prefill = self.truncation_config.prefill_format  # the agent's limits for values
+        if placeholder_chars == "config":
+            placeholder_chars = self.truncation_config.placeholder_chars
 
         # Use Python's built-in formatter to parse the template
         # This handles format specs, conversions (!r, !s, !a), and escaped braces
@@ -2600,7 +2609,13 @@ class ActorRuntime:
                         value = formatter.convert_field(value, conversion)
                     try:
                         result_parts.append(
-                            render_placeholder(value, None, format_spec, prefill=prefill)
+                            render_placeholder(
+                                value,
+                                None,
+                                format_spec,
+                                max_chars=placeholder_chars,
+                                prefill=prefill,
+                            )
                         )
                     except Exception:
                         if error_mode == "silent":
@@ -2613,7 +2628,11 @@ class ActorRuntime:
                         else:
                             result_parts.append(f"{{{field_name}:{format_spec} | FORMAT ERROR}}")
                 else:
-                    result_parts.append(render_placeholder(value, conversion, prefill=prefill))
+                    result_parts.append(
+                        render_placeholder(
+                            value, conversion, max_chars=placeholder_chars, prefill=prefill
+                        )
+                    )
 
         return "".join(result_parts)
 

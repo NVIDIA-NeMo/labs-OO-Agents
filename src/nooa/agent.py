@@ -604,6 +604,7 @@ Inspect in REPL: print(doc(self.events))
                             value,
                             conversion,
                             fmt_spec or "",
+                            max_chars=self._truncation.placeholder_chars,
                             prefill=self._truncation.prefill_format,
                         )
                     )
