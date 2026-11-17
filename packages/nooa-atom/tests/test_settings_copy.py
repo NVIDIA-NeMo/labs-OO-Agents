@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Atom copies the ``coding`` settings it used to read into its own ``atom`` section.
 
-The TUI and ``nooa-acp`` keep reading ``coding``. The first time Atom reads
+``nooa-acp`` keeps reading ``coding``. The first time Atom reads
 a settings file that has ``coding`` and no ``atom``, it adds an ``atom``
 copy; from then on the two sections change independently.
 """
@@ -21,7 +21,7 @@ PROJECT_SETTINGS = """\
 coding:
   default_model: ws-model  # the team model
   active_skills: [review]
-tui:
+other:
   theme: dark
 """
 
@@ -55,16 +55,16 @@ def test_loading_copies_coding_to_atom_and_keeps_the_rest_of_the_file(workspace)
             "active_skills": ["review"],
         }
     )
-    assert data["tui"] == {"theme": "dark"}
+    assert data["other"] == {"theme": "dark"}
 
 
 def test_the_copy_happens_once_and_the_sections_then_change_independently(workspace):
     _settings(workspace).write_text(PROJECT_SETTINGS)
     AtomOptions.load(workspace)
 
-    # The TUI changes its section afterwards; Atom keeps its own.
+    # nooa-acp's section changes afterwards; Atom keeps its own.
     data = yaml.safe_load(_settings(workspace).read_text())
-    data["coding"]["default_model"] = "tui-model"
+    data["coding"]["default_model"] = "acp-model"
     _settings(workspace).write_text(yaml.safe_dump(data, sort_keys=False))
     before = _settings(workspace).read_text()
 
@@ -82,7 +82,7 @@ def test_a_file_that_already_has_atom_is_left_alone(workspace):
 
 @pytest.mark.parametrize(
     "text",
-    ["tui:\n  theme: dark\n", "coding:\n", "coding: not-a-mapping\n", "- a list\n", ""],
+    ["other:\n  theme: dark\n", "coding:\n", "coding: not-a-mapping\n", "- a list\n", ""],
 )
 def test_a_file_without_a_coding_mapping_is_left_alone(workspace, text):
     _settings(workspace).write_text(text)

@@ -24,20 +24,21 @@ def isolated_home(tmp_path, monkeypatch):
     return home
 
 
-def test_project_tui_skill_dirs_remain_compatible(tmp_path, monkeypatch):
+def test_legacy_tui_section_and_config_toml_are_ignored(tmp_path, monkeypatch):
+    """Only ``coding.additional_skills_dirs`` names skill roots; old TUI settings do not."""
     workspace = tmp_path / "workspace"
-    skills = tmp_path / "nemo-oo-skills"
+    skills = workspace / "nemo-oo-skills"
     user_config = tmp_path / "user-config"
-    workspace.mkdir()
-    skills.mkdir()
+    skills.mkdir(parents=True)
     user_config.mkdir()
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_config))
     monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
     config_dir = workspace / ".nooa"
     config_dir.mkdir()
     (config_dir / "settings.yaml").write_text(f"tui:\n  additional_skills_dirs:\n    - {skills}\n")
+    (config_dir / "config.toml").write_text('[tui]\nlibs_dirs = ["nemo-oo-skills"]\n')
 
-    assert load_coding_skills_dirs(workspace) == [skills.resolve()]
+    assert load_coding_skills_dirs(workspace) == []
 
 
 def test_shared_coding_skill_dirs_and_workspace_conventions_are_loaded(tmp_path, monkeypatch):
@@ -76,57 +77,17 @@ def test_missing_configured_skill_dirs_are_ignored(tmp_path, monkeypatch):
     assert load_coding_skills_dirs(workspace) == []
 
 
-def test_legacy_project_config_toml_libs_dirs_remain_supported(tmp_path, monkeypatch):
-    workspace = tmp_path / "workspace"
-    skills = workspace / "nemo-oo-skills"
-    user_config = tmp_path / "user-config"
-    skills.mkdir(parents=True)
-    user_config.mkdir()
-    monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_config))
-    monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
-    config_dir = workspace / ".nooa"
-    config_dir.mkdir()
-    (config_dir / "config.toml").write_text('[tui]\nlibs_dirs = ["nemo-oo-skills"]\n')
-
-    assert load_coding_skills_dirs(workspace) == [skills.resolve()]
-
-
-def test_user_yaml_does_not_suppress_workspace_legacy_skill_dirs(tmp_path, monkeypatch):
-    workspace = tmp_path / "workspace"
-    user_config = tmp_path / "user-config"
-    user_skills = tmp_path / "user-skills"
-    workspace_skills = workspace / "workspace-skills"
-    user_config.mkdir()
-    user_skills.mkdir()
-    workspace_skills.mkdir(parents=True)
-    (user_config / "settings.yaml").write_text(
-        f"coding:\n  additional_skills_dirs:\n    - {user_skills}\n"
-    )
-    config_dir = workspace / ".nooa"
-    config_dir.mkdir()
-    (config_dir / "config.toml").write_text('[tui]\nlibs_dirs = ["workspace-skills"]\n')
-    monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_config))
-    monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
-
-    assert load_coding_skills_dirs(workspace) == [
-        user_skills.resolve(),
-        workspace_skills.resolve(),
-    ]
-
-
 def test_environment_settings_override_user_and_workspace_layers(tmp_path, monkeypatch):
     workspace = tmp_path / "workspace"
     user_config = tmp_path / "user-config"
     user_skills = tmp_path / "user-skills"
     workspace_skills = tmp_path / "workspace-skills"
     override_skills = tmp_path / "override-skills"
-    legacy_skills = tmp_path / "legacy-skills"
     workspace.mkdir()
     user_config.mkdir()
     user_skills.mkdir()
     workspace_skills.mkdir()
     override_skills.mkdir()
-    legacy_skills.mkdir()
     workspace_config = workspace / ".nooa"
     workspace_config.mkdir()
     override = tmp_path / "override.yaml"
@@ -137,33 +98,28 @@ def test_environment_settings_override_user_and_workspace_layers(tmp_path, monke
         f"coding:\n  additional_skills_dirs:\n    - {workspace_skills}\n"
     )
     override.write_text(f"coding:\n  additional_skills_dirs:\n    - {override_skills}\n")
-    (workspace_config / "config.toml").write_text(f'[tui]\nlibs_dirs = ["{legacy_skills}"]\n')
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_config))
     monkeypatch.setenv("NEMO_OO_SETTINGS", str(override))
 
     assert load_coding_skills_dirs(workspace) == [override_skills.resolve()]
 
 
-def test_an_explicit_empty_modern_list_disables_the_legacy_config(tmp_path, monkeypatch):
-    """Setting the modern key to [] must mean "none", not "fall back".
-
-    The compatibility check tested whether the modern key produced any paths,
-    not whether it was set — so a workspace that deliberately emptied it kept
-    loading .nooa/config.toml's [tui].libs_dirs, and went on importing Python
-    from directories the user believed they had removed.
-    """
+def test_an_explicit_empty_workspace_list_overrides_the_user_list(tmp_path, monkeypatch):
+    """``additional_skills_dirs: []`` in the workspace means "none"."""
     workspace = tmp_path / "workspace"
-    legacy = tmp_path / "stale-skills"
+    user_skills = tmp_path / "user-skills"
     user_config = tmp_path / "user-config"
     workspace.mkdir()
-    legacy.mkdir()
+    user_skills.mkdir()
     user_config.mkdir()
+    (user_config / "settings.yaml").write_text(
+        f"coding:\n  additional_skills_dirs:\n    - {user_skills}\n"
+    )
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_config))
     monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
 
     config_dir = workspace / ".nooa"
     config_dir.mkdir()
-    (config_dir / "config.toml").write_text(f'[tui]\nlibs_dirs = ["{legacy}"]\n')
     (config_dir / "settings.yaml").write_text("coding:\n  additional_skills_dirs: []\n")
 
     assert load_coding_skills_dirs(workspace) == []
@@ -188,42 +144,3 @@ def test_a_non_utf8_settings_file_does_not_abort_discovery(tmp_path, monkeypatch
     (config_dir / "settings.yaml").write_bytes(b"\xff\xfe coding:\n")
 
     assert load_coding_skills_dirs(workspace) == [conventional.resolve()]
-
-
-def test_a_non_utf8_legacy_config_does_not_abort_discovery(tmp_path, monkeypatch):
-    """The legacy TOML reader needs the same UnicodeError guard as the YAML one.
-
-    The sibling test only feeds a bad settings.yaml, so dropping UnicodeError
-    from the config.toml handler went unnoticed.
-    """
-    workspace = tmp_path / "workspace"
-    conventional = workspace / ".agents" / "skills"
-    conventional.mkdir(parents=True)
-    monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
-
-    config_dir = workspace / ".nooa"
-    config_dir.mkdir()
-    (config_dir / "config.toml").write_bytes(b"\xff\xfe [tui]\n")
-
-    assert load_coding_skills_dirs(workspace) == [conventional.resolve()]
-
-
-def test_an_env_override_suppresses_a_legacy_only_workspace(tmp_path, monkeypatch):
-    """The env half of the legacy guard had no test.
-
-    Every existing case also has a modern settings.yaml, so `modern_key_set`
-    short-circuits and the NEMO_OO_SETTINGS check is never exercised.
-    """
-    workspace = tmp_path / "workspace"
-    legacy = tmp_path / "legacy-skills"
-    override = tmp_path / "override.yaml"
-    workspace.mkdir()
-    legacy.mkdir()
-    override.write_text("coding:\n  additional_skills_dirs: []\n")
-    monkeypatch.setenv("NEMO_OO_SETTINGS", str(override))
-
-    config_dir = workspace / ".nooa"
-    config_dir.mkdir()
-    (config_dir / "config.toml").write_text(f'[tui]\nlibs_dirs = ["{legacy}"]\n')
-
-    assert load_coding_skills_dirs(workspace) == []

@@ -44,12 +44,12 @@ from nooa_atom.session.items import (
 
 logger = logging.getLogger(__name__)
 
-_START_EVENT_TYPES = frozenset(("SessionStarted", "TUISessionStart"))
-_TITLE_EVENT_TYPES = frozenset(("SessionTitleUpdated", "TUISessionRename"))
+_START_EVENT_TYPES = frozenset(("SessionStarted",))
+_TITLE_EVENT_TYPES = frozenset(("SessionTitleUpdated",))
 _SETTING_EVENT_TYPES = ("SessionModeChanged", "SessionModelChanged", "SessionReasoningChanged")
 # SessionUserMessage: written by earlier versions of this package, still read.
-_USER_EVENT_TYPES = frozenset(("SessionUserMessage", "TUIUserInput"))
-_AGENT_EVENT_TYPES = frozenset(("AgentMessage", "TUIAgentMessage"))
+_USER_EVENT_TYPES = frozenset(("SessionUserMessage",))
+_AGENT_EVENT_TYPES = frozenset(("AgentMessage",))
 _TURN_EVENT_TYPES = _USER_EVENT_TYPES | _AGENT_EVENT_TYPES
 _TRANSCRIPT_EVENT_TYPES = _TURN_EVENT_TYPES | frozenset(
     ("ItemAdmitted", "TurnEnded", "TurnCancelled", "SnapshotRestoreFailed")
@@ -655,14 +655,6 @@ class SessionStore:
         info = self._read_info(path)
         if info is None:
             raise SessionNotFoundError(f"Session {session_id!r} was not found or is invalid")
-        owner = self.claim_owner(session_id)
-        if owner is not None:
-            raise SessionAlreadyActiveError(
-                f"Session {session_id!r} is active in another process (pid {owner}, "
-                "TUI claim). Close it there first.",
-                session_id=session_id,
-                owner_pid=owner,
-            )
         foreign = self.foreign_owner(session_id)
         if foreign is not None:
             pid, host = foreign
@@ -823,27 +815,18 @@ class SessionStore:
         return entries
 
     def is_active(self, session_id: str) -> bool:
-        """Whether another owner holds the session: the file lock, or a live claim.
-
-        The TUI marks a session it runs with a ``<id>.active/owner-*.json``
-        claim naming its process instead of the file lock; a claim whose
-        process is alive on this host counts as active.
-        """
+        """Whether another owner holds the session's file lock."""
         return self._owner(session_id) is not None
 
     def _owner(self, session_id: str) -> str | None:
         """Who holds the session, in words (see ``InUseSession.owner``); ``None`` if nobody.
 
-        Reads the lock record, the TUI claims and a read-only lock probe;
-        writes nothing.
+        Reads the lock record and a read-only lock probe; writes nothing.
         """
         foreign = self.foreign_owner(session_id)
         if foreign is not None:
             pid, host = foreign
             return f"pid {pid} on {host}"
-        claim = self.claim_owner(session_id)
-        if claim is not None:
-            return f"old TUI (pid {claim})"
         lock_path = self.path_for(session_id).with_suffix(".lock")
         if not lock_path.exists() or not _lock_is_held(lock_path):
             return None
@@ -857,7 +840,7 @@ class SessionStore:
 
         These are the sessions ``open`` refuses and hosts leave out of their
         listings: held on another machine (its lock record), by a process
-        here (the kernel lock), or claimed by the old TUI. A crash leaves the
+        here (the kernel lock). A crash leaves the
         record behind, so a session can stay held after its owner is gone;
         ``fork`` recovers such a session without touching it. ``workspace``
         and ``roots_only`` filter as in ``list``; a file that cannot be read
@@ -994,22 +977,6 @@ class SessionStore:
             return None
         return pid, host
 
-    def claim_owner(self, session_id: str) -> int | None:
-        """The pid of a live process claiming the session through ``<id>.active/``, else None."""
-        claim_dir = self.path_for(session_id).with_suffix(".active")
-        try:
-            owners = list(claim_dir.glob("owner-*.json"))
-        except OSError:
-            return None
-        for owner_path in owners:
-            try:
-                pid = json.loads(owner_path.read_text()).get("pid")
-            except (OSError, ValueError, AttributeError):
-                continue
-            if isinstance(pid, int) and pid > 0 and _pid_alive(pid):
-                return pid
-        return None
-
     def delete(self, session_id: str) -> bool:
         """Delete an inactive session database and its SQLite sidecars."""
         return delete_sqlite_database(self.path_for(session_id))
@@ -1025,19 +992,19 @@ class SessionStore:
             try:
                 start_row = connection.execute(
                     "SELECT event_type, data FROM events "
-                    "WHERE event_type IN (?, ?) ORDER BY insertion_order LIMIT 1",
+                    "WHERE event_type IN (?) ORDER BY insertion_order LIMIT 1",
                     tuple(_START_EVENT_TYPES),
                 ).fetchone()
                 if start_row is None:
                     return None
 
                 title_rows = connection.execute(
-                    "SELECT data FROM events WHERE event_type IN (?, ?) ORDER BY insertion_order",
+                    "SELECT data FROM events WHERE event_type IN (?) ORDER BY insertion_order",
                     tuple(_TITLE_EVENT_TYPES),
                 ).fetchall()
                 turn_count = int(
                     connection.execute(
-                        "SELECT COUNT(*) FROM events WHERE event_type IN (?, ?) "
+                        "SELECT COUNT(*) FROM events WHERE event_type IN (?) "
                         "OR (event_type = 'ItemAdmitted' "
                         "AND json_extract(data, '$.channel') = 'user_messages')",
                         tuple(_USER_EVENT_TYPES),
@@ -1045,7 +1012,7 @@ class SessionStore:
                 )
                 reply_count = int(
                     connection.execute(
-                        "SELECT COUNT(*) FROM events WHERE event_type IN (?, ?, 'TurnEnded')",
+                        "SELECT COUNT(*) FROM events WHERE event_type IN (?, 'TurnEnded')",
                         tuple(_AGENT_EVENT_TYPES),
                     ).fetchone()[0]
                 )
@@ -1071,7 +1038,6 @@ class SessionStore:
         start = self._decode_data(start_row[1], path)
         if start is None:
             return None
-        start_event_type = str(start_row[0])
         offset = _utc_offset(start)
         started_at = self._timestamp(start, fallback=fallback, utc_offset=offset)
         last_active = fallback
@@ -1137,15 +1103,7 @@ class SessionStore:
             title=title,
             title_is_user_set=title_is_user_set,
             forked_from=forked_from,
-            host=str(
-                start.get(
-                    "host",
-                    start.get(
-                        "origin",
-                        "tui" if start_event_type == "TUISessionStart" else "",
-                    ),
-                )
-            ),
+            host=str(start.get("host", start.get("origin", ""))),
         )
 
     @staticmethod

@@ -95,7 +95,7 @@ LLMFactory = Callable[[str | None, Path], Any]
 
 _REQUEUED_CHANNELS = ("user_messages", "delegates")
 # Rows the store counts, with TurnEnded, as a session's replies (``info.reply_count``).
-_REPLY_EVENT_TYPES = frozenset(("AgentMessage", "TUIAgentMessage"))
+_REPLY_EVENT_TYPES = frozenset(("AgentMessage",))
 
 
 class ChildActiveElsewhereError(SessionAlreadyActiveError):
