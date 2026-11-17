@@ -273,10 +273,10 @@ class Agent(metaclass=AgentMeta):
         cm.set_static_protected("system_prompt", expr="self._resolve_system_prompt()")
         cm.set_static_protected("self", expr="doc(type(self))")
         cm.set_static_protected("events_api", expr="self._events_api_prompt()")
-        cm.set_dynamic_protected(
-            "state",
-            "pformat(self, max_length=50, max_string=500, max_depth=4)",
-        )
+        # The expression is shown in the prompt, so it carries the limits as
+        # literals: the agent's TruncationConfig.state_format (class and
+        # instance level), fixed when the agent is built.
+        cm.set_dynamic_protected("state", self._state_block_expr())
 
         # Apply class-level context blocks (from __init_subclass__)
         class_context = getattr(self.__class__, "_agent_context_blocks", None)
@@ -563,6 +563,25 @@ BEFORE starting any task, check if this skill applies.
 You MUST call doc(self.events) before using it — do not assume you know the API.
 Inspect in REPL: print(doc(self.events))
 """
+
+    @no_trace
+    @hidden
+    def _state_block_expr(self) -> str:
+        """The ``state`` context block's expression: ``pformat(self, ...)`` under ``state_format``.
+
+        The limits are the agent's ``TruncationConfig.state_format``
+        (``nooa.config.effective_truncation(self)``), by default
+        ``max_length=50, max_string=500, max_depth=4``. The prompt shows the
+        expression, so it is built once with the values as literals; a
+        method-level ``@strategy(truncation=...)`` does not change it.
+        """
+        from nooa.config.effective import effective_truncation
+
+        limits = effective_truncation(self).state_format
+        return (
+            f"pformat(self, max_length={limits.max_length}, "
+            f"max_string={limits.max_string}, max_depth={limits.max_depth})"
+        )
 
     @no_trace
     @hidden
