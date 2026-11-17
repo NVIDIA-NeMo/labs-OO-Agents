@@ -6,6 +6,28 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Workspace trust (#231). NOOA Atom (`nooa atom`) and the `nooa-acp` coding
+  agent no longer run code from a folder you have not trusted: code skills in
+  `.nooa/skills`, `.agents/skills`, `.cursor/skills`, `.claude/skills` and
+  `.claude/commands` are not imported (text skills still load), skill
+  directories named by the folder's own `.nooa/settings.yaml` or
+  `.nooa/config.toml` are ignored, and (Atom) the folder's `llm_config.yaml`
+  is not used. A symlink in the folder counts as the folder. Your own skills
+  (`~/.agents/skills`, `~/.claude/skills`, `~/.claude/commands`, user-level
+  `additional_skills_dirs`) load in every folder. Trust a folder with
+  `/trust`, by answering the question Atom asks at the first prompt, or by
+  listing it under `trusted_folders` in your user `settings.yaml` (or in a
+  `NEMO_OO_SETTINGS` file, for CI); a trusted folder trusts its subfolders.
+  The home folder and filesystem roots cannot be trusted with `/trust`.
+  **Existing users must trust their folders once.** `nooa acp` and `nooa atom`
+  load `secrets.yaml` themselves and skip its project layer when the launch
+  directory is not trusted. New core API: `nooa.workspace_trust`
+  (`is_trusted`, `trust`, `code_allowed_outside`); `SkillRegistry.code_allowed`
+  and `remove_notice()`; `SkillWriting.enable_code()`; `include_project` on
+  `layered_paths`, `load_layered_yaml`, `llm_config_chain` and
+  `load_secrets_into_env`. Plain agents and the registry used directly are not
+  affected. See `docs/workspace-trust.md`.
+
 - An inline image in a format models do not accept (anything but PNG, JPEG,
   GIF or WebP, for example SVG from `show(Image.from_file("chart.svg"))`) is now
   replaced by a note before each request, instead of being sent. Every MIME

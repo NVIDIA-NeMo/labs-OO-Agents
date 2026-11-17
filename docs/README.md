@@ -84,6 +84,7 @@ First [connect a model](model-connect.md). Then:
 | [LLM admission control](concepts/llm-admission-control.md) | How can one process or application bound concurrent outbound LLM calls? |
 | [Tracing](concepts/tracing.md) | How do I inspect the complete Python and LLM call tree? |
 | [Safety](concepts/safety.md) | What security boundary does NOOA provide, and what must the deployment provide? |
+| [Workspace trust](workspace-trust.md) | Which folders may run their own code in Atom and `nooa-acp`, and how do I trust one? |
 | [Snapshot model](snapshot-model.md) | How does NOOA cut large values and output, and say what it left out and where the rest is? |
 | [Output files](overflow.md) | Where does the whole output go, how big can it get, and when is it deleted? |
 
