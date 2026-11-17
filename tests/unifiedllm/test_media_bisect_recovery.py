@@ -400,3 +400,47 @@ async def test_a_bad_image_and_a_bad_pdf_are_both_found():
         wire.reset_mock()
         assert (await c.acall(messages_with(blocks))).content == "saw 2 images, True"
         assert wire.call_count == 1  # both exclusions kept, no new search
+
+
+@pytest.mark.parametrize("scenario", ["one_bad", "two_bad", "probe_fails", "one_off"])
+async def test_sync_and_async_fallback_send_the_same_requests(scenario):
+    images = numbered_images(6)
+
+    def make_wire():
+        calls = []
+
+        def wire_reply(**kwargs):
+            sent = sent_images(kwargs)
+            calls.append(len(sent))
+            if scenario == "probe_fails":
+                raise bad_request(UNNAMED)
+            if scenario == "one_off":
+                if len(calls) == 1:
+                    raise bad_request(UNNAMED)
+                return reply(f"saw {len(sent)} images")
+            bad = [images[2]] if scenario == "one_bad" else [images[1], images[4]]
+            if any(b in sent for b in bad):
+                raise bad_request(UNNAMED)
+            return reply(f"saw {len(sent)} images")
+
+        return wire_reply, calls
+
+    outcomes = []
+    for mode in ("sync", "async"):
+        wire_reply, calls = make_wire()
+        target = "litellm.completion" if mode == "sync" else "litellm.acompletion"
+        mock = {} if mode == "sync" else {"new_callable": AsyncMock}
+        with client() as c, patch(target, **mock) as wire:
+            wire.side_effect = wire_reply
+            try:
+                if mode == "sync":
+                    result = c.call(messages_with(images)).content
+                else:
+                    result = (await c.acall(messages_with(images))).content
+            except litellm.BadRequestError:
+                result = "failed"
+            # The next request shows what the connection kept.
+            later = c._prepare_media_messages(messages_with(images), c._prepare_call_config({}))
+        outcomes.append((result, calls, str(later).count(NOTE)))
+    assert outcomes[0] == outcomes[1]
+    assert outcomes[0][0] != "failed" or scenario == "probe_fails"
