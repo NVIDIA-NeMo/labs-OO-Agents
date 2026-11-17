@@ -3133,9 +3133,15 @@ class ActorRuntime:
                 raw_docstring = getattr(method, "__doc__", None)
                 expanded_docstring = None
                 if raw_docstring:
-                    expanded_docstring = await self.expand_variables(
-                        raw_docstring, extra_context=merged_kwargs, error_mode="silent"
-                    )
+                    # Under this method's limits (its @strategy(truncation=...)),
+                    # as everything else the call renders.
+                    docstring_token = _current_truncation_config_var.set(resolved_truncation)
+                    try:
+                        expanded_docstring = await self.expand_variables(
+                            raw_docstring, extra_context=merged_kwargs, error_mode="silent"
+                        )
+                    finally:
+                        _current_truncation_config_var.reset(docstring_token)
 
                 # Use the shared builder so Annotated parameter specs reach
                 # prefill rendering on agent calls as well as nested strategy calls.
