@@ -470,13 +470,14 @@ def _with_own_overrides(raw: dict[Any, Any], storage: dict[str, Any]) -> dict[st
 
     The overrides (``FIELD_METADATA_ATTR``) may lie past the copied entries;
     without them a field hidden on the instance would show. Every key of
-    ``raw`` is checked to be an exact ``str`` first (a C-level pass that
-    compares nothing), so the lookup runs no key's ``__eq__``.
+    ``raw`` is checked to be an exact ``str`` first, by identity of its type
+    (a set of the types would hash them: a metaclass ``__hash__`` /
+    ``__eq__``), so neither the check nor the lookup runs user code.
 
     Raises:
         _FailClosed: a key is not an exact ``str``: visibility is unknown.
     """
-    if set(map(type, dict.keys(raw))) - {str}:
+    if not all(type(key) is str for key in dict.keys(raw)):
         raise _FailClosed
     own = dict.get(raw, FIELD_METADATA_ATTR, _MISSING)
     if own is _MISSING:

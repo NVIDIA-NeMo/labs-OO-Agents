@@ -67,6 +67,36 @@ def test_an_instance_override_past_a_partial_copy_still_hides_its_field() -> Non
     assert "TOPSECRET" not in text and "attributes)" in text
 
 
+def test_the_key_check_of_a_partial_copy_runs_no_metaclass_hook() -> None:
+    # 4584541156 (_with_own_overrides): ``set(map(type, keys))`` hashed each
+    # key's type, so a metaclass ``__hash__`` ran on a partial storage copy.
+    calls: list[str] = []
+
+    class Meta(type):
+        def __hash__(cls) -> int:
+            calls.append("hash")
+            return 1
+
+        def __eq__(cls, other: object) -> bool:
+            calls.append("eq")
+            return False
+
+    class Key(metaclass=Meta):
+        pass
+
+    class Plain:
+        pass
+
+    big = Plain()
+    for index in range(5_000):
+        setattr(big, f"a{index:05d}", index)
+    storage: dict[Any, Any] = big.__dict__
+    storage[Key()] = "foreign"
+    calls.clear()
+    capture(big)
+    assert calls == []
+
+
 def test_a_huge_class_namespace_is_not_copied() -> None:
     # 4584541200: a 200,000-entry class namespace was copied whole under max_nodes=5.
     big = type("Big", (), {f"a{i}": i for i in range(200_000)})
