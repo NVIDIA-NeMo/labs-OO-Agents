@@ -315,14 +315,17 @@ def test_a_colliding_key_past_the_copied_prefix_keeps_a_hidden_field_hidden() ->
     big.secret = "TOPSECRET"  # type: ignore[attr-defined]
     for index in range(5_000):
         setattr(big, f"a{index:05d}", index)
-    set_field_metadata(big, "secret", hidden=True)
     storage: dict[Any, Any] = big.__dict__
     key = Colliding()
-    storage[key] = "foreign"  # equality off: added beside the overrides entry
-    assert FIELD_METADATA_ATTR in dict.keys(storage)
+    # Inserted first, with equality off, holding an override map that would
+    # unhide ``secret``: an unsafe lookup of the overrides attribute finds it
+    # before the real entry once equality is on.
+    storage[key] = {"secret": {"hidden": False}}
+    set_field_metadata(big, "secret", hidden=True)
+    assert dict.get(storage, FIELD_METADATA_ATTR) == {"secret": {"hidden": True}}
     assert any(k is key for k in dict.keys(storage))
     armed = True
     calls.clear()
     text = render_python(capture(big, Limits(fallback="repr")))
-    assert calls == []
     assert "TOPSECRET" not in text
+    assert calls == []
