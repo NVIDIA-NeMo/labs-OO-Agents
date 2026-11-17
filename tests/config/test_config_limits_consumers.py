@@ -26,7 +26,7 @@ PREFILL = TruncationConfig(prefill_format=FormatConfig(max_string=7, max_length=
 PLACEHOLDER = TruncationConfig(placeholder_chars=100)
 
 
-def _probe_agent(method_truncation: TruncationConfig | None, **agent_kwargs: Any) -> Agent:
+def _probe_agent(method_truncation: TruncationConfig | None, **agent_kwargs: Any) -> Any:
     """An agent with ``implemented(probe)`` and a generated ``generated(probe)``.
 
     Both call ``probe(agent)``; ``generated`` runs it from its generated code
@@ -35,7 +35,7 @@ def _probe_agent(method_truncation: TruncationConfig | None, **agent_kwargs: Any
     llm = FakeLLMClient.with_tool_call(
         "execute_python", {"code": "return_result(await probe(self))"}, strict_exhaustion=False
     )
-    kwargs = {} if method_truncation is None else {"truncation": method_truncation}
+    kwargs: dict[str, Any] = {} if method_truncation is None else {"truncation": method_truncation}
 
     class Probe(Agent, llm=llm):
         """Probe {self.value}."""
@@ -188,7 +188,7 @@ class _Doc(Agent):
         ...
 
 
-async def _task_prompt(method_name: str, agent_kwargs: dict[str, Any]) -> str:
+async def _task_prompt(method_name: str, agent_kwargs: dict[str, Any]) -> tuple[str, str]:
     llm = FakeLLMClient.with_tool_call(
         "execute_python",
         {"code": "return_result(self._resolve_system_prompt())"},

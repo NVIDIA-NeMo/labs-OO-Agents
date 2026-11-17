@@ -30,12 +30,12 @@ JOB = TruncationConfig(capture=CaptureConfig(max_job_tail=50))
 INSTRUCTIONS = TruncationConfig(instructions_file_chars=60, instructions_total_chars=500)
 
 
-def _probe_agent(method_truncation: TruncationConfig | None, **agent_kwargs: Any) -> Agent:
+def _probe_agent(method_truncation: TruncationConfig | None, **agent_kwargs: Any) -> Any:
     """``implemented(probe)`` and a generated ``generated(probe)`` that await ``probe()``."""
     llm = FakeLLMClient.with_tool_call(
         "execute_python", {"code": "return_result(await probe())"}, strict_exhaustion=False
     )
-    kwargs = {} if method_truncation is None else {"truncation": method_truncation}
+    kwargs: dict[str, Any] = {} if method_truncation is None else {"truncation": method_truncation}
 
     class Probe(Agent, llm=llm):
         async def implemented(self, probe: Callable[..., Any]) -> Any:
@@ -70,7 +70,7 @@ def _card_probe(tmp_path: Path) -> Callable[..., Any]:
         events: list[Any] = []
         manager = EventManager()
         manager.on("*", events.append)
-        shell = ActivityShellTools(shell=ShellTools(cwd=str(tmp_path)), event_manager=manager)
+        shell: Any = ActivityShellTools(shell=ShellTools(cwd=str(tmp_path)), event_manager=manager)
         try:
             await shell.run("python3 -c \"print('z' * 50000)\"")
         finally:
@@ -93,6 +93,8 @@ async def test_the_card_follows_max_shell_output(tmp_path):
 
 def _job_probe(tmp_path: Path) -> Callable[..., Any]:
     class _Host:
+        jobs: Any
+
         def __init__(self) -> None:
             self.queue_manager = QueueManager()
             self.queue_manager.queue("jobs")
