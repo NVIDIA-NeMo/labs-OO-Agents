@@ -284,3 +284,33 @@ async def test_a_tool_use_400_with_images_sends_no_probe():
         with pytest.raises(litellm.BadRequestError):
             await c.acall(messages_with(images))
         assert wire.call_count == 1
+
+
+async def test_a_search_does_not_remove_attachments_from_a_concurrent_call():
+    import asyncio
+
+    images = numbered_images(3)
+    bad = images[0]
+    a_messages = [{"role": "user", "content": [{"type": "text", "text": "A"}, *images]}]
+    b_messages = [{"role": "user", "content": [{"type": "text", "text": "B"}, *images[1:]]}]
+    probe_started, release = asyncio.Event(), asyncio.Event()
+
+    async def wire_reply(**kwargs):
+        sent = sent_images(kwargs)
+        if kwargs["messages"][0]["content"][0]["text"] == "B":
+            return reply(f"B saw {len(sent)} images")
+        if not sent:  # A's probe without media: hold it while B runs
+            probe_started.set()
+            await release.wait()
+        if bad in sent:
+            raise bad_request(UNNAMED)
+        return reply(f"A saw {len(sent)} images")
+
+    with client() as c, patch("litellm.acompletion", new=wire_reply):
+        task_a = asyncio.create_task(c.acall(a_messages))
+        await asyncio.wait_for(probe_started.wait(), 5)
+        assert (await c.acall(b_messages)).content == "B saw 2 images"
+        release.set()
+        assert (await task_a).content == "A saw 2 images"
+        # Committed only now: B's images are good, so B still sends both.
+        assert (await c.acall(b_messages)).content == "B saw 2 images"

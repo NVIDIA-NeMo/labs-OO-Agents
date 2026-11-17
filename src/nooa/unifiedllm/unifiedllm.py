@@ -73,6 +73,10 @@ logger = logging.getLogger(__name__)
 _MEDIA_RECOVERY_LIMIT = 12
 # Set while a media recovery probe runs: its request gets no endpoint retries.
 _media_probe: ContextVar[bool] = ContextVar("media_probe", default=False)
+# The exclusions a media recovery request is trying, local to that request:
+# merged with the connection's committed set only when this request is
+# prepared, so a concurrent call on the same client keeps its attachments.
+_media_trial: ContextVar[frozenset] = ContextVar("media_trial", default=frozenset())
 
 # Errors the general media fallback never probes: the request as a whole is
 # wrong, and a shorter request without media could succeed by chance.
@@ -1433,7 +1437,9 @@ class UnifiedLLM(ABC):
         # Media the interface cannot send is rejected after projection, by
         # _validate_implemented_media: only the projected request also shows the
         # native content of replayed assistant turns.
-        excluded = self._rejected_media(call_config)
+        # The connection's committed exclusions plus the ones this request
+        # (a media recovery attempt) tries; see _media_attempt.
+        excluded = self._rejected_media(call_config) | _media_trial.get()
         # The retry layer reads which kinds this request really sends.
         sent_media_kinds.set(
             frozenset(
@@ -1647,18 +1653,22 @@ class UnifiedLLM(ABC):
             )
         return self.retry_config
 
+    @staticmethod
     @contextlib.contextmanager
-    def _media_attempt(self, rejected: set, excluded: frozenset, probe: bool):
-        """Send one recovery request with ``excluded`` replaced by notes, then undo it."""
-        added = [key for key in excluded if key not in rejected]
-        rejected.update(added)
+    def _media_attempt(excluded: frozenset, probe: bool):
+        """Send one recovery request with ``excluded`` replaced by notes.
+
+        The trial exclusions live in a ContextVar for this request only; the
+        connection's ``rejected`` set changes only when ``_media_search``
+        commits a successful recovery.
+        """
+        trial = _media_trial.set(frozenset(excluded))
         token = _media_probe.set(probe)
         try:
             yield
         finally:
             _media_probe.reset(token)
-            for key in added:
-                rejected.discard(key)
+            _media_trial.reset(trial)
 
     def _validate_implemented_media(self, messages, call_config):
         from nooa.media_policy import reject_unsupported_media
@@ -1987,7 +1997,6 @@ class UnifiedLLM(ABC):
                 search = self._media_recovery(messages, kwargs, exc)
                 if search is None:
                     raise
-                rejected = self._rejected_media(self._prepare_call_config(kwargs))
             outcome = None
             while True:
                 try:
@@ -1995,7 +2004,7 @@ class UnifiedLLM(ABC):
                 except StopIteration as done:
                     return done.value
                 try:
-                    with self._media_attempt(rejected, excluded, probe):
+                    with self._media_attempt(excluded, probe):
                         outcome = (self._call_once(messages, tools, output_model, **kwargs), None)
                 except Exception as error:
                     outcome = (None, error)
@@ -2018,7 +2027,6 @@ class UnifiedLLM(ABC):
                 search = self._media_recovery(messages, kwargs, exc)
                 if search is None:
                     raise
-                rejected = self._rejected_media(self._prepare_call_config(kwargs))
             outcome = None
             while True:
                 try:
@@ -2026,7 +2034,7 @@ class UnifiedLLM(ABC):
                 except StopIteration as done:
                     return done.value
                 try:
-                    with self._media_attempt(rejected, excluded, probe):
+                    with self._media_attempt(excluded, probe):
                         outcome = (
                             await self._acall_once(messages, tools, output_model, **kwargs),
                             None,
