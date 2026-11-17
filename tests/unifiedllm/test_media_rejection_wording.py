@@ -173,3 +173,57 @@ def test_local_bedrock_value_error_is_a_format_rejection():
     )
     assert explicitly_rejected(wrapped, "image")
     assert _is_retryable_error(wrapped, RetryConfig()) == (False, False)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Could not process image: upstream request timed out",
+        "Could not process image: connection reset by peer",
+        "Failed to decode image: upstream unavailable",
+        "image processing backend overloaded",
+        "Unsupported image format: png. The service is temporarily degraded",
+        "Could not process image, please try again later",
+    ],
+)
+@pytest.mark.parametrize("status", [400, 500])
+def test_transient_wording_is_never_a_media_rejection(text, status):
+    exc = bad_request(text) if status == 400 else server_error(text)
+    assert not is_media_rejection(exc)
+    if status == 500:
+        assert _is_retryable_error(exc, RetryConfig())[0]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Failed to load the file",
+        "could not read file /models/config.json",
+        "Failed to parse the document",
+        "corrupted file in cache",
+        "The file is too large to cache",
+        "Error while downloading model weights",
+    ],
+)
+def test_generic_file_wording_in_a_500_is_not_a_media_rejection(text):
+    assert not is_media_rejection(server_error(text))
+    assert _is_retryable_error(server_error(text), RetryConfig())[0]
+
+
+def test_an_explicit_pdf_in_a_500_still_counts():
+    assert rejected_media_kinds(server_error("Failed to load the PDF")) == {"pdf"}
+    assert rejected_media_kinds(server_error("The PDF is corrupted")) == {"pdf"}
+
+
+def test_a_bracketed_non_media_param_wins_over_media_words():
+    text = "Invalid schema for function image_url: expected an object"
+    body = {"error": {"message": text, "param": "tools[0].function.parameters"}}
+    assert not is_media_rejection(bad_request(text, body))
+    # Without the param, a bare field name (a function name) is no content path.
+    assert not is_media_rejection(bad_request(text))
+    assert not is_media_rejection(bad_request("Function 'input_audio' is not defined"))
+    # A media field inside a content path still counts.
+    path = "messages[0].content[1].image_url.url"
+    assert rejected_media_kinds(bad_request(f"Invalid value at {path}")) == {"image"}
+    body = {"error": {"message": "Invalid value", "param": path}}
+    assert rejected_media_kinds(bad_request("Invalid value", body)) == {"image"}

@@ -300,6 +300,17 @@ _KIND_PARTS = {
 MEDIA_KINDS: tuple[str, ...] = ("image", "audio", "video", "pdf")
 
 
+def _kind_names(kind, narrow: bool = False) -> str:
+    """The ``_KIND_NAMES`` pattern of ``kind``; ``narrow`` (HTTP 5xx): a PDF only as "PDF".
+
+    A server error about "the file" or "the document" is usually about the
+    server's own files (model weights, caches), not an attachment.
+    """
+    if narrow and kind == "pdf":
+        return r"pdfs?"
+    return _KIND_NAMES.get(kind, r"files?")
+
+
 def _error_message(exc) -> str:
     """The provider's error message in lower case: ``body.error.message`` if set, else ``str(exc)``."""
     body = getattr(exc, "body", None)
@@ -359,14 +370,21 @@ _CONTEXT_LENGTH_RE = re.compile(
     r"context[ _](?:length|window)|maximum context|too many (?:input )?tokens|prompt is too long"
     r"|tokens? (?:exceed|limit)|reduce the length of the messages"
 )
-# A 500 with these words is the server being busy, not the attachment.
+# A server or network problem, not the attachment, at any status: such an
+# error is never a media rejection, even when it names one ("Could not
+# process image: upstream request timed out"). Checked before any media rule.
 _TRANSIENT_RE = re.compile(
-    r"\btemporar(?:y|ily)\b|\boverloaded\b|\btry again later\b|\bunavailable\b|\brate.?limit"
+    r"\btime ?outs?\b|\btimed out\b|\bconnection (?:reset|refused|aborted|closed)\b"
+    # "try again later" / "in a few seconds", but not OpenAI's "The image data
+    # you provided does not represent a valid image. Please check your input
+    # and try again.", which is a real rejection.
+    r"|\bunavailable\b|\boverloaded\b|\btemporar(?:y|ily)\b|\brate.?limit"
+    r"|\btry again (?:later|shortly|soon|in\b)|\b(?:retry|try) (?:the request )?later\b"
     r"|\bcapacity\b"
 )
 
 
-def _size_rejected(text: str, kind) -> bool:
+def _size_rejected(text: str, kind, narrow: bool = False) -> bool:
     """The attachment is too big: per-item byte, pixel or page limits.
 
     Wording examples from Anthropic's documentation and the #597 reviews (not
@@ -375,7 +393,7 @@ def _size_rejected(text: str, kind) -> bool:
     pages may be provided". Request-wide limits (context length, too many
     images) are handled elsewhere and are not matched here.
     """
-    names = _KIND_NAMES.get(kind, r"files?")
+    names = _kind_names(kind, narrow)
     if re.search(
         rf"\b(?:{names})(?: (?:size|dimensions?|file|data|payload|resolution|width|height))?\b"
         r".{0,60}?\b(?:exceeds?|exceeded|exceeding|too large|too big|larger than)\b",
@@ -416,9 +434,10 @@ def _mime_type_kind(text: str) -> str | None:
     return "pdf" if match.group(1) == "application/pdf" else match.group(1)
 
 
-def _processing_failed(text: str, kind) -> bool:
+def _processing_failed(text: str, kind, narrow: bool = False) -> bool:
     """The server could not read the attachment's bytes ("Could not process image")."""
-    names = _KIND_NAMES.get(kind, r"files?")
+    names = _kind_names(kind, narrow)
+    docs = "pdf" if narrow else "(?:pdf|document|file)"
     noun = rf"(?:{names}|media)(?: (?:input|content|format|type|data|url|attachment|file)s?)?"
     return bool(
         re.search(
@@ -440,8 +459,8 @@ def _processing_failed(text: str, kind) -> bool:
         or (
             kind == "pdf"
             and re.search(
-                r"\b(?:password[- ]protected|encrypted) (?:pdf|document|file)s?\b"
-                r"|\b(?:pdf|document|file)s?\b.{0,40}?\b(?:password[- ]protected|encrypted)\b",
+                rf"\b(?:password[- ]protected|encrypted) {docs}s?\b"
+                rf"|\b{docs}s?\b.{{0,40}}?\b(?:password[- ]protected|encrypted)\b",
                 text,
             )
         )
@@ -454,14 +473,16 @@ def _fetch_failed(text: str) -> bool:
     LiteLLM downloads image URLs itself for Bedrock and Anthropic routes and
     raises ``ImageFetchError`` ("Error: Unable to fetch image from URL. Status
     code: 404, url=..."). OpenAI's server-side fetch says "Error while
-    downloading https://..." or "Timeout while downloading ..." (wording from
-    the #597 review, not captured live). The image stays in history, so every
-    later request would fail the same way.
+    downloading https://..." (wording from the #597 review, not captured
+    live). The image stays in history, so every later request would fail the
+    same way. A download error must name an image or a URL: "Error while
+    downloading model weights" is the server's own problem. A timeout is
+    transient (``_TRANSIENT_RE``), never a rejection.
     """
     return bool(
         re.search(
             r"\bunable to (?:fetch|download|retrieve) (?:the )?image\b"
-            r"|\b(?:error|timeout|timed out) while downloading\b"
+            r"|\berror while downloading (?:the )?(?:image\b|https?://|url\b)"
             r"|\bfailed to (?:fetch|download) (?:the )?image\b",
             text,
         )
@@ -471,6 +492,22 @@ def _fetch_failed(text: str) -> bool:
 def _is_image_fetch_error(exc) -> bool:
     """``litellm.ImageFetchError`` (a 400 ``BadRequestError``), without importing LiteLLM."""
     return any(cls.__name__ == "ImageFetchError" for cls in type(exc).__mro__)
+
+
+def _param_root(param: str) -> str:
+    """The top-level request field a ``param`` path names: ``tools[0].function`` -> ``tools``."""
+    return re.split(r"[.\[\]]", param.strip().lower(), maxsplit=1)[0]
+
+
+# Request fields that hold the conversation (and so the attachments).
+_CONTENT_ROOTS = frozenset({"messages", "input", "contents", "content", "system", "prompt"})
+# A media field inside a content path of the message text, such as
+# "messages[0].content[1].input_audio.format"; a bare "image_url" (a function
+# name, say) does not count.
+_MEDIA_FIELD_PATH_RE = re.compile(
+    r"\b(?:messages|input|contents?)\b[\w\[\].]*?[.\]]"
+    r"(?:input_audio|audio_url|image_url|input_image|video_url|input_file|file_data)\b[\w\[\].]*"
+)
 
 
 def _param_kind(param: str | None) -> str | None:
@@ -536,8 +573,17 @@ def rejected_media_kinds(exc) -> frozenset[str]:
     - 413: only when the message says the attachment itself is too large.
     - 500: only wording that says the server could not read this attachment
       (unsupported format, "Could not process image", a size limit, a failed
-      image download) and nothing that sounds transient ("temporarily", "overloaded").
+      image download). A PDF counts only when the message says "PDF": a 500
+      about "the file" or "the document" is usually the server's own file.
       Other 5xx statuses (502/503/504: gateways, outages) never count.
+
+    Wording that sounds transient (a timeout, a connection reset, "unavailable",
+    "overloaded", "temporarily", "try again"; ``_TRANSIENT_RE``) never counts,
+    at any status: a later identical request may succeed. A structured
+    ``param`` outside the conversation (``tools[0].function.parameters``,
+    ``max_tokens``) wins over media words in the text, and a media field name
+    in the text counts only inside a content path
+    (``messages[0].content[1].image_url``), not as a function name.
     - No status: only a local ``ValueError`` (LiteLLM's Bedrock adapter raises
       ``ValueError("Unsupported image format: ...")`` before sending).
 
@@ -548,27 +594,22 @@ def rejected_media_kinds(exc) -> frozenset[str]:
     """
     status = _http_status(exc)
     text = _error_texts(exc)
+    if _TRANSIENT_RE.search(text):
+        return frozenset()  # a server or network problem, even if it names an image
     if image_limit(exc) is not None or _CONTEXT_LENGTH_RE.search(text):
         return frozenset()
     if _is_image_fetch_error(exc):
         return frozenset({"image"})
     param = _error_param(exc)
-    if param is not None and param.split(".")[0] in {
-        "model",
-        "include",
-        "store",
-        "max_tokens",
-        "max_output_tokens",
-        "api_key",
-        "tools",
-        "tool_choice",
-    }:
+    if param and _param_root(param) not in _CONTENT_ROOTS and _param_kind(param) is None:
+        # The provider named another parameter (tools[0].function.parameters,
+        # max_tokens, model, ...): that wins over media words in the text.
         return frozenset()
     if status in {400, 415, 422}:
         strict, server = True, True
     elif status == 413:
         strict, server = False, False
-    elif status == 500 and not _TRANSIENT_RE.search(text):
+    elif status == 500:
         strict, server = False, True
     elif status is None and isinstance(exc, ValueError):
         return frozenset(k for k in MEDIA_KINDS if _unsupported_format_text(text, k))
@@ -583,19 +624,20 @@ def rejected_media_kinds(exc) -> frozenset[str]:
             # A structured ``param`` or a field path in the message, e.g. OpenAI's
             # "Invalid value: 'mpeg'. Supported values are: 'wav' and 'mp3'." with
             # param ``messages[0].content[1].input_audio.format``.
-            for path in (
-                param,
-                *re.findall(
-                    r"[\w\[\].]*\b(?:input_audio|audio_url|image_url|input_image|video_url|input_file|file_data)\b[\w\[\].]*",
-                    text,
-                ),
-            ):
+            for path in (param, *_MEDIA_FIELD_PATH_RE.findall(text)):
                 if found := _param_kind(path):
                     kinds.add(found)
+    narrow = status is not None and status >= 500  # a PDF only as "PDF" (_kind_names)
     for kind in MEDIA_KINDS:
         if (
-            _size_rejected(text, kind)
-            or (server and (_unsupported_format_text(text, kind) or _processing_failed(text, kind)))
+            _size_rejected(text, kind, narrow)
+            or (
+                server
+                and (
+                    # Names the refused format value: specific even as a 500.
+                    _unsupported_format_text(text, kind) or _processing_failed(text, kind, narrow)
+                )
+            )
             or (server and kind == "image" and _fetch_failed(text))
             or (strict and _strict_media_statement(text, kind))
         ):

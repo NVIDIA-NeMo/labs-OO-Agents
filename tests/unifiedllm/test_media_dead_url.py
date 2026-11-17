@@ -40,11 +40,6 @@ def test_image_fetch_error_is_an_image_rejection():
             model="m",
             llm_provider="openai",
         ),
-        litellm.BadRequestError(
-            message="Timeout while downloading https://example.invalid/slow.png.",
-            model="m",
-            llm_provider="openai",
-        ),
         # The same LiteLLM error passed through the Hub proxy as a 500.
         litellm.InternalServerError(
             message="litellm.ImageFetchError: Error: Unable to fetch image from URL after 3 "
@@ -59,13 +54,23 @@ def test_download_failures_are_image_rejections_and_not_retried(exc):
     assert _is_retryable_error(exc, RetryConfig()) == (False, False)
 
 
-def test_unrelated_downloads_are_not_rejections():
-    exc = litellm.InternalServerError(
-        message="Model weights are downloading; temporarily unavailable",
-        model="m",
-        llm_provider="openai",
-    )
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Model weights are downloading; temporarily unavailable",
+        # Not about an image or a URL: the server's own download.
+        "Error while downloading model weights",
+        # A timeout may pass: retried, the image is kept.
+        "Timeout while downloading https://example.invalid/slow.png.",
+    ],
+)
+def test_unrelated_or_transient_downloads_are_not_rejections(text):
+    exc = litellm.InternalServerError(message=text, model="m", llm_provider="openai")
     assert not rejected_media_kinds(exc)
+    assert _is_retryable_error(exc, RetryConfig())[0]
+    assert not rejected_media_kinds(
+        litellm.BadRequestError(message=text, model="m", llm_provider="openai")
+    )
 
 
 async def test_dead_url_is_replaced_by_a_note_and_stays_replaced():
