@@ -1536,8 +1536,10 @@ class UnifiedLLM(ABC):
         original request once: if that succeeds, its reply is returned and
         nothing is excluded (the first failure was a one-off). Only if it fails
         again the same way does one probe go out with every candidate
-        excluded; its reply is discarded. If that probe fails too, the media is not the problem: the
-        original error is raised and nothing changes.
+        excluded; its reply is stored and returned only if the search ends on
+        that same set. If that probe fails too, the media is not the problem:
+        the original error is raised and nothing changes. No exclusion set is
+        sent twice: each outcome is stored and reused.
 
         At most ``budget`` requests are made after the original one, counted
         as endpoint requests (``media_recovery_probes``): a recovery request
@@ -1555,7 +1557,9 @@ class UnifiedLLM(ABC):
             return not still_media(err) and _is_retryable_error(err, config)[0]
 
         used = 0
+        # The outcome of every request sent, by its exclusion set.
         replies: dict[frozenset, Any] = {}
+        failures: dict[frozenset, BaseException] = {frozenset(): original}
 
         def still_media(err: BaseException) -> bool:
             if mode == "rejected":
@@ -1587,8 +1591,10 @@ class UnifiedLLM(ABC):
                 type(original).__name__,
                 str(original)[:300],
             )
-            _, error = yield frozenset(keys)
-            if error is not None:
+            response, error = yield frozenset(keys)
+            if error is None:
+                replies[frozenset(keys)] = response  # a valid reply to exactly this request
+            else:
                 logger.warning(
                     "The probe without attachments failed too; giving up: %s", str(error)[:300]
                 )
@@ -1601,8 +1607,11 @@ class UnifiedLLM(ABC):
             # A helper generator for one request of the search: (ok, error).
             nonlocal used
             excluded = frozenset(excluded)
+            # Never send the same request twice: reuse its stored outcome.
             if excluded in replies:
                 return True, None
+            if excluded in failures:
+                return False, failures[excluded]
             if used >= budget:
                 logger.warning(
                     "Media recovery stopped after %d requests without finding the attachment(s)",
@@ -1621,6 +1630,7 @@ class UnifiedLLM(ABC):
                 return True, None
             if not still_media(error):
                 raise error
+            failures[excluded] = error
             return False, error
 
         found: list[Any] = []

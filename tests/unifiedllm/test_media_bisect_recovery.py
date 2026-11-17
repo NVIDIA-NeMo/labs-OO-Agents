@@ -340,3 +340,32 @@ async def test_the_budget_counts_endpoint_requests_with_500s_mid_search(error):
         except (litellm.BadRequestError, litellm.InternalServerError):
             pass  # the budget may run out before the search ends
         assert wire.call_count - 1 <= budget
+
+
+@pytest.mark.parametrize("bad_ok", [True, False])
+async def test_one_image_sends_no_identical_repeat_in_named_mode(bad_ok):
+    images = numbered_images(1)
+
+    def wire_reply(**kwargs):
+        if sent_images(kwargs) or not bad_ok:
+            raise bad_request(BEDROCK)
+        return reply("ok")
+
+    with client() as c, patch("litellm.acompletion", new_callable=AsyncMock) as wire:
+        wire.side_effect = wire_reply
+        if bad_ok:
+            assert (await c.acall(messages_with(images))).content == "ok"
+        else:
+            with pytest.raises(litellm.BadRequestError):
+                await c.acall(messages_with(images))
+        # The request, then the image replaced by a note; never a third identical one.
+        assert [len(sent_images(call.kwargs)) for call in wire.call_args_list] == [1, 0]
+
+
+async def test_one_image_in_fallback_mode_reuses_the_probe_reply():
+    images = numbered_images(1)
+    with client() as c, patch("litellm.acompletion", new_callable=AsyncMock) as wire:
+        wire.side_effect = fake_provider(images, UNNAMED)
+        assert (await c.acall(messages_with(images))).content == "saw 0 images"
+        # The request, re-sent once, the probe (its reply is the answer).
+        assert [len(sent_images(call.kwargs)) for call in wire.call_args_list] == [1, 1, 0]
