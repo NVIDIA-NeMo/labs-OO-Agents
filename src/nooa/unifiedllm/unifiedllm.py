@@ -48,6 +48,7 @@ from nooa.unifiedllm.media_inputs import (
     is_media_rejection,
     media_occurrences,
     rejected_media_kinds,
+    unsendable_occurrences,
     validate_media_inputs,
 )
 
@@ -1337,6 +1338,8 @@ class UnifiedLLM(ABC):
         # Attachment occurrences the current connection rejected; reset when
         # a request goes to another model or endpoint.
         self._media_exclusions: tuple[tuple[Any, ...] | None, set[Any]] = (None, set())
+        # Attachment occurrences already counted as media_unsendable.
+        self._unsendable_reported: set[Any] = set()
         self.model = model
         self.config = config
         self._context_window = context_window
@@ -1416,10 +1419,27 @@ class UnifiedLLM(ABC):
 
     def _prepare_media_messages(self, messages, call_config):
         enabled = self._request_media_inputs(call_config)
+        self._record_unsendable_media(messages, enabled)
         # Media the interface cannot send is rejected after projection, by
         # _validate_implemented_media: only the projected request also shows the
         # native content of replayed assistant turns.
         return filter_media_messages(messages, enabled, self._rejected_media(call_config))
+
+    def _record_unsendable_media(self, messages, enabled) -> None:
+        """Count ``media_unsendable`` once per attachment the filter replaces before sending.
+
+        The filter runs on every request and history repeats, so each
+        occurrence (``unsendable_occurrences`` key) is counted once per client.
+        """
+        if not enabled:
+            return
+        reported = self._unsendable_reported
+        for reason, key in unsendable_occurrences(messages, enabled):
+            if key not in reported:
+                if len(reported) >= 10_000:
+                    reported.clear()  # bounded; a recount after this many is harmless
+                reported.add(key)
+                _record_llm_metric("media_unsendable", reason)
 
     def _rejected_media(self, call_config: dict[str, Any]) -> set[Any]:
         """Rejected attachment occurrences of this request's connection only."""

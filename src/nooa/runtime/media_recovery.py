@@ -10,8 +10,8 @@ asks for a retry; later requests of the session stay under the limit.
 The counters live in the ``media`` extension of :class:`HarnessMetrics`
 (span keys ``harness.media.<name>``), not on every agent's core metrics.
 Importing this module (``nooa.runtime`` does) registers the recovery, the
-extension and the unifiedllm metric events ``media_rejected_retry`` and
-``media_recovery_probe``.
+extension and the unifiedllm metric events ``media_rejected_retry``,
+``media_recovery_probe`` and ``media_unsendable``.
 """
 
 from __future__ import annotations
@@ -45,6 +45,8 @@ class MediaHarnessMetrics(HarnessMetricsExtension):
     # A provider rejected an attachment; it stays replaced by a note (kind).
     # Counted only when the request finally succeeded without it.
     rejected_retries: list[str] = Field(default_factory=list)
+    # Attachments the filter replaced before sending (kind:reason), once each
+    unsendable_replaced: list[str] = Field(default_factory=list)
     # Requests media recovery added to find a bad attachment (mode: rejected/fallback)
     recovery_probes: list[str] = Field(default_factory=list)
     image_limit_collapses: list[int] = Field(default_factory=list)  # limit M per recovery
@@ -77,6 +79,19 @@ class MediaHarnessMetrics(HarnessMetricsExtension):
             lambda m: len(m.rejected_retries),
         ),
         SchemaEntry(
+            "unsendable_replaced.count",
+            "Attachments replaced by a note before sending (format)",
+            "Media Recovery",
+            lambda m: len(m.unsendable_replaced),
+        ),
+        SchemaEntry(
+            "unsendable_replaced.reasons",
+            "Formats replaced before sending",
+            "Media Recovery",
+            lambda m: m.unsendable_replaced,
+            True,
+        ),
+        SchemaEntry(
             "recovery_probes.count",
             "Requests media recovery added to find a bad attachment",
             "Media Recovery",
@@ -100,9 +115,17 @@ class MediaHarnessMetrics(HarnessMetricsExtension):
         """The provider rejected an attachment; the request was retried without it."""
         self._append(self.rejected_retries, str(kind or "unknown"))
 
+    def unsendable(self, reason: Any) -> None:
+        """The filter replaced an attachment it cannot send (``image:image/svg+xml``)."""
+        self._append(self.unsendable_replaced, str(reason or "unknown"))
+
     def recovery_probe(self, mode: Any) -> None:
         """Media recovery sent one more request to find the attachment at fault."""
         self._append(self.recovery_probes, str(mode or "unknown"))
+
+
+def _record_unsendable(metrics: HarnessMetrics, reason: Any) -> None:
+    metrics.extension(MediaHarnessMetrics).unsendable(reason)
 
 
 def _record_rejected_retry(metrics: HarnessMetrics, kind: Any) -> None:
@@ -115,6 +138,7 @@ def _record_recovery_probe(metrics: HarnessMetrics, mode: Any) -> None:
 
 register_llm_metric_event("media_rejected_retry", _record_rejected_retry)
 register_llm_metric_event("media_recovery_probe", _record_recovery_probe)
+register_llm_metric_event("media_unsendable", _record_unsendable)
 
 
 def image_block_count(event: Any) -> int:

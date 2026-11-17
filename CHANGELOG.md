@@ -6,6 +6,36 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Media (#597): more ways one attachment could fail every later request are
+  fixed. More provider refusals count as media rejections (image size and
+  dimension limits, a 413 about the attachment, Anthropic's `media_type`
+  error, "Could not process image" also as HTTP 500, OpenAI's
+  `input_audio.format` error, "unsupported MIME type", PDF page limits and
+  invalid, corrupt or password-protected PDFs, and a remote image URL that
+  cannot be downloaded, `litellm.ImageFetchError`). The endpoint retry layer
+  and the media recovery share one predicate, so such errors are not
+  retried unchanged; plain 5xx, 429, timeouts and network errors are
+  unchanged. Recovery no longer drops every attachment of a kind on its
+  second try: it tries the newest attachment, then bisects to find the bad
+  one(s), keeps exclusions only when the final request succeeds, and adds
+  at most `min(12, 4 * max_retries)` requests. When no rule matches, a
+  non-transient 400/413/415/422 on a request with media gets one probe
+  without media (no endpoint retries, reply discarded); if the probe fails
+  the original error is raised and nothing changes. `Image.from_url` no
+  longer sends an invented `image/jpeg` type (it guesses from the URL or
+  sends none), and a remote SVG, BMP, TIFF or HEIC URL gets the same note
+  as an inline one. Audio formats are sent as `mp3`/`wav`
+  (`audio/mpeg`, `audio/x-wav`); other audio formats and `Audio.from_url`
+  clips (a URL is not base64 audio) are replaced by a note. Images of
+  unknown type are recognised from their first bytes; the note for one that
+  is still unknown says it is an image. Images inside Anthropic
+  `tool_result` blocks are filtered and recoverable, an unsendable image in
+  replayed native assistant content falls back to the portable replay, and
+  the image-limit recovery counts only images that are sent. `show()` says
+  at once when an attachment cannot be sent. New harness counters:
+  `media.unsendable_replaced`, `media.recovery_probes`; `media.rejected_retry`
+  now counts only exclusions that were kept.
+
 - An inline image in a format models do not accept (anything but PNG, JPEG,
   GIF or WebP, for example SVG from `show(Image.from_file("chart.svg"))`) is now
   replaced by a note before each request, instead of being sent. Every MIME

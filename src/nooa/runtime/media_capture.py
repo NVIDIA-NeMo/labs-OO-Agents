@@ -149,8 +149,9 @@ def show(obj: Any) -> None:
     Call show() on any Image, Audio, Video, or File object to perceive its contents.
     Also accepts PIL images and matplotlib figures (auto-converted to PNG).
     If the current model cannot take this kind of media, it is replaced by a
-    short note when the next request is sent. Images must be PNG, JPEG, GIF or
-    WebP; others (such as SVG) are replaced by a note asking for a conversion.
+    short note when the next request is sent. Images should be PNG, JPEG, GIF or
+    WebP (the formats the common model APIs accept); others (such as SVG) are
+    replaced by a note asking for a conversion, and show() says so at once.
     """
     from nooa.media import Media
 
@@ -171,9 +172,42 @@ def show(obj: Any) -> None:
         if not buf.append(block):
             print(f"[show() limit reached ({buf.max_attachments}), attachment not added]")
             return
-        print(f"[shown: {obj}]")
+        warning = _unsendable_warning(block)
+        if warning:
+            print(f"[attached: {obj}, but {warning}]")
+        else:
+            print(f"[shown: {obj}]")
     else:
         print(f"[show() called outside execution context, not captured: {obj}]")
+
+
+def _unsendable_warning(block: dict[str, Any]) -> str:
+    """Why an attached block cannot reach the model, or "" (it may still be refused later).
+
+    Uses the same check as the request filter, which replaces such a block
+    with a note on every request; ``show()`` still keeps the block in history.
+    """
+    from nooa.media_inputs import attachment_kind
+    from nooa.unifiedllm.media_inputs import unsendable_audio, unsendable_image_type
+
+    kind = attachment_kind(block)
+    if kind == "image":
+        bad = unsendable_image_type(block)
+        if bad:
+            label = {"image/svg+xml": "SVG"}.get(bad, bad)
+            return (
+                f"{label} images cannot be sent to the model; convert it to PNG "
+                "(for example render the SVG) and show that instead"
+            )
+    if kind == "file" and block.get("type") == "image_url":
+        return "its image type is unknown, so it cannot be sent; save it as PNG and show that"
+    if kind == "audio":
+        reason = unsendable_audio(block)
+        if reason == "url":
+            return "audio given as a URL cannot be sent; use Audio.from_file or Audio.from_bytes"
+        if reason:
+            return f"{reason} audio cannot be sent to the model; convert it to WAV or MP3"
+    return ""
 
 
 def _try_auto_convert(obj: Any) -> dict[str, Any] | None:

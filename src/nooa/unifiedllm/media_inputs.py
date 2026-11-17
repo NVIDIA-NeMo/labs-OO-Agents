@@ -38,7 +38,9 @@ def removed_media_notice(kind: str) -> str:
 
 # Inline image formats the common model APIs accept (OpenAI, Anthropic and
 # Bedrock). This is a common floor, not a per-provider list (there is none
-# yet): Gemini does not take GIF and OpenAI refuses animated GIF. Other types,
+# yet), and not universal: Gemini does not take GIF but does take HEIC/HEIF,
+# and OpenAI refuses animated GIF. A provider that refuses one of these
+# still triggers the media recovery in the client. Other types,
 # such as SVG, BMP or TIFF, are refused by some providers; kept in history,
 # such an image would fail every later request.
 SENDABLE_IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
@@ -216,8 +218,8 @@ def unsendable_image_notice(media_type: str) -> str:
     """The text the model sees in place of an image in a format models do not accept."""
     return (
         f"[An image was removed here: {media_type} images cannot be sent to a model. "
-        "Only PNG, JPEG, GIF and WebP are accepted; convert it (for example render "
-        "an SVG to PNG) and show it again.]"
+        "Convert it to PNG, JPEG, GIF or WebP (for example render an SVG to PNG) "
+        "and show it again.]"
     )
 
 
@@ -696,6 +698,51 @@ def _tool_result_blocks(block: Mapping[str, Any]):
     return content if isinstance(content, (list, tuple)) else None
 
 
+def unsendable_occurrences(messages, enabled: tuple[MediaInput, ...]):
+    """The enabled attachments the filter replaces before sending, as (reason, key).
+
+    ``reason`` is the refused MIME type of an image (``image/svg+xml``) or the
+    audio problem (``url``, a format name). ``key`` identifies the occurrence
+    like ``media_occurrences`` keys do, so a caller can count each one once
+    although the filter runs on every request.
+    """
+    found = []
+    seen: dict[tuple[str, str], int] = {}
+    for message in messages:
+        if isinstance(message, (LLMResponse, CacheBoundary)) or not isinstance(message, Mapping):
+            continue
+        blocks = [message] if attachment_kind(message) is not None else []
+        if not blocks:
+            slot = "output" if message.get("type") == "function_call_output" else "content"
+            content = message.get(slot)
+            for block in content if isinstance(content, (list, tuple)) else ():
+                if isinstance(block, Mapping):
+                    nested = _tool_result_blocks(block)
+                    blocks.extend(nested if nested is not None else [block])
+        for block in blocks:
+            if not isinstance(block, Mapping):
+                continue
+            kind = attachment_kind(block)
+            if kind not in enabled:
+                continue
+            reason = (
+                unsendable_image_type(block)
+                if kind == "image"
+                else unsendable_audio(block)
+                if kind == "audio"
+                else None
+            )
+            if reason is None:
+                continue
+            digest = hashlib.sha256(
+                json.dumps(dict(block), sort_keys=True, default=repr).encode()
+            ).hexdigest()
+            count = seen.get((kind, digest), 0)
+            seen[(kind, digest)] = count + 1
+            found.append((f"{kind}:{reason}", (kind, digest, count)))
+    return found
+
+
 def media_occurrences(messages, enabled: tuple[MediaInput, ...]):
     """The attachment occurrences a request sends, oldest first, as (kind, key)."""
     return [(kind, key) for *_, kind, key in _occurrences(messages, enabled)]
@@ -705,12 +752,7 @@ def unknown_type_notice(part_kind: str, media_type: str) -> str:
     """The text the model sees in place of an image (audio, video) whose type is unknown."""
     subject = _NOTICE_SUBJECT[part_kind][0]
     described = f" ({media_type})" if media_type else ""
-    advice = (
-        " Only PNG, JPEG, GIF and WebP images can be sent; save it in one of these and "
-        "show it again."
-        if part_kind == "image"
-        else ""
-    )
+    advice = " Save it as PNG, JPEG, GIF or WebP and show it again." if part_kind == "image" else ""
     return f"[{subject} of unknown type{described} was removed here.{advice}]"
 
 
