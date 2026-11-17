@@ -278,32 +278,50 @@ def test_max_items_keeps_a_huge_ints_digit_count(value: int, max_items: int) -> 
 
 
 def test_a_colliding_key_past_the_copied_prefix_keeps_a_hidden_field_hidden() -> None:
-    # 4584541163 follow-up: a non-str key whose hash and __eq__ collide with
-    # the overrides attribute, placed past the copied prefix, must neither run
-    # (no hook calls) nor unhide a field hidden on the instance.
+    # 4584541163 follow-up: ``secret`` lies in the copied prefix, its hiding
+    # override past it; a non-str key whose type imitates ``str`` (metaclass
+    # ``__eq__``/``__hash__``, which fooled ``set(map(type, keys)) - {str}``)
+    # and whose own hash and ``__eq__`` collide with the overrides attribute
+    # sits next to it. No hook may run and the hidden value must not appear.
     from nooa.snapshot._fields import FIELD_METADATA_ATTR
 
     calls: list[str] = []
+    armed = False
 
-    class Colliding:
+    class LikeStr(type):
+        def __hash__(cls) -> int:
+            calls.append("meta-hash")
+            return hash(str)
+
+        def __eq__(cls, other: object) -> bool:
+            calls.append("meta-eq")
+            return other is str
+
+    class Colliding(metaclass=LikeStr):
         def __hash__(self) -> int:
-            calls.append("hash")
+            if armed:
+                calls.append("hash")
             return hash(FIELD_METADATA_ATTR)
 
         def __eq__(self, other: object) -> bool:
-            calls.append("eq")
-            return True
+            if armed:
+                calls.append("eq")
+            return armed
 
     class Plain:
         pass
 
     big = Plain()
+    big.secret = "TOPSECRET"  # type: ignore[attr-defined]
     for index in range(5_000):
         setattr(big, f"a{index:05d}", index)
-    big.secret = "TOPSECRET"  # type: ignore[attr-defined]
     set_field_metadata(big, "secret", hidden=True)
     storage: dict[Any, Any] = big.__dict__
-    storage[Colliding()] = "foreign"
+    key = Colliding()
+    storage[key] = "foreign"  # equality off: added beside the overrides entry
+    assert FIELD_METADATA_ATTR in dict.keys(storage)
+    assert any(k is key for k in dict.keys(storage))
+    armed = True
     calls.clear()
     text = render_python(capture(big, Limits(fallback="repr")))
     assert calls == []
