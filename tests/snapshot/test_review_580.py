@@ -275,3 +275,36 @@ def test_max_items_keeps_a_huge_ints_digit_count(value: int, max_items: int) -> 
     assert isinstance(snapshot, Object)
     assert render_json(snapshot, max_chars=200).startswith('{"digits": 5001')
     assert render_python(snapshot).startswith("int(5,001 digits")
+
+
+def test_a_colliding_key_past_the_copied_prefix_keeps_a_hidden_field_hidden() -> None:
+    # 4584541163 follow-up: a non-str key whose hash and __eq__ collide with
+    # the overrides attribute, placed past the copied prefix, must neither run
+    # (no hook calls) nor unhide a field hidden on the instance.
+    from nooa.snapshot._fields import FIELD_METADATA_ATTR
+
+    calls: list[str] = []
+
+    class Colliding:
+        def __hash__(self) -> int:
+            calls.append("hash")
+            return hash(FIELD_METADATA_ATTR)
+
+        def __eq__(self, other: object) -> bool:
+            calls.append("eq")
+            return True
+
+    class Plain:
+        pass
+
+    big = Plain()
+    for index in range(5_000):
+        setattr(big, f"a{index:05d}", index)
+    big.secret = "TOPSECRET"  # type: ignore[attr-defined]
+    set_field_metadata(big, "secret", hidden=True)
+    storage: dict[Any, Any] = big.__dict__
+    storage[Colliding()] = "foreign"
+    calls.clear()
+    text = render_python(capture(big, Limits(fallback="repr")))
+    assert calls == []
+    assert "TOPSECRET" not in text
