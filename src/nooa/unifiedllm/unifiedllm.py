@@ -78,7 +78,11 @@ _media_probe: ContextVar[bool] = ContextVar("media_probe", default=False)
 _NOT_MEDIA_RE = re.compile(
     r"content[ _-]?(?:policy|filter|management)|\bsafety\b|\bflagged\b|\bmoderation\b"
     r"|responsible ai|\btools?\s*[\[.]|\btool[_ ]choice\b|\bfunctions?\s*[\[.]"
-    r"|invalid schema|json schema|response_format|\bapi[_ ]key\b|authenticat|unauthori[sz]ed"
+    r"|\btool[_ ](?:use|result|call)s?\b|\btool[_ ](?:use_|call_)?ids?\b|\btool_use_id\b"
+    r"|\broles? must alternate\b|\bmax_(?:completion_|output_)?tokens\b|\bcompletion tokens\b"
+    r"|\btemperature\b|\btop_[pk]\b|\bextra inputs\b|\bmodel[ _]id\b|\binvalid model\b"
+    r"|\bfunction declarations?\b|\bschema\b|response_format"
+    r"|\bapi[_ ]key\b|authenticat|unauthori[sz]ed"
     r"|permission|model (?:not found|does not exist)|\bno such model\b|unknown model"
 )
 
@@ -86,13 +90,18 @@ _NOT_MEDIA_RE = re.compile(
 def _media_fallback_eligible(exc: BaseException) -> bool:
     """True if a failed request may be probed once without its media (general fallback).
 
-    Only a non-transient refusal of the request (HTTP 400, 413, 415 or 422)
-    counts. Never a 429, a timeout, a network error or a 5xx (the retry layer
-    handles those), and never an error about authentication, the model, the
-    context length, the per-request image limit, a content policy, the tools
-    or the output schema: removing media would only hide such an error.
+    Only a non-transient refusal of the request (HTTP 400, 415 or 422)
+    counts. Never a 413 (it counts only with media wording, as a rejection:
+    ``rejected_media_kinds``), a 429, a timeout, a network error or a 5xx
+    (the retry layer handles those), and never an error about
+    authentication, the model, the context length, the per-request image
+    limit, a content policy, the tools (tool_use/tool_result ids, roles that
+    must alternate), sampling or token parameters, a function declaration or
+    a schema: removing media would only hide such an error. A structured
+    ``param`` that names no media part (``tools[0].function.parameters``)
+    rules the fallback out.
     """
-    if _http_status(exc) not in {400, 413, 415, 422}:
+    if _http_status(exc) not in {400, 415, 422}:
         return False
     names = {cls.__name__ for cls in type(exc).__mro__}
     if names & {"ContextWindowExceededError", "ContentPolicyViolationError", "AdmissionError"}:

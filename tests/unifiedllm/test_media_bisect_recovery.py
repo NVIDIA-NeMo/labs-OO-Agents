@@ -231,3 +231,56 @@ async def test_only_kept_exclusions_are_counted():
     attrs = metrics.to_span_attributes()
     assert attrs["harness.media.rejected_retry.count"] == 1
     assert attrs["harness.media.recovery_probes.count"] > 1
+
+
+class StatusError(Exception):
+    def __init__(self, status, message, param=None):
+        super().__init__(message)
+        self.status_code = status
+        self.body = {"error": {"message": message, "param": param}}
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "messages.2: unexpected `tool_use_id` found in `tool_result` blocks: toolu_01",
+        "Each `tool_result` block must have a corresponding `tool_use` block",
+        "An assistant message with 'tool_calls' must be followed by tool messages",
+        "Invalid tool call id: call_abc",
+        "roles must alternate between user and assistant",
+        "max_tokens: 64000 > 32000, which is the maximum allowed",
+        "This model's maximum is 4096 completion tokens",
+        "temperature and top_p cannot both be specified for this model",
+        "Extra inputs are not permitted",
+        "Invalid model ID was provided",
+        "invalid model: gpt-9",
+        "Function declaration is invalid: required property missing",
+        "Invalid JSON: schema does not match",
+    ],
+)
+def test_ordinary_400s_are_not_eligible_for_the_fallback(text):
+    from nooa.unifiedllm.unifiedllm import _media_fallback_eligible
+
+    assert not _media_fallback_eligible(bad_request(text))
+    assert _media_fallback_eligible(bad_request(UNNAMED))
+
+
+def test_413_and_bracketed_params_are_not_eligible_for_the_fallback():
+    from nooa.unifiedllm.unifiedllm import _media_fallback_eligible
+
+    assert not _media_fallback_eligible(StatusError(413, "Request Entity Too Large"))
+    assert not _media_fallback_eligible(StatusError(413, "payload exceeds 20MB"))
+    assert not _media_fallback_eligible(
+        StatusError(400, "expected an object", "tools[0].function.parameters")
+    )
+    assert not _media_fallback_eligible(StatusError(400, "bad value", "max_tokens"))
+
+
+async def test_a_tool_use_400_with_images_sends_no_probe():
+    images = numbered_images(3)
+    error = bad_request("unexpected `tool_use_id` found in `tool_result` blocks")
+    with client() as c, patch("litellm.acompletion", new_callable=AsyncMock) as wire:
+        wire.side_effect = error
+        with pytest.raises(litellm.BadRequestError):
+            await c.acall(messages_with(images))
+        assert wire.call_count == 1
