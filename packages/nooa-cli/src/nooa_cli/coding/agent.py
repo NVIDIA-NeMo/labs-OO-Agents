@@ -22,12 +22,20 @@ from nooa.interactive import (
 )
 from nooa.paths import get_project_dir
 from nooa.runtime.channels import Channel
+from nooa.skill import slash_command
 from nooa.skill_registry import SkillRegistry
 from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActStrategy, PredictStrategy
 from nooa.tools import SkillWriting, TodoManager
 from nooa.tools import shell_tools as _shell_tools
 from nooa.tools.shell_tools import ShellTools
+from nooa.workspace_trust import (
+    WorkspaceTrustError,
+    code_allowed_outside,
+    is_trusted,
+    trust,
+    untrusted_notice,
+)
 from nooa_cli.coding.activity import ActivityShellTools
 from nooa_cli.coding.instructions import render_agent_instructions
 from nooa_cli.tools.repo_tools import RepoTools
@@ -77,6 +85,10 @@ class CodingAgent(InteractiveAgent):
     _summarizers: Annotated[list[Any], hidden, nosnapshot]
     # Set by CodingSlashCommandRegistry; rebuilt with the host, never saved.
     _command_registry: Annotated[Any, hidden, nosnapshot]
+    # Whether self.cwd is a trusted folder (nooa.workspace_trust), and the
+    # skill roots the host passed, for /trust to discover again.
+    _workspace_trusted: Annotated[bool, hidden, nosnapshot]
+    _host_skills_dirs: Annotated[list[Path], hidden, nosnapshot]
 
     def __init__(
         self,
@@ -99,6 +111,17 @@ class CodingAgent(InteractiveAgent):
         self.repo = RepoTools(root=self.cwd, session=self.shell.session)
         self.todo = TodoManager()
         self.skills = SkillRegistry(self)
+        # An untrusted workspace runs none of its own code: SKILL.md text
+        # skills load, code skills found in (or pointing into) self.cwd are
+        # not imported. The user's own skill roots load as before.
+        self._workspace_trusted = is_trusted(self.cwd)
+        self._host_skills_dirs = list(skills_dirs or [])
+        if not self._workspace_trusted:
+            from nooa_cli.coding.settings import load_user_skill_roots
+
+            self.skills.code_allowed = code_allowed_outside(
+                self.cwd, user_roots=load_user_skill_roots()
+            )
         self.skills.register("nemo.shell", self.shell)
         self.skills.register("nemo.repo", self.repo)
         self.skills.register("nemo.todo", self.todo)
@@ -130,6 +153,8 @@ class CodingAgent(InteractiveAgent):
             self.skills.load(installed)
         if skills_dirs:
             self.skills.discover_skills_dirs(skills_dirs)
+        if self.skills.skipped_code():
+            self.skills.add_notice(untrusted_notice(self.cwd))
 
         self.context["python_tools"] = Context(
             doc(RepoTools, ActivityShellTools),
@@ -146,6 +171,38 @@ class CodingAgent(InteractiveAgent):
         spec(self, "events", hidden=False)
 
         install_summarizer(summarization or SummarizationConfig(), self)
+
+    @hidden
+    def workspace_untrusted_notice(self) -> str | None:
+        """The notice a host shows when this untrusted workspace's code skills were skipped, else None."""
+        if self._workspace_trusted or not self.skills.skipped_code():
+            return None
+        return untrusted_notice(self.cwd)
+
+    @slash_command("trust", output_to_agent=False)
+    async def _trust_command(self, args: str = "") -> str:
+        """Trust this folder and load its code skills."""
+        # A slash command, not a method in the model's API: the user trusts
+        # the folder. The model can still edit files during a turn.
+        from nooa_cli.coding.settings import load_coding_skills_dirs
+
+        if self._workspace_trusted:
+            return f"This folder is already trusted: {self.cwd}"
+        notice = untrusted_notice(self.cwd)
+        try:
+            trust(self.cwd)
+        except WorkspaceTrustError as exc:
+            return str(exc)
+        self._workspace_trusted = True
+        self.skills.code_allowed = None  # also clears skipped_code()
+        self.skills.remove_notice(notice)
+        self.skill_writing.enable_code()
+        dirs = [*self._host_skills_dirs, *load_coding_skills_dirs(self.cwd, trusted=True)]
+        self.skills.discover_skills_dirs(list(dict.fromkeys(dirs)))
+        registry = getattr(self, "_command_registry", None)
+        if registry is not None:
+            registry.refresh_skill_commands()
+        return f"Trusted {self.cwd}. Its code skills are loaded now."
 
     def get_summarization_status(self) -> dict[str, Any]:
         """Return compact history information for host status displays."""

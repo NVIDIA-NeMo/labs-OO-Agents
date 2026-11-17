@@ -56,9 +56,18 @@ def command(model: str, client_type: str | None) -> None:
     _warn_deprecated()  # `nooa acp`; the `nooa-acp` script has warned already
     from nooa.secrets import load_secrets_into_env
     from nooa.unifiedllm import get_llm_client
+    from nooa.workspace_trust import launch_project_trusted
     from nooa_acp.server import serve
 
-    load_secrets_into_env()
+    # The project layer of secrets.yaml and llm_config.yaml comes from the
+    # launch directory; an untrusted one must not set keys or model endpoints.
+    project_trusted = launch_project_trusted()
+    load_secrets_into_env(include_project=project_trusted)
+    if not project_trusted:
+        from nooa.llm_config import llm_config_chain
+        from nooa.unifiedllm.registry import reload_registry
+
+        reload_registry(*llm_config_chain(include_project=False))
     nvidia_api_key = os.getenv("NVIDIA_API_KEY") if model.startswith("nvidia_nim/") else None
 
     def llm_factory() -> "UnifiedLLM":

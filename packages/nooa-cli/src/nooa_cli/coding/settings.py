@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from nooa.layered_config import load_layered_yaml
+from nooa.workspace_trust import USER_SKILL_DIRS, user_skill_roots
 
 _SETTINGS_FILENAME = "settings.yaml"
 _SETTINGS_ENV_VAR = "NEMO_OO_SETTINGS"
@@ -18,11 +19,6 @@ _LEGACY_CONFIG_FILENAME = "config.toml"
 _WORKSPACE_SKILL_DIRS = (
     Path(".agents/skills"),
     Path(".cursor/skills"),
-    Path(".claude/skills"),
-    Path(".claude/commands"),
-)
-_USER_SKILL_DIRS = (
-    Path(".agents/skills"),
     Path(".claude/skills"),
     Path(".claude/commands"),
 )
@@ -34,6 +30,7 @@ def load_coding_skills_dirs(
     workspace: str | Path,
     *,
     explicit: Iterable[str | Path] = (),
+    trusted: bool | None = None,
 ) -> list[Path]:
     """Return existing skill roots for one coding-agent workspace.
 
@@ -41,12 +38,26 @@ def load_coding_skills_dirs(
     configuration. ``tui.additional_skills_dirs`` remains supported while the
     TUI migrates to the shared section. Relative configured paths are resolved
     against the active workspace, not the ACP server process's checkout.
+
+    ``trusted`` (default: ``nooa.workspace_trust.is_trusted(workspace)``)
+    False leaves out the directories the workspace itself names (its
+    project settings layer and legacy ``config.toml``); the user and
+    ``NEMO_OO_SETTINGS`` layers still apply.
+
+    The paths are absolute but not resolved: a workspace directory that is a
+    symlink is still reported inside the workspace, so the trust gate
+    (``nooa.workspace_trust.is_inside``) sees where it was found.
     """
     root = Path(workspace).expanduser().resolve()
+    if trusted is None:
+        from nooa.workspace_trust import is_trusted
+
+        trusted = is_trusted(root)
     settings = load_layered_yaml(
         _SETTINGS_FILENAME,
         _SETTINGS_ENV_VAR,
         project_dir=root / ".nooa",
+        include_project=trusted,
     )
 
     configured: list[str | Path] = []
@@ -65,24 +76,36 @@ def load_coding_skills_dirs(
         and "additional_skills_dirs" in project_settings[section]
         for section in ("coding", "tui")
     )
-    if not os.environ.get(_SETTINGS_ENV_VAR) and not modern_key_set:
+    if trusted and not os.environ.get(_SETTINGS_ENV_VAR) and not modern_key_set:
         configured.extend(_legacy_project_paths(root / ".nooa" / _LEGACY_CONFIG_FILENAME))
 
     candidates: list[Path] = []
     candidates.extend(_resolve_configured(path, root) for path in explicit)
     candidates.extend(_resolve_configured(path, root) for path in configured)
     candidates.extend(root / path for path in _WORKSPACE_SKILL_DIRS)
-    candidates.extend(Path.home() / path for path in _USER_SKILL_DIRS)
+    candidates.extend(Path.home() / path for path in USER_SKILL_DIRS)
 
     result: list[Path] = []
     seen: set[Path] = set()
     for candidate in candidates:
-        resolved = candidate.expanduser().resolve()
+        found = Path(os.path.abspath(candidate.expanduser()))
+        resolved = found.resolve()
         if resolved in seen or not resolved.is_dir():
             continue
         seen.add(resolved)
-        result.append(resolved)
+        result.append(found)
     return result
+
+
+def load_user_skill_roots() -> list[Path]:
+    """The user's own skill roots, whose code loads in any workspace.
+
+    ``nooa.workspace_trust.user_skill_roots`` plus the absolute
+    ``coding``/``tui.additional_skills_dirs`` of the user and
+    ``NEMO_OO_SETTINGS`` settings layers.
+    """
+    settings = load_layered_yaml(_SETTINGS_FILENAME, _SETTINGS_ENV_VAR, include_project=False)
+    return user_skill_roots([*_setting_paths(settings, "coding"), *_setting_paths(settings, "tui")])
 
 
 def _setting_paths(settings: Mapping[str, Any], section: str) -> list[str | Path]:
@@ -137,4 +160,4 @@ def _legacy_project_paths(path: Path) -> list[str | Path]:
     return [item for item in value if isinstance(item, str)]
 
 
-__all__ = ["load_coding_skills_dirs"]
+__all__ = ["load_coding_skills_dirs", "load_user_skill_roots"]

@@ -108,12 +108,21 @@ drives it. `--model` accepts any LiteLLM model name or configured NOOA alias.
 
 ## Opening a repository runs code from it
 
-**Creating a session imports Python from the workspace, before you send a
-prompt.** This is deliberate — it is how workspace skills work — but it means
-opening a folder is enough to execute code it contains. Treat opening a
-repository with NOOA as equivalent to running its build.
+**Only in a folder you trust.** In an untrusted folder, creating a session
+imports no Python from the workspace: code skills (packages in `.nooa/skills`,
+`.py` files and packages in `.agents/skills`, `.cursor/skills`,
+`.claude/skills` and `.claude/commands`) are skipped, the skill directories
+named by `<workspace>/.nooa/settings.yaml` or the legacy `.nooa/config.toml`
+are ignored, and `SKILL.md` text skills still load. A symlink in the folder
+counts as the folder, wherever it points. Your own skill directories
+(`~/.agents/skills`, `~/.claude/skills`, `~/.claude/commands`) load in every
+folder. The session shows one notice when code skills were skipped; type `/trust` to trust the folder and load
+its code skills. List folders under `trusted_folders` in your user
+`settings.yaml` (or in a `NEMO_OO_SETTINGS` file, for CI) to trust them up
+front. See [workspace trust](../../docs/workspace-trust.md).
 
-Three paths load workspace code at `session/new` and `session/load`:
+In a trusted folder, opening it is enough to execute code it contains: treat
+it as running its build.
 
 - **Skill roots.** Every `.py` file under `.agents/skills`, `.cursor/skills`,
   `.claude/skills`, or `.claude/commands` is imported. Module-level code runs
@@ -123,17 +132,20 @@ Three paths load workspace code at `session/new` and `session/load`:
   `.nooa/config.toml` may name *additional* skill roots. Those paths are not
   confined to the workspace: a relative path escaping it, an absolute path, or a
   symlink is accepted as written.
-- **Agent-written skills.** `<workspace>/.nooa/skills/<package>/` (and an older
-  `<workspace>/.nooa/libs/<package>/`) is imported and its
-  directory is prepended to `sys.path` for the life of the process. One ACP
-  server serves several workspaces, so a package name there can shadow the same
-  import for later sessions on other workspaces.
+- **Agent-written skills.** `<workspace>/.nooa/skills/<package>/` is imported
+  and its directory is prepended to `sys.path` for the life of the process. One
+  ACP server serves several workspaces, so a package name there can shadow the
+  same import for later sessions on other workspaces.
 
-The agent runs as you, in a process holding your model credentials. There is no
-consent prompt on these paths.
+The model settings this server uses (`llm_config.yaml`, `secrets.yaml`) are read
+when it starts; their project layer comes from the launch directory and is
+skipped when that directory is not trusted.
 
-**Open repositories you would run.** For anything else, use an OS-level sandbox,
-or start a separate server per workspace with credentials scoped to that task.
+The agent runs as you, in a process holding your model credentials. Trust
+stops automatic execution at open time; it does not stop the model from running
+commands in the folder during a turn. For untrusted tasks, use an OS-level
+sandbox, or start a separate server per workspace with credentials scoped to
+that task.
 
 ## How it behaves
 

@@ -598,6 +598,9 @@ class CodingACPAdapter:
             session.bridge.publish_best_effort(
                 _available_commands_update(session.commands.commands())
             )
+            notice = session.agent.workspace_untrusted_notice()
+            if notice:
+                session.bridge.publish_best_effort(update_agent_message(text_block(notice)))
             if session.startup_warnings:
                 details = "\n".join(f"- {warning}" for warning in session.startup_warnings)
                 session.bridge.publish_best_effort(

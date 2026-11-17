@@ -90,11 +90,19 @@ def _write_protocol_skill(workspace: Path) -> None:
     )
 
 
+def _trust_in_subprocess(tmp_path: Path) -> None:
+    """Trust ``tmp_path`` in the server process, which the test fixture does not reach."""
+    user = tmp_path / "user-config"
+    user.mkdir(exist_ok=True)
+    (user / "settings.yaml").write_text(f"trusted_folders: [{tmp_path}]\n")
+
+
 async def test_acp_subprocess_transcript(tmp_path, monkeypatch):
     client = _RecordingClient()
     fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user-config"))
     monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
+    _trust_in_subprocess(tmp_path)
     _write_protocol_skill(tmp_path)
     incoming: list[dict[str, object]] = []
 
@@ -139,7 +147,10 @@ async def test_acp_subprocess_transcript(tmp_path, monkeypatch):
     commands = next(
         update for _, update in client.updates if isinstance(update, AvailableCommandsUpdate)
     )
-    assert [command.name for command in commands.available_commands] == ["protocol-check"]
+    assert [command.name for command in commands.available_commands] == [
+        "protocol-check",
+        "trust",
+    ]
     assert commands.available_commands[0].input is not None
     assert commands.available_commands[0].input.root.hint == "<value>"
     started = next(update for _, update in client.updates if isinstance(update, ToolCallStart))
@@ -175,6 +186,7 @@ async def test_acp_subprocess_dispatches_advertised_slash_command(tmp_path, monk
     fixture = Path(__file__).parent / "fixtures" / "fake_agent.py"
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user-config"))
     monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
+    _trust_in_subprocess(tmp_path)
     _write_protocol_skill(tmp_path)
 
     async with spawn_agent_process(
