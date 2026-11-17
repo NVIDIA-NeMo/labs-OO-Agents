@@ -220,7 +220,7 @@ def test_truncation_merge_with_is_the_generic_merge():
     assert base.merge_with(other).capture == CaptureConfig(max_stdout=1_000, max_stderr=7)
 
 
-async def test_a_subclass_replaces_only_the_models_it_names():
+async def test_a_subclass_overrides_only_the_fields_it_sets():
     class Other(BaseModel):
         model_config = ConfigDict(frozen=True)
         c: int = 0
@@ -233,7 +233,8 @@ async def test_a_subclass_replaces_only_the_models_it_names():
 
     agent = Child()
     try:
-        assert effective(_Limits, agent) == _Limits(b=22)  # as truncation=: replaced
+        limits = effective(_Limits, agent)
+        assert (limits.a, limits.b) == (11, 22)  # merged over the base class
         assert effective(Other, agent) == Other(c=1)  # inherited
     finally:
         await agent.aclose()
@@ -272,3 +273,51 @@ def test_core_does_not_import_package_configs():
         or "CodingLimits" in line
     ]
     assert not offenders, offenders
+
+
+# A subclass's truncation= / configs= are partial overrides over its base classes'.
+
+
+class _BaseAgent(
+    Agent,
+    llm=FakeLLMClient([]),
+    truncation=TruncationConfig(placeholder_chars=10_000),
+    configs=[_Limits(a=1)],
+):
+    pass
+
+
+class _ChildAgent(
+    _BaseAgent,
+    truncation=TruncationConfig(capture=CaptureConfig(max_shell_output=123)),
+    configs=[_Limits(b=2)],
+):
+    pass
+
+
+class _GrandchildAgent(_ChildAgent, configs=[_Limits(a=3)]):
+    pass
+
+
+def test_a_subclass_truncation_merges_over_its_base_classes():
+    config = effective(TruncationConfig, _ChildAgent())
+    assert config.placeholder_chars == 10_000  # from the base class
+    assert config.capture.max_shell_output == 123  # from the subclass
+    assert config.capture.max_stdout == DEFAULT_TRUNCATION_CONFIG.capture.max_stdout
+
+
+def test_a_subclass_configs_merge_over_its_base_classes():
+    child = effective(_Limits, _ChildAgent())
+    assert (child.a, child.b) == (1, 2)
+    grandchild = effective(_Limits, _GrandchildAgent())
+    assert (grandchild.a, grandchild.b) == (3, 2)  # nearest class wins per field
+    base = effective(_Limits, _BaseAgent())
+    assert (base.a, base.b) == (1, 20)  # a subclass never changes its base
+
+
+def test_an_instance_merges_over_the_merged_classes():
+    agent = _ChildAgent(configs=[_Limits(a=7)], truncation=TruncationConfig(placeholder_chars=5))
+    limits = effective(_Limits, agent)
+    assert (limits.a, limits.b) == (7, 2)
+    config = effective(TruncationConfig, agent)
+    assert (config.placeholder_chars, config.capture.max_shell_output) == (5, 123)

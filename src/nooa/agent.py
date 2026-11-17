@@ -176,9 +176,9 @@ class Agent(metaclass=AgentMeta):
             event_query: Default EventQuery for filtering events in context.
             configs: Overrides of other config models (a package's own limits
                 model), one instance per model;
-                read with ``nooa.config.effective(Model)``. A subclass's
-                instance of a model replaces the inherited one (as
-                ``truncation=`` does); models it does not name are inherited.
+                read with ``nooa.config.effective(Model)``. Like
+                ``truncation=``, a class's overrides are partial: the fields
+                it sets win over its base classes', the rest are inherited.
             **kwargs: Additional arguments for multiple inheritance support.
         """
         _validate_llm_param(llm, cls.__name__)
@@ -198,10 +198,9 @@ class Agent(metaclass=AgentMeta):
         if configs is not None:
             from nooa.config.effective import config_overrides
 
-            cls._agent_configs = {  # type: ignore[attr-defined]
-                **getattr(cls, "_agent_configs", {}),
-                **config_overrides(configs, f"class {cls.__name__}"),
-            }
+            # Only this class's own overrides; _resolve_configs merges them
+            # along the MRO, base classes first.
+            cls._agent_configs = config_overrides(configs, f"class {cls.__name__}")  # type: ignore[attr-defined]
 
         from nooa.config.execution_config import ExecutionConfig as _EC
 
@@ -456,7 +455,8 @@ class Agent(metaclass=AgentMeta):
 
         Resolution order (earlier merged with later, later takes precedence):
         1. Default config (DEFAULT_TRUNCATION_CONFIG)
-        2. Class-level: class MyAgent(Agent, truncation=...)
+        2. Class-level: each class's own ``truncation=``, base classes first
+           (a subclass overrides only the fields it sets)
         3. Instance-level: MyAgent(truncation=...)
 
         Args:
@@ -471,10 +471,12 @@ class Agent(metaclass=AgentMeta):
         # Start with default config
         config = DEFAULT_TRUNCATION_CONFIG
 
-        # Merge class-level config if present
-        class_truncation = getattr(self.__class__, "_agent_truncation", None)
-        if class_truncation is not None:
-            config = config.merge_with(class_truncation)
+        # Merge each class's own truncation=, base classes first, so a
+        # subclass overrides only the fields it sets.
+        for klass in reversed(type(self).__mro__):
+            class_truncation = klass.__dict__.get("_agent_truncation")
+            if class_truncation is not None:
+                config = config.merge_with(class_truncation)
 
         # Merge instance-level config if present
         if instance_truncation is not None:
@@ -490,8 +492,11 @@ class Agent(metaclass=AgentMeta):
         """Resolve ``configs=`` by type: the defaults, the class level, then the instance level."""
         from nooa.config.effective import config_overrides, layer_configs
 
-        class_configs = getattr(self.__class__, "_agent_configs", None) or {}
-        resolved = layer_configs({}, class_configs)
+        resolved: dict[type[BaseModel], BaseModel] = {}
+        for klass in reversed(type(self).__mro__):  # base classes first
+            class_configs = klass.__dict__.get("_agent_configs")
+            if class_configs:
+                resolved = layer_configs(resolved, class_configs)
         return layer_configs(
             resolved, config_overrides(instance_configs, type(self).__name__ + "()")
         )

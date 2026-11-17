@@ -100,9 +100,11 @@ agent = MyAgent(configs=[AtomLimits(instructions_file_chars=20_000)])      # ins
 effective(AtomLimits).max_job_tail   # read where the limit is applied
 ```
 
-Outside any agent `effective(Model)` is the model's defaults (`Model()`). A
-subclass's `configs=` instance of a model replaces the inherited one, as
-`truncation=` does; models it does not name are inherited.
+Outside any agent `effective(Model)` is the model's defaults (`Model()`).
+Every layer is a partial override: the fields it sets win, the rest come from
+the layer below. The layers are the model's defaults, then each class's own
+`truncation=` / `configs=` (base classes first), then the instance, then the
+method's `@strategy(...)`.
 `nooa.config.merge_config(base, override)` is the field merge all levels use.
 
 | Field | Default | Bounds |
