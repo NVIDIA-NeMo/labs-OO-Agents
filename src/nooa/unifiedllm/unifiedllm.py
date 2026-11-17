@@ -3020,8 +3020,11 @@ class CompletionClient(UnifiedLLM):
         add_session_affinity_header(api_params)
         # RetryConfig owns endpoint retries. LiteLLM otherwise has the OpenAI SDK
         # retry each attempt twice more, tripling the configured budget. An
-        # explicit max_retries passthrough still opts into SDK retries.
+        # explicit max_retries passthrough still opts into SDK retries, except
+        # for a media recovery request: the recovery budget counts real requests.
         api_params.setdefault("max_retries", 0)
+        if _media_probe.get():
+            api_params["max_retries"] = 0
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
@@ -3141,8 +3144,11 @@ class CompletionClient(UnifiedLLM):
         add_session_affinity_header(api_params)
         # RetryConfig owns endpoint retries. LiteLLM otherwise has the OpenAI SDK
         # retry each attempt twice more, tripling the configured budget. An
-        # explicit max_retries passthrough still opts into SDK retries.
+        # explicit max_retries passthrough still opts into SDK retries, except
+        # for a media recovery request: the recovery budget counts real requests.
         api_params.setdefault("max_retries", 0)
+        if _media_probe.get():
+            api_params["max_retries"] = 0
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
@@ -3448,6 +3454,10 @@ class ResponsesClient(UnifiedLLM):
         assert http_client is not None
         if http_client.sync_client is not None:
             api_params.setdefault("client", http_client.sync_client)
+        if _media_probe.get() and "max_retries" in api_params:
+            api_params["max_retries"] = 0  # a media recovery request: no SDK retries
+        if _media_probe.get() and "client" in api_params:
+            api_params["client"] = _with_sdk_retries(api_params["client"], 0)
 
         def _make_call():
             return cast("litellm.ResponsesAPIResponse", litellm.responses(**api_params))
@@ -3537,6 +3547,10 @@ class ResponsesClient(UnifiedLLM):
         assert http_client is not None
         if http_client.async_client is not None:
             api_params.setdefault("client", http_client.async_client)
+        if _media_probe.get() and "max_retries" in api_params:
+            api_params["max_retries"] = 0  # a media recovery request: no SDK retries
+        if _media_probe.get() and "client" in api_params:
+            api_params["client"] = _with_sdk_retries(api_params["client"], 0)
 
         async def _make_call():
             async def call_provider():
