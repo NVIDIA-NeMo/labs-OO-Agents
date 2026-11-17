@@ -29,3 +29,26 @@ def _no_connect_session_call_pacing(monkeypatch):
     except ImportError:
         return
     monkeypatch.setattr(_session, "SESSION_CALL_PACING_SECONDS", 0)
+
+
+@pytest.fixture(autouse=True)
+def _trust_test_folders(monkeypatch, tmp_path_factory):
+    """Trust pytest's temp folders (nooa.workspace_trust), as a user who ran /trust would.
+
+    Tests build workspaces there and expect their code skills to load. A
+    test of the untrusted case requests ``untrusted_folders``.
+    """
+    from nooa import workspace_trust
+
+    real = workspace_trust.trusted_folders
+    base = tmp_path_factory.getbasetemp().resolve()
+    monkeypatch.setattr(workspace_trust, "trusted_folders", lambda: [*real(), base])
+    return real
+
+
+@pytest.fixture
+def untrusted_folders(monkeypatch, _trust_test_folders):
+    """Undo ``_trust_test_folders``: only the user and NEMO_OO_SETTINGS files trust folders."""
+    from nooa import workspace_trust
+
+    monkeypatch.setattr(workspace_trust, "trusted_folders", _trust_test_folders)

@@ -42,18 +42,20 @@ _SECRETS_FILENAME = "secrets.yaml"
 _SECRETS_ENV_VAR = "NEMO_OO_SECRETS"
 
 
-def load_secrets_into_env() -> list[str]:
+def load_secrets_into_env(*, include_project: bool = True) -> list[str]:
     """Load layered ``secrets.yaml`` and push its ``env:`` map into ``os.environ``.
 
     A variable already present in ``os.environ`` is left unchanged, so the
     process or shell value wins. Entries with a null value are skipped, and a
-    non-mapping ``env:`` is logged and ignored.
+    non-mapping ``env:`` is logged and ignored. ``include_project=False``
+    skips the project layer (interactive hosts pass
+    ``nooa.workspace_trust.launch_project_trusted()``).
 
     Returns:
         The names of the variables this call set (those that were missing),
         for diagnostics. Safe to call several times.
     """
-    merged = load_layered_yaml(_SECRETS_FILENAME, _SECRETS_ENV_VAR)
+    merged = load_layered_yaml(_SECRETS_FILENAME, _SECRETS_ENV_VAR, include_project=include_project)
     env_map = merged.get("env")
     if env_map is None:
         return []

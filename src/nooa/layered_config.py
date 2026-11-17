@@ -86,6 +86,7 @@ def layered_paths(
     *,
     prepend: Iterable[Path] = (),
     project_dir: Path | None = None,
+    include_project: bool = True,
 ) -> list[Path]:
     """Return existing config paths for *filename*, lowest priority first.
 
@@ -103,6 +104,8 @@ def layered_paths(
             discovery is used. Interactive hosts should pass the active
             workspace's ``.nooa`` directory so several workspaces can be
             served safely by one process.
+        include_project: False leaves the project layer out (an untrusted
+            workspace, see :mod:`nooa.workspace_trust`).
 
     Only files that exist are returned, each canonicalised via
     :meth:`pathlib.Path.resolve`. Env-var paths that don't exist log a
@@ -132,10 +135,13 @@ def layered_paths(
     if user is not None:
         _push(user)
 
-    project_path = project_dir / filename if project_dir is not None else get_project_dir(filename)
-    project = _resolved_if_exists(project_path)
-    if project is not None:
-        _push(project)
+    if include_project:
+        project_path = (
+            project_dir / filename if project_dir is not None else get_project_dir(filename)
+        )
+        project = _resolved_if_exists(project_path)
+        if project is not None:
+            _push(project)
 
     if env_var is not None:
         for raw, resolved in _env_paths(env_var):
@@ -175,6 +181,7 @@ def load_layered_yaml(
     prepend: Iterable[Path] = (),
     project_dir: Path | None = None,
     base: Mapping[str, Any] | None = None,
+    include_project: bool = True,
 ) -> dict[str, Any]:
     """Load and deep-merge every layer of *filename* into a single dict.
 
@@ -184,7 +191,7 @@ def load_layered_yaml(
 
     *prepend* supplies lowest-priority paths just like :func:`layered_paths`.
     *base*, when given, is merged under every layer, as if it were one more
-    lowest-priority file.
+    lowest-priority file. ``include_project=False`` leaves the project layer out.
     """
     import yaml
 
@@ -194,6 +201,7 @@ def load_layered_yaml(
         env_var,
         prepend=prepend,
         project_dir=project_dir,
+        include_project=include_project,
     ):
         try:
             data = yaml.safe_load(path.read_text())

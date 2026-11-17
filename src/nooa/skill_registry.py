@@ -9,7 +9,7 @@ import inspect
 import logging
 import sys
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from importlib.metadata import entry_points
 from pathlib import Path
@@ -225,6 +225,10 @@ class SkillRegistry(Skill):
         self._name_conflicts: dict[str, str] = {}
         # Lines a host or skill adds to the status (add_notice()), in order.
         self._notices: list[str] = []
+        # Host policy for code skills found on disk (see code_allowed).
+        self._code_allowed: Callable[[Path], bool] | None = None
+        # Code skill paths skipped by ``code_allowed``, in discovery order.
+        self._skipped_code: list[Path] = []
         self._load_generation = 0
         self._discover()
         super().__init__()
@@ -262,6 +266,22 @@ class SkillRegistry(Skill):
         completer) uses this instead of reaching into ``_discovered``.
         """
         return self._discovered.get(name)
+
+    @property
+    def code_allowed(self) -> Callable[[Path], bool] | None:
+        """Host policy for code skills found on disk (packages and loose ``.py`` files).
+
+        Called with the skill's path; False skips the import and records the
+        path in :meth:`skipped_code`. None (the default) allows everything.
+        ``SKILL.md`` text skills are never affected. Setting a new policy
+        clears :meth:`skipped_code`; discover again to load what it allows.
+        """
+        return self._code_allowed
+
+    @code_allowed.setter
+    def code_allowed(self, policy: Callable[[Path], bool] | None) -> None:
+        self._code_allowed = policy
+        self._skipped_code = []
 
     def discover_libs(self, libs_path: "Path") -> None:
         """Scan a libs directory and register each skill in it.
@@ -304,6 +324,8 @@ class SkillRegistry(Skill):
             if entry.is_dir() and (entry / "pyproject.toml").exists()
         ]
         for lib_dir in libraries:
+            if not self._allows_code(lib_dir):
+                continue
             lib_name = lib_dir.name
             reg_name, target = self._read_skill_entry(lib_dir, lib_name)
             if reg_name in self._loaded:
@@ -448,6 +470,20 @@ class SkillRegistry(Skill):
         except Exception:
             logger.warning("TextSkill %s skipped", entry, exc_info=True)
 
+    def _allows_code(self, path: Path) -> bool:
+        """Whether ``code_allowed`` lets the code skill at ``path`` be imported (records a skip)."""
+        if self._code_allowed is None or self._code_allowed(Path(path)):
+            return True
+        found = Path(path).absolute()
+        if found not in self._skipped_code:
+            self._skipped_code.append(found)
+            logger.info("Code skill %s not loaded: its folder is not trusted", path)
+        return False
+
+    def skipped_code(self) -> list[Path]:
+        """Code skill paths that ``code_allowed`` refused, in discovery order."""
+        return list(self._skipped_code)
+
     def name_conflicts(self) -> list[str]:
         """One line per skill skipped because the agent already has its attribute name."""
         return [self._name_conflicts[name] for name in sorted(self._name_conflicts)]
@@ -456,6 +492,11 @@ class SkillRegistry(Skill):
         """Show ``line`` in the skills status (once; e.g. a skills directory no longer loaded)."""
         if line not in self._notices:
             self._notices.append(line)
+
+    def remove_notice(self, line: str) -> None:
+        """Remove a line added with :meth:`add_notice` (no error if absent)."""
+        if line in self._notices:
+            self._notices.remove(line)
 
     def notices(self) -> list[str]:
         """The status lines added with :meth:`add_notice`, in order."""
@@ -503,6 +544,8 @@ class SkillRegistry(Skill):
     def _register_python_skill(self, entry: "Path") -> None:
         """Register a Python skill from a .py file."""
 
+        if not self._allows_code(entry):
+            return
         module_name: str | None = None
         try:
             skill, module_name = _load_python_skill(
@@ -948,6 +991,8 @@ class SkillRegistry(Skill):
                 return f"Reload failed for {name}: {exc}"
             return await self._install_reloaded_instance(name, attr, new_skill)
 
+        if not self._allows_code(source.path):
+            return f"Reload refused for {name}: its folder is not trusted (type /trust to allow)"
         if source.kind == "python":
             new_skill, module_name = await asyncio.to_thread(
                 _load_python_skill,
