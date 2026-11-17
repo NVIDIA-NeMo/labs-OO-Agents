@@ -9,7 +9,7 @@ stored strings would be an injection primitive. A key is a dict key / block name
 
 Kinds:
 
-* ``var``     — ``agent.vars[key]`` (host-provided persistent vars, e.g. the TUI)
+* ``var``     — ``agent.vars[key]`` (host-provided persistent vars, e.g. Atom)
 * ``context`` — ``agent.context_manager[key]`` (a context block's current value)
 * ``file``    — a path **relative to the working dir, contained within it**
 * ``todo``    — ``agent.todo.get(key)`` (the session todo skill, when attached)
@@ -85,7 +85,7 @@ def _lookup(agent: object, store: MemoryStore, kind: str, key: str) -> str | Non
     """Current value behind a reference, clipped — or None when it doesn't resolve.
 
     The ``getattr`` capability probes are deliberate: ``vars``/``todo`` are
-    host-provided surfaces (TUI agents have them, bare library agents may not).
+    host-provided surfaces (interactive host agents have them, bare library agents may not).
     """
     if kind == "var":
         vars_map = getattr(agent, "vars", None)

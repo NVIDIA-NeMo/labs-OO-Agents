@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Test BashSession resilience to event loop recreation (gl#212).
 
-Reproduces the scenario where the TUI agent loop dies and is recreated,
+Reproduces the scenario where a host's agent loop dies and is recreated,
 leaving BashSession with stale subprocess pipes bound to the dead loop.
 """
 
@@ -20,7 +20,7 @@ pytestmark = pytest.mark.asyncio
 async def test_bash_session_survives_loop_change():
     """BashSession should auto-recover when the event loop changes.
 
-    Simulates the TUI scenario:
+    Simulates the host scenario:
     1. Start BashSession on loop A (agent loop)
     2. Kill loop A (dispatcher crash / Esc interrupt)
     3. Use BashSession on loop B (new agent loop)

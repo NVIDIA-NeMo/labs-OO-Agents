@@ -205,7 +205,7 @@ class CorruptDatabaseError(sqlite3.DatabaseError):
     """Raised when a write fails because the SQLite file is corrupt.
 
     Subclasses sqlite3.DatabaseError so existing ``except sqlite3.Error``
-    handlers still catch it, while giving callers (e.g. the TUI) a typed
+    handlers still catch it, while giving callers (e.g. an interactive host) a typed
     signal to surface recovery guidance instead of an opaque crash.
     """
 

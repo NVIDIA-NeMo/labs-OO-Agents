@@ -18,7 +18,7 @@ queues and re-enters ``handle()`` once per notification. It provides:
   ``apply_model_limits``).
 
 ``nooa_cli.coding.CodingAgent`` adds the shared coding tools used by
-interactive hosts such as the TUI and ACP.
+interactive hosts such as ACP.
 """
 
 from typing import Annotated, Any, ClassVar, Literal, Protocol, runtime_checkable

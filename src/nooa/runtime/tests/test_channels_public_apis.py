@@ -2,9 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the public core APIs added for issue #318.
 
-These accessors replace TUI reads of ``Channel``/``QueueManager``
+These accessors replace host reads of ``Channel``/``QueueManager``
 private members. Each test asserts the public API reproduces the exact
-behaviour the TUI previously reimplemented inline.
+behaviour hosts previously reimplemented inline.
 """
 
 from __future__ import annotations
@@ -112,7 +112,7 @@ async def test_running_handles_filters_by_state():
 def test_notify_callback_fires_before_race_pair_exists():
     """The host callback must fire even on the first put, when the internal
     notify pair has not been created yet (race() has never run). This is the
-    behaviour the TUI monkey-patch relied on to start the dispatcher."""
+    behaviour a host's monkey-patch relied on to start the dispatcher."""
     qm = QueueManager()
     q = qm.queue("q")
     calls: list[int] = []

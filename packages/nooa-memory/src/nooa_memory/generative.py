@@ -128,7 +128,7 @@ def llm_episode_writer(get_llm: Callable[[], object]) -> Callable[[str], str | N
     """Build the episode writer: recent-events transcript -> episode text.
 
     Returns None when the model judges the window not noteworthy (or the
-    transcript is empty). Used by the TUI idle runner as the FIRST phase of a
+    transcript is empty). Used by a host's idle runner as the FIRST phase of a
     generative reflection: write the episode, then consolidate — which also
     feeds the reasoner, whose input is episode memories.
     """

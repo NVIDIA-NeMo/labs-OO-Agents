@@ -39,20 +39,20 @@ def _mgr(path, owner, **cfg_kw):
 # helpers
 # --------------------------------------------------------------------------
 def test_role_of_and_owner_matches():
-    assert role_of("TUIAgent@04aaac87") == "TUIAgent"
-    assert role_of("TUIAgent") == "TUIAgent"
+    assert role_of("AtomAgent@04aaac87") == "AtomAgent"
+    assert role_of("AtomAgent") == "AtomAgent"
     assert role_of("") == ""
-    assert owner_matches("TUIAgent@x", "TUIAgent") is True  # role scope
-    assert owner_matches("TUIAgent", "TUIAgent") is True  # bare-role legacy row
-    assert owner_matches("Other@x", "TUIAgent") is False
-    assert owner_matches("TUIAgent@x", "TUIAgent@x") is True  # exact instance
-    assert owner_matches("TUIAgent@y", "TUIAgent@x") is False
+    assert owner_matches("AtomAgent@x", "AtomAgent") is True  # role scope
+    assert owner_matches("AtomAgent", "AtomAgent") is True  # bare-role legacy row
+    assert owner_matches("Other@x", "AtomAgent") is False
+    assert owner_matches("AtomAgent@x", "AtomAgent@x") is True  # exact instance
+    assert owner_matches("AtomAgent@y", "AtomAgent@x") is False
     assert owner_matches("", "anything") is True  # unowned matches every scope
-    assert owner_matches("TUIAgent@x", None) is True
+    assert owner_matches("AtomAgent@x", None) is True
 
 
 def test_owner_validation():
-    MemoryConfig(owner="TUIAgent@04aaac87")  # ok
+    MemoryConfig(owner="AtomAgent@04aaac87")  # ok
     MemoryConfig(owner="planner")  # bare role ok
     MemoryConfig(owner="")  # unowned writer ok
     with pytest.raises(ValueError, match="must not contain"):

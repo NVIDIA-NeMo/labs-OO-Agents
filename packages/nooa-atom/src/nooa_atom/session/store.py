@@ -65,7 +65,7 @@ def sessions_root(workspace: Path, override: Path | None = None) -> Path:
 
     ``override`` if given, else ``$NOOA_SESSIONS_DIR`` if set (one shared
     directory for all workspaces), else ``<workspace>/.nooa/sessions``, where
-    the ``nooa-acp`` server and the TUI keep them.
+    the ``nooa-acp`` server keeps them.
     """
     if override is not None:
         return Path(override)
@@ -115,7 +115,7 @@ def _pid_alive(pid: int) -> bool:
 def _workspace_matches(recorded: str | Path, wanted: str) -> bool:
     """Whether a session's recorded workspace is ``wanted`` (a normalised path).
 
-    The old TUI recorded the directory as typed, so ``../`` or ``.`` is
+    Older hosts recorded the directory as typed, so ``../`` or ``.`` is
     common; a relative record names no directory and cannot be compared, and
     hiding the session would be worse than listing it.
     """
@@ -596,8 +596,8 @@ class SessionStore:
         todo_id: str | None = None,
     ) -> SessionHandle:
         session_id = self.validate_id(session_id or str(uuid.uuid4()))
-        # Recorded as a resolved absolute path: a relative one ("../", as the
-        # old TUI wrote) names no directory once the process has moved.
+        # Recorded as a resolved absolute path: a relative one ("../", as
+        # older hosts wrote) names no directory once the process has moved.
         workspace = _normalise_workspace(workspace)
         self.root.mkdir(parents=True, exist_ok=True)
         path = self.path_for(session_id)

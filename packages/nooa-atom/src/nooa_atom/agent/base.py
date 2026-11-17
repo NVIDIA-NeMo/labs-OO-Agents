@@ -230,7 +230,7 @@ class AtomAgentBase(InteractiveAgent):
         self.skills = SkillManager(self)
         # Skills the agent writes live at <project>/.nooa/skills (an older
         # <project>/.nooa/libs is not loaded). get_project_dir() resolves that
-        # per process, which is what a one-workspace host like the TUI wants.
+        # per process, which is what a one-workspace host wants.
         # A host serving several workspaces at once must say which project it
         # means, or every session shares one directory — and SkillWriting puts
         # it on sys.path and activates local.*, so that would expose one

@@ -504,7 +504,7 @@ class Agent(metaclass=AgentMeta):
         """The agent's resolved LLM client.
 
         Public accessor for the LLM resolved at construction time (see
-        ``_resolve_llm``). Framework/host code (e.g. the TUI's model
+        ``_resolve_llm``). Framework/host code (e.g. a host's model
         switcher) reads this instead of reaching into ``_llm``.
 
         Raises:
@@ -522,7 +522,7 @@ class Agent(metaclass=AgentMeta):
     def set_llm(self, llm: "UnifiedLLM") -> None:
         """Replace the agent's LLM client.
 
-        Used by hosts that switch models at runtime (e.g. the TUI
+        Used by hosts that switch models at runtime (e.g. a host's
         ``/switch`` command). Callers that maintain model-derived state
         (summarizer budgets, context-window limits) must refresh it after
         calling this — see ``apply_model_limits``.

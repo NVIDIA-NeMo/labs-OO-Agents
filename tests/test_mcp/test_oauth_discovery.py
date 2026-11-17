@@ -264,7 +264,7 @@ async def test_dynamic_registration_uses_already_bound_callback_uri(monkeypatch)
 
 @pytest.mark.asyncio
 async def test_authorize_fails_fast_when_callback_server_fails(monkeypatch):
-    """OAuth must not fall back to input(), which blocks/corrupts the TUI."""
+    """OAuth must not fall back to input(), which blocks/corrupts an interactive host."""
     config = oauth.OAuthConfig(
         authorization_endpoint="https://example.com/authorize",
         token_endpoint="https://example.com/token",
@@ -1015,7 +1015,7 @@ async def test_authorize_headless_without_prompt_raises_actionable_error(monkeyp
 
     monkeypatch.setattr(handler, "_capture_code_via_local_server", fail_local)
 
-    with pytest.raises(RuntimeError, match="oauth_manual = true"):
+    with pytest.raises(RuntimeError, match="oauth_manual: true"):
         await handler.authorize(open_browser=True)
 
 

@@ -197,7 +197,7 @@ class TestEventManagerOn:
 
     def test_collapse_emits_summary_to_handlers(self):
         """collapse() should notify ``Summary`` subscribers just like add()
-        does. The TUI relies on this to surface a live line whenever a
+        does. A host relies on this to surface a live line whenever a
         summarization or truncation is applied — without it, the summarizer
         is silent and pathological cascades go unnoticed.
         """
@@ -218,8 +218,8 @@ class TestEventManagerOn:
 
     def test_collapse_without_summary_text_still_emits(self):
         """Truncation (summary_text=None) should also fire the ``Summary``
-        handler — callers that watch for all collapses (e.g. the TUI
-        renderer's truncated-vs-summarized branches) need the signal."""
+        handler — callers that watch for all collapses (e.g. a host's
+        renderer with truncated-vs-summarized branches) need the signal."""
         manager = EventManager()
         handler = MagicMock()
         manager.on("Summary", handler)

@@ -88,8 +88,8 @@ class TestCodeActStrategyConfig:
     def test_default_max_iterations_is_unlimited(self):
         """Default ``max_iterations`` is ``None`` — unlimited iterations.
 
-        Long-running agent loops (especially in interactive contexts
-        like the TUI) shouldn't hit a finite default they didn't
+        Long-running agent loops (especially in interactive
+        hosts) shouldn't hit a finite default they didn't
         opt into. Callers that *want* a cap pass it explicitly.
         """
         strat = CodeActStrategy(config=CodeActConfig())

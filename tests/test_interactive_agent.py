@@ -2,9 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for nooa.interactive — the dispatcher-driven agent base.
 
-Deeper behavioral coverage (dispatcher loop, snapshot restore, echo hooks)
-lives with the TUI package, whose BaseTUIAgent subclasses this. These tests
-pin the core contract the ARC-AGI-3 example and other hosts rely on.
+These tests pin the core contract the ARC-AGI-3 example and other hosts rely on.
 """
 
 import json

@@ -368,7 +368,7 @@ async def test_missing_path_diagnostic_is_not_found_on_host_collision(tmp_path: 
 async def test_real_bash_session_anchors_remain_editable(tmp_path: Path) -> None:
     """A real, wired BashSession shares the host filesystem -- ShellTools always
     constructs one eagerly (see its own docstring: "RepoTools(session=shell.session)
-    in the TUI"), so this is how every real, shipped agent actually wires RepoTools.
+    in a host"), so this is how every real, shipped agent actually wires RepoTools.
     Anchors must stay editable, unlike the FakeSession scenarios above whose
     in-memory filesystem is genuinely separate from the host.
     """

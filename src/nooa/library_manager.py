@@ -105,7 +105,7 @@ class LibraryManager:
         attached._source_dir = lib_dir
         setattr(self._agent, lib_name, attached)
         attached.attach(self._agent)
-        # Hot-reload slash commands: if the TUI's CommandRegistry is reachable,
+        # Hot-reload slash commands: if the host's CommandRegistry is reachable,
         # re-discover @slash_command methods so new commands are immediately available.
         registry = getattr(self._agent, "_command_registry", None)
         if registry is not None and hasattr(registry, "refresh_skill_commands"):

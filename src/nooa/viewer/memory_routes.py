@@ -160,7 +160,7 @@ def list_dbs() -> list[dict]:
     """Discover memory DBs under the viewer's cwd.
 
     Scans ``<cwd>/.nooa/memory/*.sqlite`` (project stores) and
-    ``<cwd>/.nooa/sessions/*-memory.db`` (per-session TUI stores). This is
+    ``<cwd>/.nooa/sessions/*-memory.db`` (per-session stores). This is
     only the cheap local discovery feeding the DB selector — every other
     endpoint honors an explicit ``?db=`` path regardless of this list.
     """

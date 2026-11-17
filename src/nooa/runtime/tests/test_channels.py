@@ -213,7 +213,7 @@ async def test_reader_get_timeout_none_preserves_indefinite_wait():
 @pytest.mark.asyncio
 async def test_on_get_fires_on_slow_path_backlog_drain():
     """When the item was already on the deque, ``get()`` fires ``on_get``
-    before returning. The TUI relies on this for the mid-turn dequeue
+    before returning. A host relies on this for the mid-turn dequeue
     case where the agent's ``await self.user_messages.get()`` drains
     a message that was typed while the agent was busy."""
     seen: list[str] = []

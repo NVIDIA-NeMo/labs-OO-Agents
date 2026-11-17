@@ -334,7 +334,7 @@ class ShellTools(Skill):
         self.cwd = Path(cwd).resolve()
         # Construct the session eagerly (it starts lazily on first run) so a
         # consumer wired at construction time — e.g. RepoTools(session=shell._session)
-        # in the TUI — shares this shell's bash session instead of capturing None.
+        # in a host — shares this shell's bash session instead of capturing None.
         self._session: BashSession = BashSession(cwd=str(self.cwd))
 
     def __repr__(self) -> str:

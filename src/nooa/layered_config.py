@@ -3,7 +3,7 @@
 """Shared layered-config discovery for NVIDIA OO Agents.
 
 One mental model for *every* config file the project ships — LLM aliases
-(``llm_config.yaml``), TUI settings (``settings.yaml``), and secrets
+(``llm_config.yaml``), host settings (``settings.yaml``), and secrets
 (``secrets.yaml``). All three live in the same directories, share the
 same precedence rules, and are discovered through the helpers here.
 

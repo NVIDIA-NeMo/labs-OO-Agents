@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The same onboarding plan can be approved by a CLI or a TUI."""
+"""The same onboarding plan can be approved by a CLI or another host."""
 
 import json
 from copy import deepcopy
@@ -508,7 +508,6 @@ def test_library_source_has_no_ui_or_provider_imports():
             "litellm",
             "openai",
             "anthropic",
-            "textual",
         }
         for name in imported
     )
@@ -528,7 +527,7 @@ import nooa.unifiedllm
 
 class NoFrontend(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.split('.')[0] in {'nooa_cli', 'click', 'prompt_toolkit', 'rich', 'textual'}:
+        if fullname.split('.')[0] in {'nooa_cli', 'click', 'prompt_toolkit', 'rich'}:
             raise AssertionError('Connect imported a frontend dependency: ' + fullname)
 
 sys.meta_path.insert(0, NoFrontend())

@@ -138,15 +138,15 @@ class MemoryManager:
     ) -> None:
         self.agent = agent
         self.config = config or MemoryConfig()
-        # Writer identity for shared stores: explicit config wins (hosts like
-        # the TUI pass their stable per-agent key; "" writes to the shared
+        # Writer identity for shared stores: explicit config wins (interactive
+        # hosts pass their stable per-agent key; "" writes to the shared
         # namespace); the honest library default is the agent's class name.
         self.owner = self.config.owner if self.config.owner is not None else type(agent).__name__
         self._provided_embedder = embedder
         self._reasoner = reasoner
         self._reconciler = reconciler
         self.stats = MemoryStats()
-        # Set by hosts (TUI session id, bench run id); lands on AccessRecords.
+        # Set by hosts (session id, bench run id); lands on AccessRecords.
         self.session_ref: str | None = None
         self._last_injected_ids: list[str] = []
 

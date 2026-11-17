@@ -4,7 +4,7 @@
 
 Gym constructs one ``AtomHarness`` per rollout with the rollout's model client as ``llm`` and
 awaits :meth:`AtomHarness.solve` with the task text. The harness runs one Atom session the way
-the TUI does: a ``SessionRegistry`` creates the root session with the configured turn method
+an interactive host does: a ``SessionRegistry`` creates the root session with the configured turn method
 (``handle_batch`` by default: one agent works the task unattended; ``handle_orchestrate`` lets the
 root delegate to child agents), the task is the first prompt, and the session's ``Done`` outcome
 carries the :class:`TaskResult`.

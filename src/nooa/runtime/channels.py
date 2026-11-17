@@ -732,8 +732,8 @@ class QueueManager:
         # (stale/closed loop). race() checks this after recreating the pair.
         self._notify_pending = False
         # Optional host-supplied hook fired after every channel put(), in
-        # addition to the internal race() wakeup. Lets a host (e.g. the
-        # TUI) react to puts — such as (re)starting its dispatcher — via a
+        # addition to the internal race() wakeup. Lets a host (e.g. an
+        # interactive host) react to puts — such as (re)starting its dispatcher — via a
         # supported API instead of monkey-patching _set_notify.
         self._notify_callback: Callable[[], None] | None = None
         # channel name -> one status() line saying how to cancel its jobs.
@@ -794,7 +794,7 @@ class QueueManager:
     def _signal_notify(self) -> None:
         """Set the ``_notify`` event so ``race()`` wakes on a put.
 
-        Channels can be produced from the TUI thread while ``race()`` is
+        Channels can be produced from a host's UI thread while ``race()`` is
         waiting on the agent-loop thread, so wake the event via its owning
         loop instead of mutating it cross-thread. Reads the (event, loop)
         tuple atomically to avoid init races.
@@ -910,7 +910,7 @@ class QueueManager:
         """Return handles for spawned jobs currently in the ``running`` state.
 
         Public accessor for the subset of ``spawn()`` handles a host
-        (e.g. the TUI) shows as active background work, replacing reads of
+        (e.g. an interactive host) shows as active background work, replacing reads of
         the private ``_handles`` list.
         """
         return [h for h in self._handles if h.state == "running"]
@@ -1149,7 +1149,7 @@ class QueueManager:
         # Lazy-init: avoid requiring a running loop at construction time.
         # Published as an atomic tuple so _set_notify never sees a
         # half-initialized state from another thread.
-        # Recreate if the loop changed (gl-212: TUI agent loop restart).
+        # Recreate if the loop changed (gl-212: a host restarted the agent loop).
         current_loop = asyncio.get_running_loop()
         if self._notify_pair is None or self._notify_pair[1] is not current_loop:
             self._notify_pair = (asyncio.Event(), current_loop)

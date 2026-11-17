@@ -67,7 +67,7 @@ litellm.modify_params = True
 # litellm defaults to aiohttp for async HTTP (faster than httpx at high RPS).
 # But it never closes sessions on shutdown, producing noisy ResourceWarnings:
 #   "Unclosed client session" / "Unclosed connector"
-# For a TUI agent making sequential calls the perf difference is irrelevant,
+# For an interactive agent making sequential calls the perf difference is irrelevant,
 # and we already patch httpx for connection management. Disable aiohttp.
 litellm.disable_aiohttp_transport = True
 

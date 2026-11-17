@@ -8,7 +8,7 @@ Runs in this venv (install the arcade SDK via the `arc` extra):
         --run-dir <run_dir> --game ls20
 
 Protocol (files under ``<run_dir>/ipc/``):
-- waits for ``agent_ready`` (the TUI agent's tail producer is attached),
+- waits for ``agent_ready`` (the agent's tail producer is attached),
 - resets the env and appends state lines to ``states.jsonl``,
 - polls ``actions.jsonl`` for the agent's next action batch, executes up to
   ``--max-actions-per-turn`` of them (stopping early on level completion /
@@ -291,7 +291,7 @@ def main() -> int:
     )
 
     print(f"[harness] waiting for agent_ready (timeout {args.agent_ready_timeout}s)")
-    wait_for_file(ipc / "agent_ready", args.agent_ready_timeout, "TUI agent")
+    wait_for_file(ipc / "agent_ready", args.agent_ready_timeout, "solver agent")
 
     grid = env.reset()
     env_steps = 0

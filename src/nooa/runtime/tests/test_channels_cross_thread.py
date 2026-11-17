@@ -3,14 +3,14 @@
 """Cross-thread Channel and QueueManager tests.
 
 Parameterized to run both same-loop (baseline regression) and cross-loop
-(the TUI agent-thread scenario). Every test verifies the identical
+(a host's agent-thread scenario). Every test verifies the identical
 observable behavior regardless of whether producer and consumer share a
 loop.
 
 The ``mode`` fixture controls threading:
 - ``"same_loop"`` — producer and consumer on the test's event loop.
 - ``"cross_loop"`` — consumer on the test's loop, producer on a
-  background thread with its own loop (mirrors TUI: UI thread produces,
+  background thread with its own loop (mirrors a host: UI thread produces,
   agent thread consumes).
 """
 

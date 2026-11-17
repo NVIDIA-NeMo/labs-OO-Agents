@@ -56,7 +56,7 @@ def slash_command(
         completions: Subcommand names offered by tab-completion.
         output_to_agent: If True (default), the command's return value is fed to the
             agent as a turn (via the ``slash_commands`` queue). If False, the
-            output is shown to the user in the TUI only — no agent turn is
+            output is shown to the user by the host only — no agent turn is
             spent. Use ``output_to_agent=False`` for read-only commands (list/status)
             whose result the human wants to see without invoking the LLM.
 

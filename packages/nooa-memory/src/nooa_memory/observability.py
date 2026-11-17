@@ -4,7 +4,7 @@
 
 Everything here is computed from the self-contained records (their per-channel
 counters + structured ``access_log``) plus the store's ``maintenance_log`` —
-shared by the TUI memory explorer, the web viewer's Memory tab, and benchmark
+shared by the web viewer's Memory tab and benchmark
 reports. Each KPI maps to a diagnostic question ("is the store used at all?",
 "is retrieval earning its context budget?") — see the design plan §5.1.
 """
@@ -70,7 +70,7 @@ def _injected_then_used(memory: Memory) -> bool | None:
 def per_memory_usage(
     memory: Memory, *, forgetting: ForgettingEngine, now: float | None = None
 ) -> dict:
-    """The Usage panel for one memory (TUI detail pane / viewer record detail)."""
+    """The Usage panel for one memory (viewer record detail)."""
     now = _now() if now is None else now
     last = memory.access_log[-1] if memory.access_log else None
     ranked = [e for e in memory.access_log if e.rank is not None]
