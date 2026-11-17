@@ -682,13 +682,14 @@ def _key_node(key: Any, state: _State) -> Snapshot | None:
 
     ``None`` (the mapping stops with ``"key"``) when no inspection work is
     left, for an ``int`` or ``float`` key, and for a key capture cannot read (an
-    ``Unavailable`` label says nothing). The key's own capture is not
-    charged to the mapping's budget beyond the one node of the key.
+    ``Unavailable`` label says nothing). The key is a nested capture
+    (``_nested``) under ``_KEY_LIMITS``: its work, including the class
+    namespaces it reads, is charged to the enclosing capture's budget.
     """
     if state.nodes_left <= 0 or type(key) is int or type(key) is float:
         return None  # a number json_key refused (a huge int, nan) stays refused
     limits = dataclasses.replace(_KEY_LIMITS, fallback=state.limits.fallback)
-    node = _build(key, limits.max_chars, 0, "", _State(limits)).node
+    node = _nested(key, limits, state)
     return None if type(node) is Unavailable else node
 
 

@@ -413,7 +413,8 @@ def test_an_unreadable_field_reason_yields_to_the_objects_own_limit() -> None:
     whole = capture(Partly())
     assert [name for name, _ in whole.fields] == ["text", "count"]  # type: ignore[union-attr]
     assert whole.reason == "unreadable"
-    assert capture(Partly(), Limits(max_nodes=4)).reason == "unreadable"
+    # max_nodes=20: room for the class namespaces, charged to max_nodes.
+    assert capture(Partly(), Limits(max_nodes=20)).reason == "unreadable"
     cut = capture(Partly(), Limits(max_chars=20))
     assert isinstance(cut, Object) and [name for name, _ in cut.fields] == ["text"]
     assert cut.reason == "max_length"  # the builder's own limit wins over the omission
@@ -894,7 +895,8 @@ def test_array_like_obeys_max_items_and_nodes(registry) -> None:
     assert isinstance(snapshot, Sequence)
     assert render_python(snapshot) == "Animal(len=1000000, [:3]=[0, 1, 2])"
 
-    starved = capture(Animal("a"), Limits(max_nodes=5))
+    # Starved after the class namespaces (charged to max_nodes) are read.
+    starved = capture(Animal("a"), Limits(max_nodes=20))
     assert isinstance(starved, Sequence) and starved.reason == "max_nodes"
 
 

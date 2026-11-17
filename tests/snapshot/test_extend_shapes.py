@@ -240,7 +240,8 @@ def test_object_like_greedy_field_leaves_room_for_later_fields(registered) -> No
             }
         ),
     )
-    for limits in (Limits(max_chars=120), Limits(max_chars=2_000), Limits(max_nodes=80)):
+    # max_nodes=120: room for the class namespaces, charged to max_nodes.
+    for limits in (Limits(max_chars=120), Limits(max_chars=2_000), Limits(max_nodes=120)):
         snapshot = capture(Greedy(), limits)
         assert isinstance(snapshot, Object)
         assert [name for name, _node in snapshot.fields] == ["sample", "name", "count", "plain"]

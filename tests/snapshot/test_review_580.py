@@ -105,6 +105,25 @@ def test_a_huge_class_namespace_is_not_copied() -> None:
     assert time.perf_counter() - start < 0.05  # was ~0.2 s and 24 MB
 
 
+def test_a_class_namespace_read_is_charged_to_the_work_budget() -> None:
+    # 4584541200: a namespace up to the 2,000-entry floor was copied free,
+    # whatever max_nodes was left.
+    from nooa.snapshot._limits import _State
+    from nooa.snapshot._raw import _raw_namespace
+
+    big = type("Big", (), {f"a{i}": i for i in range(1_500)})
+    state = _State(Limits(max_nodes=100))
+    namespace = _raw_namespace(big, state)
+    assert namespace is not None and len(namespace) == len(big.__dict__)  # within the floor
+    assert state.nodes_left == 0  # charged, as far as work was left
+    small = type("Small", (), {"a": 1})
+    state = _State(Limits(max_nodes=100))
+    assert _raw_namespace(small, state) is not None
+    assert state.nodes_left == 100 - len(small.__dict__)
+    assert _raw_namespace(small, state) is not None  # read once per capture
+    assert state.nodes_left == 100 - len(small.__dict__)
+
+
 def test_an_ordinary_class_is_still_read_by_small_nested_captures() -> None:
     class Model(BaseModel):  # BaseModel's own namespace has more than 50 entries
         a: int = 1
