@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
@@ -53,6 +54,34 @@ def test_writes_after_close_are_dropped() -> None:
         stream.write("abc")
     assert stream.write("late") == 4
     assert render_output(stream.snapshot()) == "abc"
+
+
+def test_writes_after_close_are_counted_and_logged_once(caplog) -> None:
+    stream = SharedTextStream(unit="chars", head=10, tail=0)
+    stream.write("abc")
+    stream.close()
+    assert stream.dropped_after_close == 0
+    with caplog.at_level(logging.WARNING, logger="nooa.snapshot._stream"):
+        assert stream.write("late") == 4
+        stream.write("")
+        stream.writelines(["more", "é"])
+    assert stream.dropped_after_close == 9
+    warnings = [r.getMessage() for r in caplog.records if r.name == "nooa.snapshot._stream"]
+    assert len(warnings) == 1
+    assert warnings[0].startswith("4 chars written after the stream closed were dropped")
+    assert render_output(stream.snapshot()) == "abc"
+
+
+def test_bytes_dropped_after_close_are_counted_in_bytes(caplog) -> None:
+    stream = SharedTextStream(unit="bytes", head=10, tail=0)
+    stream.close()
+    with caplog.at_level(logging.WARNING, logger="nooa.snapshot._stream"):
+        stream.write("é")  # two UTF-8 bytes
+        stream.write(memoryview(b"abcd").cast("I"))  # one item, four bytes
+        stream.write(bytearray(b"xy"))
+    assert stream.dropped_after_close == 8
+    messages = [r.getMessage() for r in caplog.records if r.name == "nooa.snapshot._stream"]
+    assert len(messages) == 1 and messages[0].startswith("2 bytes written after")
 
 
 def test_a_write_while_another_opens_the_file_waits_for_it(tmp_path, monkeypatch) -> None:

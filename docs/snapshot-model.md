@@ -42,7 +42,7 @@ Everything is importable from `nooa.snapshot`; see each docstring for arguments,
 | `array_like`, `ndarray_like`, `mapping_like`, `object_like`, `text_like` | the five shapes `capture.register` takes |
 | `capture_fields` | a call's arguments captured together, so every named part survives, at least in short form |
 | `TextStream` | output that arrives over time, with an optional overflow file in a folder, opened only once the output is cut (`TextStream(overflow=OverflowDir(), overflow_bytes=...)`) |
-| `SharedTextStream` | a `TextStream` for several writing threads: every write, snapshot and close (and the lazy file open) under one lock, a new lock in a forked child; also the text file methods a `sys.stdout` replacement needs (`write` returns the length, `writelines`, `flush`, `isatty`/`readable` False, `writable` True; writes after `close()` are dropped) |
+| `SharedTextStream` | a `TextStream` for several writing threads: every write, snapshot and close (and the lazy file open) under one lock, a new lock in a forked child; also the text file methods a `sys.stdout` replacement needs (`write` returns the length, `writelines`, `flush`, `isatty`/`readable` False, `writable` True; writes after `close()` are dropped, counted in `dropped_after_close` and logged once per stream) |
 | `cut` | a string or bytes already whole, as a `Text` keeping its first `head` and last `tail` units (what a one-write `TextStream` gives) |
 | `merge` | join two `Text`s of the same unit (progress batches) |
 | `render_output` | command output: `HEAD`, `[... N bytes omitted; full output: PATH]`, `TAIL`; `note=` adds a sentence after `full output not kept]` |

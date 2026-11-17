@@ -391,7 +391,11 @@ class SharedTextStream:
     - ``write(data) -> int``: appends and returns ``len(data)``; a chars
       stream raises ``TypeError`` for anything but ``str``. After
       ``close()`` a write is dropped (still returns ``len(data)``): a thread
-      still printing once the output is final does not fail.
+      still printing once the output is final does not fail. The dropped
+      units (chars or bytes, as ``unit``) are counted in
+      ``dropped_after_close``, and the first dropped write logs one warning
+      per stream (``logging``, logger ``nooa.snapshot._stream``); later ones
+      are counted only.
     - ``writelines(lines)``, ``flush()`` (nothing to flush: the overflow
       file is unbuffered), ``isatty() -> False``, ``readable() -> False``,
       ``writable() -> True``.
@@ -421,6 +425,7 @@ class SharedTextStream:
             unit=unit, head=head, tail=tail, overflow=overflow, overflow_bytes=overflow_bytes
         )
         self._lock = threading.Lock()
+        self._dropped = 0
         _shared_streams.add(self)
 
     @property
@@ -438,11 +443,28 @@ class SharedTextStream:
         """The units kept from the end, as given."""
         return self._stream.tail
 
+    @property
+    def dropped_after_close(self) -> int:
+        """The units (chars or bytes, as ``unit``) written after ``close()`` and dropped."""
+        return self._dropped
+
     def write(self, data: str | bytes | bytearray | memoryview) -> int:
-        """Append ``data`` (as ``TextStream.write``) and return ``len(data)``; dropped after ``close()``."""
+        """Append ``data`` (as ``TextStream.write``) and return ``len(data)``; dropped after ``close()``, counted."""
         with self._lock:
-            if self._stream._closed is None:  # closed: the output is final, drop it
+            if self._stream._closed is None:
                 self._stream.write(data)
+                return len(data)
+            # Closed: the output is final, drop the write but count it.
+            size = _units(data, self._stream.unit)
+            first = self._dropped == 0 and size > 0
+            self._dropped += size
+        if first:
+            _log.warning(
+                "%d %s written after the stream closed were dropped "
+                "(later writes are counted in dropped_after_close, not logged)",
+                size,
+                self._stream.unit,
+            )
         return len(data)
 
     def writelines(self, lines: Iterable[str]) -> None:
@@ -482,6 +504,17 @@ class SharedTextStream:
     def __exit__(self, *exc: object) -> None:
         """``close()`` the stream on leaving the ``with`` block."""
         self.close()
+
+
+def _units(data: object, unit: Literal["chars", "bytes"]) -> int:
+    """The size of a dropped write in ``unit``: chars of a ``str``, bytes of a bytes-like (``memoryview.nbytes``)."""
+    if type(data) is memoryview:
+        return data.nbytes
+    if isinstance(data, str):
+        return len(data) if unit == "chars" else len(encode_text(data))
+    if isinstance(data, (bytes, bytearray)):
+        return len(data)
+    return 0
 
 
 # Every live SharedTextStream, so that a forked child can give each a new lock.
