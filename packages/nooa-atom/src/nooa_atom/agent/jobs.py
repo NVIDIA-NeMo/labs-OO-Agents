@@ -34,6 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from nooa._platform import require_posix
 from nooa.agentdoc import hidden, spec
+from nooa.config.effective import effective_truncation
 from nooa.context_blocks import EventBase
 from nooa.skill import Skill
 from nooa.snapshot import Overflow, TextStream, render_output
@@ -48,9 +49,10 @@ __all__ = ["JobInfo", "JobUpdate", "JobsApi", "JobsLost", "Throttle"]
 
 JOBS_CHANNEL = "jobs"
 # Characters kept of stdout and, separately, of stderr on a run's done
-# update (the end of each stream); nothing more is kept anywhere. The tail is
-# of the line-framed output: each line already bounded to _LINE_CHARS.
-_TAIL_CHARS = 20_000
+# update (the end of each stream): TruncationConfig.capture.max_job_tail of the
+# config in force when the job starts (nooa.config.effective_truncation); nothing
+# more is kept anywhere. The tail is of the line-framed output: each line
+# already bounded to _LINE_CHARS.
 # Longest delivered line (run progress, tail), in characters: a longer line is
 # its first _LINE_CHARS characters, then nooa.snapshot's render_output line
 # "[... N chars omitted; full output not kept]" (LineSplitter), or
@@ -766,9 +768,9 @@ class JobsApi(Skill):
         ends, and a cut tail names it.
         """
         # Per stream, the kept end of the output (in memory; the full output only with log_path=).
+        tail_chars = effective_truncation().capture.max_job_tail
         tails = {
-            kind: TextStream(unit="chars", head=0, tail=_TAIL_CHARS)
-            for kind in ("stdout", "stderr")
+            kind: TextStream(unit="chars", head=0, tail=tail_chars) for kind in ("stdout", "stderr")
         }
         done = [StreamDone(kind="done", returncode=0, timed_out=False)]
 
