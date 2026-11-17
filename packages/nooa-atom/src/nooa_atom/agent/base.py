@@ -257,15 +257,14 @@ class AtomAgentBase(InteractiveAgent):
         # surface. Load them so hosts can expose ``@slash_command`` methods,
         # but leave them inactive until the user opts in with ``/skills``.
         # Memory integration is deferred; do not auto-load its entry point.
-        # Also ignore the retired web publisher entry point in older installed
-        # package metadata, producers (core already sets ``self.producers``),
-        # and core's shell (the model runs commands in its own Shell()s).
+        # Also ignore producers (core already sets ``self.producers``) and
+        # core's shell (the model runs commands in its own Shell()s).
         loaded = set(self.skills.loaded())
         installed = []
         for name in self.skills.discovered():
             attr_name = name.rsplit(".", 1)[-1].replace("-", "_")
             if (
-                name in {"nemo.memory", "nemo.web", "nemo.producers", "nemo.shell"}
+                name in {"nemo.memory", "nemo.producers", "nemo.shell"}
                 or name in loaded
                 or hasattr(self, attr_name)
             ):

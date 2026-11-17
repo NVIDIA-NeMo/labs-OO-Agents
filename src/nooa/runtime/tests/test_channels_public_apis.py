@@ -10,6 +10,7 @@ behaviour the TUI previously reimplemented inline.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 
 import pytest
 
@@ -155,14 +156,16 @@ def test_notify_callback_none_clears():
 # ---------------------------------------------------------------------------
 
 
-def _watched(name: str = "q") -> tuple[QueueManager, Channel[object], list[tuple[str, object]]]:
+def _watched(
+    name: str = "q", *, on_get: Callable[[object], None] | None = None
+) -> tuple[QueueManager, Channel[object], list[tuple[str, object]]]:
     """A queue channel on a real EventManager, and the channel events it publishes."""
     manager = EventManager()
     seen: list[tuple[str, object]] = []
     manager.on("ChannelItemConsumed", lambda e: seen.append(("consumed", e.item)))
     manager.on("ChannelItemsDiscarded", lambda e: seen.append(("discarded", e.items)))
     qm = QueueManager(event_manager=manager)
-    return qm, qm.queue(name), seen
+    return qm, qm.queue(name, on_get=on_get), seen
 
 
 async def test_consumed_items_are_published_once_each():
@@ -192,16 +195,6 @@ def test_items_dropped_without_a_consumer_are_published():
         ("discarded", ["f"]),
         ("discarded", ["g"]),
     ]
-
-
-def test_pop_last_publishes_nothing():
-    """``pop_last`` hands the item back to the caller, so nothing was dropped."""
-    _qm, q, seen = _watched()
-    q.put("a")
-    q.put("b")
-    assert q.pop_last() == "b"
-    assert q.snapshot() == ["a"]
-    assert seen == []
 
 
 def test_channel_events_are_never_recorded_and_subscriber_errors_are_contained():
@@ -235,8 +228,7 @@ def test_a_channel_without_an_event_manager_publishes_nothing():
 
 def test_remove_withdraws_one_item_by_identity_and_publishes_nothing():
     got: list[object] = []
-    _qm, q, seen = _watched()
-    q.set_on_get(got.append)
+    _qm, q, seen = _watched(on_get=got.append)
     first, second, equal_not_same = ["a"], ["b"], ["a"]
     q.put(first)
     q.put(second)

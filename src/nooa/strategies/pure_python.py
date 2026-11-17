@@ -807,7 +807,7 @@ class PurePythonStrategy(CompositeStrategy):
         # 4) Execute with session locals (includes pre-compiled helpers)
         execution_builtins = {**builtins, **session.session_locals}
 
-        # Track this execution so the /activity slash command can report that
+        # Track this execution so debug tooling can report that
         # the agent is currently running a code cell (vs blocked on an LLM call).
         from nooa.runtime.debug_handler import code_exec_context
 

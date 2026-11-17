@@ -107,7 +107,7 @@ def configure_session_skills(agent: Any, options: AtomOptions) -> list[str]:
             discover(options.skills_dirs)
         except Exception as exc:
             warnings.append(f"Could not discover configured skills: {exc}")
-    # Saved names are registered names (nemo.web) or skill names (web).
+    # Saved names are registered names (nemo.todo) or skill names (todo).
     for name in options.active_skills:
         entry = skills.entry(name)
         if entry is None or entry.kind == "mcp":

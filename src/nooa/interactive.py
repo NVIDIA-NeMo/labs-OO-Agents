@@ -462,7 +462,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     # Drives handle() from the channels once a host calls turns.start().
     # Hidden: the model must not cancel or await its own turns.
     turns: Annotated[TurnLoop, hidden, nosnapshot]
-    # Producer-side Channel (full put / pop_last / snapshot / etc.)
+    # Producer-side Channel (full put / remove / snapshot / etc.)
     # — hidden, since the LLM has no business calling those.
     _user_messages_in: Annotated[Channel, hidden, nosnapshot]
     # Read-only facade (just .get() / .status() / .name) is what the

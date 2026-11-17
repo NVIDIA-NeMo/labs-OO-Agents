@@ -76,8 +76,8 @@ class ChannelItemsDiscarded(EventBase):
 
     ``flush()``, ``clear()`` and ``QueueManager.remove_channel()`` publish it
     once per call with the items they dropped, head to tail, never with an
-    empty list. ``remove()`` and ``pop_last()`` do not: a withdraw is the
-    caller's own decision, and ``pop_last()`` returns the item to the caller.
+    empty list. ``remove()`` does not: a withdraw is the caller's own
+    decision.
     A runtime event, like ``ChannelItemConsumed``.
     """
 
@@ -490,7 +490,7 @@ class Channel[T]:
         list for event-mode channels (they don't buffer) and for a
         drained queue.
 
-        Encapsulates the ``popleft`` + ``_fire_on_get`` loop the TUI
+        Encapsulates the ``popleft`` + ``_fire_on_get`` loop a host's
         dispatcher runs to flush items already buffered when a turn
         wakes, so callers no longer reimplement channel-drain semantics.
         """
@@ -502,17 +502,6 @@ class Channel[T]:
             self._fire_on_get(item)
             drained.append(item)
         return drained
-
-    @_channel_locked
-    def set_on_get(self, callback: Callable[[T], None] | None) -> None:
-        """Late-bind the ``on_get`` hook (queue-mode only).
-
-        Useful when the channel is constructed before the consumer
-        that wants to observe dequeues exists — e.g. the TUI
-        ``Session`` wires its user-bar renderer here after the agent
-        has already created its ``user_messages`` channel.
-        """
-        self._on_get = callback
 
     def _fire_on_discard(self, items: list[T]) -> None:
         if items:
@@ -535,20 +524,6 @@ class Channel[T]:
     def snapshot(self) -> list[T]:
         """Return a copy of pending items (head to tail). Non-consuming."""
         return list(self._items)
-
-    @_channel_locked
-    def pop_last(self) -> T | None:
-        """Remove and return the most recently put item (queue-mode tail).
-
-        Used by the TUI for "edit what I just queued" UX (Up-arrow):
-        the user pulls the queued message back into the input buffer.
-        Returns ``None`` if the channel is empty. Like ``remove()``, this is
-        a withdraw: nothing fires or is published, since the item goes back
-        to the caller rather than being dropped.
-        """
-        if not self._items:
-            return None
-        return self._items.pop()
 
     @_channel_locked
     def remove(self, item: T) -> bool:
@@ -628,7 +603,7 @@ class Channel[T]:
 
         Use when attaching to an agent: keep the underlying ``Channel``
         on a ``hidden`` attribute (it has ``put``, ``snapshot``,
-        ``pop_last``, etc. — full producer/dispatcher access) and
+        ``remove``, etc. — full producer/dispatcher access) and
         expose ``.reader`` as the public attribute the LLM sees in
         ``doc(self)``.
 
