@@ -8,7 +8,10 @@ to follow semantic versioning.
 
 - `truncating_pformat(value, max_chars=N)` captures a non-string value within
   an `N`-char budget, so its memory and time follow the output, not the
-  input: the result is a bounded snapshot preview (`list(len=100000,
+  input (capture's own work; the time and memory of a value's custom
+  `__repr__`, which this model-facing preview may call, and of a registered
+  shape's accessors are not bounded, only what is kept of their result; see
+  `docs/snapshot-model.md`): the result is a bounded snapshot preview (`list(len=100000,
   [:27]=[...], [-k:]=[...])`), cut again to `N` chars (head and tail around
   `[... N chars omitted; full output not kept]`) only if its rendering is
   still longer. Without `max_chars` it is `pformat`, unchanged.
@@ -28,7 +31,7 @@ to follow semantic versioning.
   results (`[... N bytes omitted; full output: PATH]`), `ShellProgress`
   merges (`[... N bytes omitted; full output not kept]` instead of
   `[... progress omitted ...]`), cell stdout/stderr
-  (`nooa.runtime.output_capture.CaptureBuffer`: `[... N chars omitted; ...]`
+  (a `nooa.snapshot.SharedTextStream` per stream: `[... N chars omitted; ...]`
   instead of the `<truncated-output>` envelope; Atom writes them to the
   session's folder), job output tails and the core bash tool. Prefill string
   cuts render through `render_python` (same text). Cell errors (and the
@@ -50,7 +53,7 @@ to follow semantic versioning.
   so no replacement character appears there (the omitted count then includes
   the trimmed bytes: 151,425 instead of 151,424 bytes for 400,000 `漢`).
 - Output files are bounded per agent and live in a new standalone package,
-  `nooa.overflow` (`OverflowDir`, `OverflowFile`; see `docs/overflow.md`): in
+  `nooa.overflow` (`OverflowDir`, `OverflowWriter`; see `docs/overflow.md`): in
   an Atom session one `OverflowDir` (20 files of up to 64 MiB, newest kept)
   holds every output file of that agent: its `Shell`s' direct runs, the
   commands inside its launched jobs and its cell output, each file capped at

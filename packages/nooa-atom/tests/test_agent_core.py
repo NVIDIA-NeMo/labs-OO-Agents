@@ -257,14 +257,16 @@ def test_repository_instructions_are_read_boundedly(tmp_path, monkeypatch):
             assert 0 <= size <= 101
             return self.stream.read(size)
 
-    monkeypatch.setattr(instructions, "_MAX_INSTRUCTION_FILE_CHARS", 100)
+    from nooa.config import TruncationConfig
+
     monkeypatch.setattr(instructions.os, "fdopen", BoundedStream)
 
-    rendered = instructions.render_agent_instructions(tmp_path)
+    config = TruncationConfig(instructions_file_chars=100)
+    rendered = instructions.render_agent_instructions(tmp_path, config)
 
     assert reads == [101]
     assert "[... truncated ...]" in rendered
-    assert len(rendered) <= instructions._MAX_INSTRUCTION_TOTAL_CHARS
+    assert len(rendered) <= config.instructions_total_chars
 
 
 def test_repository_instructions_allow_a_symlinked_workspace(tmp_path):

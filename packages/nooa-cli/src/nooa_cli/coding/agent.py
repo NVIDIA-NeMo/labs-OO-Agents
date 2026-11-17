@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Annotated, Any
 from nooa import Context, hidden, strategy
 from nooa.agentdoc import doc, spec
 from nooa.agents import TokenBudgetSummarizer
-from nooa.config import CodeActConfig, PredictConfig
+from nooa.config import CodeActConfig, PredictConfig, effective_truncation
 from nooa.errors import hints as _hints
 from nooa.interactive import (
     Done,
@@ -139,7 +139,8 @@ class CodingAgent(InteractiveAgent):
         self.context["context_usage"] = Context(
             expr="self.context_stats.format() if self.context_stats else ''"
         )
-        instructions = render_agent_instructions(self.cwd)
+        # Built in __init__, outside any method: the agent's own config.
+        instructions = render_agent_instructions(self.cwd, effective_truncation(self))
         if instructions:
             self.context["repository_instructions"] = Context(instructions, prefix=True)
         spec(self, "context", hidden=False)

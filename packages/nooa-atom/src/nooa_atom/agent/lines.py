@@ -11,13 +11,26 @@
 """
 
 import codecs
+import dataclasses
 from collections.abc import AsyncIterator, Callable
 from typing import TYPE_CHECKING
 
-from nooa.snapshot import TextStream, render_output
+from nooa.snapshot import Overflow, TextStream, render_output
 
 if TYPE_CHECKING:
     import asyncio
+
+JOB_LOG_LABEL = "full output (stdout and stderr together, in arrival order)"
+"""What a cut line calls a job's ``log_path=`` log: one file, both streams as they arrived."""
+
+
+def name_job_log(rendered: str, path: str) -> str:
+    """``rendered`` (``render_output`` of a ``Text`` whose ``full`` is the job log at ``path``) with its cut line saying what the log holds.
+
+    ``[... N chars omitted; full output: PATH]`` becomes
+    ``[... N chars omitted; full output (stdout and stderr together, in arrival order): PATH]``.
+    """
+    return rendered.replace(f"; full output: {path}]", f"; {JOB_LOG_LABEL}: {path}]", 1)
 
 
 class LineSplitter:
@@ -31,14 +44,26 @@ class LineSplitter:
     then, on its own line, ``[... N chars omitted; full output not kept]``.
     Memory stays at one bounded line plus the chunk being split. ``on_bytes``,
     if given, receives every input byte, in order, one line piece at a time
-    (e.g. for a full log). Text is decoded as UTF-8 with replacement characters.
+    (e.g. for a full log). ``full_path`` (keyword-only), if given, names the
+    file that holds the whole input (that job log, both streams): a cut line
+    then says ``[... N chars omitted; full output (stdout and stderr
+    together, in arrival order): PATH]``. Text is decoded as UTF-8
+    with replacement characters.
     """
 
-    def __init__(self, max_line_chars: int, on_bytes: Callable[[bytes], object] | None = None):
+    def __init__(
+        self,
+        max_line_chars: int,
+        on_bytes: Callable[[bytes], object] | None = None,
+        *,
+        full_path: str | None = None,
+    ):
         if max_line_chars < 1:
             raise ValueError("max_line_chars must be at least 1")
         self._max = max_line_chars
         self._on_bytes = on_bytes
+        self._full_path = full_path
+        self._line_bytes = 0  # bytes of the current line, for its Overflow
         self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         self._line = self._new_line()
         self._started = False
@@ -51,8 +76,16 @@ class LineSplitter:
             self._line.write(text)
 
     def _take(self, newline: str) -> str:
-        line = render_output(self._line.close())
-        self._line, self._started = self._new_line(), False
+        text = self._line.close()
+        line = None
+        if not text.complete and self._full_path is not None:
+            # The whole line is in the file that receives every byte (on_bytes).
+            size = self._line_bytes
+            text = dataclasses.replace(text, full=Overflow(self._full_path, size, size))
+            line = name_job_log(render_output(text), self._full_path)
+        if line is None:
+            line = render_output(text)
+        self._line, self._started, self._line_bytes = self._new_line(), False, 0
         return line + newline
 
     def feed(self, data: bytes) -> list[str]:
@@ -64,6 +97,7 @@ class LineSplitter:
             piece = data[start:] if end < 0 else data[start : end + 1]
             if piece:
                 self._started = True
+                self._line_bytes += len(piece)
                 if self._on_bytes is not None:
                     self._on_bytes(piece)
             if end < 0:
@@ -87,15 +121,17 @@ async def bounded_lines(
     max_line_chars: int,
     chunk_bytes: int = 64 * 1024,
     on_bytes: Callable[[bytes], object] | None = None,
+    full_path: str | None = None,
 ) -> AsyncIterator[str]:
     """Yield ``reader``'s lines in bounded memory, reading ``chunk_bytes`` at a time.
 
     Lines end in ``"\\n"`` (the last one may not) and are capped as in
-    :class:`LineSplitter`; ``on_bytes`` receives every byte read. Unlike
+    :class:`LineSplitter`; ``on_bytes`` receives every byte read, and a cut
+    line names ``full_path`` when given. Unlike
     ``StreamReader.readline`` a line longer than the reader's limit neither
     raises nor loses data.
     """
-    splitter = LineSplitter(max_line_chars, on_bytes)
+    splitter = LineSplitter(max_line_chars, on_bytes, full_path=full_path)
     while True:
         data = await reader.read(chunk_bytes)
         if not data:

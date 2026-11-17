@@ -109,6 +109,10 @@ def _bounded_type_name(value: Any, max_chars: int) -> str:
     return name[:max_chars]
 
 
+_NAMESPACE_FLOOR = 2_000
+"""The default ``Limits.max_nodes``: a class namespace this large is read while any work is left (and charged)."""
+
+
 def _safe_dict(owner: Any, raw: Any, state: _State) -> dict[str, Any] | None:
     """A copy of the native namespace ``raw`` of ``owner`` if every key is an exact ``str``.
 
@@ -129,7 +133,19 @@ def _safe_dict(owner: Any, raw: Any, state: _State) -> dict[str, Any] | None:
     # before the loop: a live namespace such as ``sys.modules`` may change
     # while it runs (an import in another thread). ``dict.copy`` is avoided.
     if type(raw) is MappingProxyType:
-        items: Iterable[tuple[Any, Any]] = list(raw.items())  # a class namespace: a native dict
+        # A class namespace: a native dict. Its entries are charged to the
+        # capture's work (``nodes_left``) before the copy, as far as work is
+        # left. One larger than the work left and than the default
+        # ``max_nodes`` is not copied at all (fail closed); up to that floor a
+        # small budget still reads an ordinary class, spending what is left.
+        # With no work left the walk reaches no new value, so few more
+        # namespaces are read.
+        size = len(raw)
+        if size > max(state.nodes_left, _NAMESPACE_FLOOR):
+            state.namespaces[marker] = (owner, None)
+            return None
+        state.nodes_left -= min(size, state.nodes_left)
+        items: Iterable[tuple[Any, Any]] = list(raw.items())
     elif type(raw) is dict:
         items = list(dict.items(raw))
     else:

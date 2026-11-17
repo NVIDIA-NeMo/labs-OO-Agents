@@ -331,7 +331,10 @@ def _big_integer(value: int, max_size: int, depth: int, path: str, state: _State
     ]
     if negative:
         entries.append(("negative", True))
-    built = _object_fields("int", iter(entries), max_size, depth, path, state, "python.int")
+    # Structural fields: ``max_items`` limits a container's items, not these.
+    built = _object_fields(
+        "int", iter(entries), max_size, depth, path, state, "python.int", capped=False
+    )
     node = cast(Object, built.node)
     if len(node.fields) < len(entries):
         return _fallback(value, "max_length", max_size)
@@ -650,6 +653,26 @@ class _Fill:
         return True
 
 
+def _nested(value: Any, limits: Limits, state: _State) -> Snapshot:
+    """A small capture of ``value`` inside this one (a parameter default's text, a node key).
+
+    It is built under ``limits`` (their ``max_nodes`` is not used) on the
+    enclosing capture's own ``state``: the same work budget
+    (``nodes_left``), the same cycle detection (``active``) and the same
+    checked namespaces, so a value reached again through it (a function
+    that is its own default) does not start over. ``state.nesting`` counts
+    the nested captures in progress.
+    """
+    saved = state.limits
+    state.limits = limits
+    state.nesting += 1
+    try:
+        return _build(value, limits.max_chars, 0, "", state).node
+    finally:
+        state.limits = saved
+        state.nesting -= 1
+
+
 _KEY_LIMITS = Limits(max_chars=400, max_nodes=50, max_depth=2, max_items=8, max_string=50)
 """The bounds of a node key (a tuple or enum member used as a dict key): a key is a label, so it is kept small."""
 
@@ -659,13 +682,14 @@ def _key_node(key: Any, state: _State) -> Snapshot | None:
 
     ``None`` (the mapping stops with ``"key"``) when no inspection work is
     left, for an ``int`` or ``float`` key, and for a key capture cannot read (an
-    ``Unavailable`` label says nothing). The key's own capture is not
-    charged to the mapping's budget beyond the one node of the key.
+    ``Unavailable`` label says nothing). The key is a nested capture
+    (``_nested``) under ``_KEY_LIMITS``: its work, including the class
+    namespaces it reads, is charged to the enclosing capture's budget.
     """
     if state.nodes_left <= 0 or type(key) is int or type(key) is float:
         return None  # a number json_key refused (a huge int, nan) stays refused
     limits = dataclasses.replace(_KEY_LIMITS, fallback=state.limits.fallback)
-    node = _build(key, limits.max_chars, 0, "", _State(limits)).node
+    node = _nested(key, limits, state)
     return None if type(node) is Unavailable else node
 
 
@@ -982,12 +1006,23 @@ def _shape_fields(
     ``max_string`` / ``max_length`` bound its subtree.
     """
     overrides = _class_overrides(mro, state) if shape.fields else {}
+    omit_empty = isinstance(shape, _ObjectLike) and shape.omit_empty
     entries: list[tuple[str, Any]] = []
     for name, function in shape.fields:
         flags = overrides.get(name, {})
         if flags.get("hidden"):
             continue
-        part = _lazy(functools.partial(function, value), state)
+        read = functools.partial(function, value)
+        if omit_empty:
+            try:
+                field_value = read()
+            except Exception:
+                pass  # read() raises again in the part: Unavailable("error")
+            else:
+                if _is_empty_field(field_value):
+                    continue
+                read = functools.partial(_identity, field_value)
+        part = _lazy(read, state)
         entries.append((name, _scoped_part(part, flags)))
     max_items = state.limits.max_items
     cut = max_items is not None and len(entries) > max_items
@@ -1018,6 +1053,21 @@ def _shape_fields(
         reserves=reserves,
         capped=False,
     )
+
+
+def _is_empty_field(value: Any) -> bool:
+    """``object_like(omit_empty=True)``'s test: ``None``, ``""`` or an empty ``list`` / ``dict`` / ``tuple``, by exact type (no code of the value runs)."""
+    kind = type(value)
+    if value is None:
+        return True
+    if kind is str or kind is list or kind is dict or kind is tuple:
+        return len(value) == 0
+    return False
+
+
+def _identity(value: Any) -> Any:
+    """``value`` itself: the read of a field whose value was read already."""
+    return value
 
 
 def _class_overrides(mro: tuple[type[Any], ...], state: _State) -> dict[str, dict[str, Any]]:

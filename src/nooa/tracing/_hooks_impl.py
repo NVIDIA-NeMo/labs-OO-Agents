@@ -22,13 +22,13 @@ from openinference.semconv.trace import (
 from opentelemetry import trace
 from opentelemetry.trace import Span, Status, StatusCode
 
+from nooa._bounded_text import cut_text, text_stream
 from nooa.snapshot import (
     Limits,
     Snapshot,
     TextStream,
     capture,
     capture_fields,
-    cut,
     render_output,
     render_trace,
 )
@@ -142,8 +142,7 @@ _CODE_PREVIEW_LIMITS = dataclasses.replace(_PREVIEW_LIMITS, max_string=10_000)
 
 def _error_stream() -> TextStream:
     """A stream keeping the first and last halves of ``_ERROR_MESSAGE_LIMIT`` chars."""
-    half = _ERROR_MESSAGE_LIMIT // 2
-    return TextStream(unit="chars", head=_ERROR_MESSAGE_LIMIT - half, tail=half)
+    return text_stream(_ERROR_MESSAGE_LIMIT)
 
 
 def _error_message(exception: BaseException) -> str:
@@ -153,8 +152,7 @@ def _error_message(exception: BaseException) -> str:
     of a large object.  Span attributes with MB-sized values blow up OTLP
     payloads and trace storage.
     """
-    half = _ERROR_MESSAGE_LIMIT // 2
-    return render_output(cut(str(exception), head=_ERROR_MESSAGE_LIMIT - half, tail=half))
+    return cut_text(str(exception), _ERROR_MESSAGE_LIMIT)
 
 
 def _exception_stacktrace(exception: BaseException) -> str:

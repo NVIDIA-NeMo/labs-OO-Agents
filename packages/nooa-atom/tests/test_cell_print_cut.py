@@ -35,7 +35,6 @@ async def test_a_long_cell_print_is_cut_and_kept_until_the_session_closes(tmp_pa
         path = Path(found.group(1))
         assert path.parent.name.startswith("nooa-overflow-")  # the session's folder
         assert path.read_text() == "h" * 30_000 + "m" * 10_000 + "t" * 30_000 + "\n"
-        assert "<truncated-output>" not in seen and "not recoverable" not in seen
     finally:
         await registry.close_all()
     assert not path.exists()  # removed with the session

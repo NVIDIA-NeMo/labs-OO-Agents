@@ -176,7 +176,6 @@ def test_large_diff_keeps_only_the_head_and_reports_omitted_lines(monkeypatch):
     assert len(preview) <= limit
     assert kept_lines == complete_lines[: len(kept_lines)]
     assert preview_lines[-1] == f"… +{len(complete_lines) - len(kept_lines)} lines"
-    assert "<truncated-output>" not in preview
 
 
 async def test_diff_generation_has_a_separate_input_safety_limit(tmp_path, monkeypatch):
@@ -292,7 +291,6 @@ async def test_activity_payloads_are_bounded(tmp_path):
     assert edit.diff.startswith("--- a/large.txt\n+++ b/large.txt\n")
     assert edit.diff.endswith(" lines\n")
     assert "… +" in edit.diff
-    assert "<truncated-output>" not in edit.diff
     assert "str(len=" not in edit.diff
     assert edit.content_complete is False
     assert edit.diff_complete is False

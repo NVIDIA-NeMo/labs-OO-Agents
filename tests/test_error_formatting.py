@@ -1407,7 +1407,6 @@ class TestFormatterReviewRegressions:
         assert result == (
             whole[:50] + "\n[... 914 chars omitted; full output not kept]\n" + whole[-50:]
         )
-        assert "<truncated-output>" not in result
 
     def test_very_large_diagnostic_is_bounded_with_tail_preserved(self):
         result = format_error_for_llm(RuntimeError("X" * 5_000_000))
@@ -1436,4 +1435,3 @@ def test_docs_name_the_cut_line_cell_errors_emit():
     assert "\n[... 464 chars omitted; full output not kept]\n" in value
     for text in (Agent.__doc__, CaptureConfig.__doc__):
         assert "full output not kept]" in text
-        assert "<truncated-output>" not in text and "<truncated>" not in text

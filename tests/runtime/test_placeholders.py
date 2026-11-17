@@ -7,14 +7,24 @@
 ``nooa.runtime.placeholders.render_placeholder``.
 """
 
+from typing import Any
+
 import pytest
 
 from nooa import Agent
-from nooa.runtime.placeholders import PLACEHOLDER_TEXT_CHARS, render_placeholder
+from nooa.config.truncation_config import DEFAULT_TRUNCATION_CONFIG
+from nooa.runtime.placeholders import render_placeholder as _render_placeholder
 from nooa.unifiedllm import FakeLLMClient
 
-BOUND = PLACEHOLDER_TEXT_CHARS + 200  # the cut line adds a few dozen chars
+LIMIT = DEFAULT_TRUNCATION_CONFIG.placeholder_chars
+assert LIMIT == 50_000
+BOUND = LIMIT + 200  # the cut line adds a few dozen chars
 HUGE = "a" * 5_000_000 + "b" * 5_000_000  # 10 MB
+
+
+def render_placeholder(value, conversion=None, format_spec=""):
+    """``render_placeholder`` under the default ``TruncationConfig.placeholder_chars``."""
+    return _render_placeholder(value, conversion, format_spec, max_chars=LIMIT)
 
 
 class _Boom:
@@ -191,3 +201,91 @@ def test_system_prompt_small_values_are_unchanged():
     agent.ratio = 0.5
     agent.name = "n"
     assert agent._resolve_system_prompt() == "You are Small with 3 tools, 50.0% 'n'."
+
+
+class _Configured(Agent):
+    """Value {self.value}."""
+
+    async def work(self) -> str: ...
+
+
+def _configured(**limits):
+    from nooa.config.truncation_config import FormatConfig, TruncationConfig
+
+    agent = _Configured(
+        llm=FakeLLMClient([]), truncation=TruncationConfig(prefill_format=FormatConfig(**limits))
+    )
+    return agent
+
+
+async def test_placeholders_honour_tighter_prefill_limits():
+    # correctness 4 (placeholder_config.py): both callers used the global defaults.
+    agent = _configured(max_string=4, max_length=1, max_depth=1)
+    agent.value = ["abcdefghij", "second"]
+    expected = "list(len=2, [:1]=[str(len=10, [:2]='ab', [-2:]='ij')])"
+    assert agent._resolve_system_prompt() == f"Value {expected}."
+    assert await agent.runtime.expand_variables("{self.value}") == expected
+
+
+async def test_placeholders_honour_looser_prefill_limits():
+    agent = _configured(max_string=10_000, max_length=500, max_depth=6)
+    agent.value = list(range(300))  # the default prefill keeps 25 items
+    whole = str(list(range(300)))
+    assert agent._resolve_system_prompt() == f"Value {whole}."
+    assert await agent.runtime.expand_variables("{self.value}") == whole
+
+
+async def test_placeholder_strings_keep_the_50k_bound_whatever_the_limits():
+    agent = _configured(max_string=10_000_000)
+    agent.value = "a" * 200_000
+    assert len(await agent.runtime.expand_variables("{self.value}")) < BOUND
+
+
+# TruncationConfig.placeholder_chars: the bound is the agent's config, None = whole.
+
+
+def _with_placeholder_chars(limit) -> Any:
+    from nooa.config.truncation_config import TruncationConfig
+
+    agent = _Configured(llm=FakeLLMClient([]), truncation=TruncationConfig(placeholder_chars=limit))
+    agent.value = "A" * 30_000 + "B" * 30_000
+    return agent
+
+
+def test_placeholder_chars_bounds_the_system_prompt():
+    prompt = _with_placeholder_chars(1_000)._resolve_system_prompt()
+    assert len(prompt) < 1_200
+    assert prompt.startswith("Value AAA") and prompt.endswith("BBB.")
+
+
+def test_placeholder_chars_none_keeps_the_system_prompt_whole():
+    agent = _with_placeholder_chars(None)
+    assert agent._resolve_system_prompt() == f"Value {agent.value}."
+
+
+async def test_placeholder_chars_bounds_task_prompts():
+    agent = _with_placeholder_chars(1_000)
+    for template in ("{self.value}", "{self.value!s}", "{self.value:>10}"):
+        text = await agent.runtime.expand_variables(template)
+        assert len(text) < 1_200 and text.startswith("AAA") and text.endswith("BBB")
+    error = await agent.runtime.expand_variables("{self.boom.explode()}", {"self": _holder()})
+    assert error.startswith("{ERROR: xxx") and len(error) < 1_200
+
+
+async def test_placeholder_chars_none_keeps_task_prompts_whole():
+    agent = _with_placeholder_chars(None)
+    assert await agent.runtime.expand_variables("{self.value}") == agent.value
+    assert await agent.runtime.expand_variables("{self.value!s}") == agent.value
+
+
+async def test_expand_variables_placeholder_chars_overrides_the_config():
+    agent = _with_placeholder_chars(1_000)
+    text = await agent.runtime.expand_variables("{self.value}", placeholder_chars=None)
+    assert text == agent.value
+
+
+def test_placeholder_chars_must_be_positive():
+    from nooa.config.truncation_config import TruncationConfig
+
+    with pytest.raises(ValueError, match="placeholder_chars"):
+        TruncationConfig(placeholder_chars=0)

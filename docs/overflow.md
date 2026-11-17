@@ -6,6 +6,7 @@
 |---|---|
 | `OverflowDir(*, max_files=20, file_bytes=64 MiB)` | a bounded private folder of files, always its own `tempfile.mkdtemp` folder (0700, unpredictable name) in the system temporary directory |
 | `OverflowDir.open(max_bytes=None)` | the `OverflowWriter` of a new file in the folder (exclusive, `O_NOFOLLOW`, 0600), capped at `min(max_bytes, file_bytes)`, or `None` when the budget is in use, the folder is closed or the exit began |
+| `OverflowDir.default()` | the process's own folder (default sizes) for output nobody else owns, made on first use; `None` (memory only, logged once) when it cannot be created, and a later call tries again; a forked child makes its own |
 | `OverflowWriter` | `write(data)` (unbuffered, straight to the descriptor), `finish(delete=...)` (returns whether the file is kept), read-only `path`, `max_bytes`, `written`, `closed` |
 
 ## Threat model
@@ -19,7 +20,7 @@ CPython's (`tempfile`, `shutil.rmtree`): an `OverflowDir` works only in its own 
 - **A gone path says so.** Reading an evicted or closed file raises `FileNotFoundError`.
 - **Honest writers.** No Python buffer: `written` counts only bytes the file took; a write error raises `OSError`. `finish` never raises: a failed close is logged, the file deleted, and `finish` returns `False`. A later `finish(delete=True)` deletes a kept file.
 - **Failures are logged.** A file that could not be deleted stays a closed file, counted against the caps, until a later eviction or the folder's removal deletes it; a folder that could not be removed stays registered for the next `close()` and the exit.
-- **Fork.** An `os.register_at_fork` hook makes every inherited folder and writer inert in the child (no writes, deletes or exit cleanup) and gives fresh locks; a child's own `OverflowDir` works normally.
+- **Fork.** An `os.register_at_fork` hook makes every inherited folder and writer inert in the child (no writes, deletes or exit cleanup) and gives fresh locks; a child's own `OverflowDir` works normally, and its first `OverflowDir.default()` makes a new folder rather than returning the parent's.
 - **Threads.** `open()`, `close()` and writers finishing may run in any threads; one writer is used by one thread at a time.
 - **The exit.** The exit cleanup never runs without a folder's lock and waits at most a second for it; a thread still holding it removes the folder when it lets go. During the exit `open()` returns `None`, and an `OverflowDir` made then (by an `atexit` handler that runs after the cleanup) gets no folder.
 

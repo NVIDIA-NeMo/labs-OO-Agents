@@ -141,7 +141,8 @@ def test_nested_pydantic_huge_string_is_prefix_bounded() -> None:
 
     result = trace_json(
         Outer(inner=Inner(text="x" * 10_000_000)),
-        limits=Limits(max_chars=500, max_nodes=50, max_depth=16),
+        # Room for the models' class namespaces, charged to max_nodes.
+        limits=Limits(max_chars=500, max_nodes=300, max_depth=16),
     )
 
     parsed = json.loads(result.text)
@@ -401,7 +402,8 @@ def test_incomplete_paths_are_escaped_and_metadata_is_bounded() -> None:
 def test_nonfinite_and_giant_numbers_are_valid_bounded_json() -> None:
     value = {"nan": math.nan, "inf": math.inf, "huge": 1 << 1_000_000}
 
-    result = trace_json(value, limits=Limits(max_chars=500, max_nodes=20, max_depth=5))
+    # Room for float's class namespace (46 entries), charged to max_nodes.
+    result = trace_json(value, limits=Limits(max_chars=500, max_nodes=80, max_depth=5))
     parsed = json.loads(result.text)
 
     assert set(parsed) == {"nan", "inf", "huge"}

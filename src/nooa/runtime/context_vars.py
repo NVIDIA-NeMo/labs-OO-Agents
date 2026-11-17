@@ -10,6 +10,22 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from nooa.agent import Agent
+    from nooa.overflow import OverflowDir
+
+capture_overflow: contextvars.ContextVar["OverflowDir | None"] = contextvars.ContextVar(
+    "nooa_capture_overflow", default=None
+)
+"""The ``OverflowDir`` a session's cell captures write to, set only while its output files are on.
+
+A context variable, not a parameter: the capture is made inside the core
+cell execution (``nooa.runtime.actor._make_capture_stream``) from the
+agent's ``TruncationConfig``, which knows nothing of a session; a session
+sets it for its cells next to the other cell context (Atom: its
+``ShellOwner.overflow_dir()``, so cell files follow the session's
+lifetime). Unset (``None``): ``OverflowDir.default()``. Whether a capture
+writes a file at all is the agent's ``TruncationConfig.overflow_files``
+(and ``capture.file_backed``), never this variable.
+"""
 
 # Context variable to detect when we're inside a generation session.
 # Defined here (not in actor.py) to avoid circular imports with method_wrapper.py.

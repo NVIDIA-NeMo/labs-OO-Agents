@@ -16,12 +16,14 @@ from uuid import uuid4
 
 from pydantic import Field
 
+from nooa._bounded_text import cut_halves, text_stream
 from nooa.agentdoc import hidden, spec
+from nooa.config.effective import effective_truncation
 from nooa.context_blocks import EventBase
 from nooa.context_blocks.roles import Role
 from nooa.runtime.event_manager import EventManager
 from nooa.skill import Skill
-from nooa.snapshot import TextStream, cut, render_output, render_python
+from nooa.snapshot import TextStream, render_output, render_python
 from nooa.tools._bash_session import BashSession
 from nooa.tools._results import StreamDone, StreamEvent
 from nooa.tools.shell_tools import (
@@ -34,7 +36,6 @@ from nooa.tools.shell_tools import (
 logger = logging.getLogger(__name__)
 
 _MAX_EVENT_TEXT_CHARS = 10_000
-_MAX_COMMAND_OUTPUT_CHARS = 30_000
 _MAX_DIFF_INPUT_CHARS = 1_000_000
 _MAX_DIFF_INPUT_LINES = 20_000
 
@@ -43,15 +44,16 @@ def _event_text(text: str) -> str:
     """``text`` itself, or past ``_MAX_EVENT_TEXT_CHARS`` its ``str(len=N, [:h]=..., [-t:]=...)`` cut."""
     if len(text) <= _MAX_EVENT_TEXT_CHARS:
         return text
-    tail = _MAX_EVENT_TEXT_CHARS // 2
-    return render_python(cut(text, head=_MAX_EVENT_TEXT_CHARS - tail, tail=tail))
+    return render_python(cut_halves(text, _MAX_EVENT_TEXT_CHARS))
 
 
 def _output_stream() -> TextStream:
-    """One stream of a terminal card: half of ``_MAX_COMMAND_OUTPUT_CHARS``, both ends kept."""
-    limit = _MAX_COMMAND_OUTPUT_CHARS // 2
-    tail = limit // 2
-    return TextStream(unit="chars", head=limit - tail, tail=tail)
+    """One stream of a terminal card: half of ``capture.max_shell_output``, both ends kept.
+
+    The shell's per-stream limit of the config in force
+    (``nooa.config.effective_truncation()``).
+    """
+    return text_stream(effective_truncation().capture.max_shell_output // 2)
 
 
 def _command_output(
@@ -119,8 +121,7 @@ def _edit_diff(
     if _diff_input_is_too_large(old_text) or _diff_input_is_too_large(new_text):
         return _omitted_diff(path, "file content exceeds the safe diff preview limit")
 
-    tail = _MAX_EVENT_TEXT_CHARS // 2
-    output = TextStream(unit="chars", head=_MAX_EVENT_TEXT_CHARS - tail, tail=tail)
+    output = text_stream(_MAX_EVENT_TEXT_CHARS)
     # A region diff is generated in region coordinates; every hunk shifts by the
     # same amount to reach file coordinates. Rewriting only the first one, with
     # the whole region's counts, left later hunks region-relative — able to point

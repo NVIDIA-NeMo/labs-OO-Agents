@@ -240,7 +240,8 @@ def test_object_like_greedy_field_leaves_room_for_later_fields(registered) -> No
             }
         ),
     )
-    for limits in (Limits(max_chars=120), Limits(max_chars=2_000), Limits(max_nodes=80)):
+    # max_nodes=120: room for the class namespaces, charged to max_nodes.
+    for limits in (Limits(max_chars=120), Limits(max_chars=2_000), Limits(max_nodes=120)):
         snapshot = capture(Greedy(), limits)
         assert isinstance(snapshot, Object)
         assert [name for name, _node in snapshot.fields] == ["sample", "name", "count", "plain"]
@@ -275,6 +276,78 @@ def test_object_like_values_are_captured_normally(registered) -> None:
     assert snapshot.field("inner") == Object("Inner", (), "max_depth")
     assert snapshot.field("other") == capture(object())
     assert render_python(capture(Holder())) == "Holder(inner=Inner(x=1), other=<opaque: object>)"
+
+
+def test_object_like_omit_empty_leaves_out_empty_fields_before_the_budget(registered) -> None:
+    class Sized(list):  # a subclass is kept, empty or not
+        pass
+
+    Sparse = _named("Sparse")
+    registered(
+        Sparse,
+        object_like(
+            {
+                "none": lambda v: None,
+                "text": lambda v: "",
+                "items": lambda v: [],
+                "pairs": lambda v: {},
+                "tuple": lambda v: (),
+                "zero": lambda v: 0,
+                "sub": lambda v: Sized(),
+                "kept": lambda v: "x",
+            },
+            omit_empty=True,
+        ),
+    )
+    snapshot = capture(Sparse())
+    assert isinstance(snapshot, Object)
+    assert [name for name, _node in snapshot.fields] == ["zero", "sub", "kept"]
+    first = capture(Sparse(), Limits(max_items=1))
+    assert isinstance(first, Object) and [name for name, _ in first.fields] == ["zero"]
+
+
+def test_object_like_omit_empty_runs_no_code_of_the_value(registered) -> None:
+    class Loud:
+        def __len__(self) -> int:
+            raise AssertionError("__len__ ran")
+
+        def __bool__(self) -> bool:
+            raise AssertionError("__bool__ ran")
+
+        def __eq__(self, other: object) -> bool:
+            raise AssertionError("__eq__ ran")
+
+        __hash__ = object.__hash__
+
+    def fail(value: Any) -> Any:
+        raise KeyError("x")
+
+    Wrapper = _named("Wrapper")
+    registered(Wrapper, object_like({"loud": lambda v: Loud(), "bad": fail}, omit_empty=True))
+    snapshot = capture(Wrapper())
+    assert isinstance(snapshot, Object)
+    assert [name for name, _ in snapshot.fields] == ["loud", "bad"]
+    assert snapshot.field("bad") == Unavailable("error")
+
+
+def test_object_like_keeps_empty_fields_by_default(registered) -> None:
+    Plain = _named("Plain")
+    registered(Plain, object_like({"text": lambda v: "", "none": lambda v: None}))
+    assert render_python(capture(Plain())) == "Plain(text='', none=None)"
+    with pytest.raises(TypeError, match="omit_empty"):
+        object_like({}, omit_empty=1)  # type: ignore[arg-type]
+
+
+def test_a_tool_call_only_llm_response_shows_its_tool_calls() -> None:
+    from nooa.unifiedllm import LLMResponse, ToolCall
+
+    response = LLMResponse.model_validate(
+        {"content": "", "tool_calls": [ToolCall(id="c1", name="run", arguments="{}")]}
+    )
+    snapshot = capture(response, Limits(max_items=1))
+    assert isinstance(snapshot, Object)
+    assert [name for name, _ in snapshot.fields] == ["tool_calls"]
+    assert "content=" not in render_python(snapshot)
 
 
 def test_shape_metadata_is_copied_to_exact_str(registered) -> None:

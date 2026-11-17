@@ -2,9 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Trace previews: span ``input.value`` / ``output.value`` go through ``nooa.snapshot``.
 
-Replaces the tests of ``_safe_serialize``, ``_safe_json_value`` and
-``_safe_serialize_execution_result`` (gl-74): the preview is
-``render_trace(capture(value))``'s JSON, always valid and at most 50,000
+The preview is ``render_trace(capture(value))``'s JSON, always valid and at most 50,000
 characters, plus the ``nooa.{input,output}.preview.*`` attributes.
 """
 

@@ -465,6 +465,29 @@ class _Scoped:
         self.limits = limits
 
 
+def _with_own_overrides(raw: dict[Any, Any], storage: dict[str, Any]) -> dict[str, Any]:
+    """``storage`` (a partial copy of ``raw``) plus the instance's own ``spec`` overrides, wherever ``raw`` holds them.
+
+    The overrides (``FIELD_METADATA_ATTR``) may lie past the copied entries;
+    without them a field hidden on the instance would show. Every key of
+    ``raw`` is checked to be an exact ``str`` first, by identity of its type
+    (a set of the types would hash them: a metaclass ``__hash__`` /
+    ``__eq__``), so neither the check nor the lookup runs user code.
+
+    Raises:
+        _FailClosed: a key is not an exact ``str``: visibility is unknown.
+    """
+    if not all(type(key) is str for key in dict.keys(raw)):
+        raise _FailClosed
+    own = dict.get(raw, FIELD_METADATA_ATTR, _MISSING)
+    if own is _MISSING:
+        return storage
+    return {**storage, FIELD_METADATA_ATTR: own}
+
+
+_MISSING = object()
+
+
 def _is_empty(value: Any) -> bool:
     """Whether ``value`` is ``None`` or an empty exact ``str``, ``bytes``, ``list``, ``tuple``, ``dict``, ``set`` or ``frozenset``.
 
@@ -473,7 +496,9 @@ def _is_empty(value: Any) -> bool:
     if value is None:
         return True
     value_type = type(value)
-    if value_type in _EMPTY_TYPES:  # exact built-in types: their own ``__len__``
+    # Exact built-in types (their own ``__len__``), by identity: ``in`` would
+    # run a metaclass's ``__eq__``.
+    if any(value_type is kind for kind in _EMPTY_TYPES):
         return len(value) == 0
     return False
 
@@ -804,7 +829,9 @@ def _plain_entries(
         # A quarter of the work left: the names cost as much again, the fields the rest.
         storage = _copy_storage(raw, state, limit=max(1, state.nodes_left // 4))
         partial = len(storage) < total
-        overrides = _visibility_overrides(storage, mro, state)
+        overrides = _visibility_overrides(
+            _with_own_overrides(raw, storage) if partial else storage, mro, state
+        )
         hide_empty = _class_hide_empty(mro, state)
         found: list[tuple[str, Any]] = []
         for name, default in _class_defaults(mro, state):

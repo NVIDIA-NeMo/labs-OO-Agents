@@ -797,8 +797,9 @@ def _cut_text(text: str, limit: int, tail: int | None) -> str:
     ``tail`` chars come from the end (``None``: half of ``limit``), the rest from
     the start; no file keeps the whole text, so the line ends ``full output not kept]``.
     """
-    tail_chars = limit // 2 if tail is None else tail
-    return render_output(cut(text, head=limit - tail_chars, tail=tail_chars))
+    from nooa._bounded_text import cut_text
+
+    return cut_text(text, limit, tail)
 
 
 def _hard_bound_text(text: str, limit: int) -> str:
@@ -811,7 +812,7 @@ def _hard_bound_text(text: str, limit: int) -> str:
     notice = render_output(cut(text, head=0, tail=0))
     keep = limit - len(notice) - 1  # the head and its newline before the line
     if keep <= 0:
-        return notice[:limit]
+        return notice[:limit]  # snapshot: allow transport ceiling below even the cut line
     return render_output(cut(text, head=keep, tail=0))
 
 

@@ -135,6 +135,39 @@ async def test_run_log_path_gets_the_full_output_and_keeps_the_exit_code(agent, 
     assert agent.jobs.get("noisy").log_path == str(log)
 
 
+async def test_run_log_path_cut_tail_names_the_log(agent, tmp_path):
+    # fit 1 (scratch-fit/test_fit_jobs_log.py): the log held all 108,894 bytes,
+    # yet the done update's cut line said "full output not kept".
+    await agent.jobs.run("seq 1 20000", name="big", log_path="big.log")
+    item = await _next(agent)
+    while not (isinstance(item, JobUpdate) and item.done):
+        item = await _next(agent)
+    log = tmp_path / "big.log"
+    assert item.log_path == str(log)
+    assert log.read_text() == "".join(f"{i}\n" for i in range(1, 20001))
+    first = item.stdout.splitlines()[0]
+    assert first == (
+        f"[... 88,894 chars omitted; full output (stdout and stderr together, "
+        f"in arrival order): {log}]"
+    )
+
+
+async def test_run_log_path_long_line_names_the_log_which_holds_it_whole(agent, tmp_path):
+    await agent.jobs.run(
+        "head -c 20000 /dev/zero | tr '\\0' x; echo; echo short",
+        name="wide",
+        log_path="wide.log",
+    )
+    item = await _next(agent)
+    log = tmp_path / "wide.log"
+    assert log.read_text() == "x" * 20_000 + "\nshort\n"
+    assert item.stdout == (
+        "x" * 8_000
+        + "\n[... 12,000 chars omitted; full output (stdout and stderr together, "
+        + f"in arrival order): {log}]\nshort\n"
+    )
+
+
 async def test_run_log_path_is_relative_to_the_commands_directory(agent, tmp_path):
     (tmp_path / "sub").mkdir()
     await agent.jobs.run("echo hi", name="here", cwd="sub", log_path="run.log")
@@ -980,7 +1013,6 @@ async def test_a_single_overlong_line_is_cut_in_the_snapshot_notation_in_the_tai
     assert done.done and done.returncode == 0
     # 30,012 chars: the first 8,000, then the omitted rest, counted by the snapshot.
     assert done.stdout == "A" * 8_000 + "\n[... 22,012 chars omitted; full output not kept]\n"
-    assert "THE_REAL_END" not in done.stdout and "of this line omitted" not in done.stdout
 
 
 async def test_a_throttled_chatty_run_sends_batches_early_at_the_cap(agent):

@@ -310,13 +310,24 @@ _live_lock = threading.Lock()  # held for set updates only, never across I/O
 _exiting = False
 
 
+# The process-default folder (``OverflowDir.default()``): made on first use, per process.
+_default: OverflowDir | None = None
+_default_lock = threading.Lock()
+_default_failed = False  # a creation failure was logged (once, until one succeeds)
+
+
 def _after_fork_in_child() -> None:
     """A forked child starts with no exit cleanups: the inherited folders are its parent's (inert here)."""
-    global _live, _live_lock  # noqa: PLW0603 - per-process registry
+    global _live, _live_lock, _default, _default_lock, _default_failed  # noqa: PLW0603 - per-process registry
     for folder in _live:
         folder.lock = threading.Lock()
     _live = set()
     _live_lock = threading.Lock()
+    _default, _default_lock, _default_failed = (
+        None,
+        threading.Lock(),
+        False,
+    )  # the child makes its own
 
 
 if hasattr(os, "register_at_fork"):
@@ -376,6 +387,9 @@ class OverflowDir:
     Processes: in a forked child an inherited folder is inert: ``open()``
     returns ``None`` (logged), and ``close()`` and the child's exit leave
     the parent's files alone. A child makes its own ``OverflowDir``.
+
+    ``OverflowDir.default()``: the process's own folder, made on first use,
+    for output nobody else owns; ``None`` when it cannot be created.
 
     Threads: ``open()``, ``close()`` and the writers' ``finish`` may run in
     any threads; the bookkeeping is locked.
@@ -458,6 +472,41 @@ class OverflowDir:
         if folder.mine():
             with folder.locked():
                 folder.run()
+
+    @classmethod
+    def default(cls) -> OverflowDir | None:
+        """This process's default ``OverflowDir`` (default sizes), made on first use; ``None``: memory only.
+
+        For output with no owner of its own (no session set a folder).
+        Every call in one process returns the same folder; it is removed at
+        interpreter exit, like any folder never closed. A forked child
+        never gets its parent's: its first call makes its own. When the
+        folder cannot be created (``OSError``: no temporary directory, a
+        full disk) it returns ``None`` and logs it, once until a creation
+        succeeds; a later call tries again. Once the default is closed (by
+        ``close()`` or the exit cleanup), the next call makes a new one,
+        except during the exit (then ``None``).
+        """
+        global _default, _default_failed  # noqa: PLW0603 - one per process
+        with _default_lock:
+            if _default is not None and not _default.closed:
+                return _default
+            with _live_lock:
+                exiting = _exiting
+            if exiting:
+                return None
+            try:
+                _default = cls()
+            except OSError:
+                if not _default_failed:
+                    _default_failed = True
+                    _log.warning(
+                        "could not create the default overflow folder; keeping memory only",
+                        exc_info=True,
+                    )
+                return None
+            _default_failed = False
+            return _default
 
     def __enter__(self) -> OverflowDir:
         """Return the folder itself, for ``with OverflowDir() as folder:``."""

@@ -27,7 +27,6 @@ class TestTruncatingPformatCap:
         assert cut and head.startswith("list(len=100000,\n    [:")
         assert tail.endswith("        99999,\n    ],\n)")
         assert len(head.rsplit("\n[... ", 1)[0]) == 100 and len(tail) == 100
-        assert "Output too large" not in result and "<truncated-output>" not in result
 
     def test_odd_cap_gives_the_extra_char_to_the_head(self):
         result = truncating_pformat(list(range(1_000)), max_chars=101)

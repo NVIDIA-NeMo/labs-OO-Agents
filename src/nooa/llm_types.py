@@ -523,6 +523,8 @@ capture.register(
             "content": lambda response: response.content,
             "reasoning": lambda response: response.reasoning,
             "tool_calls": lambda response: response.tool_calls,
-        }
+        },
+        # A tool-call-only reply shows its tool calls, not content=''.
+        omit_empty=True,
     ),
 )

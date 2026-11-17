@@ -6,6 +6,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+from nooa.config.effective import effective_truncation
+
+if TYPE_CHECKING:
+    from nooa.config.truncation_config import TruncationConfig
 
 logger = logging.getLogger(__name__)
 
@@ -28,16 +34,19 @@ def discover_agent_instruction_files(working_directory: str | Path) -> tuple[Pat
     return tuple(path for directory in directories if (path := directory / "AGENTS.md").is_file())
 
 
-#: Per-file and combined caps on repository instructions. The content is
-#: workspace-controlled and lands in a prefix context block on every turn, so an
-#: unbounded read is a memory and context-window risk at session setup.
-_MAX_INSTRUCTION_FILE_CHARS = 100_000
-_MAX_INSTRUCTION_TOTAL_CHARS = 200_000
 _SECTION_SEPARATOR = "\n\n---\n\n"
 
 
-def render_agent_instructions(working_directory: str | Path) -> str:
+def render_agent_instructions(
+    working_directory: str | Path, truncation: TruncationConfig | None = None
+) -> str:
     """Render applicable repository instructions as one bounded context block.
+
+    The caps are ``instructions_file_chars`` per file and
+    ``instructions_total_chars`` in all of ``truncation`` (``None``: the
+    config in force, ``nooa.config.effective_truncation()``). The content is
+    workspace-controlled and lands in a prefix context block on every turn, so
+    an unbounded read is a memory and context-window risk at session setup.
 
     Reads are bounded rather than truncated after the fact: the content is
     workspace-controlled and lands in a prefix context block on every turn, so
@@ -45,13 +54,14 @@ def render_agent_instructions(working_directory: str | Path) -> str:
     the memory. The budget covers the rendered text — headers, separators and
     truncation markers included — not just the retained file content.
     """
+    config = truncation if truncation is not None else effective_truncation()
     sections: list[str] = []
-    remaining = _MAX_INSTRUCTION_TOTAL_CHARS
+    remaining = config.instructions_total_chars
     for path in discover_agent_instruction_files(working_directory):
         if remaining <= 0:
             logger.warning("Skipping repository instructions from %s: total limit reached", path)
             continue
-        budget = min(_MAX_INSTRUCTION_FILE_CHARS, remaining)
+        budget = min(config.instructions_file_chars, remaining)
         try:
             with path.open("r", encoding="utf-8") as stream:
                 # One char past the budget is enough to know it was cut.

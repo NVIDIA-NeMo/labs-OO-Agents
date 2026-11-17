@@ -16,12 +16,14 @@ from uuid import uuid4
 
 from pydantic import Field
 
+from nooa._bounded_text import cut_halves, text_stream
 from nooa.agentdoc import hidden, spec
+from nooa.config.effective import effective_truncation
 from nooa.context_blocks import EventBase
 from nooa.context_blocks.roles import Role
 from nooa.runtime.event_manager import EventManager
 from nooa.skill import Skill
-from nooa.snapshot import TextStream, cut, render_output, render_python
+from nooa.snapshot import TextStream, render_output, render_python
 from nooa.tools import BashSession, StreamDone, StreamEvent
 from nooa.tools.shell_tools import (
     FileWrite,
@@ -33,9 +35,6 @@ from nooa.tools.shell_tools import (
 logger = logging.getLogger(__name__)
 
 _MAX_EVENT_TEXT_CHARS = 10_000
-_MAX_COMMAND_OUTPUT_CHARS = 30_000
-"""Characters of each stream a terminal card shows: the shell's own per-stream limit
-(``MAX_OUTPUT_CHARS`` of the core shell session), so the card shows what the model got."""
 _MAX_DIFF_INPUT_CHARS = 1_000_000
 _MAX_DIFF_INPUT_LINES = 20_000
 
@@ -44,14 +43,16 @@ def _event_text(text: str) -> str:
     """``text`` itself, or past ``_MAX_EVENT_TEXT_CHARS`` its ``str(len=N, [:h]=..., [-t:]=...)`` cut."""
     if len(text) <= _MAX_EVENT_TEXT_CHARS:
         return text
-    tail = _MAX_EVENT_TEXT_CHARS // 2
-    return render_python(cut(text, head=_MAX_EVENT_TEXT_CHARS - tail, tail=tail))
+    return render_python(cut_halves(text, _MAX_EVENT_TEXT_CHARS))
 
 
 def _output_stream() -> TextStream:
-    """One stream of a terminal card: the first and last halves of ``_MAX_COMMAND_OUTPUT_CHARS``."""
-    tail = _MAX_COMMAND_OUTPUT_CHARS // 2
-    return TextStream(unit="chars", head=_MAX_COMMAND_OUTPUT_CHARS - tail, tail=tail)
+    """One stream of a terminal card: the first and last halves of ``capture.max_shell_output``.
+
+    The shell's own per-stream limit (``nooa.config.effective_truncation()``),
+    so the card shows what the model got.
+    """
+    return text_stream(effective_truncation().capture.max_shell_output)
 
 
 def _command_output(
