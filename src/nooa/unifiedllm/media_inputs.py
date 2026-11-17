@@ -674,9 +674,36 @@ def media_occurrences(messages, enabled: tuple[MediaInput, ...]):
     return [(kind, key) for *_, kind, key in _occurrences(messages, enabled)]
 
 
+def unknown_type_notice(part_kind: str, media_type: str) -> str:
+    """The text the model sees in place of an image (audio, video) whose type is unknown."""
+    subject = _NOTICE_SUBJECT[part_kind][0]
+    described = f" ({media_type})" if media_type else ""
+    advice = (
+        " Only PNG, JPEG, GIF and WebP images can be sent; save it in one of these and "
+        "show it again."
+        if part_kind == "image"
+        else ""
+    )
+    return f"[{subject} of unknown type{described} was removed here.{advice}]"
+
+
+def _part_kind(block: Mapping[str, Any]) -> str | None:
+    """The kind the block's wire part carries (``image_url`` -> image), ignoring MIME hints."""
+    from nooa.media_inputs import _KINDS
+
+    kind = _KINDS.get(block.get("type"))
+    return kind if kind in _NOTICE_SUBJECT else None
+
+
 def _replacement(kind, block, rejected: bool, enabled) -> str | None:
     """The notice that replaces an attachment block on the wire, or None to send it."""
     if kind not in enabled:
+        part = _part_kind(block)
+        if kind == "file" and part is not None:
+            # An image part whose MIME type is not an image type (for example
+            # application/octet-stream): say so instead of "Only PDF files".
+            hints = sorted(_mime_hints(block))
+            return unknown_type_notice(part, hints[0] if hints else "")
         return removed_media_notice(kind)
     notice = _unsendable(kind, block)
     if notice is not None:

@@ -15,6 +15,25 @@ import mimetypes
 from pathlib import Path
 
 
+def sniff_image_type(data: bytes) -> str:
+    """The image type the first bytes of ``data`` show (PNG, JPEG, GIF, WebP, SVG), else ""."""
+    head = data[:1024]
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    text = head.lstrip(b"\xef\xbb\xbf \t\r\n").lower()
+    if text.startswith(b"<svg") or (
+        (text.startswith(b"<?xml") or text.startswith(b"<!doctype svg")) and b"<svg" in text
+    ):
+        return "image/svg+xml"
+    return ""
+
+
 def _url_media_type(url: str, prefix: str) -> str:
     """The MIME type a URL names (``data:`` type or file extension) if it starts with ``prefix``, else ""."""
     from urllib.parse import urlsplit
@@ -132,6 +151,35 @@ class Image(Media):
     """
 
     _modality = "image"
+
+    @classmethod
+    def from_file(cls, path: str | Path, **vendor_metadata: object) -> "Image":
+        """Load an image from a file path.
+
+        The type comes from the file extension, checked against the first
+        bytes (PNG, JPEG, GIF, WebP, SVG): a file with no known extension, or
+        a ``.png`` file that holds a JPEG, gets the type its bytes show. Only
+        the header is read for this; nothing is decoded.
+        """
+        p = Path(path)
+        data = p.read_bytes()
+        mime, _ = mimetypes.guess_type(str(p))
+        sniffed = sniff_image_type(data)
+        media_type = sniffed or mime or "application/octet-stream"
+        return cls.from_bytes(data, media_type=media_type, **vendor_metadata)
+
+    @classmethod
+    def from_bytes(cls, data: bytes, *, media_type: str, **vendor_metadata: object) -> "Image":
+        """Create an image from raw bytes with an explicit media type.
+
+        When ``media_type`` is empty or ``application/octet-stream``, the type
+        is read from the first bytes (PNG, JPEG, GIF, WebP, SVG) if they show
+        one. An explicit image type is kept as given.
+        """
+        declared = (media_type or "").split(";", 1)[0].strip().lower()
+        if declared in ("", "application/octet-stream"):
+            media_type = sniff_image_type(data) or media_type
+        return super().from_bytes(data, media_type=media_type, **vendor_metadata)  # type: ignore[return-value]
 
     @classmethod
     def from_url(cls, url: str, *, media_type: str = "", **vendor_metadata: object) -> "Image":
