@@ -94,8 +94,9 @@ async def test_one_bad_image_among_sixteen_is_found_with_log2_requests(error, ba
         response = await c.acall(messages_with(images))
         assert response.content == "saw 15 images"  # the final request's own reply
         requests = wire.call_count - 1  # after the original request
-        # newest alone, (all or probe), bisect over 16, final: log2(16) + 3
-        assert requests <= math.ceil(math.log2(16)) + 3
+        # newest alone, (all or probe), bisect over 16, final: log2(16) + 3;
+        # the fallback first re-sends the original once: one more
+        assert requests <= math.ceil(math.log2(16)) + 3 + (error == UNNAMED)
         last = sent_images(wire.call_args.kwargs)
         assert bad not in last and len(last) == 15
     # The exclusion is kept for later requests on this connection.
@@ -133,7 +134,7 @@ async def test_a_failed_probe_raises_the_original_error_and_excludes_nothing():
         wire.side_effect = wire_reply
         with pytest.raises(litellm.BadRequestError, match="malformed"):
             await c.acall(messages_with(images))
-        assert wire.call_count == 2  # the request, then one probe
+        assert wire.call_count == 3  # the request, the same request again, one probe
         assert sent_images(wire.call_args.kwargs) == []  # the probe carried no media
         view = c._prepare_media_messages(messages_with(images), c._prepare_call_config({}))
         assert NOTE not in str(view)
@@ -145,7 +146,7 @@ async def test_the_probe_has_no_endpoint_retries_and_its_reply_is_discarded():
 
     def wire_reply(**kwargs):
         calls.append(len(sent_images(kwargs)))
-        if len(calls) == 2:  # the probe: a retryable 500 must not be retried
+        if len(calls) == 3:  # the probe: a retryable 500 must not be retried
             raise litellm.InternalServerError(message="boom", model="m", llm_provider="openai")
         raise bad_request(UNNAMED)
 
@@ -153,7 +154,7 @@ async def test_the_probe_has_no_endpoint_retries_and_its_reply_is_discarded():
         wire.side_effect = wire_reply
         with pytest.raises(litellm.BadRequestError):
             await c.acall(messages_with(images))
-    assert calls == [2, 0]
+    assert calls == [2, 2, 0]  # the request, re-sent once, the probe
 
     # When the probe succeeds its reply ("PROBE") is never returned.
     def probe_ok(**kwargs):

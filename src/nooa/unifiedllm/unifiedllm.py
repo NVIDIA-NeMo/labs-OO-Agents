@@ -1532,8 +1532,11 @@ class UnifiedLLM(ABC):
         still fails it searches the remaining newer candidates the same way.
         One bad attachment among N costs about log2(N) + 2 requests.
 
-        ``mode="fallback"`` (no narrow rule matched) first sends one probe with
-        every candidate excluded; its reply is discarded. If that probe fails too, the media is not the problem: the
+        ``mode="fallback"`` (no narrow rule matched) first re-sends the
+        original request once: if that succeeds, its reply is returned and
+        nothing is excluded (the first failure was a one-off). Only if it fails
+        again the same way does one probe go out with every candidate
+        excluded; its reply is discarded. If that probe fails too, the media is not the problem: the
         original error is raised and nothing changes.
 
         At most ``budget`` requests are made after the original one, counted
@@ -1560,7 +1563,22 @@ class UnifiedLLM(ABC):
             return _media_fallback_eligible(err) and _http_status(err) == _http_status(original)
 
         if mode == "fallback":
-            if used >= budget:
+            # The error names no attachment: it may be a one-off. Re-send the
+            # original request once (no endpoint retries); only a second
+            # failure of the same kind starts the search, so an exclusion the
+            # fallback finds is kept only if the original set failed twice.
+            if used + 2 > budget:
+                raise original
+            used += 1
+            _record_llm_metric("media_recovery_probe", "fallback")
+            response, error = yield frozenset()
+            if error is None:
+                logger.warning(
+                    "Request failed once (%s) and succeeded when re-sent; nothing excluded",
+                    type(original).__name__,
+                )
+                return response
+            if not still_media(error):
                 raise original
             used += 1
             _record_llm_metric("media_recovery_probe", "fallback")

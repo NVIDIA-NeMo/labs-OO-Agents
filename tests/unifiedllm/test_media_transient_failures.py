@@ -101,3 +101,21 @@ async def test_an_image_500_on_a_request_with_an_image_goes_to_media_recovery():
         assert (await c.acall(WITH_IMAGE)).content == "ok"
         # No endpoint retry of the refused image: the request, then the note.
         assert [images_sent(call.kwargs) for call in wire.call_args_list] == [1, 0]
+
+
+UNNAMED = "Provided request is malformed."
+
+
+async def test_a_one_off_unnamed_400_drops_no_image():
+    images = [
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,aW1n{i:04d}"}}
+        for i in range(4)
+    ]
+    messages = [{"role": "user", "content": images}]
+    error = litellm.BadRequestError(message=UNNAMED, model="test", llm_provider="openai")
+    wire_reply, calls = fails_first(error)
+    with client() as c, patch("litellm.acompletion", new_callable=AsyncMock) as wire:
+        wire.side_effect = wire_reply
+        assert (await c.acall(messages)).content == "saw 4 images"
+        assert (await c.acall(messages)).content == "saw 4 images"
+    assert calls == [4, 4, 4]  # failed, re-sent once unchanged, the next call sends all
