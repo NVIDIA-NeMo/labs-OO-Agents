@@ -12,6 +12,18 @@ to follow semantic versioning.
   `provenance`); `write()` uses it. `connect.catalogue()` takes `timeout=`
   and `outputs=` (defaults unchanged: 30 seconds, `"text,decisions"`).
 
+- An inline image in a format models do not accept (anything but PNG, JPEG,
+  GIF or WebP, for example SVG from `show(Image.from_file("chart.svg"))`) is now
+  replaced by a note before each request, instead of being sent. Every MIME
+  hint of the image is checked (data URL, `format`, Anthropic `media_type`),
+  also for top-level Responses `input_image` items; accepted aliases are sent
+  in canonical form (`image/jpg` as `image/jpeg`). Before, the NVIDIA
+  Inference Hub refused such an image with HTTP 500 and, because the image
+  stays in history, every later turn of the session failed. A provider's HTTP
+  500 that says "Unsupported image format: ..." now also counts as an explicit
+  rejection: it is not retried unchanged, and the existing retry-with-a-note
+  recovery handles it at once. That recovery no longer blames an image that
+  was already replaced by a note.
 - `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
   publishes a runtime event when a job finishes (the job's handle state and
   result say it ended).

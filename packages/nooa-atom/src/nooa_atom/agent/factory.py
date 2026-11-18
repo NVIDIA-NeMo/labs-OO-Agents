@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from nooa.interactive import InteractiveAgent
 from nooa_atom.agent.slash_commands import SlashCommand
 from nooa_atom.session.loader import load_agent_class
+from nooa_atom.skills.reflection import CORE_BLOCKS, Reflection
 from nooa_atom.workspace.controls import behavior_commands
 from nooa_atom.workspace.models import workspace_llm_client
 from nooa_atom.workspace.options import AtomOptions, configure_session_skills
@@ -109,6 +110,16 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
     agent = agent_class(**kwargs)
 
     if atom_options is not None and isinstance(agent, AtomAgentBase):
+        # The reflection skill, with the core blocks (registered here only).
+        reflection = Reflection(
+            atom_options.reflection,
+            workspace=atom_options.working_dir,
+            host=options.host,
+            override=options.reflection,
+        )
+        reflection.blocks.update(CORE_BLOCKS)
+        # Registered, not activated: /reflection works, the model's prompt stays as it was.
+        agent.skills.register("nemo.reflection", reflection)
         for warning in configure_session_skills(agent, atom_options):
             logger.warning("Session in %s: %s", options.workspace, warning)
         # The /skills and /mcp controls belong to the agent, not to one host:

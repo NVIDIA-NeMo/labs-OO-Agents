@@ -264,7 +264,7 @@ async def test_workspace_is_static_and_only_names_a_distinct_search_root(tmp_pat
         assert agent.context["workspace_state"] == initial
         from nooa_atom.tools.repo_tools import RepoTools
 
-        agent.repo = RepoTools(root=tmp_path / "other", session=agent.shell.session)
+        agent.repo = RepoTools(root=tmp_path / "other", session=agent._workspace_shell.session)
         agent._install_context()
         assert "Repository root:" in agent.context["workspace_state"]
         assert str(tmp_path / "other") in agent.context["workspace_state"]

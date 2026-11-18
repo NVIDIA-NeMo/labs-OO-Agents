@@ -144,7 +144,8 @@ def show(obj: Any) -> None:
     Call show() on any Image, Audio, Video, or File object to perceive its contents.
     Also accepts PIL images and matplotlib figures (auto-converted to PNG).
     If the current model cannot take this kind of media, it is replaced by a
-    short note when the next request is sent.
+    short note when the next request is sent. Images must be PNG, JPEG, GIF or
+    WebP; others (such as SVG) are replaced by a note asking for a conversion.
     """
     from nooa.media import Media
 
