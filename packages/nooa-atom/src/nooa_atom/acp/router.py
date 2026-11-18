@@ -14,6 +14,8 @@ bytes. Routing, client to worker:
 
 - ``initialize``: answered by the router (``initialize_response``); the
   raw params are kept and replayed as each new worker's first request.
+- ``authenticate``: answered by the router (the terminal method's wizard
+  already ran; a worker takes its result on the next request).
 - ``session/list``: answered from the stores, read-only. Sessions are
   stored per workspace (``sessions_root``): with a ``cwd``, that
   workspace's store; without one, the stores of every workspace the
@@ -72,6 +74,7 @@ from nooa._platform import require_posix
 from nooa_atom.acp.framing import FRAME_LIMIT, Frame, encode, read_frame
 from nooa_atom.acp.listing import list_sessions
 from nooa_atom.acp.protocol import initialize_response
+from nooa_atom.acp.terminal_auth import auth_method_ids, is_auth_method
 from nooa_atom.session.store import (
     InvalidSessionIdError,
     SessionNotFoundError,
@@ -420,6 +423,8 @@ class Router:
             self._initialize(frame)
         elif method == "session/list":
             self._task(self._list_sessions(frame), name="nooa-router-list")
+        elif method == "authenticate":
+            self._authenticate(frame)
         elif method == "session/new":
             self._forward(self._new_worker(), frame)
         elif method in _ROUTED_BY_STORE and session_id is not None:
@@ -436,6 +441,25 @@ class Router:
                 self._forward(worker, frame)
         else:
             self._fail(frame.id, RequestError.method_not_found(method))
+
+    def _authenticate(self, frame: Frame) -> None:
+        """``authenticate`` after the client ran a terminal auth method.
+
+        That is ``nooa atom --connect`` or a model source's ``--sign-in``.
+        Nothing to do here: it left its result in the user's directory, and
+        the worker that serves the next prompt, load or new session takes it
+        and switches that session to the saved model.
+        """
+        method_id = frame.params.get("methodId")
+        if is_auth_method(method_id):
+            self._answer(frame, {})
+        else:
+            self._fail(
+                frame.id,
+                RequestError.invalid_params(
+                    {"methodId": method_id, "reason": f"Use one of {auth_method_ids()!r}"}
+                ),
+            )
 
     def _on_client_notification(self, frame: Frame, method: str) -> None:
         if method == "$/cancel_request":
@@ -468,7 +492,9 @@ class Router:
             self._fail(frame.id, RequestError.invalid_params({"errors": exc.errors()}))
             return
         self._init_params = frame.message.get("params")
-        response = initialize_response(request.protocol_version, request.client_info)
+        response = initialize_response(
+            request.protocol_version, request.client_info, request.client_capabilities
+        )
         self._answer(
             frame,
             response.model_dump(mode="json", by_alias=True, exclude_none=True, exclude_unset=True),

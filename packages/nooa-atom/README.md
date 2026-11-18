@@ -402,6 +402,65 @@ checkpoint/cancellation behavior is retained. Tests against fake/local model ser
 are not a benchmark result, sealed dependency parity or raw-capture reconciliation.
 The separate HCB adapter is **not certified** by this native guard.
 
+## Model sources and ACP sign-in
+
+An ACP client that runs terminal auth (`clientCapabilities.auth.terminal`,
+for example Pool) is offered `nooa connect` as a sign-in: the client runs
+`nooa atom --connect` in a terminal, then reconnects, and the session
+switches to the model the wizard saved.
+
+An installed package can add a **model source**: models that Atom lists
+and can switch to, and one more sign-in choice in the client's picker. It
+declares an entry point in the `nooa_atom.model_sources` group:
+
+```toml
+[project.entry-points."nooa_atom.model_sources"]
+hub = "my_package.hub:source"
+```
+
+The entry point loads to an object (or a no-argument callable that returns
+one) with the fields of `nooa_atom.workspace.model_sources.ModelSource`:
+
+- `id`: stable, lowercase letters, digits and `-`;
+- `name` and `description`: shown in the sign-in picker;
+- `models(workspace)`: the source's entries by alias, in the
+  `llm_config.yaml` `models:` format. It is called often, so it must be fast
+  (cache what you fetch). The configuration files win for the same alias, and
+  a file `null` hides a source alias;
+- `sign_in()`: runs in a real terminal (`nooa atom --sign-in ID`) and may
+  prompt; it returns the alias to switch to, or `None` when nothing was set up.
+
+A source that fails to load or is not valid is logged and skipped, so Atom
+always starts.
+
+### OpenRouter (built in)
+
+`nooa-atom` ships one source, **OpenRouter** (`id: openrouter`): every model
+of OpenRouter's public text-model list with one key, as
+`openrouter/<OpenRouter model ID>` (for example
+`openrouter/anthropic/claude-sonnet-4.5`).
+
+- **Sign in:** in the client's sign-in picker (Pool, Zed, T3 Code: `/connect`)
+  choose "OpenRouter", or run `nooa atom --sign-in openrouter` yourself. It
+  asks for the key (hidden input; with a key already set up it offers to keep
+  it), checks it with one request to OpenRouter's `/key` endpoint (no model
+  call), saves it as `OPENROUTER_API_KEY` in the user `secrets.yaml` (as
+  `nooa connect` does) and switches the session to
+  `openrouter/anthropic/claude-sonnet-4.5` (or the first listed model).
+- **The models need the key:** without `OPENROUTER_API_KEY` in the
+  environment or in NOOA's `secrets.yaml`, the source lists no models.
+- **Configuration:** each entry is what `nooa connect --provider openrouter`
+  saves for that model, without its test calls: OpenRouter's API base, the
+  listed context window, Connect's default reply limit, the reasoning levels
+  OpenRouter lists, and the media inputs it lists that NOOA can send (enabled
+  without a test). Run `nooa connect` for a model to test it or change its
+  settings; an alias in a configuration file replaces the source's.
+- **Cache:** the model list is kept in `openrouter_models.json` in the user
+  NOOA directory (`~/.config/nooa/` by default) and fetched again when it is
+  older than 24 hours, with a 10-second limit. When the fetch fails, the old
+  list is kept (and retried 10 minutes later). Delete the file to fetch the
+  list at the next start.
+
 ## Skills and MCP servers
 
 The Atom agent reaches all its capabilities through one `SkillManager`,

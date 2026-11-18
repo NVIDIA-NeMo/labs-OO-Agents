@@ -812,16 +812,20 @@ async def discover(
     return Discovery(base, tuple(models[name] for name in sorted(models)), url, request_count)
 
 
-async def catalogue() -> list[dict]:
+async def catalogue(*, timeout: float = 30, outputs: str = OPENROUTER_MODEL_OUTPUTS) -> list[dict]:
     """Fetch the public OpenRouter catalogue (no API key is sent).
 
     Returns the validated catalogue records (see ``openrouter_facts``). Raises
-    ValueError or an httpx error if the catalogue cannot be read.
+    ValueError, ``TimeoutError`` or an httpx error if the catalogue cannot be
+    read. ``timeout`` bounds the whole call in seconds (each network step
+    waits at most 15 seconds). ``outputs`` is OpenRouter's
+    ``output_modalities`` filter (``"text"`` leaves out decision models).
     """
-    async with asyncio.timeout(30), httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
-        payload = await bounded_json(
-            client, CATALOGUE_URL, params={"output_modalities": OPENROUTER_MODEL_OUTPUTS}
-        )
+    async with (
+        asyncio.timeout(timeout),
+        httpx.AsyncClient(timeout=min(15, timeout), follow_redirects=False) as client,
+    ):
+        payload = await bounded_json(client, CATALOGUE_URL, params={"output_modalities": outputs})
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
             raise ValueError("Catalogue response must contain a list of model objects")
@@ -3744,6 +3748,64 @@ def registry_write_lock(path: Path):
         yield path
 
 
+def saved_entry(entry: dict) -> dict:
+    """Return ``entry`` in the form ``write`` saves it: normalised, without ``provenance``.
+
+    Does no I/O. Raises ValueError if the entry is invalid or if normalising
+    it would change the settings that were tested.
+    """
+    candidate = configure_entry(entry)
+    from ._verification import effective_config_snapshot
+    from ._verification import routing_allows_save as current_baseline
+
+    if current_baseline(entry, entry) and effective_config_snapshot(
+        entry
+    ) != effective_config_snapshot(candidate):
+        raise ValueError(
+            "Save normalization changed active settings; review and retest the candidate"
+        )
+    # Save the settings only. Test results, request bodies, catalogue data and
+    # warnings belong to the Connect session (shown by
+    # ``nooa connect check --json``); saving them would write the whole history
+    # of the Connect run into the registry.
+    candidate.pop("provenance", None)
+    return candidate
+
+
+def openrouter_entry(record: dict, *, suggested_media: bool = True) -> dict:
+    """Return the entry Connect saves for an OpenRouter catalogue record, without test calls.
+
+    ``record`` is one record of ``catalogue()`` (see ``openrouter_facts``).
+    The entry is what ``nooa connect --provider openrouter`` plans for the
+    record's model and ``write`` saves: OpenRouter's API base,
+    ``OPENROUTER_API_KEY``, the catalogue's context window and reply limit,
+    and its reasoning levels. With ``suggested_media`` the media inputs the
+    catalogue lists and the chat interface can send are enabled, as the
+    wizard's "Enable ... without testing" choice does; otherwise media is
+    off. Does no I/O. Raises ValueError for an invalid record.
+    """
+    preset = PROVIDERS["openrouter"]
+    record = openrouter_facts(record)
+    model = record["id"]
+    media: list[str] = []
+    if suggested_media:
+        media = list(
+            advertised_media_suggestions(record, source=CATALOGUE_URL, api_style=preset.api_style)[
+                "suggested"
+            ]
+        )
+    proposal = plan(
+        model,
+        model,
+        preset.api_style,
+        preset.api_base,
+        preset.api_key_env,
+        catalogue=record,
+        media_inputs=media,
+    )
+    return saved_entry(proposal.entry)
+
+
 def write(entry: dict, path: Path, *, alias: str, expected_alias=ALIAS_UNCONDITIONAL) -> None:
     """Save ``entry`` as ``alias`` in the registry file ``path``, under its write lock.
 
@@ -3760,22 +3822,7 @@ def write(entry: dict, path: Path, *, alias: str, expected_alias=ALIAS_UNCONDITI
     Raises ValueError if the entry is invalid or if normalising it for the
     save would change the settings that were tested.
     """
-    candidate = configure_entry(entry)
-    from ._verification import effective_config_snapshot
-    from ._verification import routing_allows_save as current_baseline
-
-    if current_baseline(entry, entry) and effective_config_snapshot(
-        entry
-    ) != effective_config_snapshot(candidate):
-        raise ValueError(
-            "Save normalization changed active settings; review and retest the candidate"
-        )
-    entry = candidate
-    # Save the settings only. Test results, request bodies, catalogue data and
-    # warnings belong to the Connect session (shown by
-    # ``nooa connect check --json``); saving them would write the whole history
-    # of the Connect run into the registry.
-    entry.pop("provenance", None)
+    entry = saved_entry(entry)
     with registry_write_lock(path) as path:
         _write_entry(entry, path, alias=alias, expected_alias=expected_alias)
 

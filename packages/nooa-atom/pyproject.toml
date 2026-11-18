@@ -28,6 +28,10 @@ atom = "nooa_atom.acp.cli:command"
 [project.entry-points."nooa_bench.agents"]
 atom = "nooa_atom.bench_agent:AtomBenchAgent"
 
+# Built-in model source: every OpenRouter text model with one key.
+[project.entry-points."nooa_atom.model_sources"]
+openrouter = "nooa_atom.workspace.openrouter_source:source"
+
 [project.optional-dependencies]
 # tree-sitter is now a regular dependency (via nooa-cli[ast]); kept so existing
 # `nooa-atom[ast]` installs still resolve.

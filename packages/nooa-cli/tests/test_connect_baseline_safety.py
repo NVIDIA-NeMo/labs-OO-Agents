@@ -238,3 +238,26 @@ def test_explicit_manual_offline_save_remains_available(monkeypatch, tmp_path, f
         "Alias: local" in " ".join(result.output.split())
         and "not tested (manual setup)" in result.output
     )
+
+
+@pytest.mark.parametrize(("answer", "expected"), [("y\n", "local"), ("n\n", None)])
+def test_run_wizard_returns_the_alias_it_saved(monkeypatch, tmp_path, answer, expected):
+    # `nooa atom --connect` reports this as its exit code; `nooa connect` ignores it.
+    path = tmp_path / "models.yaml"
+    args = options(path, editing=False)
+    args.remove("--prompt-key")
+    monkeypatch.setenv("BASELINE_KEY", "existing-key")
+    mock_http(monkeypatch, lambda request: pytest.fail("manual setup made HTTP request"))
+    returned = []
+    run_wizard = wizard.run_wizard
+    monkeypatch.setattr(
+        wizard, "run_wizard", lambda **kw: returned.append(run_wizard(**kw)) or returned[-1]
+    )
+    result = CliRunner().invoke(
+        command,
+        [*args, "--no-probe", "--media-inputs", "pdf"],
+        input="262144\n262144\nsave\n" + answer,
+    )
+    assert result.exit_code == 0, result.output
+    assert returned == [expected], result.output
+    assert path.exists() == (expected is not None)

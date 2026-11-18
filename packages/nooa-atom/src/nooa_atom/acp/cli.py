@@ -163,6 +163,26 @@ def _resolve_agent_spec(_ctx: click.Context, _param: click.Parameter, value: str
     is_flag=True,
     help=f"With --http on a loopback address, accept connections without the {TOKEN_ENV} token.",
 )
+@click.option(
+    "--connect",
+    "connect",
+    is_flag=True,
+    help=(
+        "Run the `nooa connect` wizard in this terminal instead of serving ACP; exit 0 only "
+        "when a model was saved. ACP clients run this for terminal authentication."
+    ),
+)
+@click.option(
+    "--sign-in",
+    "sign_in",
+    metavar="SOURCE_ID",
+    default=None,
+    help=(
+        "Run the sign-in of an installed model source in this terminal instead of serving "
+        "ACP; exit 0 only when it set a model up. ACP clients run this for terminal "
+        "authentication."
+    ),
+)
 @click.option("--worker-fd", type=int, default=None, hidden=True)
 @click.option("--id-base", type=int, default=None, hidden=True)
 @click.pass_context
@@ -178,6 +198,8 @@ def command(
     port: int,
     allowed_origins: tuple[str, ...],
     no_auth: bool,
+    connect: bool,
+    sign_in: str | None,
     worker_fd: int | None,
     id_base: int | None,
 ) -> None:
@@ -192,7 +214,21 @@ def command(
       --single-process  Every session runs in this process.
       worker            Started by the router with --worker-fd and --id-base
                         on one end of a socket pair; not for direct use.
+      --connect         Not a server: the `nooa connect` wizard, for ACP
+                        terminal authentication.
+      --sign-in ID      Not a server: a model source's sign-in, for ACP
+                        terminal authentication.
     """
+    if connect:
+        # Before reserve_stdio_for_acp: the wizard needs the real terminal.
+        from nooa_atom.acp.terminal_auth import run_terminal_connect
+
+        ctx.exit(run_terminal_connect())
+    if sign_in is not None:
+        # Before reserve_stdio_for_acp: the sign-in may prompt in the terminal.
+        from nooa_atom.acp.terminal_auth import run_terminal_sign_in
+
+        ctx.exit(run_terminal_sign_in(sign_in))
     reserve_stdio_for_acp()
     from nooa.secrets import load_secrets_into_env
 

@@ -6,6 +6,12 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Connect: `connect.openrouter_entry(record)` returns the entry Connect saves
+  for an OpenRouter catalogue record, without test calls, and
+  `connect.saved_entry(entry)` the form `write()` saves (normalised, without
+  `provenance`); `write()` uses it. `connect.catalogue()` takes `timeout=`
+  and `outputs=` (defaults unchanged: 30 seconds, `"text,decisions"`).
+
 - `SandboxConfig.env_allowlist` keeps only the listed environment variables in
   the sandbox worker. The worker is a fork, so it inherited every variable of the
   parent, model API keys included, and a cell could print them. Removing them
