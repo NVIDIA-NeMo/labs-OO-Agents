@@ -40,15 +40,23 @@ class AtomOptions(BaseModel):
     def load(cls, workspace: str | Path, **overrides: Any) -> AtomOptions:
         """Load the workspace's ``atom`` settings (and the legacy ``tui`` ones).
 
-        Invalid settings are reported and replaced by the defaults.
+        Invalid settings are reported and replaced by the defaults. An
+        untrusted workspace (``nooa.workspace_trust``) adds no skill
+        directories, and its own settings file chooses no ``active_skills``.
         """
         root = Path(workspace).expanduser().resolve()
+        from nooa.workspace_trust import is_trusted
+
         from .settings import load_behavior_settings
 
+        trusted = is_trusted(root)
         values = load_behavior_settings(root)
+        if not trusted:
+            user = load_behavior_settings(root, include_project=False)
+            values["active_skills"] = user.get("active_skills", [])
         values.update({key: value for key, value in overrides.items() if value is not None})
         values["working_dir"] = str(root)
-        values["skills_dirs"] = load_skills_dirs(root)
+        values["skills_dirs"] = load_skills_dirs(root, trusted=trusted)
         return cls(**values)
 
 

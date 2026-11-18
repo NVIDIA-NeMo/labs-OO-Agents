@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from nooa.layered_config import load_layered_yaml
+from nooa.workspace_trust import is_trusted, untrusted_notice
 
 _SETTINGS_FILENAME = "settings.yaml"
 _SETTINGS_ENV_VAR = "NEMO_OO_SETTINGS"
@@ -34,6 +35,7 @@ def load_coding_skills_dirs(
     workspace: str | Path,
     *,
     explicit: Iterable[str | Path] = (),
+    trusted: bool | None = None,
 ) -> list[Path]:
     """Return existing skill roots for one coding-agent workspace.
 
@@ -41,17 +43,28 @@ def load_coding_skills_dirs(
     configuration. ``tui.additional_skills_dirs`` remains supported while the
     TUI migrates to the shared section. Relative configured paths are resolved
     against the active workspace, not the ACP server process's checkout.
+
+    ``trusted`` defaults to ``nooa.workspace_trust.is_trusted(workspace)``.
+    An untrusted workspace contributes no directory: its own skill
+    directories, its project settings layer, its legacy ``config.toml`` and
+    relative configured paths are left out. The user's own roots (``~/.claude/skills``
+    ...) and the absolute paths of the user and ``NEMO_OO_SETTINGS`` layers stay.
     """
     root = Path(workspace).expanduser().resolve()
+    if trusted is None:
+        trusted = is_trusted(root)
     settings = load_layered_yaml(
         _SETTINGS_FILENAME,
         _SETTINGS_ENV_VAR,
         project_dir=root / ".nooa",
+        include_project=trusted,
     )
 
     configured: list[str | Path] = []
     configured.extend(_setting_paths(settings, "coding"))
     configured.extend(_setting_paths(settings, "tui"))
+    if not trusted:
+        configured = [path for path in configured if Path(path).expanduser().is_absolute()]
     # A workspace's old config.toml is still a workspace layer. Do not let an
     # unrelated user-level settings.yaml silently suppress it. A modern
     # workspace settings file supersedes the legacy file, and an explicit
@@ -65,13 +78,14 @@ def load_coding_skills_dirs(
         and "additional_skills_dirs" in project_settings[section]
         for section in ("coding", "tui")
     )
-    if not os.environ.get(_SETTINGS_ENV_VAR) and not modern_key_set:
+    if trusted and not os.environ.get(_SETTINGS_ENV_VAR) and not modern_key_set:
         configured.extend(_legacy_project_paths(root / ".nooa" / _LEGACY_CONFIG_FILENAME))
 
     candidates: list[Path] = []
     candidates.extend(_resolve_configured(path, root) for path in explicit)
     candidates.extend(_resolve_configured(path, root) for path in configured)
-    candidates.extend(root / path for path in _WORKSPACE_SKILL_DIRS)
+    if trusted:
+        candidates.extend(root / path for path in _WORKSPACE_SKILL_DIRS)
     candidates.extend(Path.home() / path for path in _USER_SKILL_DIRS)
 
     result: list[Path] = []
@@ -83,6 +97,24 @@ def load_coding_skills_dirs(
         seen.add(resolved)
         result.append(resolved)
     return result
+
+
+def untrusted_workspace_notice(workspace: str | Path) -> str | None:
+    """The message for the user when ``workspace`` is untrusted and has skills that are off.
+
+    None when it is trusted, or has no skills of its own (no skill directory
+    that ``load_coding_skills_dirs`` leaves out, and nothing in ``.nooa/skills``).
+    """
+    root = Path(workspace).expanduser().resolve()
+    if is_trusted(root):
+        return None
+    off = set(load_coding_skills_dirs(root, trusted=True)) - set(
+        load_coding_skills_dirs(root, trusted=False)
+    )
+    saved = root / ".nooa" / "skills"
+    if not off and not (saved.is_dir() and any(saved.iterdir())):
+        return None
+    return untrusted_notice(root)
 
 
 def _setting_paths(settings: Mapping[str, Any], section: str) -> list[str | Path]:
@@ -137,4 +169,4 @@ def _legacy_project_paths(path: Path) -> list[str | Path]:
     return [item for item in value if isinstance(item, str)]
 
 
-__all__ = ["load_coding_skills_dirs"]
+__all__ = ["load_coding_skills_dirs", "untrusted_workspace_notice"]

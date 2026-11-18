@@ -108,6 +108,13 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
                 "them" if len(missing) > 1 else "it",
             )
     agent = agent_class(**kwargs)
+    if atom_options is not None:
+        from nooa_atom.workspace.settings import untrusted_workspace_notice
+
+        # For the user only (ACP hosts also show it as a message), never the agent.
+        notice = untrusted_workspace_notice(atom_options.working_dir)
+        if notice:
+            logger.warning("Session in %s: %s", options.workspace, notice)
 
     if atom_options is not None and isinstance(agent, AtomAgentBase):
         # The reflection skill, with the core blocks (registered here only).

@@ -63,7 +63,7 @@ class SlashCommand:
 # Shared behavior names stay reserved across hosts. Presentation-only commands
 # belong in each host's explicit `reserved` argument.
 RESERVED_COMMAND_NAMES = frozenset(
-    "help exit quit clear compact context edit connect model models skills session resume restart jobs events todos mcp reasoning recover".split()
+    "help exit quit clear compact context edit connect model models skills session resume restart jobs events todos mcp reasoning recover trust".split()
 )
 
 # Built-in commands that are plain directives to the agent: the body is sent as

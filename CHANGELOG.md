@@ -6,6 +6,31 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Workspace trust (#231). NOOA Atom (`nooa atom`) and the `nooa-acp` coding
+  agent load no skills from a folder you have not trusted: nothing in its
+  `.nooa/skills`, `.agents/skills`, `.cursor/skills`, `.claude/skills` and
+  `.claude/commands` loads (code skills, `SKILL.md` text skills and their
+  slash commands), skill directories and `active_skills` named by the folder's
+  own `.nooa/settings.yaml` or `.nooa/config.toml` are ignored, and (Atom) the
+  folder's `llm_config.yaml` is not used. `AGENTS.md` still loads, and skills
+  the agent writes in the session still work. The agent sees nothing about
+  trust; you get one message at session start ("This folder isn't trusted, so
+  its skills are off. Type /trust to allow."). Your own skills
+  (`~/.agents/skills`, `~/.claude/skills`, `~/.claude/commands`, absolute
+  user-level `additional_skills_dirs`) load in every folder. Trust a folder
+  with `/trust`, by answering the question Atom asks at the first prompt, or
+  by listing it under `trusted_folders` in your user `settings.yaml` (or in a
+  `NEMO_OO_SETTINGS` file, for CI); a trusted folder trusts its subfolders.
+  The home folder and filesystem roots cannot be trusted with `/trust`.
+  **Existing users must trust their folders once.** `nooa acp` and `nooa atom`
+  load `secrets.yaml` themselves and skip its project layer when the launch
+  directory is not trusted. New core API: `nooa.workspace_trust`
+  (`is_trusted`, `trust`, `can_trust`, `is_inside`, `untrusted_notice`);
+  `SkillWriting(load_existing=False)`; `SkillRegistry.discover_libs(names=...)`;
+  `include_project` on `layered_paths`, `load_layered_yaml`,
+  `llm_config_chain` and `load_secrets_into_env`. Plain agents and the
+  registry used directly are not affected. See `docs/workspace-trust.md`.
+
 - An inline image in a format models do not accept (anything but PNG, JPEG,
   GIF or WebP, for example SVG from `show(Image.from_file("chart.svg"))`) is now
   replaced by a note before each request, instead of being sent. Every MIME

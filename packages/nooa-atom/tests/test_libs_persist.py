@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """A skill written with self.skill_writing is saved in .nooa/skills and active in a later session."""
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -46,12 +47,19 @@ LATER_SESSION = textwrap.dedent(
 
 
 def _later_session(root, *exprs: str) -> str:
-    """Run a fresh agent on the same workspace in a new process; return its output."""
+    """Run a fresh agent on the same workspace in a new process; return its output.
+
+    The process trusts ``root`` (nooa.workspace_trust) through a
+    ``NEMO_OO_SETTINGS`` file, as CI would: the test fixture does not reach it.
+    """
+    trust_file = root.parent / f"{root.name}-trust.yaml"
+    trust_file.write_text(f"trusted_folders: [{root}]\n")
     done = subprocess.run(
         [sys.executable, "-c", LATER_SESSION, str(root), *exprs],
         capture_output=True,
         text=True,
         timeout=120,
+        env={**os.environ, "NEMO_OO_SETTINGS": str(trust_file)},
     )
     assert done.returncode == 0, done.stderr
     return done.stdout

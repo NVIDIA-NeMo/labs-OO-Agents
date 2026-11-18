@@ -9,7 +9,7 @@ import inspect
 import logging
 import sys
 import threading
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from importlib.metadata import entry_points
 from pathlib import Path
@@ -263,7 +263,7 @@ class SkillRegistry(Skill):
         """
         return self._discovered.get(name)
 
-    def discover_libs(self, libs_path: "Path") -> None:
+    def discover_libs(self, libs_path: "Path", *, names: Iterable[str] | None = None) -> None:
         """Scan a libs directory and register each skill in it.
 
         Each subdirectory containing a pyproject.toml is imported and
@@ -281,27 +281,33 @@ class SkillRegistry(Skill):
 
         Args:
             libs_path: Directory containing skill packages and text skills.
+            names: Only the subdirectories with these names (default: all).
         """
         from pathlib import Path
 
         libs_path = Path(libs_path)
         if not libs_path.is_dir():
             return
+        only = None if names is None else frozenset(names)
         for entry in sorted(libs_path.iterdir()):
+            if only is not None and entry.name not in only:
+                continue
             if (
                 entry.is_dir()
                 and not (entry / "pyproject.toml").exists()
                 and ((entry / "SKILL.md").exists() or (entry / "skill.md").exists())
             ):
                 self._register_local_text_skill(entry)
-        self._discover_packages(libs_path)
+        self._discover_packages(libs_path, only)
 
-    def _discover_packages(self, libs_path: "Path") -> None:
-        """Import and register each pyproject.toml subdirectory of ``libs_path``."""
+    def _discover_packages(self, libs_path: "Path", only: frozenset[str] | None = None) -> None:
+        """Import and register each pyproject.toml subdirectory of ``libs_path`` (named in ``only``)."""
         libraries = [
             entry
             for entry in sorted(libs_path.iterdir())
-            if entry.is_dir() and (entry / "pyproject.toml").exists()
+            if entry.is_dir()
+            and (entry / "pyproject.toml").exists()
+            and (only is None or entry.name in only)
         ]
         for lib_dir in libraries:
             lib_name = lib_dir.name

@@ -34,7 +34,7 @@ _CONFIG_FILENAME = "llm_config.yaml"
 _CONFIG_ENV_VAR = "NEMO_OO_LLM_CONFIG"
 
 
-def llm_config_chain() -> list[Path]:
+def llm_config_chain(*, include_project: bool = True) -> list[Path]:
     """Return YAML config files for the LLM registry, lowest priority first.
 
     Layers, in order:
@@ -61,8 +61,10 @@ def llm_config_chain() -> list[Path]:
 
     The user → project → env-var walk (and resolved-path dedup) is the
     shared :func:`nooa.layered_config.layered_paths` logic.
+    ``include_project=False`` leaves out layer 2 (an untrusted project, see
+    :mod:`nooa.workspace_trust`).
     """
-    return layered_paths(_CONFIG_FILENAME, _CONFIG_ENV_VAR)
+    return layered_paths(_CONFIG_FILENAME, _CONFIG_ENV_VAR, include_project=include_project)
 
 
 __all__ = ["llm_config_chain"]

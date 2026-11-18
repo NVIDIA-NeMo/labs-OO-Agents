@@ -1212,6 +1212,15 @@ class Session:
             for command in registry.commands()
         ]
 
+    def workspace_untrusted_notice(self) -> str | None:
+        """The message for the user when the workspace is untrusted and its skills or model settings are off.
+
+        ``nooa_atom.workspace.settings.untrusted_workspace_notice``; None otherwise.
+        """
+        from nooa_atom.workspace.settings import untrusted_workspace_notice
+
+        return untrusted_workspace_notice(self.options.workspace)
+
     async def invoke_command(self, name: str, raw_args: str) -> CommandResult:
         """Run a slash command through the agent's registry; ``KeyError`` if unknown."""
         registry = getattr(self._agent, "slash_commands", None)

@@ -8,7 +8,9 @@ A session in workspace ``W`` also reads ``W/.nooa/llm_config.yaml``, the file
 ``nooa connect`` run in ``W`` writes. Priority, lowest first:
 
 1. the user file and the package's project file (core's chain);
-2. ``W/.nooa/llm_config.yaml``;
+2. ``W/.nooa/llm_config.yaml``, only when ``W`` is trusted
+   (``nooa.workspace_trust``): an untrusted folder must not point a model
+   alias, and with it the user's key, at its own server;
 3. the files in ``NEMO_OO_LLM_CONFIG`` (an explicit environment variable still wins).
 
 The merged entries are kept per workspace and are never written into the
@@ -44,13 +46,16 @@ def llm_config_files(workspace: Path) -> list[Path]:
 
     Core's chain with the workspace file placed below the
     ``NEMO_OO_LLM_CONFIG`` files. Only existing files, resolved; a file
-    that appears twice keeps its higher-priority place.
+    that appears twice keeps its higher-priority place. The workspace file
+    is left out unless the workspace is trusted, and core's project layer
+    unless the launch directory is (``nooa.workspace_trust``).
     """
     from nooa.llm_config import llm_config_chain
+    from nooa.workspace_trust import is_trusted, launch_project_trusted
 
-    chain = llm_config_chain()
+    chain = llm_config_chain(include_project=launch_project_trusted())
     own = workspace_config_file(workspace)
-    if not own.is_file():
+    if not own.is_file() or not is_trusted(workspace):
         return chain
     own = own.resolve()
     env = {

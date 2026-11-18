@@ -110,6 +110,11 @@ from nooa_atom.workspace.settings import load_acp_verbosity, write_settings_upda
 _VERBOSITY_HELP = (
     "silent: no activity; concise: one-line notices; verbose: full activity (default)."
 )
+_TRUST_QUESTION = (
+    "Do you trust this folder? Trusting it turns on its skills (.nooa/skills, "
+    ".claude/skills ...) and its model settings."
+)
+_TRUST_HELP = "Yes: trust it now and remember it (like /trust). No: ask again next session."
 
 
 logger = logging.getLogger(__name__)
@@ -282,6 +287,8 @@ class AtomACPAgent:
         self._bridges: dict[str, ACPEventBridge] = {}
         self._background: set[asyncio.Task[None]] = set()
         self._title_checked: set[str] = set()
+        # Sessions already asked whether to trust their workspace (_ask_trust).
+        self._trust_asked: set[str] = set()
         # Receipts of prompts still waiting for their turn, by session: Stop
         # answers them "cancelled" and withdraws the ones not yet consumed.
         self._prompts: dict[str, list[Receipt]] = {}
@@ -716,6 +723,9 @@ class AtomACPAgent:
                 handled = await self._run_command(session, bridge, *slash)
                 if handled is not None:
                     return handled
+            if not await self._ask_trust(session, bridge):
+                await bridge.flush()
+                return PromptResponse(stop_reason="cancelled")
             await self._request_title(session, text)
             receipt = await session.submit(text, source=SOURCE)
             if self._pool_client:
@@ -806,12 +816,30 @@ class AtomACPAgent:
     async def _ask_verbosity(self, session: Session, question: str) -> Any:
         """Ask the client to pick a verbosity level in a form of its own.
 
+        Returns the chosen level, ``_DISMISSED``, ``_CANCELLED`` or ``None``
+        (see ``_ask_choice``).
+        """
+        return await self._ask_choice(
+            session, question, "verbosity", "Verbosity", _VERBOSITY_HELP, VERBOSITY_LEVELS
+        )
+
+    async def _ask_choice(
+        self,
+        session: Session,
+        question: str,
+        key: str,
+        title: str,
+        help_text: str,
+        choices: tuple[str, ...],
+    ) -> Any:
+        """Ask the client to pick one of ``choices`` in a form of its own.
+
         Pool's ``_poolside/elicitation`` (Pool 2: ``_pool/elicitation``) when
         the client is Pool, else a standard ``elicitation/create`` form when
-        the client advertised ``elicitation.form``. Returns the chosen level,
+        the client advertised ``elicitation.form``. Returns the chosen value,
         ``_DISMISSED`` when the person declined or dismissed it, ``_CANCELLED``
         when Stop ended it, or ``None`` when no form could be shown or the
-        answer is not a level. A failed Pool request turns Pool forms off for this connection.
+        answer is not one of ``choices``. A failed Pool request turns Pool forms off for this connection.
         """
         conn = self._require_conn()
         via_pool = self._pool_forms
@@ -819,9 +847,9 @@ class AtomACPAgent:
             # Pool declines non-string inputs: one required string picker.
             picker = {
                 "type": "string",
-                "title": "Verbosity",
-                "description": _VERBOSITY_HELP,
-                "oneOf": [{"const": level, "title": level} for level in VERBOSITY_LEVELS],
+                "title": title,
+                "description": help_text,
+                "oneOf": [{"const": choice, "title": choice} for choice in choices],
             }
             params = {
                 "sessionId": session.id,
@@ -829,8 +857,8 @@ class AtomACPAgent:
                 "message": question,
                 "requestedSchema": {
                     "type": "object",
-                    "properties": {"verbosity": picker},
-                    "required": ["verbosity"],
+                    "properties": {key: picker},
+                    "required": [key],
                 },
             }
             # A Pool whose version did not say gets Pool 1's request.
@@ -842,11 +870,11 @@ class AtomACPAgent:
         elif self._client_shows_forms():
             field = ElicitationStringPropertySchema(
                 type="string",
-                title="Verbosity",
-                description=_VERBOSITY_HELP,
-                enum=list(VERBOSITY_LEVELS),
+                title=title,
+                description=help_text,
+                enum=list(choices),
             )
-            schema = ElicitationSchema(properties={"verbosity": field}, required=["verbosity"])
+            schema = ElicitationSchema(properties={key: field}, required=[key])
             request = conn.create_elicitation(
                 message=question,
                 mode=ElicitationFormSessionMode(session_id=session.id, requested_schema=schema),
@@ -866,8 +894,51 @@ class AtomACPAgent:
             action, content = getattr(response, "action", None), getattr(response, "content", None)
         if action != "accept":
             return _DISMISSED
-        level = content.get("verbosity") if isinstance(content, dict) else None
-        return level if level in VERBOSITY_LEVELS else None
+        value = content.get(key) if isinstance(content, dict) else None
+        return value if value in choices else None
+
+    async def _ask_trust(self, session: Session, bridge: ACPEventBridge) -> bool:
+        """At a session's first prompt in an untrusted workspace, ask whether to trust it.
+
+        Asked once per root session, only when the workspace's skills or
+        model settings are off, the folder can be trusted (not the home
+        folder or a filesystem root) and the client can show a form. Yes runs
+        ``/trust``; No (or dismissing the form) keeps the session untrusted.
+        Returns False when Stop ended the form: the prompt is then cancelled.
+        """
+        from nooa.workspace_trust import can_trust
+
+        if session.id in self._trust_asked or session.parent_id is not None:
+            return True
+        self._trust_asked.add(session.id)
+        if (
+            session.workspace_untrusted_notice() is None
+            or not can_trust(session.options.workspace)
+            or not (self._pool_forms or self._client_shows_forms())
+        ):
+            return True
+        epoch = self._ask_epochs.get(session.id, 0)
+        answer = await self._ask_choice(
+            session,
+            _TRUST_QUESTION,
+            "trust",
+            "Trust this folder",
+            _TRUST_HELP,
+            ("Yes", "No"),
+        )
+        if answer is _CANCELLED or not self._client_answer_is_current(session, bridge, epoch):
+            return False
+        if answer != "Yes":
+            return True
+        try:
+            result = await session.invoke_command("trust", "")
+        except Exception as exc:
+            logger.warning("/trust failed in session %s", session.id, exc_info=True)
+            bridge.publish(update_agent_message(text_block(f"/trust failed: {exc}")))
+            return True
+        bridge.publish(update_agent_message(text_block(result.text)))
+        await bridge.flush()
+        return True
 
     def _client_shows_forms(self) -> bool:
         """Whether the client advertised standard ACP form elicitation."""
@@ -1382,6 +1453,9 @@ class AtomACPAgent:
         async def publish() -> None:
             await asyncio.sleep(0)
             bridge.publish_best_effort(_available_commands_update(session.commands()))
+            notice = session.workspace_untrusted_notice()
+            if notice:
+                bridge.publish_best_effort(update_agent_message(text_block(notice)))
             if warnings:
                 details = "\n".join(f"- {warning}" for warning in warnings)
                 bridge.publish_best_effort(
