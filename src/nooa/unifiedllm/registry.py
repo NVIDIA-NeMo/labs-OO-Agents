@@ -14,9 +14,7 @@ Define them in YAML and point the framework at them.
 Discovery is *not* done here. ``unifiedllm`` is intentionally ignorant of
 project filesystem conventions; the framework helper
 :func:`nooa.llm_config.llm_config_chain` returns the YAML files
-to load — including any bundled defaults registered by external
-packages via the ``nooa.bundled_configs`` entry-point group
-(install ``nemo-oo-agents-nvidia`` for the NVIDIA-gateway aliases).
+to load (user, project and ``NEMO_OO_LLM_CONFIG`` files).
 The registry exposes:
 
 - :func:`reload_registry` — load the registry from explicit paths.

@@ -334,7 +334,6 @@ def test_connect_uses_existing_registry_discovery(tmp_path, monkeypatch):
     manual = user / "llm_config.yaml"
     manual.write_text("models: {local: {model_name: openai/manual}}\n")
     connect.write(make_plan().entry, manual, alias="local")
-    monkeypatch.setattr(llm_config, "bundled_config_paths", lambda: [])
     monkeypatch.setattr(layered_config, "get_user_dir", lambda name: user / name)
     monkeypatch.setattr(layered_config, "get_project_dir", lambda name: project / name)
     monkeypatch.delenv("NEMO_OO_LLM_CONFIG", raising=False)

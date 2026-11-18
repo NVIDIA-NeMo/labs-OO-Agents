@@ -163,3 +163,53 @@ class TestNotificationValue:
         dumped = event.model_dump_json()
         assert "Opaque<42>" in dumped
         assert event.value.__class__ is Opaque  # the live object is untouched
+
+
+class TestFieldMaxLengthOverride:
+    """A class field's spec(max_length=...) bounds containers like spec(max_string=...) bounds strings."""
+
+    @staticmethod
+    def _model():
+        from typing import Annotated
+
+        from pydantic import BaseModel
+
+        from nooa.agentdoc import spec
+
+        class Item(BaseModel):
+            tags: Annotated[list[str], spec(max_length=3)]
+            plain: list[str] = []
+
+        return Item
+
+    def test_top_level_list_is_shortened(self):
+        item = self._model()(tags=[f"t{i}" for i in range(10)])
+        rendered = pformat(item, max_string=100_000, max_length=100)
+        assert "list(len=10" in rendered
+        assert "t5" not in rendered
+
+    def test_nested_in_dict_is_shortened(self):
+        item = self._model()(tags=[f"t{i}" for i in range(10)])
+        rendered = pformat({"delegates": [item]}, max_string=100_000, max_length=100, max_depth=10)
+        assert "list(len=10" in rendered
+        assert "t5" not in rendered
+
+    def test_field_spec_wins_over_smaller_outer_limit(self):
+        item = self._model()(tags=[f"t{i}" for i in range(3)], plain=[f"p{i}" for i in range(3)])
+        rendered = pformat(item, max_length=2)
+        assert "'t0', 't1', 't2'" in rendered  # field limit (3) replaces the outer 2
+        assert "list(len=3" in rendered  # the unannotated field still uses the outer 2
+
+    def test_field_subtree_inherits_field_limit(self):
+        from typing import Annotated
+
+        from pydantic import BaseModel
+
+        from nooa.agentdoc import spec
+
+        class Outer(BaseModel):
+            rows: Annotated[list[list[int]], spec(max_length=2)]
+
+        rendered = pformat(Outer(rows=[[1, 2, 3, 4], [5, 6]]), max_length=100)
+        assert "list(len=4" in rendered  # inner list bounded by the field's 2, not the outer 100
+        assert "[5, 6]" in rendered

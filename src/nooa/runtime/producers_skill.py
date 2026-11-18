@@ -33,9 +33,9 @@ class ProducersSkill(Skill):
         """Periodic tick counter at fixed intervals. Yields incrementing int."""
         return _mod.cron(interval_seconds)
 
-    def tail(self, path: str, *, poll_interval: float = 0.5):
-        """Tail a file, yielding new lines as they appear."""
-        return _mod.tail(path, poll_interval=poll_interval)
+    def tail(self, path: str, *, poll_interval: float = 0.5, max_line_bytes: int = 1 << 20):
+        """Tail a file, yielding new lines as they appear (longer lines in pieces)."""
+        return _mod.tail(path, poll_interval=poll_interval, max_line_bytes=max_line_bytes)
 
     def run_job(self, coro, job_id: str):
         """Wrap a coroutine with a job_id. Returns {"job_id": ..., "result": ...}."""

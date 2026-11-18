@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Read the model registry files as NOOA loads them, without creating any clients.
 
-The registry is a chain of YAML files (bundled defaults, the user file, the
+The registry is a chain of YAML files (the user file, the
 project file, files named in ``NEMO_OO_LLM_CONFIG``); a later file overrides
 an alias defined in an earlier one. The wizard uses this module to list
 existing aliases for editing, to suggest API key variable names already used
@@ -87,7 +87,6 @@ def shadowing_source(alias, path, *, extra_priority=False):
     import os
     from pathlib import Path
 
-    from nooa.llm_config import bundled_config_paths
     from nooa.paths import get_project_dir, get_user_dir
 
     found = entries().get(alias)
@@ -97,7 +96,6 @@ def shadowing_source(alias, path, *, extra_priority=False):
     # so a file about to be created gets its real place in the order. Other
     # --output paths are not loaded automatically and so have no place here.
     paths = [
-        *bundled_config_paths(),
         get_user_dir("llm_config.yaml"),
         get_project_dir("llm_config.yaml"),
         *(

@@ -18,7 +18,9 @@ esac
 if [ "$(id -u)" = 0 ]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
-  apt-get install -y -qq curl ca-certificates git rsync ripgrep >/dev/null
+  # Pyright's static-contract tests need Node. Install it explicitly rather
+  # than relying on pyright's runtime nodeenv download during the test suite.
+  apt-get install -y -qq curl ca-certificates git rsync ripgrep nodejs >/dev/null
   id ci >/dev/null 2>&1 || useradd --create-home --shell /bin/bash ci
   # Work on the Linux filesystem: /mnt/c is slow and ignores chmod.
   rsync -a --delete --exclude .venv ./ /home/ci/repo/

@@ -84,7 +84,7 @@ class NooaBenchAgent(BaseInstalledAgent):
         return "nooa-bench"
 
     async def install(self, environment: BaseEnvironment) -> None:
-        """Clone the repo and install core + cli + bench into a fresh venv."""
+        """Clone the repo and install core, cli, atom and bench into a fresh venv."""
         url = shlex.quote(self._git_url)
         if self._git_ref:
             # `git clone --branch` rejects commit SHAs; fetching the ref and
@@ -110,7 +110,8 @@ class NooaBenchAgent(BaseInstalledAgent):
                 'export PATH="$HOME/.local/bin:$PATH" && '
                 f"uv venv {VENV} && "
                 f"uv pip install --python {VENV}/bin/python3 "
-                f"{REPO_DIR} {REPO_DIR}/packages/nooa-cli {REPO_DIR}/packages/nooa-bench && "
+                f"{REPO_DIR} {REPO_DIR}/packages/nooa-cli {REPO_DIR}/packages/nooa-atom "
+                f"{REPO_DIR}/packages/nooa-bench && "
                 f"{VENV}/bin/python3 -c \"from nooa_bench.runner import main; print('nooa-bench installed OK')\""
             ),
         )
@@ -125,8 +126,10 @@ class NooaBenchAgent(BaseInstalledAgent):
         enable_atif = "--enable-atif " if self._enable_atif else ""
         # Exit code 1 means the agent reported task failure: map it to exit 0 so
         # the verifier scores reward=0 instead of raising a harness error.
+        # ripgrep-bin puts rg in the venv's bin; RepoTools and the model's
+        # shell commands find it only if that directory is on PATH.
         command = (
-            f"({VENV}/bin/nemo-harbor "
+            f'(export PATH="{VENV}/bin:$PATH"; {VENV}/bin/nemo-harbor '
             f"--instruction {shlex.quote(instruction)} "
             f"--model {shlex.quote(self.model_name or '')} "
             f"--agent-type {shlex.quote(self._agent_type)} "
@@ -141,6 +144,8 @@ class NooaBenchAgent(BaseInstalledAgent):
         nvidia_key = env.get("NVIDIA_INFERENCE_API_KEY") or env.get("NVIDIA_API_KEY")
         if nvidia_key:
             env.setdefault("OPENAI_API_KEY", nvidia_key)
+        # The atom agent type stores its session; only /logs/agent outlives the container.
+        env["NOOA_SESSIONS_DIR"] = "/logs/agent/sessions"
         await self.exec_as_agent(environment, command=command, env=env, cwd=REPO_DIR)
 
     def populate_context_post_run(self, context: AgentContext) -> None:

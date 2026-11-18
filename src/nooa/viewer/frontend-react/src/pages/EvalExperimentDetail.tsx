@@ -56,7 +56,8 @@ export function EvalExperimentDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const experimentId = decodeURIComponent(id || "");
+  // React Router already decodes path parameters, including literal percent signs.
+  const experimentId = id || "";
 
   const page = parseInt(searchParams.get("page") || "1", 10);
   const sortBy = searchParams.get("sort") || null;
@@ -390,10 +391,11 @@ export function EvalExperimentDetail() {
   if (!detail || !summary) return null;
 
   const overall = summary.overall;
+  const hasGrades = (overall.classified_count ?? overall.total) > 0;
   const passRate =
-    overall.total > 0
+    hasGrades && overall.total > 0
       ? ((overall.passed / overall.total) * 100).toFixed(0)
-      : "0";
+      : "N/A";
   const matrix = summary.matrix;
 
   return (
@@ -424,9 +426,9 @@ export function EvalExperimentDetail() {
 
       <SummaryStats overall={overall} passRate={passRate} />
 
-      <TierBreakdown byTier={summary.by_tier} />
+      {hasGrades && <TierBreakdown byTier={summary.by_tier} />}
 
-      {matrix.models.length >= 2 && matrix.test_types.length >= 2 && (
+      {hasGrades && matrix.models.length >= 2 && matrix.test_types.length >= 2 && (
         <ResultsMatrix matrix={matrix} />
       )}
 
@@ -493,14 +495,18 @@ function SummaryStats({
   return (
     <div className="flex items-center gap-6 mb-4 p-4 bg-gray-900 border border-gray-800 rounded-lg">
       <div>
-        <div className={`text-2xl font-bold ${scoreColor(parseInt(passRate))}`}>
-          {passRate}%
+        <div
+          className={`text-2xl font-bold ${passRate === "N/A" ? "text-gray-200" : scoreColor(parseInt(passRate))}`}
+        >
+          {passRate === "N/A" ? passRate : `${passRate}%`}
         </div>
         <div className="text-xs text-gray-500">Pass Rate</div>
       </div>
       <div>
         <div className="text-2xl font-bold text-gray-200">
-          {overall.avg_score?.toFixed(2) || "0.00"}
+          {overall.scored_count === 0
+            ? "N/A"
+            : overall.avg_score?.toFixed(3) || "N/A"}
         </div>
         <div className="text-xs text-gray-500">Avg Score</div>
       </div>
@@ -516,10 +522,25 @@ function SummaryStats({
       </div>
       <div>
         <div className="text-lg font-semibold text-red-400">
-          {overall.total - overall.passed}
+          {overall.failed ??
+            overall.total - overall.passed - (overall.unclassified ?? 0)}
         </div>
         <div className="text-xs text-gray-500">Failed</div>
       </div>
+      {(overall.unclassified ?? 0) > 0 && (
+        <div>
+          <div className="text-lg font-semibold text-gray-400">
+            {overall.unclassified}
+          </div>
+          <div className="text-xs text-gray-500">Unclassified</div>
+        </div>
+      )}
+      {overall.scored_count != null && (
+        <div>
+          <div className="text-lg font-semibold text-gray-200">{overall.scored_count}</div>
+          <div className="text-xs text-gray-500">Scored</div>
+        </div>
+      )}
     </div>
   );
 }
@@ -668,13 +689,21 @@ function renderCellValue(
 
   if (col.key === "passed") {
     const hasError = !!test.error;
-    const status = hasError ? "error" : test.passed ? "passed" : "failed";
+    const status = hasError
+      ? "error"
+      : test.passed == null
+        ? "unclassified"
+        : test.passed
+          ? "passed"
+          : "failed";
     const cls =
       status === "passed"
         ? "bg-green-900 text-green-200"
-        : status === "error"
-          ? "bg-orange-900 text-orange-200"
-          : "bg-red-900 text-red-200";
+        : status === "unclassified"
+          ? "bg-gray-800 text-gray-300"
+          : status === "error"
+            ? "bg-orange-900 text-orange-200"
+            : "bg-red-900 text-red-200";
     return (
       <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${cls}`}>
         {status.toUpperCase()}
@@ -683,7 +712,8 @@ function renderCellValue(
   }
   if (col.key === "score" || col.key === "weighted_score") {
     const score = col.key === "score"
-      ? (test.weighted_score ?? test.score ?? (test.passed ? 1 : 0))
+      ? (test.weighted_score ?? test.score ??
+          (test.passed == null ? null : test.passed ? 1 : 0))
       : val;
     return score != null ? (
       <span className="font-mono text-gray-300">{Number(score).toFixed(2)}</span>

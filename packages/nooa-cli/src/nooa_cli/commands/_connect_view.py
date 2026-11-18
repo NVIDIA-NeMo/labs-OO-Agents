@@ -365,13 +365,14 @@ def warning(text, *, err=False):
     line(text.removeprefix("Warning: "), fg="yellow", err=err)
 
 
-def prompt_text(text, *, suffix=": "):
+def prompt_text(text, *, suffix=": ", answer_width=0):
     """Return a prompt label wrapped to the terminal width, for Click's line input.
 
     Used when standard input is not a terminal; the prompt_toolkit widgets
-    format their own labels.
+    format their own labels. ``answer_width`` reserves space for a bounded
+    answer echoed after Click's suffix, such as a yes/no confirmation.
     """
-    width = max(8, shutil.get_terminal_size((80, 24)).columns - 2 - len(suffix))
+    width = max(8, shutil.get_terminal_size((80, 24)).columns - 2 - len(suffix) - answer_width)
     parts = textwrap.wrap(text, width=width, break_on_hyphens=False) or [""]
     label = "\n".join("  " + part for part in parts)
     return label  # No colour codes: Click prints this as is, also into pipes.

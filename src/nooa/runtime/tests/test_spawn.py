@@ -15,7 +15,6 @@ from nooa.runtime.channels import (
     JobError,
     JobHandle,
     QueueManager,
-    StreamEnd,
 )
 
 
@@ -55,10 +54,8 @@ async def test_spawn_coroutine_puts_result():
     await asyncio.sleep(0)
     assert handle.state == "done"
 
-    # StreamEnd should be in the event log
-    stream_ends = [e for e in em.events if isinstance(e, StreamEnd)]
-    assert len(stream_ends) == 1
-    assert stream_ends[0].channel_name == "results"
+    # No end-of-stream event is published (StreamEnd was removed)
+    assert em.events == []
 
 
 @pytest.mark.asyncio
@@ -82,9 +79,7 @@ async def test_spawn_async_generator_puts_each_yield():
     await asyncio.sleep(0)
     assert handle.state == "done"
 
-    stream_ends = [e for e in em.events if isinstance(e, StreamEnd)]
-    assert len(stream_ends) == 1
-    assert stream_ends[0].channel_name == "stream"
+    assert em.events == []
 
 
 # ---------------------------------------------------------------------------
@@ -175,15 +170,14 @@ async def test_error_mid_stream_emits_job_error():
     assert isinstance(error_item, JobError)
     assert error_item.error_type == "ValueError"
 
-    # Event channel got JobError + StreamEnd
+    # Event channel got the JobError
     job_errors = [e for e in em.events if isinstance(e, JobError)]
     assert len(job_errors) == 1
     assert job_errors[0].channel_name == "data"
     assert job_errors[0].error_type == "ValueError"
     assert "boom" in job_errors[0].error_message
 
-    stream_ends = [e for e in em.events if isinstance(e, StreamEnd)]
-    assert len(stream_ends) == 1
+    assert len(em.events) == 1
 
 
 @pytest.mark.asyncio
@@ -278,7 +272,6 @@ async def test_spawn_to_event_mode_channel():
     assert handle.state == "done"
 
     # The result went through event_manager (QueueOutput from event channel put)
-    # plus StreamEnd
     from nooa.runtime.channels import QueueOutput
 
     queue_outputs = [e for e in em.events if isinstance(e, QueueOutput)]
@@ -347,3 +340,73 @@ async def test_spawn_buffer_false_no_accumulation():
 
     assert handle.values == []
     assert handle.state == "done"
+
+
+# ---------------------------------------------------------------------------
+# JobHandle: add_done_callback / cancel_nowait / done
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_add_done_callback_gets_the_handle_with_its_final_state():
+    qm = QueueManager()
+    qm.queue("x")
+
+    async def job():
+        return 1
+
+    handle = qm.spawn(job(), channel="x")
+    seen: list[tuple[JobHandle, str]] = []
+    handle.add_done_callback(lambda h: seen.append((h, h.state)))
+    assert not handle.done()
+    await asyncio.wait_for(qm.get_channel("x").get(), 1.0)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert handle.done() and seen == [(handle, "done")]
+    # On a finished job the callback is still called (soon).
+    late: list[str] = []
+    handle.add_done_callback(lambda h: late.append(h.state))
+    await asyncio.sleep(0)
+    assert late == ["done"]
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancel_nowait_marks_cancelled_at_once_and_unwinds_later():
+    qm = QueueManager()
+    qm.queue("x")
+    cleaned = asyncio.Event()
+
+    async def job():
+        try:
+            await asyncio.sleep(30)
+        finally:
+            cleaned.set()
+
+    handle = qm.spawn(job(), channel="x")
+    await asyncio.sleep(0)  # let it start
+    states: list[str] = []
+    handle.add_done_callback(lambda h: states.append(h.state))
+    assert handle.cancel_nowait() is True
+    assert handle.state == "cancelled"  # set synchronously
+    await asyncio.wait_for(cleaned.wait(), 1.0)  # finally ran on a later iteration
+    await asyncio.sleep(0)
+    assert handle.done() and states == ["cancelled"]
+    assert handle.cancel_nowait() is False  # already finished
+    assert handle.state == "cancelled"
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancel_before_start_reads_cancelled_in_the_done_callback():
+    qm = QueueManager()
+    qm.queue("x")
+    handle = qm.spawn(asyncio.sleep(30), channel="x")
+    states: list[str] = []
+    handle.add_done_callback(lambda h: states.append(h.state))
+    handle._task.cancel()  # cancelled before _run ever ran: state was still "running"
+    with pytest.raises(asyncio.CancelledError):
+        await handle._task
+    await asyncio.sleep(0)
+    assert states == ["cancelled"] and handle.state == "cancelled"
+    await qm.shutdown()

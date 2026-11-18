@@ -124,7 +124,7 @@ async def test_library_directory_can_be_scoped_by_the_host(tmp_path):
     libs_dir = tmp_path / "scoped" / "libs"
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=libs_dir)
     try:
-        assert agent.libs._path == libs_dir
+        assert agent.skill_writing._path == libs_dir
     finally:
         await agent.close()
 

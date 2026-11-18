@@ -235,7 +235,8 @@ def confirm(text, *, default):
     """
     if not sys.stdin.isatty():
         return click.confirm(
-            view.prompt_text(text + (" [Y/n]" if default else " [y/N]")),
+            # Leave room for Click's echoed answer, including the full "yes".
+            view.prompt_text(text + (" [Y/n]" if default else " [y/N]"), answer_width=3),
             default=default,
             show_default=False,
         )

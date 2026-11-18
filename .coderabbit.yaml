@@ -5,3 +5,23 @@ reviews:
     base_branches:
       - ".*"
     auto_incremental_review: true
+  path_instructions:
+    - path: "{src,packages/*/src}/**/*.py"
+      instructions: |
+        NOOA has one way to shorten values and output for a reader: `nooa.snapshot`
+        (see docs/snapshot-model.md). Values: `capture` + `render_python` /
+        `render_json` / `render_trace`. Output streams: `TextStream` + `merge` +
+        `render_output`. Full copies on disk: `SpillTarget`.
+        Flag NEW code that truncates, previews, caps or elides a value or output
+        that a model prompt, trace, UI or log will show: slicing text, bytes or
+        lists to a size limit; joining a head and a tail; "...", "…",
+        "<truncated" or "N more" markers; new max_chars / max_string / max_items
+        style parameters; new uses of TruncatingStringIO, truncating_pformat,
+        textwrap.shorten or reprlib. Ask the author to use `nooa.snapshot`
+        instead, or, when the limit is not a preview (rejecting an oversized
+        request, pagination, a protocol limit), to add
+        `# snapshot: allow <reason>` with a concrete reason.
+        Only flag cuts the pull request adds or changes, not existing code it
+        merely moves: the existing sites are being moved onto `nooa.snapshot`
+        in follow-up pull requests. Do not flag code inside src/nooa/snapshot/.
+        Comment only; do not request changes for this rule alone.

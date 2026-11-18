@@ -898,3 +898,27 @@ class TestPredictModelRebuild:
         agent = TestAgent(llm=fake_llm)
         result = await agent.is_positive("I love this!")
         assert result is True
+
+
+class TestReturnResultToolCallHint:
+    """A failed direct return_result tool call gets a JSON example, not only Python."""
+
+    @pytest.mark.asyncio
+    async def test_direct_tool_call_hint_names_json_arguments(self):
+        class TestAgent(Agent, llm=_DUMMY_LLM):
+            @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=3, max_retries=5)))
+            async def analyse(self, text: str) -> StrictIntModel:
+                """Analyse."""
+                ...
+
+        fake_llm = FakeLLMClient(
+            scripted_responses=[
+                _resp(tool_calls=[_return_result({"wrong": 1}, call_id="r1")]),
+                _resp(tool_calls=[_return_result({"required_field": 7}, call_id="r2")]),
+            ]
+        )
+        agent = TestAgent(llm=fake_llm)
+        assert await agent.analyse("x") == StrictIntModel(required_field=7)
+        sent = json.dumps([str(call) for call in fake_llm.calls], default=str)
+        assert "In execute_python code, call it as return_result(StrictIntModel(" in sent
+        assert "As a direct return_result tool call, pass JSON arguments" in sent
