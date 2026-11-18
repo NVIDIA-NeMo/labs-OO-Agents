@@ -330,6 +330,65 @@ async def test_a_search_does_not_remove_attachments_from_a_concurrent_call():
         assert (await c.acall(b_messages)).content == "B saw 2 images"
 
 
+async def test_a_search_keeps_its_baseline_when_a_concurrent_call_commits():
+    # The CodeRabbit scenario on #600: three images, the oldest is bad. Call A
+    # pauses on its request that excludes every image; call B finds and commits
+    # the bad image meanwhile. A must go on against the exclusions it started
+    # with, or its later trials would succeed without the bad image and A would
+    # commit a good one.
+    import asyncio
+
+    images = numbered_images(3)
+    bad = images[0]
+    paused, release = asyncio.Event(), asyncio.Event()
+
+    def say(text):
+        return [{"role": "user", "content": [{"type": "text", "text": text}, *images]}]
+
+    async def wire_reply(**kwargs):
+        sent = sent_images(kwargs)
+        caller = kwargs["messages"][0]["content"][0]["text"]
+        if caller == "A" and not sent and not paused.is_set():
+            paused.set()
+            await release.wait()
+        if bad in sent:
+            raise bad_request(BEDROCK)
+        return reply(f"{caller} saw {[images.index(b) for b in sent]}")
+
+    with client() as c, patch("litellm.acompletion", new=wire_reply):
+        task_a = asyncio.create_task(c.acall(say("A")))
+        await asyncio.wait_for(paused.wait(), 5)
+        assert (await c.acall(say("B"))).content == "B saw [1, 2]"
+        release.set()
+        assert (await task_a).content == "A saw [1, 2]"
+        # Only the bad image is excluded for later requests.
+        assert (await c.acall(say("C"))).content == "C saw [1, 2]"
+
+
+async def test_a_media_worded_500_on_a_request_without_that_media_is_retried():
+    # A named 400 refuses the image; the recovery request carries only the
+    # note, and its 500 "Could not process image" is the server's problem, not
+    # a rejection: the same request is sent again from the budget.
+    images = numbered_images(1)
+    calls = []
+
+    def wire_reply(**kwargs):
+        sent = sent_images(kwargs)
+        calls.append(len(sent))
+        if sent:
+            raise bad_request(BEDROCK)
+        if calls.count(0) == 1:
+            raise litellm.InternalServerError(
+                message="Could not process image", model="m", llm_provider="openai"
+            )
+        return reply(f"saw {len(sent)} images")
+
+    with client() as c, patch("litellm.acompletion", new_callable=AsyncMock) as wire:
+        wire.side_effect = wire_reply
+        assert (await c.acall(messages_with(images))).content == "saw 0 images"
+        assert calls == [1, 0, 0]
+
+
 @pytest.mark.parametrize("error", [BEDROCK, UNNAMED])
 async def test_the_budget_counts_endpoint_requests_with_500s_mid_search(error):
     images = numbered_images(16)

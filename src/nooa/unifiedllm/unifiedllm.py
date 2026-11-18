@@ -47,7 +47,6 @@ from nooa.unifiedllm.media_inputs import (
     attachment_kind,
     filter_media_messages,
     image_limit,
-    is_media_rejection,
     media_occurrences,
     rejected_media_kinds,
     sent_media_kinds,
@@ -77,10 +76,12 @@ _MEDIA_RECOVERY_LIMIT = 12
 # request): it gets no endpoint retries, so the recovery budget counts
 # endpoint requests.
 _media_probe: ContextVar[bool] = ContextVar("media_probe", default=False)
-# The exclusions a media recovery request is trying, local to that request:
-# merged with the connection's committed set only when this request is
-# prepared, so a concurrent call on the same client keeps its attachments.
-_media_trial: ContextVar[frozenset] = ContextVar("media_trial", default=frozenset())
+# The whole exclusion set a media recovery request sends (the search's frozen
+# baseline plus its trial set), local to that request; None outside recovery,
+# where the connection's committed set applies. A concurrent call on the same
+# client keeps its attachments.
+_media_trial: ContextVar[frozenset | None] = ContextVar("media_trial", default=None)
+
 
 # Errors the general media fallback never probes: the request as a whole is
 # wrong, and a shorter request without media could succeed by chance.
@@ -1464,9 +1465,11 @@ class UnifiedLLM(ABC):
         # Media the interface cannot send is rejected after projection, by
         # _validate_implemented_media: only the projected request also shows the
         # native content of replayed assistant turns.
-        # The connection's committed exclusions plus the ones this request
-        # (a media recovery attempt) tries; see _media_attempt.
-        excluded = self._rejected_media(call_config) | _media_trial.get()
+        # The connection's committed exclusions, or for a media recovery
+        # attempt the exclusions it tries: the search's frozen baseline plus its
+        # trial set (see _media_attempt), never what another call commits meanwhile.
+        trial = _media_trial.get()
+        excluded = self._rejected_media(call_config) if trial is None else trial
         # The retry layer reads which kinds this request really sends.
         sent = media_occurrences(messages, enabled, audio_formats)
         sent_media_kinds.set(frozenset(kind for kind, key in sent if key not in excluded))
@@ -1538,10 +1541,20 @@ class UnifiedLLM(ABC):
             return None
         if not candidates:
             return None
-        return self._media_search(candidates, exc, mode, rejected, budget, newest_first)
+        return self._media_search(
+            candidates, exc, mode, rejected, budget, newest_first, baseline=frozenset(rejected)
+        )
 
     def _media_search(
-        self, candidates, original: Exception, mode: str, rejected: set, budget: int, available=()
+        self,
+        candidates,
+        original: Exception,
+        mode: str,
+        rejected: set,
+        budget: int,
+        available=(),
+        *,
+        baseline: frozenset = frozenset(),
     ):
         """Find the fewest attachments to exclude for the request to succeed.
 
@@ -1588,6 +1601,18 @@ class UnifiedLLM(ABC):
         exclusions of a final request that succeeded are kept (added to
         ``rejected``, the connection's set) and counted as
         ``media_rejected_retry``; the reply of that final request is returned.
+
+        ``baseline`` is the connection's committed exclusions when the search
+        started. Every request of the search sends ``baseline`` plus its trial
+        set, even if a concurrent call commits more exclusions meanwhile, so
+        all stored outcomes describe the same baseline. At the end only the
+        attachments this search found are added to the live ``rejected`` set.
+
+        A media-worded error of a search request counts as a rejection only
+        if that request still sent media of the refused kind (the rule of
+        the endpoint retry layer, ``retry.py``): a 500 "Could not process
+        image" on a request whose images are all replaced by notes is the
+        server's problem and is retried like any retryable error.
         """
         keys = [key for _, key in candidates]
         available = available or candidates
@@ -1596,17 +1621,24 @@ class UnifiedLLM(ABC):
         widened: list[Any] = []  # set by attempt() when the pool grew
         config = self.retry_config or RetryConfig()
 
-        def _retryable(err: BaseException) -> bool:
-            return not still_media(err) and _is_retryable_error(err, config)[0]
+        def _retryable(err: BaseException, excluded: frozenset) -> bool:
+            return not still_media(err, excluded) and _is_retryable_error(err, config)[0]
 
         used = 0
         # The outcome of every request sent, by its exclusion set.
         replies: dict[frozenset, Any] = {}
         failures: dict[frozenset, BaseException] = {frozenset(): original}
 
-        def still_media(err: BaseException) -> bool:
+        def still_media(err: BaseException, excluded: frozenset) -> bool:
+            # ``excluded``: the trial set of the request that failed with ``err``.
             if mode == "rejected":
-                return is_media_rejection(err)
+                refused = rejected_media_kinds(err)
+                status = _http_status(err)
+                if refused and status is not None and status >= 500:
+                    # Like retry.py: a 5xx counts only if this request sent that kind.
+                    sent = {kind for key, kind in kinds.items() if key not in excluded}
+                    return bool(refused & sent)
+                return bool(refused)
             return _media_fallback_eligible(err) and _http_status(err) == _http_status(original)
 
         status = _http_status(original)
@@ -1629,12 +1661,13 @@ class UnifiedLLM(ABC):
                 type(original).__name__,
                 str(original)[:300],
             )
-            response, error = yield frozenset(keys)
+            response, error = yield baseline | frozenset(keys)
             if error is None:
                 replies[frozenset(keys)] = response  # a valid reply to exactly this request
             else:
                 logger.warning(
-                    "The probe without attachments failed too; giving up: %s", str(error)[:300]
+                    "The probe without attachments failed too; giving up: %s",
+                    str(error)[:300],
                 )
                 raise original
             logger.warning(
@@ -1658,15 +1691,15 @@ class UnifiedLLM(ABC):
                 raise original
             used += 1
             _record_llm_metric("media_recovery_probe", mode)
-            response, error = yield excluded
-            while error is not None and _retryable(error) and used < limit:
+            response, error = yield baseline | excluded
+            while error is not None and _retryable(error, excluded) and used < limit:
                 used += 1  # an endpoint retry of the same request, from the budget
                 _record_llm_metric("media_recovery_probe", mode)
-                response, error = yield excluded
+                response, error = yield baseline | excluded
             if error is None:
                 replies[excluded] = response
                 return True, None
-            if not still_media(error):
+            if not still_media(error, excluded):
                 raise error
             failures[excluded] = error
             if mode == "rejected" and (new := rejected_media_kinds(error) - searched_kinds):
@@ -1727,14 +1760,14 @@ class UnifiedLLM(ABC):
             # unchanged once (no endpoint retries) before keeping anything.
             used += 1
             _record_llm_metric("media_recovery_probe", "confirm")
-            response, error = yield frozenset()
+            response, error = yield baseline
             if error is None:
                 logger.warning(
                     "Request failed once (%s) and succeeded when re-sent; nothing excluded",
                     type(original).__name__,
                 )
                 return response
-            if not still_media(error):
+            if not still_media(error, frozenset()):
                 # Not the same failure again: the found set's reply is valid,
                 # but nothing proves the attachments are bad, so keep none.
                 logger.warning(
