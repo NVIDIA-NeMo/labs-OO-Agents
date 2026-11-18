@@ -258,6 +258,7 @@ class OpenRouterSource:
             if not key:
                 click.echo("No key entered; nothing was set up.", err=True)
                 return None
+        click.echo("Checking the key with OpenRouter...")
         problem = check_key(key)
         if problem is not None:
             click.echo(f"{problem} Nothing was saved.", err=True)
@@ -277,6 +278,7 @@ class OpenRouterSource:
                     err=True,
                 )
             os.environ[KEY_ENV] = key
+        click.echo("Fetching the OpenRouter model list...")
         try:
             records = _fetch()
             if not records:
