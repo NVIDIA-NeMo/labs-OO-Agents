@@ -459,20 +459,30 @@ class TestReload:
         skill_dir.mkdir()
         skill_md = skill_dir / "SKILL.md"
         skill_md.write_text("---\nname: demo\ndescription: old description\n---\nold body\n")
+        old_file = skill_dir / "old.txt"
+        old_file.write_text("old")
         first = SkillRegistry(_FakeAgent())
         second = SkillRegistry(_FakeAgent())
         first.discover_skills_dirs([tmp_path])
         second.discover_skills_dirs([tmp_path])
         try:
             skill_md.write_text("---\nname: demo\ndescription: new description\n---\nnew body\n")
+            old_file.unlink()
+            (skill_dir / "new.txt").write_text("new")
 
             assert await first.reload("cmd.demo") == "Reloaded cmd.demo (self.demo)"
             assert first["cmd.demo"].description == "new description"
+            assert "new body" in (type(first["cmd.demo"]).__doc__ or "")
+            assert [file.path for file in first["cmd.demo"].files] == ["SKILL.md", "new.txt"]
             assert second["cmd.demo"].description == "old description"
+            assert "old body" in (type(second["cmd.demo"]).__doc__ or "")
+            assert [file.path for file in second["cmd.demo"].files] == ["SKILL.md", "old.txt"]
 
             assert await second.reload("cmd.demo") == "Reloaded cmd.demo (self.demo)"
             assert second["cmd.demo"].description == "new description"
+            assert [file.path for file in second["cmd.demo"].files] == ["SKILL.md", "new.txt"]
             assert first["cmd.demo"] is not second["cmd.demo"]
+            assert first["cmd.demo"].shell is not second["cmd.demo"].shell
         finally:
             await first.aclose()
             await second.aclose()
@@ -811,3 +821,36 @@ class TestReload:
         registry._reload_one = fake
         await registry.reload("nemo.shell")
         assert called["name"] == "nemo.shell"
+
+
+class TestRegisterAttachedTextSkill:
+    """register() cannot await an async detach(), so it refuses the transfer."""
+
+    @staticmethod
+    def _text_skill(tmp_path: Path):
+        from nooa.skill import TextSkill
+
+        root = tmp_path / "demo-skill"
+        root.mkdir()
+        (root / "SKILL.md").write_text("---\nname: demo-skill\ndescription: demo\n---\nBody\n")
+        return TextSkill(path=root)
+
+    async def test_attached_to_another_agent_is_refused(self, tmp_path, recwarn):
+        skill = self._text_skill(tmp_path)
+        first, second = SkillRegistry(_FakeAgent()), SkillRegistry(_FakeAgent())
+        first.register("local.demo", skill)
+        with pytest.raises(ValueError, match="attached to another agent"):
+            second.register("local.demo", skill)
+        assert not hasattr(second._agent, "demo")
+        assert "local.demo" not in second.loaded()
+        assert not [w for w in recwarn if "never awaited" in str(w.message)]
+        await skill.detach()
+
+    async def test_detached_instance_can_move(self, tmp_path):
+        skill = self._text_skill(tmp_path)
+        first, second = SkillRegistry(_FakeAgent()), SkillRegistry(_FakeAgent())
+        first.register("local.demo", skill)
+        await skill.detach()
+        second.register("local.demo", skill)
+        assert second._agent.demo is skill
+        await skill.detach()

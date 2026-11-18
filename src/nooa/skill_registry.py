@@ -669,11 +669,22 @@ class SkillRegistry(Skill):
             # the model kept being told it still had one. Re-registering the
             # same name is still fine.
             raise ValueError(f"Cannot register skill {name!r} as agent attr {attr!r}: {conflict}")
+        existing_agent = getattr(skill, "_agent", None)
+        if (
+            existing_agent is not None
+            and existing_agent is not self._agent
+            and inspect.iscoroutinefunction(getattr(skill, "detach", None))
+        ):
+            # register() is synchronous, so it cannot await this detach() (for
+            # a text skill, closing its shell). Refuse instead of skipping it.
+            raise ValueError(
+                f"Cannot register skill {name!r}: it is attached to another agent and its "
+                "detach() is async; await skill.detach() first, or register a new instance"
+            )
         if hasattr(self._agent, attr) and attr not in set(self._attr_map.values()):
             logger.warning("Skill %s overwrites existing agent attr '%s'", name, attr)
         setattr(self._agent, attr, skill)
         if hasattr(skill, "attach"):
-            existing_agent = getattr(skill, "_agent", None)
             if existing_agent is not None and existing_agent is not self._agent:
                 if hasattr(skill, "detach"):
                     skill.detach()

@@ -123,9 +123,10 @@ async def test_manager_hides_internal_read_and_source_dir_only(agent, concise, t
     assert agent.skills.read("review") in agent.skills.doc("review")
     skill = agent.skills.registry["cmd.review"]
     assert skill.source_dir == tmp_path / "skills" / "review"
-    assert "source_dir" in doc(skill) and "def read_file(" in doc(skill)
+    assert "source_dir" in doc(skill) and "shell: ShellTools" in doc(skill)
     (skill.source_dir / "guide.txt").write_text("local guide")
-    assert skill.read_file("guide.txt") == "local guide"
+    assert (await skill.shell.read("guide.txt")).text == "local guide"
+    await skill.shell.close()
     extra = tmp_path / "extra_skills"
     (extra / "second").mkdir(parents=True)
     (extra / "second" / "SKILL.md").write_text(
@@ -214,7 +215,8 @@ async def test_doc_describes_each_kind(agent, installed):
     review = agent.skills.doc("review")
     assert review.startswith("review (text skill): Review a change for defects")
     assert "Instructions:\nRead the diff, then list defects by severity." in review
-    assert "self.review.read_file(path)" in review
+    assert "self.review.files" in review and "self.review.shell" in review
+    assert "read_file" not in review and "run_script" not in review
     probe = agent.skills.doc("probe")
     assert "probe (mcp, available)" in probe and "not connected" in probe
     with pytest.raises(KeyError, match="nope"):
