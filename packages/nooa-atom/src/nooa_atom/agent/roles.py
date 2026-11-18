@@ -44,7 +44,8 @@ ROLE_INSTRUCTIONS: dict[TurnPolicy, str] = {
         "- Reply with Done(message=...): complete Markdown with outcome, evidence, risks (when "
         "asked for an exact value or format, exactly that, with nothing added). Background "
         "jobs may keep running.\n"
-        "- Ask with NeedInput(question=...) only when the person must answer."
+        "- Ask with NeedInput(question=...) only when the person must answer.\n"
+        "- A running cell holds back new messages until it ends."
     ),
     "unattended": "You work on one task unattended. " + _UNATTENDED,
     "orchestrator": (

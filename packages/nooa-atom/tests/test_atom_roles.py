@@ -104,8 +104,10 @@ def test_the_interactive_role_is_a_bulleted_block():
         "- Reply with Done(message=...): complete Markdown with outcome, evidence, risks (when "
         "asked for an exact value or format, exactly that, with nothing added). Background "
         "jobs may keep running.\n"
-        "- Ask with NeedInput(question=...) only when the person must answer."
+        "- Ask with NeedInput(question=...) only when the person must answer.\n"
+        "- A running cell holds back new messages until it ends."
     )
+    assert "A running cell" not in ROLE_INSTRUCTIONS["child"]
     assert "Send brief progress notes" not in ROLE_INSTRUCTIONS["interactive"]
 
 
@@ -262,7 +264,7 @@ async def test_workspace_is_static_and_only_names_a_distinct_search_root(tmp_pat
         assert agent.context["workspace_state"] == initial
         from nooa_atom.tools.repo_tools import RepoTools
 
-        agent.repo = RepoTools(root=tmp_path / "other", session=agent.shell.session)
+        agent.repo = RepoTools(root=tmp_path / "other", session=agent._workspace_shell.session)
         agent._install_context()
         assert "Repository root:" in agent.context["workspace_state"]
         assert str(tmp_path / "other") in agent.context["workspace_state"]

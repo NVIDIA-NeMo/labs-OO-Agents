@@ -368,21 +368,10 @@ def _detach(
     port: Any, route: _Route, future: asyncio.Future[Any], ref: Any, name: str, deadline: Any
 ) -> bool:
     """A one-shot child awaited by a cell at its deadline: run on as a job; False if it cannot."""
-    session = getattr(port, "_session", None)
-    jobs = getattr(getattr(session, "_agent", None), "jobs", None)
-    if jobs is None or future.done():
+    if future.done():
         return False
-    for n in range(1, 100):
-        job_name = name if n == 1 else f"{name}_{n}"
-        work = _adopted(port, route, future, ref, name)
-        try:
-            job = jobs.launch(work, name=job_name)
-        except ValueError:  # the name is taken (a running job, a channel): try the next
-            continue
-        except Exception:  # a closed work manager: the child closes as before
-            return False
-        break
-    else:
+    job = hand_over(name, lambda: _adopted(port, route, future, ref, name), port)
+    if job is None:
         return False
     task = job._task
     if task is not None:  # cancelled before it ran, its body never closes the child
@@ -390,6 +379,27 @@ def _detach(
     atom_metrics().child_detached()
     deadline.note(still_running_note(job.name))
     return True
+
+
+def hand_over(base: str, work: Callable[[], Any], port: Any = None) -> Any:
+    """Launch ``work()`` as a job of the session's ``self.jobs``, named ``base`` (else
+    ``base_2``...): what a cell awaited runs on past its deadline. None if it cannot."""
+    if port is None:
+        from nooa_atom.session.port import current_port
+
+        port = current_port.get()
+    session = getattr(port, "_session", None)
+    jobs = getattr(getattr(session, "_agent", None), "jobs", None)
+    if jobs is None:
+        return None
+    for n in range(1, 100):
+        try:
+            return jobs.launch(work(), name=base if n == 1 else f"{base}_{n}")
+        except ValueError:  # the name is taken (a running job, a channel): try the next
+            continue
+        except Exception:  # a closed work manager: the caller stops its work as before
+            return None
+    return None
 
 
 async def _adopted(
@@ -409,12 +419,11 @@ async def _adopted(
     return _value(item, name)
 
 
-def still_running_note(name: str) -> str:
+def still_running_note(name: str, what: str = "") -> str:
     """The cell deadline's note for a job that runs on after the cell's await ended."""
+    head = f"{what} is still running as job {name}" if what else f"job {name} is still running"
     return (
-        f"job {name} is still running: "
-        f'Waiting(on=["{name}"]) for its result, '
-        f'or await self.jobs.get("{name}").cancel().'
+        f'{head}: Waiting(on=["{name}"]) for its result, or await self.jobs.get("{name}").cancel().'
     )
 
 

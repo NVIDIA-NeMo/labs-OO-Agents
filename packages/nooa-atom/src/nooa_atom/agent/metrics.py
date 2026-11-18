@@ -40,6 +40,10 @@ class AtomHarnessMetrics(HarnessMetricsExtension):
     shell_busy_rejected: int = 0
     # A one-shot child awaited in a cell handed to self.jobs at the cell deadline (not closed)
     child_detached_at_deadline: int = 0
+    # A Shell command awaited in a cell handed to self.jobs at the cell deadline (not stopped)
+    shell_detached_at_deadline: int = 0
+    # A Shell command awaited in a cell that took over 60 s
+    shell_long_awaits: int = 0
     # Waiting on the person (user_messages) rejected; the role whose turn did it
     waiting_on_person_rejections: list[str] = Field(default_factory=list)
     shell_exit_hints: list[int] = Field(default_factory=list)
@@ -66,6 +70,18 @@ class AtomHarnessMetrics(HarnessMetricsExtension):
             "Children awaited in a cell kept running as jobs at the cell deadline",
             "Tool Usage",
             lambda m: m.child_detached_at_deadline,
+        ),
+        SchemaEntry(
+            "shell_detached_at_deadline.count",
+            "Shell commands awaited in a cell kept running as jobs at the cell deadline",
+            "Tool Usage",
+            lambda m: m.shell_detached_at_deadline,
+        ),
+        SchemaEntry(
+            "shell_long_await.count",
+            "Shell commands awaited in a cell that took over 60 s",
+            "Tool Usage",
+            lambda m: m.shell_long_awaits,
         ),
         SchemaEntry(
             "waiting_on_person_rejected.count",
@@ -162,6 +178,14 @@ class AtomHarnessMetrics(HarnessMetricsExtension):
     def child_detached(self) -> None:
         """A child awaited in a cell outlived the cell deadline as a job instead of being closed."""
         self.child_detached_at_deadline += 1
+
+    def shell_detached(self) -> None:
+        """A Shell command awaited in a cell outlived the cell deadline as a job instead of stopping."""
+        self.shell_detached_at_deadline += 1
+
+    def shell_long_await(self) -> None:
+        """A Shell command awaited in a cell took over 60 s (recorded when it returned)."""
+        self.shell_long_awaits += 1
 
     def shell_exit_hint(self, code: int) -> None:
         """A command ended its Shell's bash itself (``exit N``, errexit); the result said so."""

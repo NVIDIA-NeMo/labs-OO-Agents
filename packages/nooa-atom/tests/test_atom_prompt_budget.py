@@ -207,8 +207,11 @@ RESULT = (
 # -> after: handle 22,375 / 23,708 -> 22,502 / 23,835, handle_batch 22,300 /
 # 23,633 -> 22,427 / 23,760, handle_work 22,468 / 23,801 -> 22,595 / 23,928,
 # handle_orchestrate 22,603 / 23,936 -> 22,730 / 24,063.
+# The handle limits raised for the interactive role's "A running cell holds back
+# new messages until it ends." bullet (2026-11-10, Shell deadline handover):
+# handle system / total 22,541 / 23,874 -> 22,597 / 23,930 (only handle's role).
 LIMITS = {
-    (ATOM, "handle"): (22_600, 23_900),
+    (ATOM, "handle"): (22_700, 24_000),
     (ATOM, "handle_batch"): (22_500, 23_900),
     (ATOM, "handle_work"): (22_700, 24_100),
     (ATOM, "handle_orchestrate"): (22_800, 24_200),
