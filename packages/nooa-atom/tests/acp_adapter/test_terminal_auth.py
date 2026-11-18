@@ -456,6 +456,51 @@ async def test_an_alias_the_workspace_cannot_use_is_reported_not_switched_to(
     assert "not in the model configuration" in "".join(client.texts(AgentMessageChunk, session_id))
 
 
+class _PickedSource:
+    """A model source whose sign-in offers one model to pick."""
+
+    id = "picker"
+    name = "Picker"
+    description = "One model"
+
+    def models(self, workspace):
+        return {}
+
+    def choices(self, workspace):
+        return {
+            "picker/x": {
+                "model_name": "openai/x",
+                "api_base": "https://picker.test/v1",
+                "api_key_env": "PICKER_API_KEY",
+            }
+        }
+
+    def sign_in(self):
+        return "picker/x"
+
+
+@pytest.mark.parametrize("then", ["authenticate", "new"])
+async def test_a_source_sign_in_switches_the_session_to_the_picked_model(
+    make_adapter, workspace, user_dir, no_server, monkeypatch, then
+):
+    from nooa_atom.workspace import model_sources
+
+    source = _PickedSource()
+    monkeypatch.setattr(model_sources, "model_sources", lambda: [source])
+    monkeypatch.setattr(model_sources, "find_source", lambda source_id: source)
+    _save_user_model(user_dir, "first")
+    adapter = await make_adapter(
+        ScriptedModels({None: []}), capabilities=TERMINAL, llm_factory=WorkspaceDefault()
+    )
+    session_id = (await adapter.new_session(str(workspace))).session_id
+    assert terminal_auth.run_terminal_sign_in("picker") == 0
+    if then == "authenticate":
+        await adapter.authenticate(terminal_auth.source_method_id("picker"))
+    else:
+        session_id = (await adapter.new_session(str(workspace))).session_id
+    assert adapter.session(session_id).info.model == "picker/x"
+
+
 async def test_authenticate_rejects_an_unknown_method(make_adapter):
     adapter = await make_adapter(ScriptedModels({None: []}), capabilities=TERMINAL)
     with pytest.raises(RequestError):

@@ -260,7 +260,7 @@ def save_model(alias: str, entry: dict[str, Any]) -> Path:
 
 
 def choose_model(source_name: str, models: dict[str, Any], default: str) -> str:
-    """Ask which of a source's ``models`` to use; Enter keeps ``default``.
+    """Ask which of a source's ``models`` to use; ``default`` is offered first.
 
     A searchable list in a terminal (type part of a name, Tab to select),
     Click line input otherwise. Only a listed alias is accepted. Ctrl-C
@@ -273,8 +273,7 @@ def choose_model(source_name: str, models: dict[str, Any], default: str) -> str:
     if default not in models:
         default = names[0]
     click.echo(
-        f"{len(names)} {source_name} models. Type part of a name and press Tab to "
-        f"select one, or press Enter for {default}."
+        f"{len(names)} {source_name} models. Type part of a name and press Tab to select one."
     )
     while True:
         choice = prompts.prompt("Model", default=default, choices=names, searchable=True).strip()
