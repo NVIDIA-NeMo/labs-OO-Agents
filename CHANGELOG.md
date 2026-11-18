@@ -6,6 +6,14 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `import nooa` no longer loads the framework: every name in `nooa.__all__`
+  now loads on first use, and `nooa.<submodule>` is imported on attribute
+  access. Importing a light subpackage such as `nooa.overflow` now loads 6
+  `nooa` modules instead of 102 (about 25 ms instead of 150 ms);
+  `from nooa import Agent` is unchanged in what it gives you. The SIGUSR2
+  debug handler is still installed at `import nooa`; its implementation moved
+  to `nooa._debug_handler`, and `nooa.runtime.debug_handler` remains its
+  public path. (#590)
 - `SandboxConfig.env_allowlist` keeps only the listed environment variables in
   the sandbox worker. The worker is a fork, so it inherited every variable of the
   parent, model API keys included, and a cell could print them. Removing them

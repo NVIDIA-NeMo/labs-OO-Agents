@@ -44,7 +44,10 @@ if TYPE_CHECKING:
     from nooa.runtime.event_query import EventQuery
     from nooa.runtime.restrictions import RestrictionsConfig
 
-from nooa.errors.formatting import rewrite_never_awaited_warnings
+# A module reference, not a name import: nooa.errors.formatting loads nooa.config,
+# which loads this module, so when nooa.errors is imported first the formatting
+# module is still partially initialized here.
+from nooa.errors import formatting as _error_formatting
 from nooa.events import (
     DecisionCallEnd,
     DecisionCallStart,
@@ -2206,7 +2209,9 @@ class ActorRuntime:
             partial_results = getattr(execution_exception, "execution_results", None) or []
             for finished in (result, *partial_results[-1:]):
                 if finished is not None and finished.stderr:
-                    finished.stderr = rewrite_never_awaited_warnings(finished.stderr, self.agent)
+                    finished.stderr = _error_formatting.rewrite_never_awaited_warnings(
+                        finished.stderr, self.agent
+                    )
             # Call after_code_execution hook
             call_after_hook(
                 "after_code_execution",
