@@ -29,6 +29,10 @@ if TYPE_CHECKING:
     from nooa.config.truncation_config import FormatConfig
     from nooa.llm_types import LLMResponse
 
+# A module reference, not a name import: nooa.llm_types imports
+# nooa.context_blocks, so when nooa.llm_types is imported first it is still
+# partially initialized here.
+from nooa import llm_types as _llm_types
 from nooa.agentdoc import pformat
 from nooa.context_blocks.events import CODEACT_INLINE_RETURN, EventBase, ToolCallEvent
 from nooa.context_blocks.models import (
@@ -37,7 +41,6 @@ from nooa.context_blocks.models import (
     Role,
     ToolCallInfo,
 )
-from nooa.llm_types import assistant_message
 
 logger = logging.getLogger(__name__)
 
@@ -543,7 +546,7 @@ class OpenAIProviderFormatter(ProviderFormatter):
                 )
             elif msg.tool_calls:
                 out.append(
-                    assistant_message(
+                    _llm_types.assistant_message(
                         msg.content, tool_calls=msg.tool_calls, reasoning=msg.reasoning
                     )
                 )
@@ -558,7 +561,7 @@ class OpenAIProviderFormatter(ProviderFormatter):
             elif msg.images:
                 _append_openai_image_message(out, msg)
             elif msg.role is Role.ASSISTANT:
-                out.append(assistant_message(msg.content, reasoning=msg.reasoning))
+                out.append(_llm_types.assistant_message(msg.content, reasoning=msg.reasoning))
             else:
                 if msg.role in (Role.RUNTIME_EVENT, Role.METADATA):
                     continue
