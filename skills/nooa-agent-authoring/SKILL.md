@@ -43,11 +43,11 @@ Use `Annotated[type, "description"]` on parameters and return types to give the 
 
 ## LLM clients and cascading
 
-Use existing registry aliases with `get_llm_client("my-model")`. Before model
-onboarding, checks or configuration writes, follow
-[nooa-connect](../nooa-connect/SKILL.md), the canonical permission-first headless
-guide. Authoring an agent does not itself authorize configuring/testing models.
-For saved settings, precedence, reasoning levels and caching semantics, use
+Use an already configured registry alias with `get_llm_client("my-model")`.
+To configure a model, get the user's permission and follow
+[nooa-connect](../nooa-connect/SKILL.md): agents run its headless stages, not the
+interactive wizard. For registry semantics, reply budgets, reasoning-level
+configuration and caching, use
 [nooa-model-configuration](../nooa-model-configuration/SKILL.md).
 On Windows, run nooa inside WSL 2; native Windows stops at `import nooa`
 unless `NOOA_SKIP_PLATFORM_CHECK=1` is set.

@@ -44,8 +44,9 @@ class CaptureConfig(BaseModel):
 
     These apply at *capture time* (when execute_python writes to stdout / stderr
     or formats an exception). The captured text is head/tail-truncated to fit
-    the budget, with a ``<truncated>...</truncated>`` wrapper indicating where
-    content was elided.
+    the budget, inside a ``<truncated-output>`` ... ``</truncated-output>``
+    wrapper that says how much was cut and where the full text is, if kept.
+    Error text past its hard cap ends in ``...<truncated>``.
 
     Field naming: ``max_<stream>`` — char count, no ``_chars`` suffix needed
     inside the capture config since every field here is char-based.
@@ -78,6 +79,15 @@ class CaptureConfig(BaseModel):
             ),
         ),
     ] = False
+    unrecoverable_hint: Annotated[
+        str | None,
+        Field(
+            description=(
+                "A sentence appended to the notice's 'not recoverable' line when a "
+                "stream is cut and no file keeps the full output (None: nothing)."
+            ),
+        ),
+    ] = None
 
     @model_validator(mode="after")
     def _check(self) -> "CaptureConfig":

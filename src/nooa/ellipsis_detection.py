@@ -80,7 +80,7 @@ def _is_ellipsis_stmt(stmt: ast.stmt) -> bool:
     )
 
 
-def has_ellipsis_body(func: Callable[..., Any]) -> bool:
+def has_ellipsis_body(func: Callable[..., Any], *, require_source: bool = False) -> bool:
     """Check if a function body ends with `...` (ellipsis).
 
     This returns True if the function ends with ellipsis, even if there's
@@ -88,6 +88,9 @@ def has_ellipsis_body(func: Callable[..., Any]) -> bool:
 
     Args:
         func: Function to check
+        require_source: Require confirmation from inspectable or generated
+            source. Short bytecode alone cannot distinguish an ellipsis from
+            an implemented return, pass, or docstring-only body.
 
     Returns:
         True if body ends with ellipsis (may have code before it)
@@ -102,6 +105,9 @@ def has_ellipsis_body(func: Callable[..., Any]) -> bool:
 
         # Check if last statement is ellipsis
         return _is_ellipsis_stmt(body[-1])
+
+    if require_source:
+        return False
 
     # For dynamically generated functions without source, check bytecode
     # A function with just `...` compiles to just RESUME, LOAD_CONST(None), RETURN_VALUE

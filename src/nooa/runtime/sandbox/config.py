@@ -71,6 +71,16 @@ class SandboxConfig(BaseModel):
         description="False -> internet sockets blocked (AF_INET/AF_INET6); True -> allowed.",
     )
 
+    # --- environment -----------------------------------------------------
+    env_allowlist: tuple[str, ...] | None = Field(
+        default=None,
+        description=(
+            "Environment variables the worker keeps; every other one is removed. "
+            "Values the parent already copied elsewhere in memory are not. "
+            "None -> the worker inherits the parent's full environment."
+        ),
+    )
+
     # --- guardrail 2: memory + cpu ----------------------------------------
     max_memory_mb: int = Field(
         default=0,
@@ -156,6 +166,7 @@ class ResolvedSpec:
     block_network: bool = False
     max_memory_mb: int = 0
     max_cpu_seconds: int = 0
+    env_allowlist: tuple[str, ...] | None = None
 
     def requests_anything(self) -> bool:
         return bool(
@@ -207,7 +218,7 @@ def resolve_spec(config: SandboxConfig) -> ResolvedSpec:
     """Turn declarative :class:`SandboxConfig` into a concrete :class:`ResolvedSpec`.
 
     Deduplicates and normalizes Landlock rules (read vs read-write), folds in the
-    interpreter/system read paths, and records the network/rlimit intent.
+    interpreter/system read paths, and records the network/rlimit/env intent.
     """
     paths: dict[str, tuple[bool, bool]] = {}  # path -> (write, required)
 
@@ -240,4 +251,5 @@ def resolve_spec(config: SandboxConfig) -> ResolvedSpec:
         block_network=not config.network,
         max_memory_mb=config.max_memory_mb,
         max_cpu_seconds=config.max_cpu_seconds,
+        env_allowlist=config.env_allowlist,
     )

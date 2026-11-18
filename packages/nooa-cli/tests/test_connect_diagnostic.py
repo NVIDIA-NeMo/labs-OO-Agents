@@ -45,14 +45,15 @@ def test_target_and_effective_source_are_distinct(tmp_path, monkeypatch):
 
     skill_path = Path(context["reference_paths"][0])
     name, _, _ = _parse_skill_md(skill_path.parent)
-    assert name == "nooa-model-configuration"
+    assert name == "nooa-connect"
     assert str(skill_path) in prompt
     assert "nooa-agent-authoring" not in prompt
     assert context["target_in_registry_chain"] is False
     # The rerun reserves three default discovery probes (reply cap + 512 input each).
     expected = 3 * (connect.DISCOVERY_OUTPUT_TOKENS + 512)
     assert shlex.split(context["rerun_command"])[-1] == str(expected)
-    assert "does not authorize additional paid calls" in prompt
+    assert "Confirm permission for additional paid calls, model configuration or writes" in prompt
+    assert "remaining allowance before rerunning" in prompt
 
 
 def test_context_does_not_mask_broken_yaml_or_leak_pasted_key(tmp_path, monkeypatch):

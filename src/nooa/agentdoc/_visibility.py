@@ -22,81 +22,67 @@ import sys
 import threading
 import types
 import typing
-from typing import Annotated, Any, cast
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Annotated, Any
+
+from nooa.agentdoc.markers import _Hidden as _Hidden  # re-exported: the type of ``hidden``
+from nooa.agentdoc.markers import hidden
+
+
+class _TypeHintCache:
+    def __init__(self) -> None:
+        self.entries: dict[int, tuple[Any, dict[str, Any]]] = {}
+        self.active = True
+        self.owner_thread = threading.get_ident()
+
+    def is_current(self) -> bool:
+        return self.active and self.owner_thread == threading.get_ident()
+
+
+_type_hints: ContextVar[_TypeHintCache | None] = ContextVar("agentdoc_type_hints", default=None)
+
+
+@contextmanager
+def _type_hint_scope() -> Iterator[None]:
+    """Reuse resolved annotations within a formatting call, never across independent calls.
+
+    Recursive and reentrant formatting on this thread share the cache, so resolved
+    annotations are stable until the outermost formatting call ends. Instance/class spec()
+    overrides remain live. Copied contexts cannot extend the cache's lifetime or
+    share it with another thread; calls outside a formatting call resolve without caching.
+    """
+    current = _type_hints.get()
+    if current is not None and current.is_current():
+        yield
+        return
+    cache = _TypeHintCache()
+    token = _type_hints.set(cache)
+    try:
+        yield
+    finally:
+        # Copied contexts retain this holder even after our ContextVar is reset.
+        # Expire it explicitly, and release objects kept alive by its entries.
+        cache.active = False
+        cache.entries.clear()
+        _type_hints.reset(token)
+
+
+def _resolve_type_hints(obj: Any) -> dict[str, Any]:
+    cache = _type_hints.get()
+    if cache is None or not cache.is_current():
+        return typing.get_type_hints(obj, include_extras=True)
+    # Keep the object alive and key by identity: callable instances can be unhashable.
+    key = id(obj)
+    if key not in cache.entries:
+        cache.entries[key] = (obj, typing.get_type_hints(obj, include_extras=True))
+    return cache.entries[key][1]
 
 
 def _is_dunder(name: str) -> bool:
     """True if name is a module/class dunder (e.g. __name__, __file__)."""
     return name.startswith("__") and name.endswith("__")
-
-
-class _Hidden:
-    """Hide a field, callable, or module-level name from documentation.
-
-    Use as ``@hidden``, ``Annotated[T, hidden]``, or ``with hidden:``.
-    """
-
-    def __init__(self):
-        self._local = threading.local()
-
-    @property
-    def _stack(self) -> list[tuple[types.ModuleType, set[str]]]:
-        """Thread-local stack of (module, snapshot) for nested ``with hidden:``."""
-        if not hasattr(self._local, "stack"):
-            self._local.stack = []
-        return cast(list[tuple[types.ModuleType, set[str]]], self._local.stack)
-
-    def __call__(self, func: Any) -> Any:
-        """Use as @hidden decorator on methods or module-level functions."""
-        try:
-            func._agentdoc_hidden = True
-        except AttributeError:
-            # property/cached_property have no __dict__; store on the inner
-            # function so is_hidden_method() can find it.
-            if isinstance(func, property) and func.fget is not None:
-                func.fget._agentdoc_hidden = True  # type: ignore[attr-defined]
-            elif isinstance(func, functools.cached_property):
-                func.func._agentdoc_hidden = True  # type: ignore[attr-defined]
-        return func
-
-    def __enter__(self):
-        frame = sys._getframe(1)
-        if frame.f_locals is not frame.f_globals:
-            raise RuntimeError(
-                "'with hidden:' must be used at module level, not inside a function or class body"
-            )
-        module_name = frame.f_globals.get("__name__")
-        module = sys.modules.get(module_name) if module_name else None
-        if module is None:
-            raise RuntimeError(
-                "hidden must be used at module level, could not determine calling module."
-            )
-        return self._enter_for_module(module)
-
-    def _enter_for_module(self, module: types.ModuleType):
-        """Enter the block for a specific module (used by tests)."""
-        self._stack.append((module, set(module.__dict__.keys())))
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: Any,
-    ) -> bool:
-        if not self._stack:
-            raise RuntimeError("_Hidden.__exit__ called without matching __enter__")
-        module, snapshot = self._stack.pop()
-        new_names = set(module.__dict__.keys()) - snapshot
-        existing: set[str] = getattr(module, "_agentdoc_hidden_names", set())
-        module._agentdoc_hidden_names = existing | new_names  # type: ignore[attr-defined]
-        return False
-
-    def __repr__(self):
-        return "hidden"
-
-
-hidden = _Hidden()
 
 
 def is_hidden_method(func: Any) -> bool:
@@ -115,6 +101,26 @@ def is_hidden_method(func: Any) -> bool:
     if isinstance(func, functools.cached_property):
         return getattr(func.func, "_agentdoc_hidden", False) is True
     return False
+
+
+def explicit_field_visibility(obj: Any, name: str) -> bool | None:
+    """The explicit ``spec(..., name, hidden=...)`` value in force for *obj*, or None.
+
+    Same resolution as :func:`is_hidden_field`'s overrides: an instance's own
+    declaration first, then the class MRO (leaf to base), most-derived wins.
+    """
+    from nooa.agentdoc._metadata import get_field_metadata
+
+    if not isinstance(obj, type):
+        own = get_field_metadata(obj, name).get("hidden")
+        if own is not None:
+            return own
+        obj = type(obj)
+    for klass in obj.__mro__:
+        declared = get_field_metadata(klass, name).get("hidden")
+        if declared is not None:
+            return declared
+    return None
 
 
 def is_hidden_field(cls: Any, name: str) -> bool:
@@ -159,7 +165,7 @@ def is_hidden_field(cls: Any, name: str) -> bool:
             continue
         # get_type_hints resolves string annotations and forward refs
         try:
-            resolved = typing.get_type_hints(klass, include_extras=True)
+            resolved = _resolve_type_hints(klass)
         except (NameError, AttributeError, TypeError):
             resolved = None
 

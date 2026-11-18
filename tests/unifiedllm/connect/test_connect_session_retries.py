@@ -135,6 +135,7 @@ async def test_retry_stops_at_explicit_bounds_and_never_retries_errors(
     if mode == "fixed-level":
         entry["reasoning_levels"] = {"fixed": {"max_tokens": 2048}}
         entry["reasoning_default"] = "fixed"
+        entry["reasoning_level"] = "fixed"
     budget = 43008 if mode == "budget" else 400000
     updates = [
         u async for u in session_steps("test", entry, api_key="test-key", budget_tokens=budget)

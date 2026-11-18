@@ -61,6 +61,7 @@ class DecideStrategy(GenerationStrategy):
             call.bound_parameters(),
             context=context,
             events=events,
+            media_inputs=getattr(model, "media_inputs", ()),
         )
         response = await decision_runtime.decide(
             request, include_raw_response=self.include_raw_response

@@ -299,3 +299,21 @@ class TestFileBackedExport:
         from nooa.agentdoc import FileBackedTruncatingStringIO as FB
 
         assert FB is FileBackedTruncatingStringIO
+
+
+class TestTailOnly:
+    def test_tail_only_notice_names_the_file(self):
+        buf = FileBackedTruncatingStringIO(limit=4, tail_chars=4)
+        try:
+            buf.write("abcdefgh")
+            buf.close()
+            assert buf.getvalue() == f"[... 4 chars omitted; full output: {buf.file_path}]\nefgh"
+            with open(buf.file_path) as f:
+                assert f.read() == "abcdefgh"
+        finally:
+            buf.cleanup()
+
+    def test_unwritable_dir_falls_back_to_memory(self):
+        buf = FileBackedTruncatingStringIO(limit=4, tail_chars=4, dir="/nonexistent/path/xyz")
+        buf.write("abcdefgh")
+        assert buf.getvalue() == "[... 4 chars omitted]\nefgh"

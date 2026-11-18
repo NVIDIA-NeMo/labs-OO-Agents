@@ -250,23 +250,29 @@ class RetrievalEngine:
 
         With ``owner``, spread is confined to visible memories (that owner +
         unowned): an edge must not leak — or amplify through — another agent's
-        memory in an owner-scoped recall.
+        memory in an owner-scoped recall. Archived memories never receive or
+        relay activation, regardless of owner scope.
         """
         cfg = self.config
         visible_cache: dict[str, bool] = {}
 
         def _visible(mid: str) -> bool:
-            if owner is None:
-                return True
+            """Cache whether a non-archived record is visible to this recall's owner."""
             if mid not in visible_cache:
-                mem_owner = self.store.owner_of(mid)
-                visible_cache[mid] = mem_owner is not None and owner_matches(mem_owner, owner)
+                memory = self.store.get(mid)
+                visible_cache[mid] = (
+                    memory is not None
+                    and not memory.archived
+                    and (owner is None or owner_matches(memory.owner, owner))
+                )
             return visible_cache[mid]
 
         spread: dict[str, float] = {}
         frontier = dict(seed_activation)
-        for h in range(1, hops + 1):
-            decay = cfg.per_hop_decay**h
+        # ``act`` already carries the decay of every earlier hop, so applying a
+        # single factor per step is what yields ``per_hop_decay ** h`` at hop h.
+        decay = cfg.per_hop_decay
+        for _ in range(hops):
             nxt: dict[str, float] = {}
             for node, act in frontier.items():
                 edges = self.store.neighbors(node)

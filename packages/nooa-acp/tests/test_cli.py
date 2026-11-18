@@ -66,6 +66,19 @@ def test_explicit_flag_overrides_the_environment(monkeypatch, stubbed_serve):
     assert requested["name"] == "anthropic/claude-sonnet-4-5"
 
 
+def test_the_command_warns_that_nooa_acp_is_deprecated_and_still_runs(monkeypatch, stubbed_serve):
+    monkeypatch.setenv("NOOA_MODEL", "openai/gpt-4o-mini")
+    monkeypatch.setattr("nooa_acp.cli._warned", False)
+
+    result = click.testing.CliRunner().invoke(command, [])
+
+    assert result.exit_code == 0, result.output
+    assert "nooa-acp is deprecated" in result.stderr
+    assert "nooa-atom" in result.stderr
+    assert "deprecated" not in result.stdout  # standard output is the protocol
+    assert "llm_factory" in stubbed_serve  # it went on to serve
+
+
 def _console_script() -> str:
     """Locate the installed ``nooa-acp`` console script.
 
@@ -98,6 +111,8 @@ def test_console_script_is_installed_and_runnable():
 
     assert result.returncode == 0, result.stderr
     assert "Serve the NOOA coding agent over ACP" in result.stdout
+    assert "nooa-acp is deprecated" in result.stderr
+    assert "nooa-atom" in result.stderr
 
 
 def test_console_script_requires_a_model():
@@ -113,3 +128,6 @@ def test_console_script_requires_a_model():
 
     assert result.returncode == 2
     assert "--model" in result.stderr
+    # The script warns first, then click reports the usage error.
+    assert "nooa-acp is deprecated" in result.stderr
+    assert result.stdout == ""

@@ -12,9 +12,58 @@ from typing import TYPE_CHECKING, Annotated, Any, TypedDict, get_type_hints
 from uuid import uuid4
 
 from nooa.ellipsis_detection import get_pre_ellipsis_code
+from nooa.runtime.execution_namespace import ExecutionNamespace
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
+
+
+class _Unset:
+    """Marker type for "argument not given" where ``None`` is a valid value."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "<unset>"
+
+
+_UNSET = _Unset()
+
+
+def bind_call_arguments(
+    signature: inspect.Signature,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    *,
+    partial: bool = False,
+) -> inspect.BoundArguments:
+    """Bind Python call arguments, including defaults, across supported CPython versions."""
+    var_keyword = next(
+        (p.name for p in signature.parameters.values() if p.kind is inspect.Parameter.VAR_KEYWORD),
+        None,
+    )
+    # Older CPython inspect versions reject positional-only names in **kwargs
+    # when the positional value is omitted, although Python accepts the call.
+    # Bind those keywords separately so they cannot replace a positional default.
+    positional_keywords = {
+        p.name: kwargs[p.name]
+        for p in signature.parameters.values()
+        if var_keyword is not None
+        and p.kind is inspect.Parameter.POSITIONAL_ONLY
+        and p.name in kwargs
+    }
+    binding_kwargs = {k: v for k, v in kwargs.items() if k not in positional_keywords}
+    bind = signature.bind_partial if partial else signature.bind
+    bound = bind(*args, **binding_kwargs)
+
+    bound.apply_defaults()
+    if positional_keywords and var_keyword is not None:
+        captured = bound.arguments[var_keyword]
+        bound.arguments[var_keyword] = {
+            k: v for k, v in kwargs.items() if k in positional_keywords or k in captured
+        }
+
+    return bound
 
 
 def merge_call_arguments(
@@ -44,11 +93,9 @@ def merge_call_arguments(
     parameters = [parameter for name, parameter in signature.parameters.items() if name != "self"]
     call_signature = signature.replace(parameters=parameters)
     try:
-        bound = call_signature.bind_partial(*args, **supplied_kwargs)
+        bound = bind_call_arguments(call_signature, args, supplied_kwargs, partial=True)
     except TypeError:
         return supplied_kwargs
-
-    bound.apply_defaults()
 
     # Keep unmatched keywords at the top level for compatibility, then overlay
     # the canonical Python locals. If a keyword collides with a positional-only
@@ -182,6 +229,11 @@ class CurrentCall:
     positional_param_names: list[str] | None = None
     var_positional_param_name: str | None = None
     var_keyword_param_name: str | None = None
+    # The owned namespace this call's cells run in (CodeAct in-process: from the
+    # agent's ``execution_namespace_for`` hook; None for the sandbox backend and
+    # strategies without one); never copied into snapshot/user state. Last so main's
+    # positional constructor order above stays unchanged.
+    execution_namespace: ExecutionNamespace | None = None
 
     def __hash__(self) -> int:
         """Hash by id for use in sets/dicts."""
@@ -373,11 +425,19 @@ class CurrentCall:
         kwargs: dict[str, Any] | None = None,
         decorator: str = "plan",
         parent_id: str | None = None,
+        *,
+        call_id: str | None = None,
+        method_name: str | None = None,
+        docstring: "str | None | _Unset" = _UNSET,
+        session_locals: dict[str, Any] | None = None,
     ) -> "CurrentCall":
         """Create CurrentCall from a method object.
 
         Extracts signature and docstring automatically.
         Maps positional arguments to parameter names for template expansion.
+        The agent runtime passes its own call identity, expanded docstring and
+        caller state through the keyword-only overrides, so the call is fully
+        built here and never patched afterwards.
 
         Args:
             method: The method being called.
@@ -385,12 +445,17 @@ class CurrentCall:
             kwargs: Keyword arguments for the call.
             decorator: Decorator type ('plan', 'agent').
             parent_id: Parent call ID for nested calls.
+            call_id: Call ID to use (default: a fresh ``call_<hex>`` ID).
+            method_name: Method name to record (default: ``method.__name__``).
+            docstring: Docstring to record, ``None`` included (default:
+                ``inspect.getdoc(method)``).
+            session_locals: Caller-owned seed/writeback state (default: unset).
 
         Returns:
             CurrentCall instance with extracted metadata.
         """
-        # Generate unique ID
-        call_id = f"call_{uuid4().hex[:12]}"
+        if call_id is None:
+            call_id = f"call_{uuid4().hex[:12]}"
 
         # Extract signature
         try:
@@ -400,8 +465,8 @@ class CurrentCall:
             sig = None
             signature_str = None
 
-        # Extract docstring
-        docstring = inspect.getdoc(method)
+        if isinstance(docstring, _Unset):
+            docstring = inspect.getdoc(method)
 
         # Check if async
         is_async = inspect.iscoroutinefunction(method)
@@ -457,7 +522,7 @@ class CurrentCall:
 
         return cls(
             id=call_id,
-            method_name=method.__name__,
+            method_name=method_name if method_name is not None else method.__name__,
             decorator=decorator,
             signature=signature_str,
             docstring=docstring,
@@ -468,5 +533,6 @@ class CurrentCall:
             return_type=return_type,
             pre_ellipsis_code=pre_ellipsis_code,
             param_specs=param_specs,
+            session_locals=session_locals,
             **signature_parameter_names(sig),
         )

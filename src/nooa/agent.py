@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Agent base class."""
 
+import inspect
 import logging
 from typing import TYPE_CHECKING, Annotated, Any, cast
 from uuid import uuid4
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
     from nooa.runtime.event_manager import EventManager
     from nooa.runtime.event_query import EventQuery
     from nooa.runtime.events import EventsApi
+    from nooa.runtime.execution_namespace import ExecutionNamespace
     from nooa.storage.manager import StorageManager
     from nooa.unifiedllm import UnifiedLLM
 
@@ -92,7 +94,7 @@ class Agent(metaclass=AgentMeta):
     - Structured instances (dataclasses, Pydantic, custom classes) render as `ClassName(field=value, ...)`; a trailing `...` means fields were elided:
         Config(name='foo', enabled=True, ...)
     - The variable itself is **not** truncated — index/iterate it directly to operate on the full data.
-    - `<truncated>...</truncated>` in captured stdout/stderr is **not recoverable**.
+    - Output cut to fit is wrapped in `<truncated-output>`...`</truncated-output>`: it says the cut part is **not recoverable**, or, when file-backed capture is on, names the file with the full output.
     """
 
     # Agent instances should never be serialized as nested values inside other objects.
@@ -535,6 +537,21 @@ class Agent(metaclass=AgentMeta):
 
     @no_trace
     @hidden
+    def execution_namespace_for(self, call: Any) -> "ExecutionNamespace":
+        """Hook: the owned namespace this method call's cells run in.
+
+        CodeAct's in-process backend calls it once per call (``call`` is the
+        :class:`~nooa.strategies.current_call.CurrentCall`). The default is a
+        fresh :class:`~nooa.runtime.execution_namespace.ExecutionNamespace` per
+        call (the call's arguments and the runtime names are reserved); override
+        it to share one namespace across calls.
+        """
+        from nooa.runtime.execution_namespace import default_execution_namespace
+
+        return default_execution_namespace(call)
+
+    @no_trace
+    @hidden
     def _events_api_prompt(self) -> str:
         """Expose event guidance only when the instance exposes its events API."""
         from nooa.agentdoc.visibility import is_hidden_field
@@ -560,11 +577,14 @@ Inspect in REPL: print(doc(self.events))
         """
         import string
 
-        # Walk MRO to find nearest docstring (Python doesn't inherit __doc__)
+        # Walk MRO to find nearest docstring (Python doesn't inherit __doc__).
+        # cleandoc: Python 3.13+ strips docstring indentation at compile time
+        # and 3.12 keeps it, so the raw ``__doc__`` would make the prompt
+        # depend on the interpreter version.
         doc = ""
         for cls in type(self).__mro__:
             if cls.__doc__:
-                doc = cls.__doc__
+                doc = inspect.cleandoc(cls.__doc__)
                 break
         if not doc or "{" not in doc:
             return doc

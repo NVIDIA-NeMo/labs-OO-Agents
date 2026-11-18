@@ -26,15 +26,17 @@ def test_no_cheat_sheet_with_empty_channels(names):
     assert "shutdown" not in status
 
 
-def test_cheat_sheet_appears_with_extra_channels():
-    """Cheat sheet appears when channels beyond user_messages exist."""
+def test_status_never_names_the_hidden_queue_manager():
+    """Pending items on extra channels are shown, but no queue_manager commands."""
     qm = QueueManager()
     qm.queue("user_messages")
     ch = qm.queue("ci_monitor")
     ch.put("some status line")
     status = qm.status()
-    assert "remove_channel" in status
     assert "ci_monitor" in status
+    assert "queue_manager" not in status
+    assert "remove_channel" not in status
+    assert "shutdown" not in status
 
 
 def test_cheat_sheet_lists_extra_channel_names():
@@ -48,16 +50,6 @@ def test_cheat_sheet_lists_extra_channel_names():
     status = qm.status()
     assert "pipeline_a" in status
     assert "pipeline_b" in status
-
-
-def test_cheat_sheet_mentions_shutdown():
-    """Cheat sheet includes shutdown as the nuclear option."""
-    qm = QueueManager()
-    qm.queue("user_messages")
-    ch = qm.queue("ci")
-    ch.put("line")
-    status = qm.status()
-    assert "shutdown" in status
 
 
 def test_no_cheat_sheet_when_no_channels():
@@ -77,14 +69,7 @@ def test_status_populated_formatting_unchanged_then_drained():
     messages.put("second")
     monitor.put("ok")
 
-    assert qm.status(max_items=1) == (
-        "user_messages: 2 pending\n"
-        "  1. first\n"
-        "  … 1 more\n"
-        "ci_monitor: 1 pending\n"
-        "  1. ok\n"
-        "💡 self.queue_manager.remove_channel('ci_monitor') | .shutdown()"
-    )
+    assert qm.status() == "Unread:\n  • user_messages: 2\n  • ci_monitor: 1"
     assert messages.drain() == ["first", "second"]
     assert monitor.drain() == ["ok"]
     assert qm.status() == "(nothing queued)"
@@ -109,11 +94,55 @@ async def test_active_spawns_shown_when_queues_empty():
     await asyncio.sleep(0.05)
 
     status = qm.status()
-    assert "active background job" in status
+    assert "\nRunning:\n  • " in status  # after "Unread:" (the item it yielded)
     assert "ci_monitor" in status
-    assert "running" in status
+    assert "running" not in status  # the heading says it
 
     # Cleanup
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_undescribed_spawn_shows_default_stop_line():
+    """A running job nobody described gets one line naming the call that stops it."""
+    qm = QueueManager()
+    qm.queue("ci_monitor")
+    qm.spawn(_dummy_gen(), channel="ci_monitor")
+    qm.spawn(_dummy_gen(), channel="ci_monitor")
+    await asyncio.sleep(0.05)
+    status = qm.status()
+    stop = "Stop: await self.queue_manager.cancel('ci_monitor')"
+    assert status.endswith("\n" + stop)
+    assert status.count(stop) == 1
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_described_or_hinted_spawn_shows_only_the_owner_text():
+    """An owner's describe() or set_cancel_hint replaces the default line."""
+    qm = QueueManager()
+    qm.queue("described")
+    qm.queue("hinted")
+    h = qm.spawn(_dummy_gen(), channel="described")
+    h.describe = lambda: "watching CI for PR 7"
+    qm.set_cancel_hint("hinted", "Stop a monitor: await self.ci.stop('<label>')")
+    qm.spawn(_dummy_gen(), channel="hinted")
+    await asyncio.sleep(0.05)
+    status = qm.status()
+    assert "  • watching CI for PR 7" in status
+    assert status.endswith("\nStop a monitor: await self.ci.stop('<label>')")
+    assert "queue_manager" not in status
+    await qm.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_default_stop_line_can_be_turned_off():
+    qm = QueueManager()
+    qm.queue("ci_monitor")
+    qm.set_default_cancel_hint(None)
+    qm.spawn(_dummy_gen(), channel="ci_monitor")
+    await asyncio.sleep(0.05)
+    assert "Stop:" not in qm.status()
     await qm.shutdown()
 
 
@@ -122,4 +151,54 @@ def test_no_active_spawns_shown_when_none_running():
     qm = QueueManager()
     qm.queue("user_messages")
     status = qm.status()
-    assert "active background job" not in status
+    assert "Running:" not in status
+
+
+class _Sourced:
+    """An item whose sender line is item code (``status_source()``)."""
+
+    def __init__(self, n: int) -> None:
+        self.n = n
+
+    def status_source(self) -> str:
+        return f"/root/w{self.n % 5}"
+
+
+def test_status_survives_concurrent_cross_thread_puts():
+    """status() copies items under the batch lock, so a put loop never breaks it."""
+    import threading
+    import time
+
+    qm = QueueManager()
+    ch = qm.queue("ci_monitor")
+    stop = threading.Event()
+    errors: list[BaseException] = []
+
+    def produce() -> None:
+        n = 0
+        try:
+            while not stop.is_set():
+                ch.put(_Sourced(n))
+                n += 1
+                if ch.qsize() > 200:
+                    ch.clear()
+        except BaseException as exc:  # noqa: BLE001 - reported below
+            errors.append(exc)
+
+    producer = threading.Thread(target=produce, daemon=True)
+    producer.start()
+    deadline = time.monotonic() + 1.0
+    calls = 0
+    try:
+        while time.monotonic() < deadline:
+            status = qm.status()
+            line = ch.status()
+            assert status
+            assert line == "" or line.startswith("ci_monitor: ")
+            calls += 1
+    finally:
+        stop.set()
+        producer.join(timeout=2)
+    assert not producer.is_alive()
+    assert not errors
+    assert calls > 0
