@@ -682,7 +682,7 @@ class EventManager:
             start_tag: First tag to collapse (inclusive), e.g., "2"
             end_tag: Last tag to collapse (inclusive), e.g., "40"
             summary_text: Optional LLM-generated summary. None = truncation for a new
-                summary. Re-collapsing an existing summary's exact range preserves
+                summary. Re-collapsing an active summary's exact range preserves
                 its text when omitted or None; a string replaces its text.
 
         Returns:
