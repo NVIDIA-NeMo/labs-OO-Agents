@@ -182,15 +182,18 @@ class Image(Media):
         return super().from_bytes(data, media_type=media_type, **vendor_metadata)  # type: ignore[return-value]
 
     @classmethod
-    def from_url(cls, url: str, *, media_type: str = "", **vendor_metadata: object) -> "Image":
+    def from_url(
+        cls, url: str, *, media_type: str | None = None, **vendor_metadata: object
+    ) -> "Image":
         """Create an image from a URL (no download — URL is passed directly to the LLM).
 
         Without ``media_type`` the type comes from the URL: a ``data:`` URL's
         declared type, else a guess from the file extension (``.png`` ->
         ``image/png``). When neither says, no type is sent and the provider
         reads it from the server; no ``image/jpeg`` default is invented.
+        ``media_type=""`` means "send no type" and is kept as given.
         """
-        if not media_type:
+        if media_type is None:
             media_type = _url_media_type(url, "image/")
         return cls(data_url=url, media_type=media_type, vendor_metadata=vendor_metadata or None)
 
