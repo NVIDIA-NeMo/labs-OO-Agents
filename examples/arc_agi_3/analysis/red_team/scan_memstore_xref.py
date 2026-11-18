@@ -52,7 +52,7 @@ def main() -> int:
     for fp in logs:
         g = _game_of(fp)
         try:
-            t = open(fp, errors="ignore").read()
+            t = open(fp, encoding="utf-8", errors="ignore").read()
         except OSError:
             continue
         for a in ALIAS.findall(t):

@@ -222,7 +222,7 @@ def install():
         click.secho(f"Completions written to {profile}", fg="green")
     else:
         # Bash/zsh: append eval one-liner to profile
-        with open(profile, "a") as f:
+        with open(profile, "a", encoding="utf-8") as f:
             f.write(f"\n# nooa shell completions\n{line}\n")
         click.secho(f"Completions added to {profile}", fg="green")
         click.echo(f"Run: source {profile}")
@@ -237,7 +237,7 @@ def _detect_line_ending(text: str) -> str:
 
 def _read_preserving_newlines(path: Path) -> str:
     """Read file without Python's universal newline translation."""
-    with open(path, newline="") as f:
+    with open(path, encoding="utf-8", newline="") as f:
         return f.read()
 
 

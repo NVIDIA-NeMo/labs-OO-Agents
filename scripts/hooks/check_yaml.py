@@ -9,7 +9,7 @@ import yaml
 retval = 0
 for filename in sys.argv[1:]:
     try:
-        with open(filename) as f:
+        with open(filename, encoding="utf-8") as f:
             yaml.safe_load(f)
     except yaml.YAMLError as e:
         print(f"{filename}: {e}")

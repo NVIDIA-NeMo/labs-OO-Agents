@@ -40,7 +40,7 @@ def get_rss_mb() -> float:
     reports *peak* RSS — the value never decreases within a process.
     """
     try:
-        with open("/proc/self/status") as f:
+        with open("/proc/self/status", encoding="utf-8") as f:
             for line in f:
                 if line.startswith("VmRSS:"):
                     return int(line.split()[1]) / 1024  # kB → MB
@@ -56,7 +56,7 @@ def get_rss_mb() -> float:
 def _get_vas_mb() -> float:
     """Return current virtual address space size in MB."""
     try:
-        with open("/proc/self/status") as f:
+        with open("/proc/self/status", encoding="utf-8") as f:
             for line in f:
                 if line.startswith("VmSize:"):
                     return int(line.split()[1]) / 1024  # kB → MB
@@ -319,7 +319,7 @@ class MemoryMonitor:
         # Append kill notice to diagnostics file
         if self.diag_file:
             try:
-                with open(self.diag_file, "a") as f:
+                with open(self.diag_file, "a", encoding="utf-8") as f:
                     f.write(
                         f"\n*** HARD KILL at {current_rss:.1f} MB (limit: {self.limit_mb} MB) ***\n"
                     )

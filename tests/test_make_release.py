@@ -40,7 +40,7 @@ def mr():
 
 def write_eval(path: Path, rows: Sequence[Row]) -> Path:
     """Write a .noo-eval.jsonl from (model, test, case, tier, passed, error_type)."""
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         fh.write(json.dumps({"_type": "metadata", "metadata": {}}) + "\n")
         for model, test, case, tier, passed, error in rows:
             fh.write(
@@ -961,7 +961,8 @@ def test_fresh_wheel_quickstarts_isolate_customer_install_and_record_failures(
             return subprocess.CompletedProcess(cmd, 1, "", "resolver failed")
         if "-c" in cmd:
             Path(cmd[-1]).write_text(
-                json.dumps({"packages": {"nooa": "1.2.3", "example-dependency": "4.5.6"}})
+                json.dumps({"packages": {"nooa": "1.2.3", "example-dependency": "4.5.6"}}),
+                encoding="utf-8",
             )
             return subprocess.CompletedProcess(
                 cmd,

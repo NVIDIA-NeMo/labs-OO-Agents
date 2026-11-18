@@ -725,7 +725,7 @@ async def test_network_guard_inside_cell():
 async def test_filesystem_guard_inside_cell():
     with tempfile.TemporaryDirectory() as ws, tempfile.TemporaryDirectory() as secret:
         secret_path = os.path.join(secret, "s.txt")
-        with open(secret_path, "w") as fh:
+        with open(secret_path, "w", encoding="utf-8") as fh:
             fh.write("TOPSECRET")
         ex = _executor(
             SandboxConfig(

@@ -73,7 +73,7 @@ def main() -> int:
     behav_hits = []
     for fp in logs:
         try:
-            t = open(fp, errors="ignore").read()
+            t = open(fp, encoding="utf-8", errors="ignore").read()
         except OSError:
             continue
         if BEHAV.search(t):

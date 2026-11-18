@@ -233,7 +233,7 @@ def load_config(config_path: Path) -> EvalConfig:
             class: LLMJudgeScorer
             model: nemotron3-nano-30b  # References key from models
     """
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
     # Parse models as dict keyed by ID
@@ -361,7 +361,7 @@ def load_tasks(data_file: Path, limit: int | None = None) -> list[Task]:
         List of Tasks with input as (args, kwargs) tuple
     """
     tasks = []
-    with open(data_file) as f:
+    with open(data_file, encoding="utf-8") as f:
         for i, line in enumerate(f):
             if limit and i >= limit:
                 break

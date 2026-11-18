@@ -111,7 +111,11 @@ def load_config(path: str | None, args: argparse.Namespace) -> dict:
     if path:
         import yaml
 
-        raw = {k: v for k, v in yaml.safe_load(Path(path).read_text()).items() if v is not None}
+        raw = {
+            k: v
+            for k, v in yaml.safe_load(Path(path).read_text(encoding="utf-8")).items()
+            if v is not None
+        }
         # Merge the nested `sandbox:` block over its defaults so a partial block
         # (e.g. just `cells: true`) keeps the default guardrail knobs.
         if isinstance(raw.get("sandbox"), dict):

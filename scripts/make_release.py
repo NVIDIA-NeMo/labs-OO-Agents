@@ -816,7 +816,7 @@ class ArmResults:
 
 def parse_results(path: Path, label: str) -> ArmResults:
     arm = ArmResults(label=label)
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         try:
@@ -1927,7 +1927,7 @@ def local_main(args: argparse.Namespace) -> int:
         diff=diff,
         change_notes=change_notes,
     )
-    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as fh:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".md", delete=False) as fh:
         fh.write(notes)
         notes_path = Path(fh.name)
     try:

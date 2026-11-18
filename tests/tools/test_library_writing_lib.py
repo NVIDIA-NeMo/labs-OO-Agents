@@ -28,10 +28,10 @@ class _FakeShell:
         from nooa.tools._results import EditResult
 
         p = Path(path)
-        content = p.read_text()
+        content = p.read_text(encoding="utf-8")
         if content.count(old_str) != 1:
             return EditResult(path=path, diff="", success=False, error="not unique")
-        p.write_text(content.replace(old_str, new_str, 1))
+        p.write_text(content.replace(old_str, new_str, 1), encoding="utf-8")
         return EditResult(path=path, diff=f"-{old_str}\n+{new_str}", success=True)
 
     async def grep(self, pattern, path=".", **kwargs):

@@ -233,7 +233,7 @@ def _release(_directory: object) -> None:
 def _start_time(pid: int) -> str | None:
     """A process's start time (Linux), so a reused pid is never mistaken for it."""
     try:
-        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+        return Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[19]
     except (OSError, IndexError):
         return None
 
@@ -938,7 +938,7 @@ class Shell:
     def _read_status(self, statusfile: Path) -> None:
         """Take the options and USR1-trap state the epilogue reported (none: bash ended first)."""
         try:
-            _rc, flags, usr1 = statusfile.read_text().split()
+            _rc, flags, usr1 = statusfile.read_text(encoding="utf-8").split()
         except (OSError, ValueError):
             return
         self._options = "".join(f for f in "euxvp" if f in flags)
@@ -980,7 +980,7 @@ class Shell:
             self._note = ""
         self._lost = False
         try:
-            ran_in = int(pidfile.read_text().strip())
+            ran_in = int(pidfile.read_text(encoding="utf-8").strip())
         except (OSError, ValueError):
             ran_in = None
         if ran_in is not None and self._bash is None:

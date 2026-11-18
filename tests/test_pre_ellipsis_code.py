@@ -423,7 +423,7 @@ class TestGetPreEllipsisCodeEdgeCases:
         """Should handle with statements."""
 
         def with_context():
-            with open("test.txt") as f:  # noqa: F841
+            with open("test.txt", encoding="utf-8") as f:  # noqa: F841
                 pass
             ...
 

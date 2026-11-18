@@ -375,7 +375,7 @@ def main() -> int:
             launcher_env["ARC_SANDBOX_REQUIRE"] = "1"
 
     launcher_err = None  # opened here so the finally below can always close it safely
-    launcher_err = open(run_dir / "launcher.err", "w")
+    launcher_err = open(run_dir / "launcher.err", "w", encoding="utf-8")
     launcher = subprocess.Popen(
         launcher_cmd,
         cwd=str(REPO_ROOT),

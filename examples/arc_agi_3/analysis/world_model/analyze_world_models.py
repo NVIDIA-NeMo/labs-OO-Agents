@@ -115,8 +115,8 @@ def main() -> int:
         # ---- status ----
         acts = run / "ipc" / "actions.jsonl"
         sts = run / "ipc" / "states.jsonl"
-        n_act = sum(1 for _ in open(acts)) if acts.exists() else 0
-        n_st = sum(1 for _ in open(sts)) if sts.exists() else 0
+        n_act = sum(1 for _ in open(acts, encoding="utf-8")) if acts.exists() else 0
+        n_st = sum(1 for _ in open(sts, encoding="utf-8")) if sts.exists() else 0
         done = (run / "result.json").exists()
         alive = (
             subprocess.run(

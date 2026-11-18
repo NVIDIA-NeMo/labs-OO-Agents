@@ -104,13 +104,13 @@ class TestFileBackedFileOutput:
         content = "A" * 5 + "B" * 90 + "C" * 5
         small_buf.write(content)
         assert small_buf.was_truncated
-        with open(small_buf.file_path) as f:
+        with open(small_buf.file_path, encoding="utf-8") as f:
             assert f.read() == content
 
     def test_file_contains_full_output_when_not_truncated(self, buf):
         """Temp file contains the output even when truncation was not triggered."""
         buf.write("hello world")
-        with open(buf.file_path) as f:
+        with open(buf.file_path, encoding="utf-8") as f:
             assert f.read() == "hello world"
 
     def test_file_contains_multiple_writes(self, small_buf):
@@ -118,7 +118,7 @@ class TestFileBackedFileOutput:
         small_buf.write("hello ")
         small_buf.write("world ")
         small_buf.write("this is a long string")
-        with open(small_buf.file_path) as f:
+        with open(small_buf.file_path, encoding="utf-8") as f:
             assert f.read() == "hello world this is a long string"
 
     def test_custom_dir(self):
@@ -160,7 +160,7 @@ class TestFileBackedFileOutput:
             content = "x" * 50_000
             buf.write(content)
             assert buf.was_truncated
-            with open(buf.file_path) as f:
+            with open(buf.file_path, encoding="utf-8") as f:
                 assert f.read() == content
         finally:
             buf.cleanup()
@@ -308,7 +308,7 @@ class TestTailOnly:
             buf.write("abcdefgh")
             buf.close()
             assert buf.getvalue() == f"[... 4 chars omitted; full output: {buf.file_path}]\nefgh"
-            with open(buf.file_path) as f:
+            with open(buf.file_path, encoding="utf-8") as f:
                 assert f.read() == "abcdefgh"
         finally:
             buf.cleanup()

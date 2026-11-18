@@ -104,9 +104,9 @@ def test_cpu_closed_with_cap():
 def test_file_read_leak_without_sandbox():
     with tempfile.TemporaryDirectory() as secret:
         path = os.path.join(secret, "s.txt")
-        with open(path, "w") as fh:
+        with open(path, "w", encoding="utf-8") as fh:
             fh.write("TOPSECRET")
-        msg, _ = run_child(lambda: open(path).read())
+        msg, _ = run_child(lambda: open(path, encoding="utf-8").read())
         assert msg == "OK"
 
 
@@ -114,12 +114,12 @@ def test_file_read_leak_without_sandbox():
 def test_file_read_closed_with_sandbox():
     with tempfile.TemporaryDirectory() as ws, tempfile.TemporaryDirectory() as secret:
         secret_path = os.path.join(secret, "s.txt")
-        with open(secret_path, "w") as fh:
+        with open(secret_path, "w", encoding="utf-8") as fh:
             fh.write("TOPSECRET")
 
         def child():
             apply_landlock(_SYSTEM_READ + [LandlockRule(ws, write=True)])
-            open(secret_path).read()
+            open(secret_path, encoding="utf-8").read()
 
         msg, _ = run_child(child)
         assert "PermissionError" in msg
@@ -133,11 +133,11 @@ def test_file_write_closed_but_workspace_allowed():
 
         def write_outside():
             apply_landlock(_SYSTEM_READ + [LandlockRule(ws, write=True)])
-            open(outside_path, "w").write("x")
+            open(outside_path, "w", encoding="utf-8").write("x")
 
         def write_inside():
             apply_landlock(_SYSTEM_READ + [LandlockRule(ws, write=True)])
-            open(os.path.join(ws, "ok.txt"), "w").write("x")
+            open(os.path.join(ws, "ok.txt"), "w", encoding="utf-8").write("x")
 
         outside_msg, _ = run_child(write_outside)
         inside_msg, _ = run_child(write_inside)

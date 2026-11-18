@@ -126,7 +126,7 @@ async def main():
     import json
 
     meta_path = FIXTURE_DIR / "archival_95pct_meta.json"
-    with open(meta_path, "w") as f:
+    with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(
             {
                 "model": _MODEL_NAME,

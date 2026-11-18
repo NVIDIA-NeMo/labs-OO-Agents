@@ -243,7 +243,7 @@ def _write_answer(result: dict[str, Any]) -> None:
         return
     try:
         ANSWER_FILE.parent.mkdir(parents=True, exist_ok=True)
-        ANSWER_FILE.write_text(str(answer))
+        ANSWER_FILE.write_text(str(answer), encoding="utf-8")
         logger.info("Answer written → %s", ANSWER_FILE)
     except OSError as e:
         logger.warning("Could not write answer file %s: %s", ANSWER_FILE, e)

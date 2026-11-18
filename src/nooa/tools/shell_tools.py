@@ -1509,7 +1509,7 @@ class ShellTools(Skill):
             ):
                 new_text += "\n"
             new_content = "".join(before) + new_text + "".join(after)
-            resolved.write_text(new_content)
+            resolved.write_text(new_content, encoding="utf-8")
 
             diff = f"--- a/{target.path}\n+++ b/{target.path}\n"
             diff += f"@@ -{target.start},{target.end - target.start + 1} @@\n"

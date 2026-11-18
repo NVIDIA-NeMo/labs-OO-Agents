@@ -293,5 +293,5 @@ def write_eval_span_to_trace(
             }
         ]
     }
-    with open(trace_file, "a") as f:
+    with open(trace_file, "a", encoding="utf-8") as f:
         f.write(json.dumps(payload, separators=(",", ":"), default=str) + "\n")
