@@ -19,7 +19,8 @@ based on [Keep a Changelog](https://keepachangelog.com/).
   sign-in through the `nooa_atom.model_sources` entry point group: its models
   are listed below the configuration files, and terminal-auth clients are
   offered its sign-in (`nooa atom --sign-in ID`) next to `nooa connect`, which
-  is then named "Other models (nooa connect)".
+  is then named "Other models (nooa connect)". After the sign-in, a searchable
+  list asks which of the source's models to use (Enter keeps its default).
 
 - `nooa-atom`: reflection. The `nemo.reflection` skill posts a housekeeping
   message on a root session's `system_messages` queue when one is due (20

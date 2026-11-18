@@ -233,6 +233,30 @@ def run_terminal_connect() -> int:
     return 0
 
 
+def choose_model(source_name: str, models: dict[str, Any], default: str) -> str:
+    """Ask which of a source's ``models`` to use; Enter keeps ``default``.
+
+    A searchable list in a terminal (type part of a name, Tab to select),
+    Click line input otherwise. Only a listed alias is accepted. Ctrl-C
+    propagates as ``click.Abort``.
+    """
+    import click
+    from nooa_cli.commands import _connect_prompts as prompts
+
+    names = list(models)
+    if default not in models:
+        default = names[0]
+    click.echo(
+        f"{len(names)} {source_name} models. Type part of a name and press Tab to "
+        f"select one, or press Enter for {default}."
+    )
+    while True:
+        choice = prompts.prompt("Model", default=default, choices=names, searchable=True).strip()
+        if choice in models:
+            return choice
+        click.echo(f"{choice!r} is not one of the {source_name} models.", err=True)
+
+
 def run_terminal_sign_in(source_id: str) -> int:
     """Run the sign-in of model source ``source_id`` here; 0 only when it set a model up.
 
@@ -257,9 +281,13 @@ def run_terminal_sign_in(source_id: str) -> int:
         click.echo("Nothing was set up.", err=True)
         return 1
     try:
-        entry = source.models(Path.cwd()).get(alias)
+        models = source.models(Path.cwd())
     except Exception:
-        entry = None
+        models = {}
+    models = models if isinstance(models, dict) else {}
+    if len(models) > 1:
+        alias = choose_model(source.name, models, alias)
+    entry = models.get(alias)
     entry = entry if isinstance(entry, dict) else {}
     write_result(alias, str(entry.get("model_name") or ""), str(entry.get("api_base") or ""))
     click.echo("Return to the client; it reconnects with the new model.")
@@ -273,6 +301,7 @@ __all__ = [
     "SIGN_IN_ARG",
     "auth_method_ids",
     "auth_methods",
+    "choose_model",
     "clear_result",
     "connect_auth_method",
     "consume_result",

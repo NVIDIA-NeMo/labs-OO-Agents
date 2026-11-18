@@ -251,6 +251,29 @@ def test_sign_in_saves_the_result(monkeypatch, isolated, no_server):
     assert source.calls == 1
 
 
+THREE = {
+    "hub-a": {"model_name": "openai/a", "api_base": "https://hub.test/v1"},
+    "hub-b": {"model_name": "openai/b", "api_base": "https://hub.test/v1"},
+    "hub-c": {"model_name": "openai/c", "api_base": "https://hub.test/v1"},
+}
+
+
+@pytest.mark.parametrize(
+    ("answers", "alias"),
+    [("hub-c\n", "hub-c"), ("\n", "hub-a"), ("nope\nhub-b\n", "hub-b")],
+)
+def test_sign_in_asks_which_model_to_use(monkeypatch, isolated, no_server, answers, alias):
+    _install(monkeypatch, Source("hub", models=THREE))
+    from nooa_atom.acp.cli import command
+
+    result = click.testing.CliRunner().invoke(command, ["--sign-in", "hub"], input=answers)
+    assert result.exit_code == 0, result.output
+    assert "3 Hub models models. Type part of a name" in result.output
+    saved = json.loads((isolated / terminal_auth.RESULT_FILE).read_text())
+    assert saved["alias"] == alias
+    assert saved["model"] == THREE[alias]["model_name"]
+
+
 @pytest.mark.parametrize(
     ("source_id", "outcome", "code"),
     [("hub", None, 1), ("hub", "", 1), ("hub", RuntimeError("bad key"), 1), ("nope", "x", 2)],
