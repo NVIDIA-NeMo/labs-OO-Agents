@@ -6,6 +6,13 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- A cell run in an `ExecutionNamespace` no longer keeps its source in
+  `linecache.cache` for the life of the namespace. The entry now lives as long
+  as code compiled from the cell does: while the cell runs, while a function,
+  method, generator or coroutine it defined is still referenced, and while a
+  traceback through it is retained. Tracebacks and `inspect.getsource` for such
+  code are unchanged. Before, a namespace shared across calls (a session) kept
+  one entry per cell it ever ran (#607).
 - An inline image in a format models do not accept (anything but PNG, JPEG,
   GIF or WebP, for example SVG from `show(Image.from_file("chart.svg"))`) is now
   replaced by a note before each request, instead of being sent. Every MIME

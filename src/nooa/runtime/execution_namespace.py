@@ -416,12 +416,54 @@ def _in_context(context: contextvars.Context, function):
     return run
 
 
+def _discard_source(entries: dict[str, tuple], filename: str, entry: tuple) -> None:
+    # A reused filename may now belong to a later cell or to another owner
+    # (even with identical contents): only this cell's own entry is removed.
+    if entries.get(filename) is entry:
+        entries.pop(filename, None)
+    if linecache.cache.get(filename) is entry:
+        linecache.cache.pop(filename, None)
+
+
 def _discard_sources(entries: dict[str, tuple]) -> None:
-    # Entries contain only source text/metadata, never the namespace. A reused
-    # filename may now belong to another owner (even with identical contents).
-    for filename, entry in entries.items():
-        if linecache.cache.get(filename) is entry:
-            del linecache.cache[filename]
+    # Entries contain only source text/metadata, never the namespace.
+    for filename, entry in list(entries.items()):
+        _discard_source(entries, filename, entry)
+
+
+def _code_objects(code: types.CodeType) -> Iterator[types.CodeType]:
+    """``code`` and every code object nested in it (functions, lambdas, class bodies)."""
+    pending = [code]
+    while pending:
+        code = pending.pop()
+        yield code
+        pending.extend(const for const in code.co_consts if isinstance(const, types.CodeType))
+
+
+def _code_released(
+    alive: set[int], index: int, entries: dict[str, tuple], filename: str, entry: tuple
+) -> None:
+    alive.discard(index)
+    if not alive:
+        _discard_source(entries, filename, entry)
+
+
+def _discard_source_with_code(
+    code: types.CodeType, entries: dict[str, tuple], filename: str, entry: tuple
+) -> None:
+    """Remove a cell's source entry once no code object compiled from the cell is alive.
+
+    A traceback or ``inspect.getsource`` can only ask for the cell's lines
+    through one of those code objects. They are kept alive by exactly what can
+    still run or show the cell: the running cell itself, a function, method,
+    generator or coroutine it left behind, and a retained traceback. A cell
+    that leaves none of these keeps no source after it ends.
+    """
+    alive: set[int] = set()
+    for index, nested in enumerate(_code_objects(code)):
+        alive.add(index)
+        release = weakref.finalize(nested, _code_released, alive, index, entries, filename, entry)
+        release.atexit = False  # nothing to release at interpreter exit
 
 
 def default_execution_namespace(call: Any) -> ExecutionNamespace:
@@ -717,9 +759,12 @@ class ExecutionNamespace:
         compiled = compile_cell(source, filename, self.reserved)
         # Publish only after successful compilation, but before execution so
         # runtime failures and retained tracebacks can still recover the source.
+        # The entry lives as long as code compiled from this cell, not as long
+        # as the namespace: see ``_discard_source_with_code``.
         entry = (len(source), None, source.splitlines(keepends=True), filename)
         self._source_entries[filename] = entry
         linecache.cache[filename] = entry
+        _discard_source_with_code(compiled.code, self._source_entries, filename, entry)
         self.user_names.update(compiled.bindings)
         self.dependency_names.update(compiled.dependencies)
         self.epoch += 1

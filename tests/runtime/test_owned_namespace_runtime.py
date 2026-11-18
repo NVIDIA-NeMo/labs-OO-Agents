@@ -431,3 +431,29 @@ async def test_every_exit_path_finishes_scope_before_reading_output(monkeypatch,
         assert isinstance(result.error, ZeroDivisionError)
     if path == "signal":
         assert result.signal.result == {"result": 1}
+
+
+async def test_cell_source_does_not_accumulate_over_a_long_lived_namespace():
+    import gc
+    import linecache
+    import traceback
+
+    agent, ns = CellAgent(), namespace()
+    cells = ["value = {n}\nprint(value)", "print(helper(1) + {n})", "items = [{n}]\nitems[1]"]
+
+    def retained():
+        return [name for name in linecache.cache if f"[ns:{ns.identity}:" in name]
+
+    with ns.enter({}):
+        first = await run(agent, ns, "def helper(x):\n return 1 / x  # defined long ago")
+        assert first.error is None
+        for number in range(150):
+            result = await run(agent, ns, cells[number % 3].format(n=number))
+            assert isinstance(result.error, IndexError) == (number % 3 == 2)
+        del result
+        gc.collect()  # an error's traceback, its frames and their code form a cycle
+        assert len(retained()) == 1  # the cell that defined helper(), still callable
+        failed = await run(agent, ns, "helper(0)")
+    frame = traceback.extract_tb(failed.error.__traceback__)[-1]
+    assert frame.filename == ns.globals["helper"].__code__.co_filename
+    assert frame.lineno == 2 and "defined long ago" in frame.line
