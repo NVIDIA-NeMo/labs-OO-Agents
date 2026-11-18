@@ -201,5 +201,5 @@ with SQLite resume and changing trailing context; all six directed opaque-state
 exclusion checks; and real Nemotron, Qwen, and DeepSeek reasoning transferred to
 OpenAI, Anthropic, and Gemini. Those runs used 30 requests, 95,055 input tokens,
 and 7,672 output tokens. They covered clients, rendering, storage, and HTTP, not
-the TUI or execution of generated Python. Cache-policy evidence belongs to the
+interactive hosts or execution of generated Python. Cache-policy evidence belongs to the
 follow-up; these results are not a fresh run of the extracted commit.

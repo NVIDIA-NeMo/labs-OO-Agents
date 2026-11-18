@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the public ``Agent.llm`` / ``Agent.set_llm`` accessors (issue #318).
 
-These replace host reads/writes of the private ``agent._llm`` (e.g. the TUI
+These replace host reads/writes of the private ``agent._llm`` (e.g. a host's
 ``/switch`` command and summarizer-budget syncing).
 """
 

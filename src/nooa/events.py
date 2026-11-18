@@ -464,7 +464,7 @@ class LLMCallStart(EventBase):  # type: ignore[misc]
     ``runtime.generate()``.
 
     Observable via ``event_manager.on("LLMCallStart", fn)`` — fire-and-forget,
-    for telemetry / activity surfacing (e.g. the TUI status line showing
+    for telemetry / activity surfacing (e.g. a host's status line showing
     "waiting on model"). Pairs 1:1 with a later ``LLMCallEnd`` carrying the
     same ``generation_id`` + ``turn_number``.
 

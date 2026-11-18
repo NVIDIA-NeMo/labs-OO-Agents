@@ -79,11 +79,11 @@ The `<execution_context>` block lists every symbol available in the REPL.
 Scan **Imported items** and ask: does the LLM have any reason to call this directly?
 
 **Should usually be hidden:** framework internals (`SkillManager`, `TokenBudgetSummarizer`),
-base classes (`BaseTUIAgent`, `Agent`), LLM client classes (`FakeLLMClient`, `get_llm_client`),
+base classes (`InteractiveAgent`, `Agent`), LLM client classes (`FakeLLMClient`, `get_llm_client`),
 internal config (`CodeActConfig`, `SummarizationConfig`, `AgentConfig`),
 pydantic internals (`BaseModel`, `Field`), private helpers (anything starting with `_`).
 
-**Fine to expose:** tool/skill classes the LLM uses (`ShellTools`, `WebPublisher`),
+**Fine to expose:** tool/skill classes the LLM uses (`ShellTools`, `TodoManager`),
 `pd`, `np`, `px`, `go`, `Path`, `json`, `math`, `re`.
 
 **Fix:** wrap the import in `with hidden:` at module level:

@@ -15,7 +15,7 @@ from nooa_atom.workspace.settings import load_skills_dirs
 
 
 class AtomOptions(BaseModel):
-    """Behavioral options; terminal presentation settings stay with the TUI.
+    """Behavioral options; presentation settings stay with each host.
 
     These are the Atom agent's own settings, read from the workspace and
     user settings files. They are not the Session layer's
@@ -38,7 +38,7 @@ class AtomOptions(BaseModel):
 
     @classmethod
     def load(cls, workspace: str | Path, **overrides: Any) -> AtomOptions:
-        """Load the workspace's ``atom`` settings (and the legacy ``tui`` ones).
+        """Load the workspace's ``atom`` settings.
 
         Invalid settings are reported and replaced by the defaults.
         """
@@ -107,7 +107,7 @@ def configure_session_skills(agent: Any, options: AtomOptions) -> list[str]:
             discover(options.skills_dirs)
         except Exception as exc:
             warnings.append(f"Could not discover configured skills: {exc}")
-    # Saved names are registered names (nemo.web) or skill names (web).
+    # Saved names are registered names (nemo.todo) or skill names (todo).
     for name in options.active_skills:
         entry = skills.entry(name)
         if entry is None or entry.kind == "mcp":

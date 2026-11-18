@@ -300,14 +300,14 @@ class Metadata(EventBase):
 
     Example::
 
-        class TUISessionStart(Metadata):
+        class HostSessionStart(Metadata):
             model: str = ""
             working_dir: str = ""
-            # event_type auto-derived as "TUISessionStart"
+            # event_type auto-derived as "HostSessionStart"
 
         # Or with explicit event_type:
-        class TUISessionStart(Metadata):
-            event_type: Literal["tui_session_start"] = "tui_session_start"
+        class HostSessionStart(Metadata):
+            event_type: Literal["host_session_start"] = "host_session_start"
             model: str = ""
             working_dir: str = ""
     """

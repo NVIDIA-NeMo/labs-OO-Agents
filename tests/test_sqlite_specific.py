@@ -166,20 +166,20 @@ def test_deserialize_unknown_type_logs_warning(sqlite_conn, caplog):
 def test_register_event_type_custom_subclass_roundtrip(sqlite_conn):
     """A registered Metadata subclass must deserialize as that subclass, not plain Metadata."""
 
-    class TUISessionStart(Metadata):
+    class HostSessionStart(Metadata):
         event_type: Literal["tui_session_start"] = "tui_session_start"
         model: str = ""
         working_dir: str = ""
 
     backend = SQLiteEventBackend(sqlite_conn)
-    backend.register_event_type(TUISessionStart)
+    backend.register_event_type(HostSessionStart)
 
-    ev = TUISessionStart(model="gpt-4", working_dir="/tmp")
+    ev = HostSessionStart(model="gpt-4", working_dir="/tmp")
     backend.store("1", ev)
 
     result = backend.get("1")
-    assert type(result) is TUISessionStart, (
-        f"Expected TUISessionStart after register_event_type, got {type(result).__name__}"
+    assert type(result) is HostSessionStart, (
+        f"Expected HostSessionStart after register_event_type, got {type(result).__name__}"
     )
     assert result.model == "gpt-4"
     assert result.working_dir == "/tmp"

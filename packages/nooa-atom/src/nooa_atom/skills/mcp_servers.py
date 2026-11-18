@@ -227,14 +227,8 @@ class MCPServers:
 
         copy_coding_settings(self.project_dir)
         data = load_settings_layers(self.project_dir)
-        legacy = data.get("tui", {})
-        tui = dict(legacy) if isinstance(legacy, dict) else {}
         atom = data.get(SETTINGS_SECTION, {})
-        if "mcp_servers" in tui and not (isinstance(atom, dict) and "mcp_servers" in atom):
-            logger.warning("Reading legacy tui.mcp_servers; use atom.mcp_servers")
-        if isinstance(atom, dict):
-            tui.update(atom)
-        raw_servers = tui.get("mcp_servers", {}) if isinstance(tui, dict) else {}
+        raw_servers = atom.get("mcp_servers", {}) if isinstance(atom, dict) else {}
         if raw_servers is None:
             raw_servers = {}
         if not isinstance(raw_servers, dict):

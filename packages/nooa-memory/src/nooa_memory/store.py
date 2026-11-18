@@ -3,7 +3,7 @@
 """SQLite-centric memory store + pluggable vector index.
 
 Everything lives in one SQLite file selected by ``MemoryConfig.path`` or the
-embedding host. TUI defaults to one memory DB per session; other hosts may choose
+embedding host. A host may use one memory DB per session, or choose
 workspace/project paths explicitly:
 
 * ``memories``      — full record as JSON + promoted columns for filtering/sort
@@ -354,7 +354,7 @@ class MemoryStore:
 
         The promoted column is authoritative on read, so the stale ``owner``
         inside the data JSON is harmless. Used to heal legacy owner spellings
-        (e.g. the TUI's module:qualname keys) into the canonical short name.
+        (e.g. old module:qualname keys) into the canonical short name.
         """
         with self._lock:
             if old == new or not old:

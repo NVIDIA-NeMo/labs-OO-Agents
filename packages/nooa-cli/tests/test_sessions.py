@@ -4,10 +4,8 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 import threading
-from datetime import UTC, datetime
 
 import nooa_cli.sessions.store as store_module
 import pytest
@@ -21,7 +19,7 @@ def test_create_record_title_list_and_resume(tmp_path):
     store = SessionStore(tmp_path)
     session = store.create(
         session_id="session-one",
-        origin="tui",
+        origin="acp",
         model="test/model",
         agent="CodingAgent",
         working_directory="/workspace",
@@ -33,7 +31,7 @@ def test_create_record_title_list_and_resume(tmp_path):
 
     info = store.list()[0]
     assert info.id == "session-one"
-    assert info.origin == "tui"
+    assert info.origin == "acp"
     assert info.model == "test/model"
     assert info.agent == "CodingAgent"
     assert info.working_directory == "/workspace"
@@ -192,79 +190,3 @@ def test_prefix_search_is_literal_and_sorted(tmp_path):
     assert set(store.find_by_prefix("prefix-")) == {"prefix-a", "prefix-b"}
     assert store.find_by_prefix("*") == []
     assert store.find_by_prefix("../") == []
-
-
-def test_reads_legacy_tui_session_events(tmp_path):
-    store = SessionStore(tmp_path)
-    session = store.create(session_id="legacy-placeholder")
-    session.close()
-    store.delete("legacy-placeholder")
-
-    path = tmp_path / "legacy.db"
-    connection = sqlite3.connect(path)
-    connection.executescript(
-        """
-        CREATE TABLE events (
-            tag TEXT PRIMARY KEY,
-            event_id TEXT NOT NULL,
-            event_type TEXT NOT NULL,
-            status TEXT NOT NULL DEFAULT 'active',
-            data TEXT NOT NULL,
-            insertion_order INTEGER NOT NULL
-        );
-        """
-    )
-    timestamp = datetime.now(UTC).isoformat()
-    legacy_events = [
-        (
-            "TUISessionStart",
-            {
-                "event_type": "TUISessionStart",
-                "timestamp": timestamp,
-                "model": "legacy/model",
-                "agent_cls": "TUIAgent",
-                "working_dir": "/legacy",
-            },
-        ),
-        (
-            "TUIUserInput",
-            {"event_type": "TUIUserInput", "timestamp": timestamp, "text": "old user"},
-        ),
-        (
-            "TUIAgentMessage",
-            {
-                "event_type": "TUIAgentMessage",
-                "timestamp": timestamp,
-                "content": "old agent",
-            },
-        ),
-        (
-            "TUISessionRename",
-            {
-                "event_type": "TUISessionRename",
-                "timestamp": timestamp,
-                "name": "Legacy title",
-                "user_named": True,
-            },
-        ),
-    ]
-    for order, (event_type, data) in enumerate(legacy_events):
-        connection.execute(
-            "INSERT INTO events VALUES (?, ?, ?, 'active', ?, ?)",
-            (str(order + 1), f"id-{order}", event_type, json.dumps(data), order),
-        )
-    connection.commit()
-    connection.close()
-
-    info = store.get("legacy")
-    assert info.origin == "tui"
-    assert info.model == "legacy/model"
-    assert info.agent == "TUIAgent"
-    assert info.working_directory == "/legacy"
-    assert info.title == "Legacy title"
-    assert info.title_is_user_set is True
-    assert info.turn_count == 1
-    assert [(turn.role, turn.content) for turn in store.load_turns("legacy")] == [
-        ("user", "old user"),
-        ("agent", "old agent"),
-    ]

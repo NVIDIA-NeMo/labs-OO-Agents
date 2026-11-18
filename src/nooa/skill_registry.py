@@ -258,7 +258,7 @@ class SkillRegistry(Skill):
         """Return the discovery record for *name*, or ``None`` if unknown.
 
         Public accessor for a single discovered entry (``name``,
-        ``category``, ``entry_point``). Host code (e.g. the TUI
+        ``category``, ``entry_point``). Host code (e.g. a host's
         completer) uses this instead of reaching into ``_discovered``.
         """
         return self._discovered.get(name)
@@ -738,7 +738,7 @@ class SkillRegistry(Skill):
             self._unhide_skill(name)
             self._register_context_block(name)
 
-        # Refresh slash commands so the TUI picks up @slash_command methods
+        # Refresh slash commands so the host picks up @slash_command methods
         if matched:
             cmd_reg = getattr(self._agent, "_command_registry", None)
             if cmd_reg is not None and hasattr(cmd_reg, "refresh_skill_commands"):

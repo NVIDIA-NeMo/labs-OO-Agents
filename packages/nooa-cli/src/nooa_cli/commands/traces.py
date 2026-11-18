@@ -44,8 +44,8 @@ def _discover_trace_dirs(root: Path | None = None) -> list[Path]:
 
     The live trace viewer stores spans in SQLite via OTLP/Journal ingestion; JSONL
     trace files are an explicit fallback/export path.  Keep this helper bounded to
-    locations NeMo OO itself can write: the project trace dir used by TUI
-    ``--trace``, the legacy ``./traces`` convention at the project root, and an
+    locations NeMo OO itself can write: the project trace dir ``.nooa/traces``
+    (old traces may remain there), the legacy ``./traces`` convention at the project root, and an
     explicit ``TRACE_DIR`` override when present.
     """
     project_root = root.resolve() if root is not None else find_project_root().resolve()
@@ -63,7 +63,7 @@ def _discover_trace_dirs(root: Path | None = None) -> list[Path]:
 
 
 def _project_trace_dir(root: Path | None = None) -> Path:
-    """Return the project-local JSONL trace directory used by TUI ``--trace``."""
+    """Return the project-local JSONL trace directory, ``.nooa/traces``."""
     project_root = root.resolve() if root is not None else find_project_root().resolve()
     return project_root / ".nooa" / "traces"
 

@@ -173,8 +173,8 @@ def test_sqlite_direct_store_keeps_tag_counter_coherent(tmp_path):
 def test_sqlite_multiple_managers_share_backend_without_tag_collision(tmp_path):
     """SQLite-side parity for ``test_multiple_managers_share_backend_without_tag_collision``.
 
-    Mirrors the InMemory test on a real SQLite backend — covers the
-    TUI's runtime configuration where the agent's stable EventManager
+    Mirrors the InMemory test on a real SQLite backend — covers an
+    interactive host's runtime configuration where the agent's stable EventManager
     and the SessionManager's thin EventManager both write through the
     same storage's backend.
     """

@@ -257,7 +257,7 @@ class EventBackend(Protocol):
 
         Tag allocation lives on the backend so multiple EventManagers
         writing through the same backend (e.g. the agent's stable
-        manager and a SessionManager recording TUI metadata) never hand
+        manager and a SessionManager recording host metadata) never hand
         out the same tag. ``store(tag, event)`` is expected to follow.
         """
         ...

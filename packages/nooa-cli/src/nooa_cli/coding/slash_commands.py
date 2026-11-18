@@ -96,7 +96,7 @@ class CodingSlashCommandRegistry:
         if command is None:
             raise KeyError(name)
         kwargs = parse_typed_args(command._method, raw_args)
-        # Commands execute on the agent's event loop, matching the native TUI.
+        # Commands execute on the agent's event loop, as in every other host.
         # Several existing synchronous skills call QueueManager.spawn(), which
         # requires that loop. Async commands can cancel cooperatively; a truly
         # blocking sync command needs the future per-agent process boundary to

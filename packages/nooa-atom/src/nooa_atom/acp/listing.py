@@ -101,7 +101,7 @@ async def list_sessions(
             continue
         else:
             status = "on_disk"
-        # ACP requires an absolute cwd for every entry. The old TUI recorded
+        # ACP requires an absolute cwd for every entry. Older hosts recorded
         # the directory as typed ("../"), so fall back to the request's cwd,
         # then to the directory the store belongs to.
         workspace = info.workspace if Path(info.workspace).is_absolute() else None

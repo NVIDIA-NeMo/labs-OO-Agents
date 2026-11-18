@@ -76,8 +76,8 @@ entry-point name is the subcommand name; the object it points at must be a
 
     # pyproject.toml of the contributing package
     [project.entry-points."nooa_cli.commands"]
-    tui  = "my_package.cli.tui:command"
-    term = "my_package.cli.term:command"
+    hello   = "my_package.cli.hello:command"
+    goodbye = "my_package.cli.goodbye:command"
 
 Rules:
 

@@ -49,7 +49,7 @@ or consume the client's stream.
 ## Where sessions live
 
 Each workspace keeps its sessions in `<workspace>/.nooa/sessions`, the
-directory the `nooa-acp` server and the TUI use, so sessions they wrote are
+directory the `nooa-acp` server uses, so sessions it wrote are
 listed and can be loaded. A subagent's session file sits next to its root's.
 `--sessions-dir DIR` (or `NOOA_SESSIONS_DIR`) puts the sessions of all
 workspaces in one shared directory instead; each session records its

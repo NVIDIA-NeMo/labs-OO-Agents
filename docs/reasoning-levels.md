@@ -100,7 +100,7 @@ and request tests, rather than importing hundreds of profiles.
   session archives and replay remain unchanged. This is not a retention toggle.
 - Effort labels are provider-local, not comparable units of intelligence or cost.
   Changing effort can invalidate a provider's cached prefix. This PR does not add
-  cache-preserving mid-turn steering, TUI controls, or selection persistence.
+  cache-preserving mid-turn steering, host UI controls, or selection persistence.
 
 ## Tests
 

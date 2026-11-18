@@ -39,7 +39,7 @@ See the main repo [README](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/ma
 ## Interactive coding sessions
 
 `nooa_cli.sessions` owns durable coding-agent session identity, metadata, and
-conversation replay shared by CLI hosts such as the native TUI and ACP. The
+conversation replay shared by CLI hosts such as the ACP server. The
 process running an agent owns the writable session handle; other hosts attach
 through their transport or use read-only discovery. Generic event and SQLite
 storage primitives remain in the core `nooa` package.

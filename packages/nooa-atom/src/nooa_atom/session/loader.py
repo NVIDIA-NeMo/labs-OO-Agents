@@ -28,20 +28,14 @@ AgentFactory = Callable[[SessionOptions, StorageManager], InteractiveAgent]
 ATOM_AGENT = "nooa_atom.agent:AtomAgent"
 """The Atom agent. ``nooa_atom.agent.agent:AtomAgent`` names the same class."""
 LEGACY_AGENT_SPECS = {
-    "nooa_cli.tui.agent:TUIAgent": ATOM_AGENT,
-    "nooa_cli.coding.legacy_agent:TUIAgent": ATOM_AGENT,
-    "nooa_cli.tui.experimental_agent:ExperimentalTUIAgent": ATOM_AGENT,
-    "nooa_cli.coding.experimental_agent:ExperimentalTUIAgent": ATOM_AGENT,
     # What nooa-coder, the package before nooa-atom, recorded.
     "nooa_coder.coding.agent:CodingAgent": ATOM_AGENT,
     "nooa_coder.coding.experimental_agent:ExperimentalCodingAgent": ATOM_AGENT,
     # Spellings from before the agent moved out of nooa-cli.
     "nooa_cli.coding.agent:CodingAgent": ATOM_AGENT,
     "nooa_cli.coding.experimental_agent:ExperimentalCodingAgent": ATOM_AGENT,
-    # What the nooa-acp server and the old TUI record as a session's agent.
+    # What the nooa-acp server records as a session's agent.
     "CodingAgent": ATOM_AGENT,
-    "TUIAgent": ATOM_AGENT,
-    "ExperimentalTUIAgent": ATOM_AGENT,
     # ExperimentalAtomAgent was removed; it differed from AtomAgent only in its
     # prompt wording and the missing context-usage block, so its saved sessions
     # (and those of the experimental agents before it) load as AtomAgent.

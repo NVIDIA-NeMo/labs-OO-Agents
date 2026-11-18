@@ -205,12 +205,12 @@ def _load_models_from_yaml(path: Path) -> dict[str, dict[str, Any] | None]:
 # framework (see :func:`reload_registry` / :func:`ensure_loaded`).
 # Consumers:
 #   - get_llm_client() — looks up config when you pass a registered alias
-#   - TUI /model and /models commands — list and autocomplete aliases
+#   - Host /model and /models commands — list and autocomplete aliases
 #   - External tools (eval_pipeline, nat plugin) — resolve alias → endpoint/key
 #
 # Starts empty. The first get_llm_client() call triggers ensure_loaded(),
 # which auto-discovers via nooa.llm_config.llm_config_chain. The
-# framework (TUI bootstrap) can call reload_registry() explicitly during
+# framework (a host's bootstrap) can call reload_registry() explicitly during
 # startup. reload_registry() updates this dict in-place so existing
 # references stay live.
 # NOTE: entries are raw dicts so litellm can receive arbitrary passthrough
@@ -251,7 +251,7 @@ def reload_registry(*paths: Path) -> dict[str, dict[str, Any]]:
     """Reload ``MODELS`` from YAML files, last-wins.
 
     With explicit ``paths``: load only those files. This is the
-    framework-driven path (e.g. TUI bootstrap does
+    framework-driven path (e.g. a host's bootstrap does
     ``reload_registry(*llm_config_chain())``).
 
     With no arguments: **re-discover via**
@@ -292,7 +292,7 @@ def ensure_loaded() -> None:
     """Idempotently populate ``MODELS`` via the framework's config chain.
 
     Called automatically from :func:`get_llm_client` so standalone
-    scripts and benchmark runners (no TUI bootstrap) populate the
+    scripts and benchmark runners (no host bootstrap) populate the
     registry without ceremony. Call explicitly from other entry points
     that read ``MODELS`` directly before any :func:`get_llm_client`
     call (e.g. the ``nat`` plugin).
@@ -325,7 +325,7 @@ def get_registry_config(name: str) -> dict[str, Any]:
     ``_registry_lock``. Prefer :func:`nooa.config.get_model_config`
     when a typed :class:`~nooa.config.ModelConfig` is enough.
 
-    Triggers :func:`ensure_loaded` first so standalone processes (no TUI
+    Triggers :func:`ensure_loaded` first so standalone processes (no host
     bootstrap) still see registered aliases, then copies the entry under
     the registry lock so a concurrent :func:`reload_registry` — which does
     ``MODELS.clear()`` then ``update()`` — can never expose a half-cleared

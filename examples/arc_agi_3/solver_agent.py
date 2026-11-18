@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""ARC-AGI-3 single-agent solver built on the normal nemo-oo TUI agent.
+"""ARC-AGI-3 single-agent solver built on the normal nooa interactive agent.
 
 One agent (no team) plays an ARC-AGI-3 game through a file-IPC harness:
 
@@ -196,7 +196,6 @@ _CELL_BANNED_ATTRS = frozenset(
         "web",
         "mcp",
         "skill_writing",
-        "tui_config",
         # denylist-bypass gadgets
         "__subclasses__",
         "__bases__",

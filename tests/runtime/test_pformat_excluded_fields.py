@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Test: _pformat respects Pydantic exclude=True fields.
 
-Regression test for TUI hang caused by _pformat recursing into
+Regression test for a host hang caused by _pformat recursing into
 ExecutionResult.captured_locals which contains arbitrary user objects.
 The captured_locals field has exclude=True in Pydantic but _pformat
 was ignoring that annotation, walking into the dict, and triggering
@@ -62,7 +62,7 @@ def test_pformat_skips_excluded_pydantic_fields():
 
     assert not expensive.accessed, (
         "_pformat recursed into a Pydantic exclude=True field and triggered "
-        "a property on an object inside it. This causes the TUI hang."
+        "a property on an object inside it. This causes the host hang."
     )
     # stdout should still appear (it's not excluded)
     assert "hello" in output
@@ -117,7 +117,7 @@ def test_pformat_no_hang_on_importlib_metadata_entrypoints():
 
 
 def test_exact_regression_real_execution_result():
-    """Exact regression test for the TUI hang reported in #214.
+    """Exact regression test for the host hang reported in #214.
 
     The agent generated code:
         from importlib.metadata import entry_points

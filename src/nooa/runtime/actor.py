@@ -687,8 +687,8 @@ class ActorRuntime:
     def _ensure_generation_lock_on_current_loop(self) -> None:
         """Recreate _generation_lock if the event loop changed (gl-212).
 
-        asyncio.Lock binds to the first loop that contends it. In the TUI,
-        the agent loop can be recreated after a crash or ESC-cancel, leaving
+        asyncio.Lock binds to the first loop that contends it. In an
+        interactive host, the agent loop can be recreated after a crash or cancel, leaving
         the lock bound to the dead loop. Recreating it avoids RuntimeError.
         """
         loop = asyncio.get_running_loop()

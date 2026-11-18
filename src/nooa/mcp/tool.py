@@ -1060,7 +1060,7 @@ class MCPManager:
 
         Args:
             mcp_file: Optional path to a VS Code / Claude-style .mcp.json file.
-            servers: Optional inline server config from the TUI config.toml.
+            servers: Optional inline server config from the host's settings.
 
         Returns:
             List of configured server names.
@@ -1204,7 +1204,7 @@ class MCPManager:
                 When set, it must not exceed ``discovery_timeout`` and may have
                 less time available after the initial connection attempt.
             mcp_file: Path to .mcp.json file (default: .mcp.json in cwd)
-            servers: Optional inline server config from the TUI config.toml.
+            servers: Optional inline server config from the host's settings.
             tool_call_timeout: How long one tool call may take before it fails.
                 Raise it for servers whose tools wrap slow work such as an LLM call.
             discovery_timeout: Overall timeout shared by initial connection,
