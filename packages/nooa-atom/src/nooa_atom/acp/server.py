@@ -1008,6 +1008,10 @@ class AtomACPAgent:
                 config_options=self._config_options(session) or [],
             )
         )
+        # Send the update now, before the session/load or session/new answer
+        # that ends this call: the client may show the model from this
+        # notification rather than from the response's config options.
+        await bridge.flush()
         return text
 
     def _client_shows_forms(self) -> bool:
