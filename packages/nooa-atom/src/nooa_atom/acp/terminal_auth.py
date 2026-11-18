@@ -233,6 +233,18 @@ def run_terminal_connect() -> int:
     return 0
 
 
+def ask_secret(label: str) -> str:
+    """Ask for a key in this terminal, showing one ``*`` per character typed or pasted.
+
+    Uses the same masked field as ``nooa connect``; without a terminal,
+    Click's hidden line input. Returns the stripped answer (``""`` when
+    nothing was entered). Ctrl-C propagates as ``click.Abort``.
+    """
+    from nooa_cli.commands import _connect_prompts as prompts
+
+    return prompts.prompt(label, hide_input=True, default="", show_default=False).strip()
+
+
 def choose_model(source_name: str, models: dict[str, Any], default: str) -> str:
     """Ask which of a source's ``models`` to use; Enter keeps ``default``.
 
@@ -300,6 +312,7 @@ __all__ = [
     "RESULT_MAX_AGE",
     "SIGN_IN_ARG",
     "auth_method_ids",
+    "ask_secret",
     "auth_methods",
     "choose_model",
     "clear_result",

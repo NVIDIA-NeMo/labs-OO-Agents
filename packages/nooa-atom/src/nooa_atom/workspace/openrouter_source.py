@@ -242,10 +242,9 @@ class OpenRouterSource:
             key = existing
         if key is None:
             click.echo("Create a key at https://openrouter.ai/settings/keys.")
-            key = click.prompt(
-                "OpenRouter API key", hide_input=True, default="", show_default=False
-            )
-            key = key.strip()
+            from nooa_atom.acp.terminal_auth import ask_secret
+
+            key = ask_secret("OpenRouter API key")
             if not key:
                 click.echo("No key entered; nothing was set up.", err=True)
                 return None
