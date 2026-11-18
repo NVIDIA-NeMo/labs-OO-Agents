@@ -49,7 +49,7 @@ from nooa.strategies.generated_code import (
     ReturnValueValidator,
 )
 from nooa.strategies.template import TemplateStrategy
-from nooa.unifiedllm import ReasoningReplayError
+from nooa.unifiedllm import TERMINAL_LLM_ERRORS
 
 # Import httpx timeout exceptions if available (used by litellm)
 try:
@@ -280,7 +280,7 @@ class PurePythonStrategy(CompositeStrategy):
         if self.prefill:
             try:
                 await self._run_prefill(runtime, call, builtins, session)
-            except ReasoningReplayError:
+            except TERMINAL_LLM_ERRORS:
                 raise
             except Exception as e:
                 logger.warning(f"[PURE_PYTHON] Prefill error (continuing): {e}")
@@ -319,7 +319,7 @@ class PurePythonStrategy(CompositeStrategy):
                 generate_event_id: str | None = None
                 try:
                     code, generate_event_id = await self._generate_code(runtime, session)
-                except ReasoningReplayError as e:
+                except TERMINAL_LLM_ERRORS as e:
                     turn_final = True
                     turn_exception = type(e).__name__
                     raise
@@ -577,6 +577,9 @@ class PurePythonStrategy(CompositeStrategy):
             logger.debug(
                 f"[PURE_PYTHON] Prefill captured locals: {list(result.captured_locals.keys())}"
             )
+
+        if isinstance(result.error, TERMINAL_LLM_ERRORS):
+            raise result.error
 
         # Emit PythonOutput for the prefill execution result (mirrors normal turn event sequence).
         if result.error:

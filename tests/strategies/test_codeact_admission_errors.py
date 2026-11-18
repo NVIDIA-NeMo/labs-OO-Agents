@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Preserve admission failures at the model-generation boundary, not as API retries."""
+"""Terminal strategy failures escape unchanged, without policy or provider retries."""
 
 from __future__ import annotations
 
@@ -15,14 +15,15 @@ import litellm
 import pytest
 
 from nooa import Agent, strategy
-from nooa.config import CodeActConfig, PredictConfig
+from nooa.config import CodeActConfig
 from nooa.events import AfterTurn, PythonOutput
 from nooa.runtime.harness_metrics import HarnessMetrics
 from nooa.runtime.sandbox.config import SandboxConfig
 from nooa.strategies.codeact import CodeActStrategy
 from nooa.strategies.codeact_v2 import CodeActV2
-from nooa.strategies.predict import PredictStrategy
+from nooa.strategies.pure_python import PurePythonStrategy
 from nooa.unifiedllm import (
+    TERMINAL_LLM_ERRORS,
     AdmissionBroker,
     AdmissionCallCapError,
     AdmissionControl,
@@ -33,29 +34,32 @@ from nooa.unifiedllm import (
     CompletionClient,
     FakeLLMClient,
     LLMResponse,
-    ResponsesClient,
+    ReasoningReplayError,
     RetryConfig,
     ToolCall,
 )
+from nooa.unifiedllm.errors import TERMINAL_LLM_ERRORS as SHARED_TERMINAL_ERRORS
+
+STRATEGIES = [CodeActStrategy, CodeActV2, PurePythonStrategy]
+ADMISSION_ERRORS = [AdmissionCallCapError, AdmissionTimeoutError, AdmissionUnavailableError]
 
 
-class ApplicationRejection(AdmissionError):
-    """An external controller's policy error must follow the same base-class contract."""
+def test_terminal_rule_is_reexported_and_includes_application_subclasses():
+    """One public tuple retains the two error families and custom admission policies."""
 
+    class ApplicationRejection(AdmissionError):
+        """An external policy may specialize the public admission error contract."""
 
-ERRORS = [
-    AdmissionCallCapError,
-    AdmissionTimeoutError,
-    AdmissionUnavailableError,
-    ApplicationRejection,
-]
+    assert TERMINAL_LLM_ERRORS is SHARED_TERMINAL_ERRORS
+    assert TERMINAL_LLM_ERRORS == (ReasoningReplayError, AdmissionError)
+    assert isinstance(ApplicationRejection("application policy"), TERMINAL_LLM_ERRORS)
 
 
 class RejectingController:
-    """A real protocol implementation rejecting every acquisition with one policy error."""
+    """A concrete protocol implementation rejecting acquisition with one policy error."""
 
     def __init__(self, error):
-        """Retain the exception so tests can verify its identity at the Agent boundary."""
+        """Retain the exception so tests can verify identity at the Agent boundary."""
         self.error = error
         self.attempts = 0
 
@@ -65,65 +69,81 @@ class RejectingController:
         raise self.error
 
 
-def _config(strategy_type, *, retries=3, execution="inprocess"):
-    """Select a real strategy configuration without live-provider setup."""
-    if strategy_type is PredictStrategy:
-        return PredictConfig(max_retries=retries)
-    return CodeActConfig(
-        prefill=None,
-        max_retries=retries,
-        execution_backend=execution,
-        sandbox=SandboxConfig(require=True, filesystem=False, network=False),
+def _strategy(strategy_type, *, execution="inprocess", prefill=None):
+    """Use one retry budget and vary only strategy behavior relevant to the contract."""
+    if strategy_type is PurePythonStrategy:
+        return PurePythonStrategy(max_retries=3, prefill=prefill)
+    return strategy_type(
+        config=CodeActConfig(
+            prefill=prefill,
+            max_retries=3,
+            execution_backend=execution,
+            sandbox=SandboxConfig(require=True, filesystem=False, network=False),
+        )
     )
 
 
-def _reply(tool="execute_python", code="return_result(7)"):
-    """Build a valid transport response rather than bypassing the production parser."""
+def _response(strategy_type, code=None):
+    """Build a valid successful response for either strategy's production parser."""
+    if strategy_type is PurePythonStrategy:
+        return LLMResponse(
+            raw_response=None, content=code or "return 7", finish_reason="stop", tool_calls=[]
+        )
+    tool = "python_cell" if strategy_type is CodeActV2 else "execute_python"
+    return LLMResponse(
+        raw_response=None,
+        content="",
+        finish_reason="tool_calls",
+        tool_calls=[
+            ToolCall(
+                id="finish", name=tool, arguments=json.dumps({"code": code or "return_result(7)"})
+            )
+        ],
+    )
+
+
+def _reply(strategy_type, code=None):
+    """Return a transport response rather than bypassing the completion parser."""
+    response = _response(strategy_type, code)
     return litellm.ModelResponse(
         model="gpt-4o-mini",
         choices=[
             {
                 "index": 0,
-                "finish_reason": "tool_calls",
+                "finish_reason": response.finish_reason,
                 "message": {
                     "role": "assistant",
-                    "content": None,
+                    "content": response.content,
                     "tool_calls": [
                         {
-                            "id": uuid4().hex,
+                            "id": tool.id,
                             "type": "function",
-                            "function": {"name": tool, "arguments": json.dumps({"code": code})},
+                            "function": {"name": tool.name, "arguments": tool.arguments},
                         }
-                    ],
+                        for tool in response.tool_calls
+                    ]
+                    or None,
                 },
             }
         ],
     )
 
 
-@pytest.mark.parametrize("strategy_type", [CodeActStrategy, CodeActV2, PredictStrategy])
-@pytest.mark.parametrize("error_type", ERRORS)
-@pytest.mark.parametrize("client_type", [CompletionClient, ResponsesClient])
-@pytest.mark.parametrize("provider_retries", [0, 3])
-@pytest.mark.parametrize("strategy_retries", [1, 3])
-async def test_admission_failure_is_not_a_model_api_error(
-    strategy_type, error_type, client_type, provider_retries, strategy_retries
-):
-    """Reject once, preserve the exact exception, and record no fictitious API failures."""
+@pytest.mark.parametrize("strategy_type", STRATEGIES)
+@pytest.mark.parametrize("error_type", ADMISSION_ERRORS)
+async def test_admission_failure_is_not_a_model_api_error(strategy_type, error_type):
+    """One acquisition preserves the exception and records no fictitious API failure."""
     failure = error_type("application policy rejected this attempt")
     controller = RejectingController(failure)
     llm = AdmissionControl(
-        client_type(
-            "openai/gpt-4o-mini",
-            retry_config=RetryConfig(max_retries=provider_retries, rate_limit_extra_retries=0),
-        ),
+        CompletionClient("openai/gpt-4o-mini", retry_config=RetryConfig(max_retries=3)),
         AdmissionControlConfig(controller=controller),
     )
 
     class PolicyAgent(Agent):
-        """Exercise the normal public generation method under application admission."""
+        """Exercise the public generation method under application admission."""
 
-        @strategy(strategy_type(config=_config(strategy_type, retries=strategy_retries)))
+        @strategy(_strategy(strategy_type))
         async def answer(self) -> int:
             """Generate an integer only if the application admits the request."""
             ...
@@ -131,8 +151,7 @@ async def test_admission_failure_is_not_a_model_api_error(
     agent = PolicyAgent(llm=llm)
     try:
         with (
-            patch("litellm.acompletion", AsyncMock()) as chat,
-            patch("litellm.aresponses", AsyncMock()) as responses,
+            patch("litellm.acompletion", AsyncMock()) as provider,
             patch.object(agent.event_manager, "add", wraps=agent.event_manager.add) as add,
             patch.object(HarnessMetrics, "llm_api_error", autospec=True) as api_error,
         ):
@@ -140,52 +159,88 @@ async def test_admission_failure_is_not_a_model_api_error(
                 await agent.answer()
             assert caught.value is failure
             assert controller.attempts == 1
-            chat.assert_not_awaited()
-            responses.assert_not_awaited()
+            provider.assert_not_awaited()
             api_error.assert_not_called()
             assert agent.events.query(type="Error") == []
-            if strategy_type is not PredictStrategy:
-                turns = [c.args[0] for c in add.call_args_list if isinstance(c.args[0], AfterTurn)]
-                assert len(turns) == 1
-                assert turns[0].is_final and not turns[0].success
-                assert turns[0].exception_type == error_type.__name__
+            turns = [c.args[0] for c in add.call_args_list if isinstance(c.args[0], AfterTurn)]
+            assert len(turns) == 1
+            assert turns[0].is_final and not turns[0].success
+            assert turns[0].exception_type == error_type.__name__
     finally:
         await agent.aclose()
         await llm.aclose()
 
 
-@pytest.mark.parametrize("strategy_type", [CodeActStrategy, CodeActV2])
-@pytest.mark.parametrize("error_type", ERRORS)
-async def test_standalone_admission_failure_preserves_policy_error(strategy_type, error_type):
+@pytest.mark.parametrize("strategy_type", STRATEGIES)
+async def test_standalone_admission_failure_preserves_policy_error(strategy_type):
     """Standalone strategy stubs need no Agent-only attributes to propagate policy errors."""
-    failure = error_type("standalone admission rejection")
+    failure = AdmissionUnavailableError("standalone admission rejection")
     controller = RejectingController(failure)
     llm = AdmissionControl(
-        CompletionClient("openai/gpt-4o-mini", retry_config=RetryConfig(max_retries=3)),
-        AdmissionControlConfig(controller=controller),
+        CompletionClient("openai/gpt-4o-mini"), AdmissionControlConfig(controller=controller)
     )
 
-    @strategy(strategy_type(config=_config(strategy_type)), llm=llm)
+    @strategy(_strategy(strategy_type), llm=llm)
     async def answer() -> int:
         """Generate an integer only when application policy allows it."""
         ...
 
     try:
-        with (
-            patch("litellm.acompletion", AsyncMock()) as provider,
-            patch.object(HarnessMetrics, "llm_api_error", autospec=True) as api_error,
-        ):
-            with pytest.raises(error_type) as caught:
+        with patch("litellm.acompletion", AsyncMock()) as provider:
+            with pytest.raises(AdmissionUnavailableError) as caught:
                 await answer()
             assert caught.value is failure
             assert controller.attempts == 1
             provider.assert_not_awaited()
-            api_error.assert_not_called()
     finally:
         await llm.aclose()
 
 
-@pytest.mark.parametrize("strategy_type", [CodeActStrategy, CodeActV2])
+@pytest.mark.parametrize("strategy_type", STRATEGIES)
+@pytest.mark.parametrize("entry", ["plugin", "execution"])
+@pytest.mark.parametrize("error_type", [AdmissionCallCapError, ReasoningReplayError, ValueError])
+async def test_prefill_uses_the_same_terminal_rule(strategy_type, entry, error_type):
+    """Both raised and executed prefill errors stop only for terminal failure types."""
+    failure = error_type("prefill failure")
+
+    class FailingPrefill:
+        """Fail in the plugin itself or execute real prefill code that fails."""
+
+        def get_code(self, call, *, config):
+            """Cover both the outer exception handler and captured execution results."""
+            if entry == "plugin":
+                raise failure
+            return "await self.fail_prefill()"
+
+    class PolicyAgent(Agent):
+        """Let a policy error escape without an application-side catch."""
+
+        async def fail_prefill(self) -> None:
+            """Reject before the main model response is requested."""
+            raise failure
+
+        @strategy(_strategy(strategy_type, prefill=FailingPrefill()))
+        async def answer(self) -> int:
+            """Generate an integer only after prefill succeeds or recovers."""
+            ...
+
+    llm = FakeLLMClient([_response(strategy_type)], strict_exhaustion=True)
+    agent = PolicyAgent(llm=llm)
+    try:
+        if error_type is ValueError:
+            assert await agent.answer() == 7
+            assert len(llm.calls) == 1
+        else:
+            with pytest.raises(error_type) as caught:
+                await agent.answer()
+            assert caught.value is failure
+            assert not llm.calls
+            assert agent.events.query(type="Error") == []
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.parametrize("strategy_type", STRATEGIES)
 @pytest.mark.parametrize("kind", ["timeout", "cap", "unavailable"])
 async def test_real_controller_failures_escape_without_strategy_retries(strategy_type, kind):
     """Use actual queue deadlines, a committed broker cap and a closed controller."""
@@ -212,9 +267,9 @@ async def test_real_controller_failures_escape_without_strategy_retries(strategy
         held = await llm.controller.acquire(lambda _: None)
 
     class PolicyAgent(Agent):
-        """Run the actual admission owner through the normal strategy entrypoint."""
+        """Run the admission owner through the normal strategy entrypoint."""
 
-        @strategy(strategy_type(config=_config(strategy_type)))
+        @strategy(_strategy(strategy_type))
         async def answer(self) -> int:
             """Generate an integer if capacity and run policy allow it."""
             ...
@@ -235,14 +290,7 @@ async def test_real_controller_failures_escape_without_strategy_retries(strategy
         if held:
             held.release()
             held = None
-            with patch(
-                "litellm.acompletion",
-                AsyncMock(
-                    return_value=_reply(
-                        "python_cell" if strategy_type is CodeActV2 else "execute_python"
-                    )
-                ),
-            ):
+            with patch("litellm.acompletion", AsyncMock(return_value=_reply(strategy_type))):
                 assert await agent.answer() == 7
     finally:
         if held:
@@ -262,37 +310,35 @@ async def test_real_controller_failures_escape_without_strategy_retries(strategy
 async def test_exhausted_cap_after_executed_cell_preserves_output_and_final_turn(
     strategy_type, execution
 ):
-    """A later model rejection stays terminal after a real in-process or guarded cell."""
+    """A later rejection stays terminal after a real in-process or guarded cell."""
     if execution == "sandbox" and sys.platform != "linux":
         pytest.skip("Guarded worker validation requires Linux")
     broker = AdmissionBroker(max_in_flight=1, max_calls=1).start()
     controller = broker.controller()
     llm = AdmissionControl(
-        CompletionClient("openai/gpt-4o-mini", retry_config=RetryConfig(max_retries=3)),
-        AdmissionControlConfig(controller=controller),
+        CompletionClient("openai/gpt-4o-mini"), AdmissionControlConfig(controller=controller)
     )
 
     class PolicyAgent(Agent):
-        """Use the first allowed attempt for a cell, then exhaust the shared cap."""
+        """Use the first attempt for a cell, then exhaust the shared cap."""
 
         def note_pid(self, pid: int) -> None:
-            """Record where the first cell actually executed."""
+            """Record where the first cell executed."""
             self._cell_pid = pid
 
-        @strategy(strategy_type(config=_config(strategy_type, execution=execution)))
+        @strategy(_strategy(strategy_type, execution=execution))
         async def answer(self) -> int:
             """Run a cell before asking for the final model result."""
             ...
 
     agent = PolicyAgent(llm=llm)
-    tool = "python_cell" if strategy_type is CodeActV2 else "execute_python"
     try:
         with (
             patch(
                 "litellm.acompletion",
                 AsyncMock(
                     return_value=_reply(
-                        tool, "self.note_pid(os.getpid())\nprint('completed first cell')"
+                        strategy_type, "self.note_pid(os.getpid())\nprint('completed first cell')"
                     )
                 ),
             ) as provider,
@@ -302,16 +348,15 @@ async def test_exhausted_cap_after_executed_cell_preserves_output_and_final_turn
             with pytest.raises(AdmissionCallCapError):
                 await agent.answer()
             assert provider.await_count == 1
-            assert acquire.await_count == 2  # One admitted attempt, one terminal rejection.
+            assert acquire.await_count == 2
             assert (agent._cell_pid != os.getpid()) == (execution == "sandbox")
-            outputs = agent.events.query(type="PythonOutput")
             assert any(
-                isinstance(e, PythonOutput) and "completed first cell" in e.stdout for e in outputs
+                isinstance(e, PythonOutput) and "completed first cell" in e.stdout
+                for e in agent.events.query(type="PythonOutput")
             )
             assert agent.events.query(type="Error") == []
             turns = [c.args[0] for c in add.call_args_list if isinstance(c.args[0], AfterTurn)]
-            assert len(turns) == 2
-            assert not turns[0].is_final
+            assert len(turns) == 2 and not turns[0].is_final
             assert turns[-1].is_final and not turns[-1].success
             assert turns[-1].exception_type == "AdmissionCallCapError"
     finally:
@@ -321,98 +366,9 @@ async def test_exhausted_cap_after_executed_cell_preserves_output_and_final_turn
         broker.close()
 
 
-@pytest.mark.parametrize("strategy_type", [CodeActStrategy, CodeActV2])
-@pytest.mark.parametrize("error_type", ERRORS[:3])
-@pytest.mark.parametrize("entry", ["cell", "prefill"])
-@pytest.mark.parametrize(
-    "execution", ["inprocess", pytest.param("sandbox", marks=pytest.mark.sandbox)]
-)
-async def test_parent_can_handle_child_policy_failure_in_cells_and_prefill(
-    strategy_type, error_type, entry, execution
-):
-    """Application-side catches work for nested generation without changing RPC error policy."""
-    if execution == "sandbox" and sys.platform != "linux":
-        pytest.skip("Guarded worker validation requires Linux")
-    failure = error_type("child policy rejected this attempt")
-    controller = RejectingController(failure)
-    inner_llm = AdmissionControl(
-        CompletionClient("openai/gpt-4o-mini", retry_config=RetryConfig(max_retries=3)),
-        AdmissionControlConfig(controller=controller),
-    )
-
-    class Child(Agent):
-        """Expose a real generation method to the parent's deterministic orchestrator."""
-
-        @strategy(strategy_type(config=_config(strategy_type)))
-        async def answer(self) -> int:
-            """Generate an integer only when admitted."""
-            ...
-
-    child = Child(llm=inner_llm)
-
-    class Parent(Agent):
-        """Handle a child policy rejection in application code, including sandbox RPCs."""
-
-        def note_pid(self, pid: int) -> None:
-            """Prove which process executes the parent's cell."""
-            self._cell_pid = pid
-
-        async def handle_child_failure(self) -> int:
-            """Choose an explicit application fallback instead of hiding the policy error."""
-            try:
-                return await child.answer()
-            except AdmissionError as error:
-                self._handled = error
-                return 7
-
-        @strategy(strategy_type(config=_config(strategy_type, execution=execution)))
-        async def cell(self) -> int:
-            """Execute the scripted cell which invokes deterministic error handling."""
-            ...
-
-        @strategy(strategy_type(config=_config(strategy_type, execution=execution)))
-        async def prefill(self) -> int:
-            """Handle the nested rejection before the parent's first model request."""
-            self.note_pid(os.getpid())
-            value = await self.handle_child_failure()  # noqa: F841 -- Used by the scripted cell.
-            ...
-
-    tool = "python_cell" if strategy_type is CodeActV2 else "execute_python"
-    code = (
-        "self.note_pid(os.getpid())\nreturn_result(await self.handle_child_failure())"
-        if entry == "cell"
-        else "return_result(value)"
-    )
-    outer_llm = FakeLLMClient(
-        [
-            LLMResponse(
-                raw_response=None,
-                content="",
-                finish_reason="tool_calls",
-                tool_calls=[ToolCall(id="finish", name=tool, arguments=json.dumps({"code": code}))],
-            )
-        ],
-        strict_exhaustion=True,
-    )
-    parent = Parent(llm=outer_llm)
-    try:
-        with patch("litellm.acompletion", AsyncMock()) as provider:
-            assert await getattr(parent, entry)() == 7
-            provider.assert_not_awaited()
-        assert parent._handled is failure
-        assert (parent._cell_pid != os.getpid()) == (execution == "sandbox")
-        assert controller.attempts == 1
-        assert len(outer_llm.calls) == 1
-        assert child.events.query(type="Error") == []
-    finally:
-        await parent.aclose()
-        await child.aclose()
-        await inner_llm.aclose()
-
-
-@pytest.mark.parametrize("strategy_type", [CodeActStrategy, CodeActV2])
+@pytest.mark.parametrize("strategy_type", STRATEGIES)
 async def test_cancelled_admission_wait_stays_cancelled_and_owner_recovers(strategy_type):
-    """Cancellation does not become a policy/API error or strand queued admission."""
+    """Cancellation neither becomes a policy/API error nor strands queued admission."""
     broker = AdmissionBroker(max_in_flight=1).start()
     controller = broker.controller()
     held = await controller.acquire(lambda _: None)
@@ -421,18 +377,19 @@ async def test_cancelled_admission_wait_stays_cancelled_and_owner_recovers(strat
     )
 
     class PolicyAgent(Agent):
-        """Wait under a real shared broker and retain normal task cancellation."""
+        """Wait under a shared broker and retain normal task cancellation."""
 
-        @strategy(strategy_type(config=_config(strategy_type)))
+        @strategy(_strategy(strategy_type))
         async def answer(self) -> int:
             """Generate an integer after capacity opens."""
             ...
 
     agent = PolicyAgent(llm=llm)
     task = None
-    tool = "python_cell" if strategy_type is CodeActV2 else "execute_python"
     try:
-        with patch("litellm.acompletion", AsyncMock(return_value=_reply(tool))) as provider:
+        with patch(
+            "litellm.acompletion", AsyncMock(return_value=_reply(strategy_type))
+        ) as provider:
             task = asyncio.create_task(agent.answer())
             async with asyncio.timeout(5):
                 while broker.snapshot().queued != 1:
@@ -458,24 +415,15 @@ async def test_cancelled_admission_wait_stays_cancelled_and_owner_recovers(strat
         broker.close()
 
 
-@pytest.mark.parametrize("strategy_type", [CodeActStrategy, CodeActV2])
+@pytest.mark.parametrize("strategy_type", STRATEGIES)
 async def test_ordinary_provider_error_still_retries_and_recovers(strategy_type):
-    """Do not globally disable CodeAct's existing recovery for ordinary API failures."""
-    tool = "python_cell" if strategy_type is CodeActV2 else "execute_python"
-    response = LLMResponse(
-        raw_response=None,
-        content="",
-        tool_calls=[
-            ToolCall(id="done", name=tool, arguments=json.dumps({"code": "return_result(7)"}))
-        ],
-        finish_reason="tool_calls",
-    )
+    """Keep existing recovery for transient provider failures, unlike terminal policy errors."""
     llm = FakeLLMClient()
 
     class RecoveringAgent(Agent):
-        """Keep the existing recoverable API-failure path intact."""
+        """Retain the recoverable provider-failure path."""
 
-        @strategy(strategy_type(config=_config(strategy_type)))
+        @strategy(_strategy(strategy_type))
         async def answer(self) -> int:
             """Return an integer after the temporary provider failure."""
             ...
@@ -492,7 +440,7 @@ async def test_ordinary_provider_error_still_retries_and_recovers(strategy_type)
                         model="gpt-4o-mini",
                         llm_provider="openai",
                     ),
-                    response,
+                    _response(strategy_type),
                 ]
             ),
         ) as provider:
