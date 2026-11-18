@@ -257,11 +257,11 @@ def test_repository_instructions_are_read_boundedly(tmp_path, monkeypatch):
             assert 0 <= size <= 101
             return self.stream.read(size)
 
-    from nooa.config import TruncationConfig
+    from nooa_atom.limits import AtomLimits
 
     monkeypatch.setattr(instructions.os, "fdopen", BoundedStream)
 
-    config = TruncationConfig(instructions_file_chars=100)
+    config = AtomLimits(instructions_file_chars=100)
     rendered = instructions.render_agent_instructions(tmp_path, config)
 
     assert reads == [101]

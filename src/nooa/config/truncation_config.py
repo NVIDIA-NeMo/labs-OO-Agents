@@ -27,13 +27,13 @@ Two layers of bounds:
    - ``state_format`` (``FormatConfig``): the agent's ``state`` context block
      (its field values, every turn).
 3. **Char budgets of other model-visible text** (top level):
-   ``placeholder_chars`` (one docstring ``{expr}``), ``instructions_file_chars``
-   / ``instructions_total_chars`` (repository instructions); in ``capture``:
-   ``max_shell_output`` (shell command results) and ``max_job_tail``
-   (background job output).
+   ``placeholder_chars`` (one docstring ``{expr}``); in ``capture``:
+   ``max_shell_output`` (shell command results).
 
-Read the config in force with :func:`nooa.config.effective_truncation`, when
-the limit is applied.
+Read the config in force with ``nooa.config.effective(TruncationConfig)``, when
+the limit is applied. Limits of a package (job tails, repository
+instructions) are fields of that package's own config model, read the same
+way; they do not belong here.
 
 ``max_event_tokens`` and ``min_preserved_events`` are retained for
 configuration compatibility, but are not currently enforced because events
@@ -105,16 +105,6 @@ class CaptureConfig(BaseModel):
             )
         ),
     ] = 30_000
-    max_job_tail: Annotated[
-        int,
-        Field(
-            description=(
-                "Max chars kept of the end of each of stdout and stderr on a "
-                "background shell job's done update (nooa-atom jobs). Not affected "
-                "by capture.tail."
-            )
-        ),
-    ] = 20_000
     unrecoverable_hint: Annotated[
         str | None,
         Field(
@@ -128,7 +118,7 @@ class CaptureConfig(BaseModel):
     @model_validator(mode="after")
     def _check(self) -> "CaptureConfig":
         errors = []
-        for name in ("max_stdout", "max_stderr", "max_error", "max_shell_output", "max_job_tail"):
+        for name in ("max_stdout", "max_stderr", "max_error", "max_shell_output"):
             if getattr(self, name) <= 0:
                 errors.append(f"capture.{name} must be > 0, got {getattr(self, name)}")
         if self.tail is not None:
@@ -232,7 +222,7 @@ class TruncationConfig(BaseModel):
     truncation=...)``, ``MyAgent(truncation=...)``, then a method's
     ``@strategy(truncation=...)`` while that method runs. Each level names
     only the fields it changes (``merge_with``). Code that applies a limit
-    reads the config in force with ``nooa.config.effective_truncation()`` at
+    reads the config in force with ``nooa.config.effective(TruncationConfig)`` at
     the time it applies it; it does not read ``DEFAULT_TRUNCATION_CONFIG``.
     """
 
@@ -299,25 +289,6 @@ class TruncationConfig(BaseModel):
             )
         ),
     ] = 50_000
-    instructions_file_chars: Annotated[
-        int,
-        Field(
-            description=(
-                "Most characters read from one repository instruction file "
-                "(AGENTS.md) into the repository_instructions context block "
-                "(nooa-atom, nooa-cli)."
-            )
-        ),
-    ] = 100_000
-    instructions_total_chars: Annotated[
-        int,
-        Field(
-            description=(
-                "Most characters of the whole repository_instructions context block, "
-                "headers and separators included (nooa-atom, nooa-cli)."
-            )
-        ),
-    ] = 200_000
     capture: CaptureConfig = CaptureConfig()
     media_capture: MediaCaptureConfig = MediaCaptureConfig()
     # Generous: rendered every turn, especially PythonOutput.value (the LLM
@@ -344,9 +315,6 @@ class TruncationConfig(BaseModel):
                 errors.append(f"{name} must be > 0 or None, got {v}")
         if self.placeholder_chars is not None and self.placeholder_chars <= 0:
             errors.append(f"placeholder_chars must be > 0 or None, got {self.placeholder_chars}")
-        for name in ("instructions_file_chars", "instructions_total_chars"):
-            if getattr(self, name) <= 0:
-                errors.append(f"{name} must be > 0, got {getattr(self, name)}")
         if errors:
             raise ValueError("Invalid TruncationConfig:\n" + "\n".join(f"  - {e}" for e in errors))
         return self
@@ -358,36 +326,12 @@ class TruncationConfig(BaseModel):
         ``prefill_format``, ``context_block_format``, ``state_format``) merge field-by-field —
         supplying ``other.event_format`` with only ``max_string`` set does NOT
         clobber the base's ``max_length``. Top-level fields use the same
-        explicit-fields semantics.
+        explicit-fields semantics (``nooa.config.merge_config``, the rule of
+        every config model).
         """
-        if other is None:
-            return self
-        if not other.model_fields_set:
-            raise ValueError(
-                "merge_with() received a config with no model_fields_set. "
-                "Was it constructed from model_dump() or model_validate()? "
-                "Config objects must be freshly constructed: TruncationConfig(field=value)."
-            )
-        sub_field_names = (
-            "capture",
-            "media_capture",
-            "event_format",
-            "prefill_format",
-            "context_block_format",
-            "state_format",
-        )
-        updates: dict = {
-            k: getattr(other, k) for k in other.model_fields_set if k not in sub_field_names
-        }
-        # Sub-config merge: only apply if user explicitly passed a sub-config.
-        for sub in sub_field_names:
-            if sub in other.model_fields_set:
-                base_sub = getattr(self, sub)
-                other_sub = getattr(other, sub)
-                updates[sub] = base_sub.model_copy(
-                    update={k: getattr(other_sub, k) for k in other_sub.model_fields_set}
-                )
-        return self.model_copy(update=updates)
+        from nooa.config.effective import merge_config
+
+        return merge_config(self, other)
 
 
 # Default configuration

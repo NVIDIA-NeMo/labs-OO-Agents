@@ -106,16 +106,18 @@ def test_a_huge_class_namespace_is_not_copied() -> None:
 
 
 def test_a_class_namespace_read_is_charged_to_the_work_budget() -> None:
-    # 4584541200: a namespace up to the 2,000-entry floor was copied free,
-    # whatever max_nodes was left.
+    # 4584541200: a namespace up to a 2,000-entry floor was copied whatever
+    # max_nodes was left. The budget is exact: a larger one is not copied.
     from nooa.snapshot._limits import _State
     from nooa.snapshot._raw import _raw_namespace
 
     big = type("Big", (), {f"a{i}": i for i in range(1_500)})
     state = _State(Limits(max_nodes=100))
-    namespace = _raw_namespace(big, state)
-    assert namespace is not None and len(namespace) == len(big.__dict__)  # within the floor
-    assert state.nodes_left == 0  # charged, as far as work was left
+    assert _raw_namespace(big, state) is None  # larger than the work left: fail closed
+    assert state.nodes_left == 100  # nothing copied, nothing charged
+    state = _State(Limits(max_nodes=2_000))
+    assert _raw_namespace(big, state) is not None
+    assert state.nodes_left == 2_000 - len(big.__dict__)
     small = type("Small", (), {"a": 1})
     state = _State(Limits(max_nodes=100))
     assert _raw_namespace(small, state) is not None
@@ -275,3 +277,57 @@ def test_max_items_keeps_a_huge_ints_digit_count(value: int, max_items: int) -> 
     assert isinstance(snapshot, Object)
     assert render_json(snapshot, max_chars=200).startswith('{"digits": 5001')
     assert render_python(snapshot).startswith("int(5,001 digits")
+
+
+def test_a_colliding_key_past_the_copied_prefix_keeps_a_hidden_field_hidden() -> None:
+    # 4584541163 follow-up: ``secret`` lies in the copied prefix, its hiding
+    # override past it; a non-str key whose type imitates ``str`` (metaclass
+    # ``__eq__``/``__hash__``, which fooled ``set(map(type, keys)) - {str}``)
+    # and whose own hash and ``__eq__`` collide with the overrides attribute
+    # sits next to it. No hook may run and the hidden value must not appear.
+    from nooa.snapshot._fields import FIELD_METADATA_ATTR
+
+    calls: list[str] = []
+    armed = False
+
+    class LikeStr(type):
+        def __hash__(cls) -> int:
+            calls.append("meta-hash")
+            return hash(str)
+
+        def __eq__(cls, other: object) -> bool:
+            calls.append("meta-eq")
+            return other is str
+
+    class Colliding(metaclass=LikeStr):
+        def __hash__(self) -> int:
+            if armed:
+                calls.append("hash")
+            return hash(FIELD_METADATA_ATTR)
+
+        def __eq__(self, other: object) -> bool:
+            if armed:
+                calls.append("eq")
+            return armed
+
+    class Plain:
+        pass
+
+    big = Plain()
+    big.secret = "TOPSECRET"  # type: ignore[attr-defined]
+    for index in range(5_000):
+        setattr(big, f"a{index:05d}", index)
+    storage: dict[Any, Any] = big.__dict__
+    key = Colliding()
+    # Inserted first, with equality off, holding an override map that would
+    # unhide ``secret``: an unsafe lookup of the overrides attribute finds it
+    # before the real entry once equality is on.
+    storage[key] = {"secret": {"hidden": False}}
+    set_field_metadata(big, "secret", hidden=True)
+    assert dict.get(storage, FIELD_METADATA_ATTR) == {"secret": {"hidden": True}}
+    assert any(k is key for k in dict.keys(storage))
+    armed = True
+    calls.clear()
+    text = render_python(capture(big, Limits(fallback="repr")))
+    assert "TOPSECRET" not in text
+    assert calls == []

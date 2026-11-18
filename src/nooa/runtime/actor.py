@@ -25,7 +25,11 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from nooa.agentdoc.introspect import methods, variables
-from nooa.config.effective import _current_truncation_config_var
+from nooa.config.effective import (
+    _current_configs_var,
+    _current_truncation_config_var,
+    layer_configs,
+)
 from nooa.context_blocks import (
     DynamicContext,
     ResolvedBlock,
@@ -433,7 +437,7 @@ _current_llm_selection_source_var: contextvars.ContextVar[str | None] = contextv
 
 # Context variable for the resolved truncation config for the current generation call.
 # Set by _execute_with_generation() so that method-level @strategy(truncation=...)
-# overrides are visible to nooa.config.effective_truncation() (and so to
+# overrides are visible to nooa.config.effective(TruncationConfig) (and so to
 # runtime.truncation_config) throughout strategy execution. Defined in
 # nooa.config.effective, the one place that encodes the override rule
 # (imported above as _current_truncation_config_var).
@@ -956,13 +960,14 @@ class ActorRuntime:
     def truncation_config(self) -> "TruncationConfig":
         """Truncation configuration for the current generation call (RuntimeServices protocol).
 
-        ``nooa.config.effective_truncation(self.agent)``: the method-level
+        ``nooa.config.effective(TruncationConfig, self.agent)``: the method-level
         override (set by @strategy(truncation=...)) if active, otherwise the
         agent-level config.
         """
-        from nooa.config.effective import effective_truncation
+        from nooa.config.effective import effective
+        from nooa.config.truncation_config import TruncationConfig
 
-        return effective_truncation(self.agent)
+        return effective(TruncationConfig, self.agent)
 
     async def decision_state_inputs(
         self,
@@ -3045,6 +3050,11 @@ class ActorRuntime:
         # Resolve truncation config: method-level @strategy(truncation=...) > agent-level
         method_truncation = getattr(base_method, "_strategy_truncation", None)
         resolved_truncation = self.agent._truncation.merge_with(method_truncation)
+        # The same for other config models: @strategy(configs=...) > the agent's configs=.
+        resolved_configs = layer_configs(
+            getattr(self.agent, "_configs", None) or {},
+            getattr(base_method, "_strategy_configs", None) or {},
+        )
 
         # Mark that we're in a generation session
         # This allows nested ellipsis method calls to execute inline without deadlocking
@@ -3136,11 +3146,13 @@ class ActorRuntime:
                     # Under this method's limits (its @strategy(truncation=...)),
                     # as everything else the call renders.
                     docstring_token = _current_truncation_config_var.set(resolved_truncation)
+                    docstring_configs_token = _current_configs_var.set(resolved_configs)
                     try:
                         expanded_docstring = await self.expand_variables(
                             raw_docstring, extra_context=merged_kwargs, error_mode="silent"
                         )
                     finally:
+                        _current_configs_var.reset(docstring_configs_token)
                         _current_truncation_config_var.reset(docstring_token)
 
                 # Use the shared builder so Annotated parameter specs reach
@@ -3172,6 +3184,7 @@ class ActorRuntime:
                     llm_selection_source
                 )
                 truncation_token = _current_truncation_config_var.set(resolved_truncation)
+                configs_token = _current_configs_var.set(resolved_configs)
                 event_format_token = _current_event_format_var.set(
                     resolved_truncation.event_format.model_dump()
                 )
@@ -3215,6 +3228,7 @@ class ActorRuntime:
                     _current_llm_model_name_var.reset(llm_model_name_token)
                     _current_llm_selection_source_var.reset(llm_selection_source_token)
                     _current_truncation_config_var.reset(truncation_token)
+                    _current_configs_var.reset(configs_token)
                     _current_event_format_var.reset(event_format_token)
                     _decorator_context_var.reset(decorator_ctx_token)
                     _decorator_events_var.reset(decorator_evt_token)

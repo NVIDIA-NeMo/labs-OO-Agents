@@ -34,12 +34,13 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from nooa._platform import require_posix
 from nooa.agentdoc import hidden, spec
-from nooa.config.effective import effective_truncation
+from nooa.config.effective import effective
 from nooa.context_blocks import EventBase
 from nooa.skill import Skill
 from nooa.snapshot import Overflow, TextStream, render_output
 from nooa.tools import StreamDone, StreamEvent
 from nooa_atom.agent.lines import LineSplitter, bounded_lines, name_job_log
+from nooa_atom.limits import AtomLimits
 from nooa_atom.session.names import ROOT_PATH, check_name, child_path
 
 if TYPE_CHECKING:
@@ -49,8 +50,8 @@ __all__ = ["JobInfo", "JobUpdate", "JobsApi", "JobsLost", "Throttle"]
 
 JOBS_CHANNEL = "jobs"
 # Characters kept of stdout and, separately, of stderr on a run's done
-# update (the end of each stream): TruncationConfig.capture.max_job_tail of the
-# config in force when the job starts (nooa.config.effective_truncation); nothing
+# update (the end of each stream): AtomLimits.max_job_tail of the config in
+# force when the job starts (nooa.config.effective(AtomLimits)); nothing
 # more is kept anywhere. The tail is of the line-framed output: each line
 # already bounded to _LINE_CHARS.
 # Longest delivered line (run progress, tail), in characters: a longer line is
@@ -768,7 +769,7 @@ class JobsApi(Skill):
         ends, and a cut tail names it.
         """
         # Per stream, the kept end of the output (in memory; the full output only with log_path=).
-        tail_chars = effective_truncation().capture.max_job_tail
+        tail_chars = effective(AtomLimits).max_job_tail
         tails = {
             kind: TextStream(unit="chars", head=0, tail=tail_chars) for kind in ("stdout", "stderr")
         }
