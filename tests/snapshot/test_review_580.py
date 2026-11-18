@@ -106,16 +106,18 @@ def test_a_huge_class_namespace_is_not_copied() -> None:
 
 
 def test_a_class_namespace_read_is_charged_to_the_work_budget() -> None:
-    # 4584541200: a namespace up to the 2,000-entry floor was copied free,
-    # whatever max_nodes was left.
+    # 4584541200: a namespace up to a 2,000-entry floor was copied whatever
+    # max_nodes was left. The budget is exact: a larger one is not copied.
     from nooa.snapshot._limits import _State
     from nooa.snapshot._raw import _raw_namespace
 
     big = type("Big", (), {f"a{i}": i for i in range(1_500)})
     state = _State(Limits(max_nodes=100))
-    namespace = _raw_namespace(big, state)
-    assert namespace is not None and len(namespace) == len(big.__dict__)  # within the floor
-    assert state.nodes_left == 0  # charged, as far as work was left
+    assert _raw_namespace(big, state) is None  # larger than the work left: fail closed
+    assert state.nodes_left == 100  # nothing copied, nothing charged
+    state = _State(Limits(max_nodes=2_000))
+    assert _raw_namespace(big, state) is not None
+    assert state.nodes_left == 2_000 - len(big.__dict__)
     small = type("Small", (), {"a": 1})
     state = _State(Limits(max_nodes=100))
     assert _raw_namespace(small, state) is not None
