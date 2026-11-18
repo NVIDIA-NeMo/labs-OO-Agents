@@ -10,17 +10,20 @@ based on [Keep a Changelog](https://keepachangelog.com/).
 - `nooa-atom`: built-in OpenRouter model source. After one sign-in
   (`/connect` -> "OpenRouter" in an ACP client, or
   `nooa atom --sign-in openrouter`), which checks the key and saves it as
-  `OPENROUTER_API_KEY`, every OpenRouter text model is listed as
-  `openrouter/<model ID>`, configured as `nooa connect` saves it. The model
-  list is cached for 24 hours in `openrouter_models.json` in the user NOOA
-  directory; no key means no models.
+  `OPENROUTER_API_KEY`, you pick one OpenRouter text model from a searchable
+  list. Only the models picked so far are listed, as `openrouter/<model ID>`
+  and configured as `nooa connect` saves them; each sign-in adds one
+  (`openrouter_selected.json` in the user NOOA directory). The catalogue is
+  cached for 24 hours in `openrouter_models.json`; no key means no models.
 
 - `nooa-atom`: model sources. An installed package can add models and an ACP
   sign-in through the `nooa_atom.model_sources` entry point group: its models
   are listed below the configuration files, and terminal-auth clients are
   offered its sign-in (`nooa atom --sign-in ID`) next to `nooa connect`, which
   is then named "Other models (nooa connect)". After the sign-in, a searchable
-  list asks which of the source's models to use (Enter keeps its default).
+  list asks which of the source's models to use (Enter keeps its default). A
+  source may offer `choices(workspace)` to pick from and `select(alias)` to
+  remember the pick.
 
 - `nooa-atom`: reflection. The `nemo.reflection` skill posts a housekeeping
   message on a root session's `system_messages` queue when one is due (20

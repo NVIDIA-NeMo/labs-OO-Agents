@@ -88,7 +88,7 @@ def test_a_key_saved_in_secrets_counts_and_is_loaded(monkeypatch, tmp_path):
     monkeypatch.setenv("NEMO_OO_SECRETS", str(secrets))
     _fetch(monkeypatch)
     _cache()
-    assert list(orsrc.source.models(tmp_path)) == _aliases()
+    assert list(orsrc.source.choices(tmp_path)) == _aliases()
     # The model client reads the key from the environment.
     assert os.environ[orsrc.KEY_ENV] == "sk-or-saved"
 
@@ -97,20 +97,20 @@ def test_fresh_cache_needs_no_network_and_is_memoised(monkeypatch, tmp_path):
     monkeypatch.setenv(orsrc.KEY_ENV, "sk-or-test")
     fetch = _fetch(monkeypatch, error=AssertionError("no network"))
     _cache(age=60)
-    first = orsrc.source.models(tmp_path)
+    first = orsrc.source.choices(tmp_path)
     assert list(first) == _aliases()
     built = []
     monkeypatch.setattr(orsrc, "entries", lambda records: built.append(records) or {})
-    assert orsrc.source.models(tmp_path) == first
+    assert orsrc.source.choices(tmp_path) == first
     assert built == [] and fetch.calls == 0
 
 
 def test_missing_cache_is_fetched_once(monkeypatch, tmp_path):
     monkeypatch.setenv(orsrc.KEY_ENV, "sk-or-test")
     fetch = _fetch(monkeypatch)
-    assert list(orsrc.source.models(tmp_path)) == _aliases()
+    assert list(orsrc.source.choices(tmp_path)) == _aliases()
     assert orsrc.cache_path().is_file()
-    assert list(orsrc.source.models(tmp_path)) == _aliases()
+    assert list(orsrc.source.choices(tmp_path)) == _aliases()
     assert fetch.calls == 1
 
 
@@ -118,7 +118,7 @@ def test_stale_cache_is_refreshed(monkeypatch, tmp_path):
     monkeypatch.setenv(orsrc.KEY_ENV, "sk-or-test")
     fetch = _fetch(monkeypatch)
     _cache(age=orsrc.MAX_AGE + 60)
-    assert list(orsrc.source.models(tmp_path)) == _aliases()
+    assert list(orsrc.source.choices(tmp_path)) == _aliases()
     assert fetch.calls == 1
     fetched_at = json.loads(orsrc.cache_path().read_text())["fetched_at"]
     assert time.time() - fetched_at < 60
@@ -128,8 +128,8 @@ def test_stale_cache_and_failed_fetch_keep_the_stale_models(monkeypatch, tmp_pat
     monkeypatch.setenv(orsrc.KEY_ENV, "sk-or-test")
     fetch = _fetch(monkeypatch, error=httpx.ConnectError("offline"))
     _cache(age=orsrc.MAX_AGE + 60)
-    assert list(orsrc.source.models(tmp_path)) == _aliases()
-    assert list(orsrc.source.models(tmp_path)) == _aliases()
+    assert list(orsrc.source.choices(tmp_path)) == _aliases()
+    assert list(orsrc.source.choices(tmp_path)) == _aliases()
     # One attempt, one warning: a failure is not retried on every call.
     assert fetch.calls == 1
     assert [r.levelname for r in caplog.records if "OpenRouter" in r.getMessage()] == ["WARNING"]
@@ -138,7 +138,7 @@ def test_stale_cache_and_failed_fetch_keep_the_stale_models(monkeypatch, tmp_pat
 def test_missing_cache_and_failed_fetch_list_nothing(monkeypatch, tmp_path):
     monkeypatch.setenv(orsrc.KEY_ENV, "sk-or-test")
     _fetch(monkeypatch, error=TimeoutError())
-    assert orsrc.source.models(tmp_path) == {}
+    assert orsrc.source.choices(tmp_path) == {}
 
 
 def test_an_unreadable_cache_is_fetched_again(monkeypatch, tmp_path):
@@ -146,7 +146,7 @@ def test_an_unreadable_cache_is_fetched_again(monkeypatch, tmp_path):
     fetch = _fetch(monkeypatch)
     orsrc.cache_path().parent.mkdir(parents=True)
     orsrc.cache_path().write_text("{not json")
-    assert list(orsrc.source.models(tmp_path)) == _aliases()
+    assert list(orsrc.source.choices(tmp_path)) == _aliases()
     assert fetch.calls == 1
 
 
@@ -287,7 +287,7 @@ def test_sign_in_saves_the_key_writes_the_cache_and_picks_a_default(monkeypatch,
     assert "3 OpenRouter models are now available" in run.output
     assert orsrc.cache_path().is_file()
     # The models are listed at once, without another fetch.
-    assert list(orsrc.source.models(Path.cwd())) == _aliases()
+    assert list(orsrc.source.choices(Path.cwd())) == _aliases()
     assert fetch.calls == 1
 
 
@@ -376,6 +376,30 @@ def test_the_source_is_valid_and_listed_after_the_files(monkeypatch, tmp_path):
         )
     )
     monkeypatch.setenv("NEMO_OO_LLM_CONFIG", str(config))
+    assert list(workspace_models(tmp_path)) == ["mine"]  # nothing picked yet
+    for alias in _aliases():
+        orsrc.select(alias)
     aliases = list(workspace_models(tmp_path))
     assert aliases[0] == "mine"
     assert aliases[1:] == [a for a in _aliases() if a != "openrouter/openai/gpt-5"]
+
+
+def test_models_lists_only_the_picked_models_in_pick_order(monkeypatch, tmp_path):
+    monkeypatch.setenv(orsrc.KEY_ENV, "sk-or-test")
+    _fetch(monkeypatch)
+    assert orsrc.source.models(tmp_path) == {}
+    first, second = _aliases()[-1], _aliases()[0]
+    orsrc.source.select(first)
+    orsrc.source.select(second)
+    orsrc.source.select(first)  # kept once
+    assert orsrc.selected() == [first, second]
+    assert list(orsrc.source.models(tmp_path)) == [first, second]
+    assert orsrc.source.models(tmp_path)[first] == orsrc.source.choices(tmp_path)[first]
+
+
+def test_a_picked_model_the_catalogue_dropped_is_not_listed(monkeypatch, tmp_path):
+    monkeypatch.setenv(orsrc.KEY_ENV, "sk-or-test")
+    _fetch(monkeypatch)
+    orsrc.select("openrouter/gone/model")
+    orsrc.select(_aliases()[0])
+    assert list(orsrc.source.models(tmp_path)) == [_aliases()[0]]

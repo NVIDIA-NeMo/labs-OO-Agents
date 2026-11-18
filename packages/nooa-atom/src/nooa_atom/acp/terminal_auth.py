@@ -292,13 +292,21 @@ def run_terminal_sign_in(source_id: str) -> int:
     if not alias or not isinstance(alias, str):
         click.echo("Nothing was set up.", err=True)
         return 1
+    listing = getattr(source, "choices", None) or source.models
     try:
-        models = source.models(Path.cwd())
+        models = listing(Path.cwd())
     except Exception:
         models = {}
     models = models if isinstance(models, dict) else {}
     if len(models) > 1:
         alias = choose_model(source.name, models, alias)
+    remember = getattr(source, "select", None)
+    if callable(remember):
+        try:
+            remember(alias)
+        except Exception as exc:
+            click.echo(f"Could not remember {alias}: {exc}", err=True)
+            return 1
     entry = models.get(alias)
     entry = entry if isinstance(entry, dict) else {}
     write_result(alias, str(entry.get("model_name") or ""), str(entry.get("api_base") or ""))

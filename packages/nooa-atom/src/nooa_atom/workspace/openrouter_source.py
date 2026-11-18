@@ -3,8 +3,10 @@
 """The built-in OpenRouter model source: every OpenRouter text model with one key.
 
 Once an OpenRouter key is set up (``OPENROUTER_API_KEY`` in the environment
-or in NOOA's ``secrets.yaml``), Atom lists every model of OpenRouter's public
-text-model catalogue as ``openrouter/<OpenRouter model ID>``, for example
+or in NOOA's ``secrets.yaml``), each sign-in lets you pick one model of
+OpenRouter's public text-model catalogue, and Atom lists the models picked so
+far (kept in ``openrouter_selected.json`` in the user NOOA directory) as
+``openrouter/<OpenRouter model ID>``, for example
 ``openrouter/anthropic/claude-sonnet-4.5``. Each entry is exactly what
 ``nooa connect --provider openrouter`` saves for that model, without its test
 calls (see ``nooa.unifiedllm.connect.openrouter_entry``).
@@ -67,6 +69,45 @@ def cache_path() -> Path:
     from nooa import paths
 
     return paths.get_user_dir(CACHE_FILE)
+
+
+SELECTED_FILE = "openrouter_selected.json"
+"""The aliases picked at sign-in; ``models()`` lists only these."""
+
+
+def selected_path() -> Path:
+    """Where the picked aliases are kept."""
+    from nooa import paths
+
+    return paths.get_user_dir(SELECTED_FILE)
+
+
+def selected() -> list[str]:
+    """The aliases picked at sign-in, oldest first; ``[]`` when none or unreadable."""
+    try:
+        data = json.loads(selected_path().read_text())
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict) or not isinstance(data.get("models"), list):
+        return []
+    return [alias for alias in data["models"] if isinstance(alias, str)]
+
+
+def select(alias: str) -> None:
+    """Add ``alias`` to the picked models (kept once, in pick order)."""
+    names = selected()
+    if alias in names:
+        return
+    path = selected_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(dir=str(path.parent), prefix=".openrouter-selected-")
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump({"models": [*names, alias]}, stream, indent=1)
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
 
 
 def api_key() -> str | None:
@@ -200,14 +241,31 @@ def reset() -> None:
 
 
 class OpenRouterSource:
-    """Every OpenRouter text model, configured as ``nooa connect`` would save it."""
+    """OpenRouter text models, configured as ``nooa connect`` would save them.
+
+    ``choices()`` is the whole catalogue; ``models()`` lists only the models
+    picked at sign-in (``select()``), so ``/model`` does not fill up with
+    every OpenRouter model.
+    """
 
     id = "openrouter"
     name = "OpenRouter"
     description = "All OpenRouter models with one key"
 
     def models(self, workspace: Path) -> dict[str, dict[str, Any]]:
-        """The OpenRouter entries by alias; ``{}`` without a key or a catalogue. Never raises."""
+        """The models picked at sign-in, by alias; ``{}`` without a key. Never raises."""
+        picked = selected()
+        if not picked:
+            return {}
+        listed = self.choices(workspace)
+        return {alias: listed[alias] for alias in picked if alias in listed}
+
+    def select(self, alias: str) -> None:
+        """Remember ``alias`` as picked, so ``models()`` lists it."""
+        select(alias)
+
+    def choices(self, workspace: Path) -> dict[str, dict[str, Any]]:
+        """Every OpenRouter text model by alias, to pick from; ``{}`` without a key or a catalogue. Never raises."""
         try:
             if api_key() is None:
                 return {}

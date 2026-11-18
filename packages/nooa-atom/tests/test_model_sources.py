@@ -274,6 +274,35 @@ def test_sign_in_asks_which_model_to_use(monkeypatch, isolated, no_server, answe
     assert saved["model"] == THREE[alias]["model_name"]
 
 
+class PickingSource(Source):
+    """Lists only picked models; ``choices`` is the whole catalogue."""
+
+    def __init__(self):
+        super().__init__("hub", models=THREE)
+        self.picked = []
+
+    def choices(self, workspace):
+        return THREE
+
+    def models(self, workspace):
+        return {alias: THREE[alias] for alias in self.picked}
+
+    def select(self, alias):
+        self.picked.append(alias)
+
+
+def test_sign_in_picks_from_choices_and_remembers_the_pick(monkeypatch, isolated, no_server):
+    from nooa_atom.acp.cli import command
+
+    source = PickingSource()
+    _install(monkeypatch, source)
+    result = click.testing.CliRunner().invoke(command, ["--sign-in", "hub"], input="hub-b\n")
+    assert result.exit_code == 0, result.output
+    assert source.picked == ["hub-b"]
+    saved = json.loads((isolated / terminal_auth.RESULT_FILE).read_text())
+    assert saved["alias"] == "hub-b" and saved["model"] == "openai/b"
+
+
 @pytest.mark.parametrize(
     ("source_id", "outcome", "code"),
     [("hub", None, 1), ("hub", "", 1), ("hub", RuntimeError("bad key"), 1), ("nope", "x", 2)],

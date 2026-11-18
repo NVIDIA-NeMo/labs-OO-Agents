@@ -57,6 +57,11 @@ class ModelSource(Protocol):
         """Set the source up in a real terminal (it may prompt).
 
         Returns the alias to switch to, or ``None`` when nothing was set up.
+        After it, the user picks one of the source's models (``alias`` is the
+        default). Two optional methods change that step: ``choices(workspace)``
+        returns the models to pick from when they differ from ``models()``
+        (for example a whole catalogue), and ``select(alias)`` is called with
+        the pick (for example so ``models()`` lists only picked models).
         """
         ...
 
