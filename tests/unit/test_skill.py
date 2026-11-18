@@ -35,11 +35,22 @@ def test_skill_path_accepts_explicit_id(skill_dir):
 
 
 def test_skill_path_creates_dynamic_subclass(skill_dir):
-    """A path-loaded skill exposes its description through a generated skill subclass."""
+    """A path-loaded skill exposes its description through a generated TextSkill subclass."""
     skill = TextSkill(path=skill_dir)
-    assert type(skill).__name__ != "Skill"
-    assert isinstance(skill, Skill)
-    assert not isinstance(skill, TextSkill)
+    assert type(skill).__name__ == "GitWorkflow"
+    assert isinstance(skill, TextSkill)
+    assert "Best practices for Git" in (type(skill).__doc__ or "")
+
+
+def test_text_skill_subclass_keeps_its_base(skill_dir):
+    class ReviewedSkill(TextSkill):
+        def reviewed(self) -> bool:
+            return True
+
+    skill = ReviewedSkill(path=skill_dir)
+    assert isinstance(skill, ReviewedSkill)
+    assert isinstance(skill, TextSkill)
+    assert skill.reviewed()
     assert "Best practices for Git" in (type(skill).__doc__ or "")
 
 
@@ -136,6 +147,20 @@ async def test_text_skill_runs_scripts_through_shell(skill_with_scripts):
         output = await skill.shell.run("python3 scripts/greet.py")
         assert output.success
         assert "hello from script" in output.stdout
+    finally:
+        await skill.detach()
+
+
+@pytest.mark.asyncio
+async def test_text_skill_shell_keeps_directory_changes(skill_with_scripts):
+    """Manifest paths are relative to the root the shell starts in, not to later cds."""
+    skill = TextSkill(path=skill_with_scripts)
+    try:
+        assert (await skill.shell.run("cat assets/prompt.txt")).stdout == "prompt"
+        await skill.shell.run("cd scripts")
+        assert not (await skill.shell.run("cat assets/prompt.txt")).success
+        stable = skill.source_dir / "assets/prompt.txt"
+        assert (await skill.shell.run(f"cat {stable}")).stdout == "prompt"
     finally:
         await skill.detach()
 

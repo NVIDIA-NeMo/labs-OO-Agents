@@ -74,7 +74,7 @@ class MyAgent(Agent, llm=llm):
 ```
 
 - Agents see a `# Skills` block (one-liner per skill) in their execution context and call `doc(self.<skill>)` for the full guide.
-- `TextSkill(path=...)` is a compatibility constructor that returns a regular dynamically generated `Skill`. Its class docstring comes from `SKILL.md`, `files: list[SkillFile]` lists packaged files using stable skill-root-relative paths, and `shell: ShellTools` has the skill root as its working directory; like any `ShellTools`, it does not restrict paths to that directory.
+- `TextSkill(path=...)` returns a `TextSkill` (a generated subclass whose docstring comes from `SKILL.md`). `files: list[SkillFile]` lists packaged files using skill-root-relative paths, and `shell: ShellTools` starts in the skill root; like any `ShellTools`, it keeps its directory between calls (use `skill.source_dir / file.path` after a `cd`) and does not restrict paths to the skill root. A `TextSkill` you construct yourself needs `await skill.detach()` to close its shell.
 - Read bundled files with `await skill.shell.read(file.path)` and run scripts with `await skill.shell.run("python3 scripts/task.py")`. The old `read_file()` / `run_script()` helpers are intentionally absent; all file and process behavior goes through ShellTools.
 - SKILL.md frontmatter: required `name`, `description`; optional `compatibility`, `metadata`, `user-invocable`, `allowed-tools` — Claude-Code-compatible format.
 - `SkillRegistry(agent)` supports explicit `register(...)` / `activate(...)`

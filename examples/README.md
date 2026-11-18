@@ -53,19 +53,27 @@ capability you need rather than treating the remaining files as required steps.
 
 ### Text skill API
 
-`TextSkill(path=...)` returns a regular `Skill` whose documentation comes from
-`SKILL.md`. Use its root-relative file manifest and its `ShellTools`, which starts in the
+`TextSkill(path=...)` loads a skill whose documentation comes from `SKILL.md`.
+Use its root-relative file manifest and its `ShellTools`, which starts in the
 skill root (paths are not restricted to it):
 
 ```python
 skill = TextSkill(path=ASSETS / "frontend-design")
-print([file.path for file in skill.files])
-content = (await skill.shell.read("assets/prompt.txt")).text
-output = await skill.shell.run("python3 scripts/check.py")
+try:
+    print([file.path for file in skill.files])
+    content = (await skill.shell.read("assets/prompt.txt")).text
+    output = await skill.shell.run("python3 scripts/check.py")
+finally:
+    await skill.detach()  # closes the skill's shell
 ```
 
-The former `read_file()` and `run_script()` helpers are removed. Registry
-reloads rebuild the documentation, file manifest, and skill-local shell.
+The former `read_file()` and `run_script()` helpers are removed. The shell
+keeps its state between calls, including the directory: after
+`shell.run("cd scripts")`, root-relative paths no longer resolve, so use
+`skill.source_dir / file.path` when you need a stable path. A skill you create
+yourself needs `await skill.detach()` once its shell has run; skills in a
+`SkillRegistry` are detached by the registry, and registry reloads rebuild the
+documentation, file manifest and shell.
 
 ## Advanced mechanics
 

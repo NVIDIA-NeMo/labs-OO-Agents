@@ -6,13 +6,15 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
-- Text skills now load as regular `Skill` objects with documentation from
-  `SKILL.md`, a stable `files: list[SkillFile]` manifest, and a skill-local
-  `ShellTools` whose working directory is the skill root. `TextSkill(path=...)`
-  remains available as the compatibility constructor. The `read_file()` /
-  `run_script()` helpers are removed; use `skill.shell.read()` /
+- Text skills (`TextSkill(path=...)`) now have a `files: list[SkillFile]`
+  manifest and a skill-local `ShellTools` that starts in the skill root. The
+  `read_file()` / `run_script()` helpers are removed; use `skill.shell.read()` /
   `skill.shell.run()` instead. Unlike `read_file()`, the shell does not restrict
-  paths to the skill directory.
+  paths to the skill directory, and it keeps its state between calls,
+  including `cd`. Its `detach()` is now async and closes the shell, so a text
+  skill you construct yourself needs `await skill.detach()`, and
+  `SkillRegistry.register()` refuses an instance that is still attached to
+  another agent.
 - `SandboxConfig.env_allowlist` keeps only the listed environment variables in
   the sandbox worker. The worker is a fork, so it inherited every variable of the
   parent, model API keys included, and a cell could print them. Removing them

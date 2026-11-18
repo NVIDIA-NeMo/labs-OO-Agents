@@ -821,3 +821,36 @@ class TestReload:
         registry._reload_one = fake
         await registry.reload("nemo.shell")
         assert called["name"] == "nemo.shell"
+
+
+class TestRegisterAttachedTextSkill:
+    """register() cannot await an async detach(), so it refuses the transfer."""
+
+    @staticmethod
+    def _text_skill(tmp_path: Path):
+        from nooa.skill import TextSkill
+
+        root = tmp_path / "demo-skill"
+        root.mkdir()
+        (root / "SKILL.md").write_text("---\nname: demo-skill\ndescription: demo\n---\nBody\n")
+        return TextSkill(path=root)
+
+    async def test_attached_to_another_agent_is_refused(self, tmp_path, recwarn):
+        skill = self._text_skill(tmp_path)
+        first, second = SkillRegistry(_FakeAgent()), SkillRegistry(_FakeAgent())
+        first.register("local.demo", skill)
+        with pytest.raises(ValueError, match="attached to another agent"):
+            second.register("local.demo", skill)
+        assert not hasattr(second._agent, "demo")
+        assert "local.demo" not in second.loaded()
+        assert not [w for w in recwarn if "never awaited" in str(w.message)]
+        await skill.detach()
+
+    async def test_detached_instance_can_move(self, tmp_path):
+        skill = self._text_skill(tmp_path)
+        first, second = SkillRegistry(_FakeAgent()), SkillRegistry(_FakeAgent())
+        first.register("local.demo", skill)
+        await skill.detach()
+        second.register("local.demo", skill)
+        assert second._agent.demo is skill
+        await skill.detach()

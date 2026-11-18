@@ -217,8 +217,10 @@ def _parse_skill_md(path: Path) -> tuple[str, str, str]:
 class SkillFile:
     """A file packaged with a text skill.
 
-    ``path`` is POSIX-style and relative to the skill root, so it can be
-    passed directly to the skill's ``shell`` methods on every platform.
+    ``path`` is POSIX-style and relative to the skill root. The skill's
+    ``shell`` starts in that root, so the path works there until a ``cd``
+    changes the shell's directory; ``skill.source_dir / file.path`` always
+    points at the file.
     """
 
     path: str
@@ -231,8 +233,8 @@ def _discover_skill_files(skill_root: Path) -> list[SkillFile]:
     for candidate in sorted(root.rglob("*"), key=lambda path: path.relative_to(root).as_posix()):
         if not candidate.is_file():
             continue
-        # A symlink that resolves outside the skill is not part of the package
-        # and ShellTools would reject it at access time as well.
+        # A symlink that resolves outside the skill is not part of the package,
+        # so the manifest leaves it out. (The shell itself does not restrict paths.)
         if not candidate.resolve().is_relative_to(root):
             continue
         files.append(SkillFile(path=candidate.relative_to(root).as_posix()))
@@ -340,23 +342,41 @@ class Skill:
         return source_path
 
 
-class _GeneratedTextSkill(Skill):
-    """Runtime base for data-driven skills constructed from a SKILL.md directory."""
+class TextSkill(Skill):
+    """Skill loaded from a SKILL.md directory.
+
+    Each instance gets a generated subclass of its class whose docstring is the
+    ``SKILL.md`` description and body, so ``doc()`` shows the instructions and
+    ``isinstance(skill, TextSkill)`` holds. It has ``id``, ``description``, a
+    ``files`` manifest and a ``shell`` that starts in the skill root.
+    """
 
     id: str
     description: str
     files: list[SkillFile]
 
-    def __init__(self, *, path: Path, skill_id: str, description: str) -> None:
+    def __init__(self, *, path: Path | str, id: str | None = None) -> None:
         # Import lazily: ShellTools itself subclasses Skill, so importing it at
         # module initialization time would create a circular import.
         from nooa.tools.shell_tools import ShellTools
 
-        self._skill_path = path.resolve()
-        self.id = skill_id
+        skill_path = Path(path).resolve()
+        skill_id, description, body = _parse_skill_md(skill_path)
+        class_name = "".join(word.capitalize() for word in skill_id.split("-"))
+        self.__class__ = type(  # pyright: ignore[reportAttributeAccessIssue]
+            class_name,
+            (type(self),),
+            {
+                "__doc__": f"{description}\n---\n{body}",
+                "__module__": __name__,
+                "__annotations__": {"shell": ShellTools, "files": list[SkillFile]},
+            },
+        )
+        self._skill_path = skill_path
+        self.id = id or skill_id
         self.description = description
-        self.files = _discover_skill_files(self._skill_path)
-        self.shell = ShellTools(cwd=str(self._skill_path))
+        self.files = _discover_skill_files(skill_path)
+        self.shell = ShellTools(cwd=str(skill_path))
         super().__init__()
 
     @property
@@ -370,52 +390,3 @@ class _GeneratedTextSkill(Skill):
             await self.shell.close()
         finally:
             super().detach()
-
-
-def _load_text_skill(*, path: Path | str, id: str | None = None) -> Skill:
-    """Construct a normal Skill object from a SKILL.md directory."""
-    from nooa.tools.shell_tools import ShellTools
-
-    skill_path = Path(path).resolve()
-    skill_id, description, body = _parse_skill_md(skill_path)
-    docstring = f"{description}\n---\n{body}"
-    class_name = "".join(word.capitalize() for word in skill_id.split("-"))
-    generated_class = type(
-        class_name,
-        (_GeneratedTextSkill,),
-        {
-            "__doc__": docstring,
-            "__module__": __name__,
-            "__annotations__": {
-                "shell": ShellTools,
-                "files": list[SkillFile],
-            },
-        },
-    )
-    return generated_class(
-        path=skill_path,
-        skill_id=id or skill_id,
-        description=description,
-    )
-
-
-class TextSkill(Skill):
-    """Compatibility factory for loading a SKILL.md directory as a normal Skill.
-
-    The returned object is a generated ``Skill`` with documentation from
-    ``SKILL.md``, a ``shell`` whose working directory is the skill root, and a
-    ``files`` manifest.
-    ``TextSkill`` remains importable so existing construction sites continue
-    to work, but the returned object has no text-skill-specific tool methods.
-    """
-
-    def __new__(cls, *, path: Path | str, id: str | None = None) -> Skill:
-        if cls is not TextSkill:
-            return super().__new__(cls)
-        return _load_text_skill(path=path, id=id)
-
-    def __init__(self, *, path: Path | str, id: str | None = None) -> None:
-        # ``__new__`` returns a generated Skill, so this initializer is skipped
-        # for normal TextSkill(...) calls. Keep the signature for introspection
-        # and fail clearly for unsupported TextSkill subclassing.
-        raise TypeError("TextSkill is a compatibility factory and cannot be subclassed")
