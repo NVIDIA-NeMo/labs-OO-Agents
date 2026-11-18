@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import contextlib
 import copy
 import inspect
 import json
@@ -26,6 +27,7 @@ from nooa.llm_types import (
     LLMUsage,
     ToolCall,
 )
+from nooa.snapshot import cut, render_output
 from nooa.unifiedllm.cache_policy import (
     add_session_affinity_header,
     apply_cache_policy,
@@ -35,11 +37,21 @@ from nooa.unifiedllm.cache_policy import (
     wrap_responses_text,
 )
 from nooa.unifiedllm.media_inputs import (
+    _CONTEXT_LENGTH_RE,
+    INPUT_AUDIO_FORMATS,
     MediaInput,
+    _error_param,
+    _error_texts,
+    _http_status,
+    _param_kind,
+    _param_names_other_field,
     attachment_kind,
-    explicitly_rejected,
     filter_media_messages,
+    image_limit,
     media_occurrences,
+    rejected_media_kinds,
+    sent_media_kinds,
+    unsendable_occurrences,
     validate_media_inputs,
 )
 
@@ -49,7 +61,7 @@ from .errors import EmptyContentError
 from .http_config import HttpConfig
 from .limits import REPLY_CAP_KEYS, ContextLimits
 from .reasoning import ReasoningConfig, apply_reasoning_level
-from .retry import sync_retry, with_retry
+from .retry import _is_retryable_error, sync_retry, with_retry
 from .retry_config import RetryConfig
 from .structured_output import (
     StructuredOutputMode,
@@ -58,6 +70,69 @@ from .structured_output import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Most requests media recovery adds after a failed request (``_media_search``).
+_MEDIA_RECOVERY_LIMIT = 12
+# Set while a media recovery request runs (the probe and every search
+# request): it gets no endpoint retries, so the recovery budget counts
+# endpoint requests.
+_media_probe: ContextVar[bool] = ContextVar("media_probe", default=False)
+# The whole exclusion set a media recovery request sends (the search's frozen
+# baseline plus its trial set), local to that request; None outside recovery,
+# where the connection's committed set applies. A concurrent call on the same
+# client keeps its attachments.
+_media_trial: ContextVar[frozenset | None] = ContextVar("media_trial", default=None)
+
+
+def _error_preview(exc: BaseException) -> str:
+    """``str(exc)`` shortened for a log line by ``nooa.snapshot``."""
+    return render_output(cut(str(exc), head=300, tail=100))
+
+
+# Errors the general media fallback never probes: the request as a whole is
+# wrong, and a shorter request without media could succeed by chance.
+_NOT_MEDIA_RE = re.compile(
+    r"content[ _-]?(?:policy|filter|management)|\bsafety\b|\bflagged\b|\bmoderation\b"
+    r"|responsible ai|\btools?\s*[\[.]|\btool[_ ]choice\b|\bfunctions?\s*[\[.]"
+    r"|\btool[_ ](?:use|result|call)s?\b|\btool[_ ](?:use_|call_)?ids?\b|\btool_use_id\b"
+    r"|\broles? must alternate\b|\bmax_(?:completion_|output_)?tokens\b|\bcompletion tokens\b"
+    r"|\btemperature\b|\btop_[pk]\b|\bextra inputs\b|\bmodel[ _]id\b|\binvalid model\b"
+    r"|\bfunction declarations?\b|\bschema\b|response_format"
+    r"|\bapi[_ ]key\b|authenticat|unauthori[sz]ed"
+    r"|permission|model (?:not found|does not exist)|\bno such model\b|unknown model"
+)
+
+
+def _media_fallback_eligible(exc: BaseException) -> bool:
+    """True if a failed request may be probed once without its media (general fallback).
+
+    Only a non-transient refusal of the request (HTTP 400, 415 or 422)
+    counts. Never a 413 (it counts only with media wording, as a rejection:
+    ``rejected_media_kinds``), a 429, a timeout, a network error or a 5xx
+    (the retry layer handles those), and never an error about
+    authentication, the model, the context length, the per-request image
+    limit, a content policy, the tools (tool_use/tool_result ids, roles that
+    must alternate), sampling or token parameters, a function declaration or
+    a schema: removing media would only hide such an error. A structured
+    ``param`` that names no media part (``tools[0].function.parameters``)
+    rules the fallback out.
+    """
+    if _http_status(exc) not in {400, 415, 422}:
+        return False
+    names = {cls.__name__ for cls in type(exc).__mro__}
+    if names & {"ContextWindowExceededError", "ContentPolicyViolationError", "AdmissionError"}:
+        return False
+    if image_limit(exc) is not None:
+        return False
+    text = _error_texts(exc)
+    param = _error_param(exc)
+    if param and (_param_names_other_field(param) or _param_kind(param) is None):
+        return False  # the provider named another parameter (model, temperature, tools, ...)
+    named = re.search(r"\binvalid (?:value|type) for ['\"`]?([\w.\[\]]+)", text)
+    if named and _param_kind(named.group(1)) is None:
+        return False  # "Invalid value for 'temperature'": not an attachment
+    return not (_CONTEXT_LENGTH_RE.search(text) or _NOT_MEDIA_RE.search(text))
+
 
 # Bedrock/Anthropic reject requests where messages contain tool_call blocks but
 # no tools= param is passed (e.g. PredictStrategy after a CodeAct turn).
@@ -1288,6 +1363,8 @@ class UnifiedLLM(ABC):
         # Attachment occurrences the current connection rejected; reset when
         # a request goes to another model or endpoint.
         self._media_exclusions: tuple[tuple[Any, ...] | None, set[Any]] = (None, set())
+        # Attachment occurrences already counted as media_unsendable.
+        self._unsendable_reported: set[Any] = set()
         self.model = model
         self.config = config
         self._context_window = context_window
@@ -1365,12 +1442,62 @@ class UnifiedLLM(ABC):
             return ()
         return validate_media_inputs(self.media_inputs)
 
+    def _input_audio_formats(self, call_config) -> frozenset[str] | None:
+        """The audio formats this request's route accepts inline, or None for no limit.
+
+        Routes that send audio as OpenAI ``input_audio`` (OpenAI, Azure and
+        hosted OpenAI-compatible chat endpoints) take only WAV and MP3. Other
+        routes (Gemini, Vertex AI, ...) get their audio blocks unchanged; the
+        adapter decides. URL audio is never sent on any route.
+        """
+        try:
+            _, provider, _, _ = litellm.get_llm_provider(
+                model=self._effective_model(call_config),
+                custom_llm_provider=call_config.get("custom_llm_provider"),
+                api_base=call_config.get("api_base") or call_config.get("base_url"),
+            )
+        except Exception:
+            return None  # LiteLLM cannot route it: not an OpenAI input_audio route either
+        if provider in {"openai", "azure", "text-completion-openai"} or provider in getattr(
+            litellm, "openai_compatible_providers", []
+        ):
+            return INPUT_AUDIO_FORMATS
+        return None
+
     def _prepare_media_messages(self, messages, call_config):
         enabled = self._request_media_inputs(call_config)
+        audio_formats = self._input_audio_formats(call_config) if "audio" in enabled else None
+        self._record_unsendable_media(messages, enabled, audio_formats)
         # Media the interface cannot send is rejected after projection, by
         # _validate_implemented_media: only the projected request also shows the
         # native content of replayed assistant turns.
-        return filter_media_messages(messages, enabled, self._rejected_media(call_config))
+        # The connection's committed exclusions, or for a media recovery
+        # attempt the exclusions it tries: the search's frozen baseline plus its
+        # trial set (see _media_attempt), never what another call commits meanwhile.
+        trial = _media_trial.get()
+        excluded = self._rejected_media(call_config) if trial is None else trial
+        # The retry layer reads which kinds this request really sends.
+        sent = media_occurrences(messages, enabled, audio_formats)
+        sent_media_kinds.set(frozenset(kind for kind, key in sent if key not in excluded))
+        return filter_media_messages(messages, enabled, excluded, audio_formats)
+
+    def _record_unsendable_media(
+        self, messages, enabled, audio_formats=INPUT_AUDIO_FORMATS
+    ) -> None:
+        """Count ``media_unsendable`` once per attachment the filter replaces before sending.
+
+        The filter runs on every request and history repeats, so each
+        occurrence (``unsendable_occurrences`` key) is counted once per client.
+        """
+        if not enabled:
+            return
+        reported = self._unsendable_reported
+        for reason, key in unsendable_occurrences(messages, enabled, audio_formats):
+            if key not in reported:
+                if len(reported) >= 10_000:
+                    reported.clear()  # bounded; a recount after this many is harmless
+                reported.add(key)
+                _record_llm_metric("media_unsendable", reason)
 
     def _rejected_media(self, call_config: dict[str, Any]) -> set[Any]:
         """Rejected attachment occurrences of this request's connection only."""
@@ -1387,62 +1514,321 @@ class UnifiedLLM(ABC):
             self._media_exclusions = exclusions
         return exclusions[1]
 
-    def _exclude_rejected_media(
-        self, messages, kwargs: dict[str, Any], exc: Exception, staged: list[tuple[set, Any]]
-    ) -> bool:
-        """Exclude sent attachments the provider explicitly rejected, for a retry.
+    def _media_recovery(self, messages, kwargs: dict[str, Any], exc: Exception):
+        """Plan the recovery of a request that failed because of an attachment, or None.
 
-        The first exclusion of a request takes the newest sent attachment: the
-        only one when the request carries one, and usually the one just added.
-        A provider rarely says which one it could not read, so if the retry is
-        rejected too, the next one excludes every remaining attachment of that
-        kind at once. Each exclusion is appended to ``staged``; the caller
-        drops them all again unless the request finally succeeds, so a request
-        that still fails never leaves good attachments replaced by a note.
-
-        True means the request changed and may be retried; a generic error, or
-        one with nothing left to exclude, returns False.
+        Returns a ``_media_search`` generator (driven by ``call``/``acall``),
+        or None when there is nothing to recover: media recovery is disabled
+        (``max_retries=0``), the request sends no attachment that is not
+        already excluded, or ``exc`` is neither a media rejection
+        (``rejected_media_kinds``) nor eligible for the general fallback
+        (``_media_fallback_eligible``).
         """
+        budget = self._media_recovery_attempts()
+        if budget <= 0:
+            return None
         try:
             call_config = self._prepare_call_config(kwargs)
         except Exception:
-            return False  # The request itself is invalid; re-raise the original error.
+            return None  # The request itself is invalid; re-raise the original error.
         rejected = self._rejected_media(call_config)
-        sent = media_occurrences(messages, self._request_media_inputs(call_config))
-        candidates = [
-            (kind, key)
-            for kind, key in reversed(sent)
-            if key not in rejected and explicitly_rejected(exc, kind)
-        ]
-        if not candidates:
-            return False
-        if staged:  # the newest was not it: the provider did not say which one
-            kind = candidates[0][0]
-            chosen = [(k, key) for k, key in candidates if k == kind]
+        enabled = self._request_media_inputs(call_config)
+        audio_formats = self._input_audio_formats(call_config) if "audio" in enabled else None
+        sent = media_occurrences(messages, enabled, audio_formats)
+        newest_first = [(kind, key) for kind, key in reversed(sent) if key not in rejected]
+        kinds = rejected_media_kinds(exc)
+        if kinds:
+            candidates = [(kind, key) for kind, key in newest_first if kind in kinds]
+            mode = "rejected"
+        elif newest_first and _media_fallback_eligible(exc):
+            candidates = newest_first
+            mode = "fallback"
         else:
-            chosen = candidates[:1]
-        for kind, key in chosen:
-            rejected.add(key)
-            staged.append((rejected, key))
-            _record_llm_metric("media_rejected_retry", kind)
-        logger.warning(
-            "Provider rejected an attached %s; retrying with a note in place of %d: %s",
-            chosen[0][0],
-            len(chosen),
-            str(exc)[:300],
+            return None
+        if not candidates:
+            return None
+        return self._media_search(
+            candidates, exc, mode, rejected, budget, newest_first, baseline=frozenset(rejected)
         )
-        return True
+
+    def _media_search(
+        self,
+        candidates,
+        original: Exception,
+        mode: str,
+        rejected: set,
+        budget: int,
+        available=(),
+        *,
+        baseline: frozenset = frozenset(),
+    ):
+        """Find the fewest attachments to exclude for the request to succeed.
+
+        A generator: it yields the ``excluded_keys`` of each request to try
+        (sent by ``_media_attempt``, without endpoint retries) and is sent
+        back ``(response, error)``. It returns the response of
+        the final request, or raises (the original error when the search
+        fails), so a failed search changes nothing.
+
+        ``candidates`` are the suspected attachment occurrences, newest first.
+        Excluding a set S is assumed to succeed exactly when S holds every bad
+        attachment. Each round first tries the newest candidate alone (it is
+        usually the one just added), then halves the remaining candidates
+        (bisect) to find the newest one that must go; the older ones are
+        cleared. The next round tries the attachments found so far; if that
+        still fails it searches the remaining newer candidates the same way.
+        One bad attachment among N costs about log2(N) + 2 requests.
+
+        ``available`` holds every attachment the request sends (newest
+        first). If a search request fails with a rejection of a kind not yet
+        searched (a bad image and a bad PDF), the attachments of that kind
+        join the pool and the round starts again, within the same budget.
+
+        ``mode="fallback"`` (no narrow rule matched) first sends one probe
+        with every candidate excluded; its reply is stored and returned only if
+        the search ends on that same set. If that probe fails too, the media is
+        not the problem: the original error is raised and nothing changes (a
+        persistent ordinary 400 costs one extra request). No exclusion set is
+        sent twice: each outcome is stored and reused.
+
+        Only a 4xx that names a media kind (or a local adapter error) is
+        definitive. Otherwise (a fallback, a media-worded 5xx) the first
+        failure may have been a one-off, so a found set is confirmed before
+        it is kept: the original request is re-sent unchanged once. If that
+        succeeds, its reply is returned and nothing is excluded; if it fails
+        again as a media error, the exclusions are kept and the stored reply
+        of the found set is returned. The search leaves one request of the
+        budget for this confirmation.
+
+        At most ``budget`` requests are made after the original one, counted
+        as endpoint requests (``media_recovery_probes``): a recovery request
+        gets no endpoint or SDK retries, and a retryable error (a plain 5xx, a
+        429) re-sends the same request from this budget. Only the
+        exclusions of a final request that succeeded are kept (added to
+        ``rejected``, the connection's set) and counted as
+        ``media_rejected_retry``; the reply of that final request is returned.
+
+        ``baseline`` is the connection's committed exclusions when the search
+        started. Every request of the search sends ``baseline`` plus its trial
+        set, even if a concurrent call commits more exclusions meanwhile, so
+        all stored outcomes describe the same baseline. At the end only the
+        attachments this search found are added to the live ``rejected`` set.
+
+        A media-worded error of a search request counts as a rejection only
+        if that request still sent media of the refused kind (the rule of
+        the endpoint retry layer, ``retry.py``): a 500 "Could not process
+        image" on a request whose images are all replaced by notes is the
+        server's problem and is retried like any retryable error.
+        """
+        keys = [key for _, key in candidates]
+        available = available or candidates
+        kinds = {key: kind for kind, key in available}
+        searched_kinds = {kind for kind, _ in candidates}
+        widened: list[Any] = []  # set by attempt() when the pool grew
+        config = self.retry_config or RetryConfig()
+
+        def _retryable(err: BaseException, excluded: frozenset) -> bool:
+            return not still_media(err, excluded) and _is_retryable_error(err, config)[0]
+
+        used = 0
+        # The outcome of every request sent, by its exclusion set.
+        replies: dict[frozenset, Any] = {}
+        failures: dict[frozenset, BaseException] = {frozenset(): original}
+
+        def still_media(err: BaseException, excluded: frozenset) -> bool:
+            # ``excluded``: the trial set of the request that failed with ``err``.
+            if mode == "rejected":
+                refused = rejected_media_kinds(err)
+                status = _http_status(err)
+                if refused and status is not None and status >= 500:
+                    # Like retry.py: a 5xx counts only if this request sent that kind.
+                    sent = {kind for key, kind in kinds.items() if key not in excluded}
+                    return bool(refused & sent)
+                return bool(refused)
+            return _media_fallback_eligible(err) and _http_status(err) == _http_status(original)
+
+        status = _http_status(original)
+        # Only a 4xx naming a media kind (or a local adapter error) is
+        # definitive; anything else may be a one-off and is confirmed by
+        # re-sending the original once before exclusions are kept.
+        confirm = mode == "fallback" or (status is not None and status >= 500)
+        limit = budget - 1 if confirm else budget  # keep one request for the confirmation
+
+        if mode == "fallback":
+            # The error names no attachment: probe once with every candidate
+            # excluded (no endpoint retries). If that fails too, the media is
+            # not the problem: raise the original, one extra request in all.
+            if used + 1 > limit:
+                raise original
+            used += 1
+            _record_llm_metric("media_recovery_probe", "fallback")
+            logger.warning(
+                "Request failed (%s); probing once with every attachment replaced by a note: %s",
+                type(original).__name__,
+                _error_preview(original),
+            )
+            response, error = yield baseline | frozenset(keys)
+            if error is None:
+                replies[frozenset(keys)] = response  # a valid reply to exactly this request
+            else:
+                logger.warning(
+                    "The probe without attachments failed too; giving up: %s",
+                    _error_preview(error),
+                )
+                raise original
+            logger.warning(
+                "The probe without attachments succeeded; searching for the bad attachment(s)"
+            )
+
+        def attempt(excluded):
+            # A helper generator for one request of the search: (ok, error).
+            nonlocal used
+            excluded = frozenset(excluded)
+            # Never send the same request twice: reuse its stored outcome.
+            if excluded in replies:
+                return True, None
+            if excluded in failures:
+                return False, failures[excluded]
+            if used >= limit:
+                logger.warning(
+                    "Media recovery stopped after %d requests without finding the attachment(s)",
+                    used,
+                )
+                raise original
+            used += 1
+            _record_llm_metric("media_recovery_probe", mode)
+            response, error = yield baseline | excluded
+            while error is not None and _retryable(error, excluded) and used < limit:
+                used += 1  # an endpoint retry of the same request, from the budget
+                _record_llm_metric("media_recovery_probe", mode)
+                response, error = yield baseline | excluded
+            if error is None:
+                replies[excluded] = response
+                return True, None
+            if not still_media(error, excluded):
+                raise error
+            failures[excluded] = error
+            if mode == "rejected" and (new := rejected_media_kinds(error) - searched_kinds):
+                # The request now fails on another kind (a bad image and a bad
+                # PDF): add those attachments to the pool, within the budget.
+                searched_kinds.update(new)
+                pool.extend(key for kind, key in available if kind in new and key not in pool)
+                widened.append(new)
+            return False, error
+
+        found: list[Any] = []
+        pool = list(keys)
+        top_ok = mode == "fallback"  # excluding every candidate is known to succeed
+        while True:
+            widened.clear()
+            if found:
+                ok, _ = yield from attempt(found)
+                if ok:
+                    break
+                if widened:
+                    top_ok = False
+                    continue
+            if not pool:
+                raise original
+            low, high = 0, len(pool)  # excluding pool[:low] fails
+            ok, _ = yield from attempt([*found, pool[0]])
+            if widened:
+                top_ok = False
+                continue  # another kind is refused too: search the larger pool
+            if ok:
+                high = 1
+            elif high > 1 and not top_ok:
+                ok, _ = yield from attempt([*found, *pool])
+                if widened:
+                    continue
+                if not ok:
+                    raise original  # even without all of them it fails: not these attachments
+            if high > 1:
+                low = 1
+            while high - low > 1:
+                mid = (low + high) // 2
+                ok, _ = yield from attempt([*found, *pool[:mid]])
+                if widened:
+                    break
+                if ok:
+                    high = mid
+                else:
+                    low = mid
+            if widened:
+                top_ok = False
+                continue
+            found.append(pool[high - 1])
+            pool = pool[: high - 1]  # older candidates are fine
+            top_ok = True
+        final = frozenset(found)
+        if confirm:
+            # The first failure may have been a one-off: re-send the original
+            # unchanged once (no endpoint retries) before keeping anything.
+            used += 1
+            _record_llm_metric("media_recovery_probe", "confirm")
+            response, error = yield baseline
+            if error is None:
+                logger.warning(
+                    "Request failed once (%s) and succeeded when re-sent; nothing excluded",
+                    type(original).__name__,
+                )
+                return response
+            if not still_media(error, frozenset()):
+                # Not the same failure again: the found set's reply is valid,
+                # but nothing proves the attachments are bad, so keep none.
+                logger.warning(
+                    "Confirmation request failed differently (%s); nothing excluded",
+                    type(error).__name__,
+                )
+                return replies[final]
+        for key in found:
+            rejected.add(key)
+            _record_llm_metric("media_rejected_retry", kinds[key])
+        logger.warning(
+            "Provider %s; kept %d attachment(s) replaced by a note (%s) after %d request(s): %s",
+            "rejected an attachment" if mode == "rejected" else "request failed with attachments",
+            len(found),
+            ", ".join(kinds[key] for key in found),
+            used,
+            _error_preview(original),
+        )
+        return replies[final]
 
     def _media_recovery_attempts(self) -> int:
-        # Shares the endpoint retry budget: max_retries=0 (e.g. a connect
-        # probe, which must see the provider's own answer) disables it.
-        return max(0, self.retry_config.max_retries) if self.retry_config else 0
+        """The most requests media recovery may add after a failed request.
+
+        Scales with the endpoint retry budget, capped by
+        ``_MEDIA_RECOVERY_LIMIT``: ``max_retries=0`` (e.g. a connect probe,
+        which must see the provider's own answer) disables it.
+        """
+        retries = max(0, self.retry_config.max_retries) if self.retry_config else 0
+        return min(_MEDIA_RECOVERY_LIMIT, 4 * retries)
+
+    def _endpoint_retry_config(self) -> RetryConfig | None:
+        """The endpoint retry config of this request: no retries for a media recovery request."""
+        if self.retry_config is not None and _media_probe.get():
+            return self.retry_config.model_copy(
+                update={"max_retries": 0, "rate_limit_extra_retries": 0}
+            )
+        return self.retry_config
 
     @staticmethod
-    def _unstage_media(staged: list[tuple[set, Any]]) -> None:
-        """The request still failed: its exclusions were not the fix, so undo them."""
-        for rejected, key in staged:
-            rejected.discard(key)
+    @contextlib.contextmanager
+    def _media_attempt(excluded: frozenset):
+        """Send one recovery request with ``excluded`` replaced by notes, without endpoint retries.
+
+        The trial exclusions live in a ContextVar for this request only; the
+        connection's ``rejected`` set changes only when ``_media_search``
+        commits a successful recovery. No endpoint retries: each recovery
+        request is one endpoint request, which the recovery budget counts.
+        """
+        trial = _media_trial.set(frozenset(excluded))
+        token = _media_probe.set(True)
+        try:
+            yield
+        finally:
+            _media_probe.reset(token)
+            _media_trial.reset(trial)
 
     def _validate_implemented_media(self, messages, call_config):
         from nooa.media_policy import reject_unsupported_media
@@ -1753,26 +2139,37 @@ class UnifiedLLM(ABC):
         5. Returns everything in standardized LLMResponse
 
         Pass prior LLMResponse objects directly in messages to retain compatible state.
-        An attachment the provider explicitly rejects is retried as a note
-        (``_exclude_rejected_media``); each request is one ``_call_once``.
+        An attachment the provider explicitly rejects is retried as a note, and
+        a request that fails for an unnamed reason while carrying media gets one
+        probe without it (``_media_recovery``, ``_media_search``); each request
+        is one ``_call_once``.
 
         Raises:
         - ValidationError: if output_model validation fails
         - json.JSONDecodeError: if JSON parsing fails
         - Other exceptions for API errors
         """
-        staged: list[tuple[set, Any]] = []
+        token = sent_media_kinds.set(frozenset())  # this call's own; see retry.py
         try:
-            for _ in range(self._media_recovery_attempts()):
+            try:
+                return self._call_once(messages, tools, output_model, **kwargs)
+            except Exception as exc:
+                search = self._media_recovery(messages, kwargs, exc)
+                if search is None:
+                    raise
+            outcome = None
+            while True:
                 try:
-                    return self._call_once(messages, tools, output_model, **kwargs)
-                except Exception as exc:
-                    if not self._exclude_rejected_media(messages, kwargs, exc, staged):
-                        raise
-            return self._call_once(messages, tools, output_model, **kwargs)
-        except BaseException:
-            self._unstage_media(staged)
-            raise
+                    excluded = search.send(outcome)
+                except StopIteration as done:
+                    return done.value
+                try:
+                    with self._media_attempt(excluded):
+                        outcome = (self._call_once(messages, tools, output_model, **kwargs), None)
+                except Exception as error:
+                    outcome = (None, error)
+        finally:
+            sent_media_kinds.reset(token)
 
     async def acall(
         self,
@@ -1782,18 +2179,30 @@ class UnifiedLLM(ABC):
         **kwargs,
     ) -> LLMResponse:
         """Async version of call"""
-        staged: list[tuple[set, Any]] = []
+        token = sent_media_kinds.set(frozenset())  # this call's own; see retry.py
         try:
-            for _ in range(self._media_recovery_attempts()):
+            try:
+                return await self._acall_once(messages, tools, output_model, **kwargs)
+            except Exception as exc:
+                search = self._media_recovery(messages, kwargs, exc)
+                if search is None:
+                    raise
+            outcome = None
+            while True:
                 try:
-                    return await self._acall_once(messages, tools, output_model, **kwargs)
-                except Exception as exc:
-                    if not self._exclude_rejected_media(messages, kwargs, exc, staged):
-                        raise
-            return await self._acall_once(messages, tools, output_model, **kwargs)
-        except BaseException:
-            self._unstage_media(staged)
-            raise
+                    excluded = search.send(outcome)
+                except StopIteration as done:
+                    return done.value
+                try:
+                    with self._media_attempt(excluded):
+                        outcome = (
+                            await self._acall_once(messages, tools, output_model, **kwargs),
+                            None,
+                        )
+                except Exception as error:
+                    outcome = (None, error)
+        finally:
+            sent_media_kinds.reset(token)
 
     @abstractmethod
     def _call_once(
@@ -2672,8 +3081,11 @@ class CompletionClient(UnifiedLLM):
         add_session_affinity_header(api_params)
         # RetryConfig owns endpoint retries. LiteLLM otherwise has the OpenAI SDK
         # retry each attempt twice more, tripling the configured budget. An
-        # explicit max_retries passthrough still opts into SDK retries.
+        # explicit max_retries passthrough still opts into SDK retries, except
+        # for a media recovery request: the recovery budget counts real requests.
         api_params.setdefault("max_retries", 0)
+        if _media_probe.get():
+            api_params["max_retries"] = 0
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
@@ -2705,7 +3117,7 @@ class CompletionClient(UnifiedLLM):
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
         with _track_llm_call(model=effective_model, endpoint=self.config.get("api_base")):
             raw_response = (
-                sync_retry(_make_call, config=self.retry_config)
+                sync_retry(_make_call, config=self._endpoint_retry_config())
                 if self.retry_config
                 else _make_call()
             )
@@ -2793,8 +3205,11 @@ class CompletionClient(UnifiedLLM):
         add_session_affinity_header(api_params)
         # RetryConfig owns endpoint retries. LiteLLM otherwise has the OpenAI SDK
         # retry each attempt twice more, tripling the configured budget. An
-        # explicit max_retries passthrough still opts into SDK retries.
+        # explicit max_retries passthrough still opts into SDK retries, except
+        # for a media recovery request: the recovery budget counts real requests.
         api_params.setdefault("max_retries", 0)
+        if _media_probe.get():
+            api_params["max_retries"] = 0
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
@@ -2832,7 +3247,7 @@ class CompletionClient(UnifiedLLM):
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
         with _track_llm_call(model=effective_model, endpoint=self.config.get("api_base")):
             raw_response = (
-                await with_retry(_make_call, config=self.retry_config)
+                await with_retry(_make_call, config=self._endpoint_retry_config())
                 if self.retry_config
                 else await _make_call()
             )
@@ -3100,6 +3515,10 @@ class ResponsesClient(UnifiedLLM):
         assert http_client is not None
         if http_client.sync_client is not None:
             api_params.setdefault("client", http_client.sync_client)
+        if _media_probe.get() and "max_retries" in api_params:
+            api_params["max_retries"] = 0  # a media recovery request: no SDK retries
+        if _media_probe.get() and "client" in api_params:
+            api_params["client"] = _with_sdk_retries(api_params["client"], 0)
 
         def _make_call():
             return cast("litellm.ResponsesAPIResponse", litellm.responses(**api_params))
@@ -3107,7 +3526,7 @@ class ResponsesClient(UnifiedLLM):
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
         with _track_llm_call(model=effective_model, endpoint=self.config.get("api_base")):
             raw_response = (
-                sync_retry(_make_call, config=self.retry_config)
+                sync_retry(_make_call, config=self._endpoint_retry_config())
                 if self.retry_config
                 else _make_call()
             )
@@ -3189,6 +3608,10 @@ class ResponsesClient(UnifiedLLM):
         assert http_client is not None
         if http_client.async_client is not None:
             api_params.setdefault("client", http_client.async_client)
+        if _media_probe.get() and "max_retries" in api_params:
+            api_params["max_retries"] = 0  # a media recovery request: no SDK retries
+        if _media_probe.get() and "client" in api_params:
+            api_params["client"] = _with_sdk_retries(api_params["client"], 0)
 
         async def _make_call():
             async def call_provider():
@@ -3202,7 +3625,7 @@ class ResponsesClient(UnifiedLLM):
         # Track LLM call for debugging (visible via SIGUSR2 if nooa debug handler installed)
         with _track_llm_call(model=effective_model, endpoint=self.config.get("api_base")):
             raw_response = (
-                await with_retry(_make_call, config=self.retry_config)
+                await with_retry(_make_call, config=self._endpoint_retry_config())
                 if self.retry_config
                 else await _make_call()
             )

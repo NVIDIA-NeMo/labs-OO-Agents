@@ -143,13 +143,24 @@ async def test_newest_attachment_goes_first_then_history_media():
     history = {"role": "user", "content": [OTHER]}
     fresh = {"role": "user", "content": [IMAGE]}
     messages = [history, {"role": "assistant", "content": "seen"}, fresh]
+
+    def wire_reply(**kwargs):
+        sent = [
+            b for m in kwargs["messages"] if isinstance(m["content"], list) for b in m["content"]
+        ]
+        if OTHER in sent:  # the history image is the bad one
+            raise bad_request(BEDROCK)
+        return ok(False)
+
     with CompletionClient("openai/test", media_inputs=["image"], cache_breakpoint=None) as client:
         with patch("litellm.acompletion", new_callable=AsyncMock) as wire:
-            wire.side_effect = [bad_request(BEDROCK), bad_request(BEDROCK), ok(False)]
+            wire.side_effect = wire_reply
             await client.acall(messages)
             sent = [call.kwargs["messages"] for call in wire.call_args_list]
-            assert [len(images(m[0]["content"] + m[2]["content"])) for m in sent] == [2, 1, 0]
+            # original, newest excluded, all excluded, then only the history image excluded
+            assert [len(images(m[0]["content"] + m[2]["content"])) for m in sent] == [2, 1, 0, 1]
             assert images(sent[1][0]["content"]) == [OTHER]  # the newest went first
+            assert images(sent[-1][2]["content"]) == [IMAGE]  # the good new image is kept
 
 
 async def test_exclusion_is_cleared_when_the_connection_changes():
@@ -197,19 +208,21 @@ async def test_an_unnamed_bad_older_image_never_costs_good_images_on_failure(max
         with patch("litellm.acompletion", new_callable=AsyncMock) as wire:
             wire.side_effect = wire_reply
             if max_retries == 1:
-                # One retry (the newest image) is not enough: the request fails
-                # and no good image stays replaced for later requests.
+                # A budget of 4 recovery requests is not enough to find the
+                # oldest of six: the request fails and no good image stays
+                # replaced for later requests.
                 with pytest.raises(litellm.BadRequestError):
                     await client.acall(messages)
-                assert wire.call_count == 2
+                assert wire.call_count == 5
                 view = client._prepare_media_messages(messages, client._prepare_call_config({}))
                 assert NOTE not in texts([b for m in view for b in m["content"]])
             else:
-                # Newest first, then every remaining image at once: it succeeds.
+                # Newest first, then all, then bisect: only the bad image goes.
                 assert (await client.acall(messages)).content == "UNREADABLE"
                 sent = [sent_blocks(call, False) for call in wire.call_args_list]
-                assert [len(images(blocks)) for blocks in sent] == [6, 5, 0]
-                assert texts(sent[-1]).count(NOTE) == 6
+                assert [len(images(blocks)) for blocks in sent] == [6, 5, 0, 3, 2, 1, 5]
+                assert texts(sent[-1]).count(NOTE) == 1
+                assert bad not in sent[-1] and all(g in sent[-1] for g in good)
 
 
 def test_a_still_failing_sync_request_undoes_its_exclusions():
@@ -250,7 +263,9 @@ def test_unsupported_format_500_is_an_explicit_rejection():
 
 
 def test_other_500s_are_not_media_rejections():
-    assert not explicitly_rejected(server_error("Could not process image"), "image")
+    # #597: a media-worded 500 ("Could not process image") is a rejection now;
+    # a plain 500 is not.
+    assert explicitly_rejected(server_error("Could not process image"), "image")
     assert not explicitly_rejected(server_error("Internal server error"), "image")
 
 
@@ -265,6 +280,16 @@ def test_the_500_gate_reads_the_structured_error_message():
     pdf = "Unsupported document format: docx. Supported formats: ['pdf']"
     assert explicitly_rejected(server_error(pdf), "pdf")
     assert explicitly_rejected(server_error("unsupported pdf type 'application/x-pdf'"), "pdf")
+
+
+def test_an_unsupported_file_format_500_is_not_a_pdf_rejection():
+    # "file" in a 500 is usually the server's own file (model weights), not a PDF.
+    text = "Unsupported file format: safetensors"
+    assert not explicitly_rejected(server_error(text), "pdf")
+    assert not explicitly_rejected(server_error_with_body(text), "pdf")
+    assert not explicitly_rejected(server_error("Unsupported document type: 'x'"), "pdf")
+    # A 400 is about the request, so the broad wording still counts there.
+    assert explicitly_rejected(bad_request(text), "pdf")
 
 
 def test_a_500_that_only_mentions_a_format_is_not_a_rejection():
@@ -285,7 +310,7 @@ def test_an_unsupported_format_500_is_not_retried_by_the_endpoint_retry_layer():
 
 @pytest.mark.parametrize("client_type", [CompletionClient, ResponsesClient])
 @pytest.mark.parametrize("asynchronous", [False, True])
-async def test_unsupported_format_500_is_sent_twice_then_a_note(client_type, asynchronous):
+async def test_unsupported_format_500_is_confirmed_then_a_note(client_type, asynchronous):
     responses = client_type is ResponsesClient
     method = ("a" if asynchronous else "") + ("responses" if responses else "completion")
     messages = [{"role": "user", "content": [{"type": "text", "text": "Read this:"}, IMAGE]}]
@@ -308,9 +333,20 @@ async def test_unsupported_format_500_is_sent_twice_then_a_note(client_type, asy
                 assert (await client.acall(messages)).content == "UNREADABLE"
             else:
                 assert client.call(messages).content == "UNREADABLE"
-            assert wire.call_count == 2  # no unchanged resend of the refused image
-            last = sent_blocks(wire.call_args_list[-1], responses)
-            assert images(last) == [] and NOTE in texts(last)
+            # The request, the note (no endpoint retry of the refused image),
+            # then one confirmation: a 500 may be a one-off, so the original
+            # is re-sent once before the exclusion is kept.
+            assert wire.call_count == 3
+            first, note, confirm = (sent_blocks(c, responses) for c in wire.call_args_list)
+            assert images(first) and images(confirm)
+            assert images(note) == [] and NOTE in texts(note)
+            # Kept: the next call sends the note at once.
+            wire.reset_mock()
+            if asynchronous:
+                assert (await client.acall(messages)).content == "UNREADABLE"
+            else:
+                assert client.call(messages).content == "UNREADABLE"
+            assert wire.call_count == 1
 
 
 SVG = {"type": "image_url", "image_url": {"url": "data:image/svg+xml;base64,PHN2Zy8+"}}

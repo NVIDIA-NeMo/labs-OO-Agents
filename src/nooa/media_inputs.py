@@ -50,6 +50,34 @@ _KINDS: dict[str, Literal["image", "audio", "video", "file"]] = {
 }
 
 
+# MIME subtype (or a format name) -> the audio format name OpenAI-style
+# ``input_audio`` parts use. Only these two are accepted there.
+_AUDIO_FORMAT_NAMES = {
+    "mpeg": "mp3",
+    "mp3": "mp3",
+    "mpeg3": "mp3",
+    "x-mpeg-3": "mp3",
+    "x-mp3": "mp3",
+    "wav": "wav",
+    "x-wav": "wav",
+    "wave": "wav",
+    "vnd.wave": "wav",
+    "x-pn-wav": "wav",
+}
+INPUT_AUDIO_FORMATS = frozenset({"wav", "mp3"})
+
+
+def audio_format_name(media_type_or_format: str) -> str:
+    """The ``input_audio`` format name for a MIME type or format (``audio/mpeg`` -> ``mp3``).
+
+    ``audio/x-wav``, ``audio/wave`` and ``audio/vnd.wave`` are ``wav``. Other
+    subtypes are returned unchanged in lower case (``audio/mp4`` -> ``mp4``):
+    a MIME alias is not a codec conversion, so M4A is never relabelled as MP3.
+    """
+    subtype = media_type_or_format.split(";", 1)[0].strip().lower().rsplit("/", 1)[-1]
+    return _AUDIO_FORMAT_NAMES.get(subtype, subtype)
+
+
 def _mime_hints(block: Mapping[str, Any]) -> set[str]:
     # Compare ALL documented hints/data URLs: a PDF label must not hide a
     # conflicting Word data URL. Unknown bytes are never fetched or decoded.

@@ -7,6 +7,7 @@ became three HTTP requests. These tests count requests at the HTTP transport.
 """
 
 import asyncio
+import json
 from typing import Any
 
 import httpx
@@ -279,3 +280,81 @@ def test_sync_call_copies_caller_supplied_sdk_client(monkeypatch):
 
     assert attempts == 1
     assert supplied.max_retries == 2
+
+
+def _image_count(request: httpx.Request) -> int:
+    body = json.loads(request.content)
+    return sum(
+        1
+        for message in body["messages"]
+        if isinstance(message.get("content"), list)
+        for part in message["content"]
+        if part.get("type") == "image_url"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize("sdk_client", [False, True], ids=["owned-client", "caller-client"])
+async def test_media_recovery_requests_get_no_sdk_retries(monkeypatch, is_async, sdk_client):
+    """#597 re-review: an explicit SDK retry override must not multiply the recovery budget.
+
+    Every request body the endpoint has not seen three times gets a generic
+    500 first (so SDK retries would show up as extra requests); then it
+    rejects any request still carrying the bad image.
+    """
+    import openai
+
+    images = [
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,aW1n{i:04d}"}}
+        for i in range(8)
+    ]
+    bad = images[3]["image_url"]["url"]
+    seen: dict[bytes, int] = {}
+    counts: list[int] = []
+    first_rejection: list[int] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        counts.append(_image_count(request))
+        seen[request.content] = seen.get(request.content, 0) + 1
+        if seen[request.content] <= 3:
+            return httpx.Response(500, json={"error": {"message": "boom"}})
+        if bad in request.content.decode():
+            first_rejection.append(len(counts))
+            return httpx.Response(
+                400, json={"error": {"message": "Unsupported image format: svg+xml"}}
+            )
+        return httpx.Response(200, json=OK_BODY)
+
+    transport = httpx.MockTransport(respond)
+    _install(monkeypatch, transport)
+    config: dict[str, Any] = {"media_inputs": ["image"], "cache_breakpoint": None}
+    if sdk_client:
+        sdk_type = openai.AsyncOpenAI if is_async else openai.OpenAI
+        http_type = httpx.AsyncClient if is_async else httpx.Client
+        config["client"] = sdk_type(
+            api_key="key",
+            base_url="https://endpoint.example/v1",
+            http_client=http_type(transport=transport),
+            max_retries=3,
+        )
+    client = _client(1, **config)
+    budget = client._media_recovery_attempts()
+    messages = [{"role": "user", "content": images}]
+    try:
+        if is_async:
+            await client.acall(messages, max_retries=3)
+        else:
+            client.call(messages, max_retries=3)
+    except litellm.BadRequestError:
+        pass  # the budget may end before the search does; the bound is what matters
+    finally:
+        await client.aclose()
+
+    assert budget == 4
+    # The original request may use the caller's SDK retries (3 x 500, then the 400).
+    original = first_rejection[0]
+    assert counts[:original] == [8] * original
+    print("wire image counts:", counts)
+    assert len(counts) - original <= budget, counts
+    assert all(count < 8 for count in counts[original:])
