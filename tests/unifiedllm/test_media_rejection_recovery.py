@@ -282,6 +282,16 @@ def test_the_500_gate_reads_the_structured_error_message():
     assert explicitly_rejected(server_error("unsupported pdf type 'application/x-pdf'"), "pdf")
 
 
+def test_an_unsupported_file_format_500_is_not_a_pdf_rejection():
+    # "file" in a 500 is usually the server's own file (model weights), not a PDF.
+    text = "Unsupported file format: safetensors"
+    assert not explicitly_rejected(server_error(text), "pdf")
+    assert not explicitly_rejected(server_error_with_body(text), "pdf")
+    assert not explicitly_rejected(server_error("Unsupported document type: 'x'"), "pdf")
+    # A 400 is about the request, so the broad wording still counts there.
+    assert explicitly_rejected(bad_request(text), "pdf")
+
+
 def test_a_500_that_only_mentions_a_format_is_not_a_rejection():
     text = "Router misconfiguration: unsupported image format conversion plugin is unavailable"
     assert not explicitly_rejected(server_error(text), "image")

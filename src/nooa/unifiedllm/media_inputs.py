@@ -365,8 +365,24 @@ def _unsupported_format(exc, kind) -> bool:
     return _unsupported_format_text(_error_texts(exc), kind)
 
 
-def _unsupported_format_text(text: str, kind) -> bool:
+def _unsupported_format_text(text: str, kind, narrow: bool = False) -> bool:
+    """ "Unsupported <kind> format: X" (see ``_unsupported_format``).
+
+    ``narrow`` (HTTP 5xx): for a PDF the message must say "PDF". "Unsupported
+    file format: safetensors" is about the server's own files. A "file" or
+    "document" wording counts only when the supported formats it lists name
+    PDF (the Hub's "Unsupported document format: docx. Supported formats:
+    ['pdf']").
+    """
     noun = _FORMAT_NOUN.get(kind, "file")
+    if narrow and kind == "pdf":
+        if re.search(
+            r"\bunsupported (?:file|document) (?:format|type)s?\b[^\n]{0,120}?"
+            r"\b(?:supported|allowed|accepted) (?:formats|types)\b[^\n]{0,40}?\bpdf\b",
+            text,
+        ):
+            return True
+        noun = "pdf"
     return bool(
         re.search(
             rf"\bunsupported {noun} (?:format|type)s?"
@@ -601,8 +617,9 @@ def rejected_media_kinds(exc) -> frozenset[str]:
     - 413: only when the message says the attachment itself is too large.
     - 500: only wording that says the server could not read this attachment
       (unsupported format, "Could not process image", a size limit, a failed
-      image download). A PDF counts only when the message says "PDF": a 500
-      about "the file" or "the document" is usually the server's own file.
+      image download). A PDF counts only when the message says "PDF" (or an
+      unsupported-format message lists PDF among the supported formats): a
+      500 about "the file" or "the document" is usually the server's own file.
       Other 5xx statuses (502/503/504: gateways, outages) never count.
 
     Wording that sounds transient (a timeout, a connection reset, "unavailable",
@@ -664,7 +681,8 @@ def rejected_media_kinds(exc) -> frozenset[str]:
                 server
                 and (
                     # Names the refused format value: specific even as a 500.
-                    _unsupported_format_text(text, kind) or _processing_failed(text, kind, narrow)
+                    _unsupported_format_text(text, kind, narrow)
+                    or _processing_failed(text, kind, narrow)
                 )
             )
             or (server and kind == "image" and _fetch_failed(text))
