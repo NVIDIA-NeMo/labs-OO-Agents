@@ -253,7 +253,7 @@ def command(
         deferred_annotations: list[dict] = []
         batch = _TraceBatch()
 
-        with open(file) as f:
+        with open(file, encoding="utf-8") as f:
             for line_num, raw_line in enumerate(f, 1):
                 raw_line = raw_line.strip()
                 if not raw_line:

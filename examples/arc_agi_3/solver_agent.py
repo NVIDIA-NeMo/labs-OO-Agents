@@ -664,7 +664,7 @@ class ArcSolverBase(InteractiveAgent):
         install_summarizer(SummarizationConfig(), agent=self)
 
         if skill_path is not None:
-            self.context["arc_skill"] = Path(skill_path).read_text()
+            self.context["arc_skill"] = Path(skill_path).read_text(encoding="utf-8")
         self.context.set_dynamic("arc_game", "self.format_game_context()")
 
         # Step reasoning_effort down the ladder as a turn runs long (wraps

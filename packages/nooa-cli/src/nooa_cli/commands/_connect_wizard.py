@@ -2223,7 +2223,7 @@ def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
     same_previous_route = state.guided_reasoning_route in {None, route}
     levels = deepcopy(state.edited_level_patches) if same_previous_route else None
     if state.levels_file:
-        with Path(state.levels_file).open() as source:
+        with Path(state.levels_file).open(encoding="utf-8") as source:
             levels = yaml.safe_load(source)
     elif state.levels or state.reasoning_template:
         if not state.levels or not state.reasoning_template:
@@ -2516,7 +2516,7 @@ def configure_checks(state: WizardState) -> bool:
         if not state.levels_file:
             state.patches = {label: deepcopy(original_levels[label]) for label in labels}
     if state.levels_file:
-        with Path(state.levels_file).open() as source:
+        with Path(state.levels_file).open(encoding="utf-8") as source:
             state.patches = yaml.safe_load(source)
     if state.levels or state.reasoning_template:
         if not state.reasoning_template or not state.levels:

@@ -7,6 +7,10 @@ based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- `nooa-atom`: text files are now read and written as UTF-8 regardless of the
+  locale: the workspace settings file, `self.repo` search and file reads, and
+  the Shell's state files. Before, they used the locale default encoding.
+
 - `nooa-atom`: reflection. The `nemo.reflection` skill posts a housekeeping
   message on a root session's `system_messages` queue when one is due (20
   turns or 60 minutes since the last, or the context half full; at least 5

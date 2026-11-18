@@ -149,7 +149,7 @@ async def replay_from_file(
 
     # Read JSONL file
     entries = []
-    with open(error_file) as f:
+    with open(error_file, encoding="utf-8") as f:
         for line in f:
             if line.strip():
                 entries.append(json.loads(line))

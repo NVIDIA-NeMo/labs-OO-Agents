@@ -346,7 +346,13 @@ select = [
     "B",   # flake8-bugbear
     "C4",  # flake8-comprehensions
     "UP",  # pyupgrade
+    "PLW1514",  # unspecified-encoding: text I/O must name its encoding (preview rule)
 ]
+# PLW1514 is a preview rule in the pinned Ruff. Preview is on for lint only, and
+# explicit-preview-rules keeps every other preview rule off unless selected by
+# its exact code.
+preview = true
+explicit-preview-rules = true
 ignore = [
     "E501",  # line too long (handled by formatter)
 ]
@@ -356,6 +362,11 @@ ignore = [
 # Tests intentionally use legacy typing syntax (Optional[X], Union[X,Y], Generic[T])
 # to verify that _get_complex_type() handles those annotation forms correctly.
 "tests/test_pure_functions_gl105.py" = ["UP007", "UP045", "UP046"]
+# These packages export names lazily through a module-level __getattr__. Stable
+# F822 skips such modules; its preview behavior (on for PLW1514) flags them.
+"src/nooa/__init__.py" = ["F822"]
+"packages/nooa-atom/src/nooa_atom/agent/__init__.py" = ["F822"]
+"packages/nooa-cli/src/nooa_cli/coding/__init__.py" = ["F822"]
 [tool.ruff.lint.isort]
 known-first-party = ["nooa", "eval_pipeline", "evaluation", "agentdoc"]
 

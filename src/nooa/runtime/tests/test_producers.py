@@ -89,7 +89,7 @@ async def test_tail_yields_new_lines(tmp_path):
 
     async def append_later():
         await asyncio.sleep(0.05)
-        with open(str(f), "a") as fh:
+        with open(str(f), "a", encoding="utf-8") as fh:
             fh.write("line1\n")
             fh.write("line2\n")
 

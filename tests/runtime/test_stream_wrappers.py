@@ -129,7 +129,7 @@ class TestContextVarStreamFileno:
         # Use a real file for fileno support
         import tempfile
 
-        with tempfile.TemporaryFile(mode="w") as f:
+        with tempfile.TemporaryFile(encoding="utf-8", mode="w") as f:
             stream = ContextVarStream(f, buf_var, "test")
             assert stream.fileno() == f.fileno()
 
@@ -333,7 +333,7 @@ class TestBlockedStdinFileno:
     def test_fileno_delegates_to_original(self):
         import tempfile
 
-        with tempfile.TemporaryFile(mode="r") as f:
+        with tempfile.TemporaryFile(encoding="utf-8", mode="r") as f:
             wrapper = BlockedStdinWrapper(f)
             assert wrapper.fileno() == f.fileno()
 

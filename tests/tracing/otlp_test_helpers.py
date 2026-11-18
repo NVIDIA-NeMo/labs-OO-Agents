@@ -38,7 +38,7 @@ def read_otlp_jsonl_spans(path: Path) -> list[dict[str, Any]]:
       - ``resource_attributes`` — flat ``{key: value}`` dict from the envelope
     """
     spans: list[dict[str, Any]] = []
-    with open(path) as fh:
+    with open(path, encoding="utf-8") as fh:
         for line in fh:
             line = line.strip()
             if not line:

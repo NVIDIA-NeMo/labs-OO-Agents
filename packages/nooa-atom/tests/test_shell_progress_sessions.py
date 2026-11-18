@@ -209,7 +209,7 @@ async def test_direct_one_liner_output_file_lives_until_the_session_closes(tmp_p
         assert await asyncio.wait_for(root.prompt("run"), 30) == Done(explanation="ran")
         gc.collect()
         path = Path(root._agent.v.out)
-        assert path.read_text().count("\n") == 100000  # outlives the dropped Shell
+        assert path.read_text(encoding="utf-8").count("\n") == 100000  # outlives the dropped Shell
     finally:
         await registry.close_all()
     assert not path.exists()  # removed with the session

@@ -71,7 +71,7 @@ class OtlpJsonFileExporter(SpanExporter):
                 resource_spans = build_resource_spans(file_spans)
                 payload = {"resourceSpans": resource_spans}
                 line = json.dumps(payload, separators=(",", ":"), default=str) + "\n"
-                with self._lock, open(target_file, "a") as fh:
+                with self._lock, open(target_file, "a", encoding="utf-8") as fh:
                     fh.write(line)
         except Exception as e:
             log.warning("Error exporting spans: %s", e, exc_info=True)

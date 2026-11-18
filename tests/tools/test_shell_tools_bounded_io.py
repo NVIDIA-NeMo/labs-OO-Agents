@@ -44,7 +44,7 @@ EXOTIC_BREAKS = "\v\f\x1c\x1d\x1e\x85\u2028\u2029"
 
 def _legacy_read(path: Path, start: int, end: int) -> tuple[str, int, int]:
     """The pre-#90 implementation, kept as the differential reference."""
-    content = path.read_text()
+    content = path.read_text(encoding="utf-8")
     all_lines = content.splitlines(keepends=True)
     total = len(all_lines)
     start = max(1, start)
@@ -58,7 +58,7 @@ def sh(tmp_path):
 
 
 def _write_lines(path: Path, count: int, width: int = 64) -> None:
-    path.write_text("".join(f"{i:0{width}d}\n" for i in range(1, count + 1)))
+    path.write_text("".join(f"{i:0{width}d}\n" for i in range(1, count + 1)), encoding="utf-8")
 
 
 # --------------------------------------------------------------------------
@@ -438,10 +438,13 @@ def test_whole_file_read_is_bounded_for_fifos(tmp_path):
 
 
 def test_whole_file_read_keeps_read_text_decoding(tmp_path):
-    """Universal newlines and the default encoding still match Path.read_text()."""
+    """Universal newlines and UTF-8 decoding match Path.read_text(encoding="utf-8")."""
     path = tmp_path / "mixed.txt"
-    path.write_bytes(b"a\r\nb\rc\n")
-    assert read_whole_file_checked(path, 1024, hint="") == path.read_text() == "a\nb\nc\n"
+    path.write_bytes("a\r\nb\rc\u00e9\n".encode())
+    expected = "a\nb\nc\u00e9\n"
+    assert (
+        read_whole_file_checked(path, 1024, hint="") == path.read_text(encoding="utf-8") == expected
+    )
 
 
 def test_shell_tools_rejects_nonpositive_file_budget(tmp_path):

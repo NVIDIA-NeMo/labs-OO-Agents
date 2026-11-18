@@ -38,7 +38,7 @@ def _otlp_body(index: int) -> dict:
 def _write_trace(path: Path, count: int, *extra_records: dict) -> None:
     records = [_otlp_body(index) for index in range(count)]
     records.extend(extra_records)
-    path.write_text("\n".join(json.dumps(record) for record in records) + "\n")
+    path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
 
 
 def _patch_viewer_preflight(

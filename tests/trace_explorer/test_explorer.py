@@ -175,7 +175,9 @@ Return type: int
 
 def create_trace_file(spans: list[dict]) -> Path:
     """Create a temporary trace file from span data."""
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+    with tempfile.NamedTemporaryFile(
+        encoding="utf-8", mode="w", suffix=".jsonl", delete=False
+    ) as f:
         for span in spans:
             f.write(json.dumps(span) + "\n")
         return Path(f.name)

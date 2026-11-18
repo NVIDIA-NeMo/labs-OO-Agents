@@ -78,7 +78,7 @@ def _bounded(text: str) -> str:
 def _process_start_time(pid: int) -> str | None:
     """Linux process identity, so escalation cannot signal a reused PID."""
     try:
-        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+        return Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[19]
     except (OSError, IndexError):
         return None
 
@@ -204,7 +204,7 @@ class BashSession:
                 parts.append(f"  killed_by={sig_name}")
             # Try to read /proc/<pid>/status before it disappears
             try:
-                with open(f"/proc/{proc.pid}/status") as f:
+                with open(f"/proc/{proc.pid}/status", encoding="utf-8") as f:
                     for line in f:
                         if any(k in line for k in ("State:", "SigPnd:", "SigCgt:")):
                             parts.append(f"  /proc/status: {line.strip()}")

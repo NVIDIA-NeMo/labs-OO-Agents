@@ -732,7 +732,7 @@ class ShellTools(Skill):
         if isinstance(target, Match):
             new_text = old_or_new
             resolved = Path(target.resolved_path)
-            content = resolved.read_text()
+            content = resolved.read_text(encoding="utf-8")
             all_lines = content.splitlines(keepends=True)
 
             before = all_lines[: target.start - 1]
@@ -740,7 +740,7 @@ class ShellTools(Skill):
             if new_text and not new_text.endswith("\n") and after:
                 new_text += "\n"
             new_content = "".join(before) + new_text + "".join(after)
-            resolved.write_text(new_content)
+            resolved.write_text(new_content, encoding="utf-8")
 
             diff = f"--- a/{target.path}\n+++ b/{target.path}\n"
             diff += f"@@ -{target.start},{target.end - target.start + 1} @@\n"

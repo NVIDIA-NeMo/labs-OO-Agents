@@ -31,7 +31,7 @@ def alive(pid: int) -> bool:
     except ProcessLookupError:
         return False
     try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except (FileNotFoundError, ProcessLookupError):
         return False  # exited (and was reaped) between the two checks
     return "Z" not in stat.split()[2]
@@ -71,7 +71,7 @@ async def test_long_output_bounded_with_retained_file(manager):
     assert r.stdout_path and r.stdout.startswith("1\n2\n")
     assert cut_marker(r.stdout_path, 1_288_895 - 1_048_576) in r.stdout
     assert len(r.stdout.encode()) < 1_049_000 and r.stdout.endswith("199999\n200000\n")
-    assert Path(r.stdout_path).read_text().count("\n") == 200000
+    assert Path(r.stdout_path).read_text(encoding="utf-8").count("\n") == 200000
     # Kept after the result was consumed; removed with the manager.
     await asyncio.sleep(0)
     assert Path(r.stdout_path).exists()
@@ -121,7 +121,7 @@ async def test_direct_run_keeps_long_output_until_aclose(tmp_path):
         assert path and text.startswith("line 00000 ")
         assert cut_marker(path, 1_200_000 - 1_048_576) in text
         assert text.endswith("line 39999 " + "x" * 18 + "\n")
-        assert Path(path).read_text() == out
+        assert Path(path).read_text(encoding="utf-8") == out
     short = await sh.run("echo hi")
     assert (short.stdout, short.stdout_path, short.stderr_path) == ("hi\n", None, None)
     assert sorted(p.name for p in Path(r.stdout_path).parent.iterdir()) == [
@@ -162,7 +162,7 @@ async def test_dropped_unowned_shell_keeps_files_while_the_result_lives():
     r = await Shell().run("seq 1 300000")  # the temporary Shell is dropped
     gc.collect()
     path = Path(r.stdout_path)
-    assert path.read_text().count("\n") == 300000
+    assert path.read_text(encoding="utf-8").count("\n") == 300000
     del r
     gc.collect()
     assert not path.exists()
@@ -185,7 +185,7 @@ async def test_dropped_owned_shell_keeps_files_until_the_owner_closes():
     path = Path(r.stdout_path)
     del r
     gc.collect()  # neither the Shell nor the result is needed: the owner keeps it
-    assert path.read_text().count("\n") == 300000
+    assert path.read_text(encoding="utf-8").count("\n") == 300000
     await owner.aclose()
     assert not path.exists()
 

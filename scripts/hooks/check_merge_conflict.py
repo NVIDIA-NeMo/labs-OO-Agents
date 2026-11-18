@@ -10,7 +10,7 @@ PATTERN = re.compile(r"^(<{7}|>{7}|={7}|\|{7})( |$)", re.MULTILINE)
 retval = 0
 for filename in sys.argv[1:]:
     try:
-        with open(filename) as f:
+        with open(filename, encoding="utf-8") as f:
             content = f.read()
     except (UnicodeDecodeError, PermissionError):
         continue
