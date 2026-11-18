@@ -275,32 +275,31 @@ def test_sign_in_asks_which_model_to_use(monkeypatch, isolated, no_server, answe
 
 
 class PickingSource(Source):
-    """Lists only picked models; ``choices`` is the whole catalogue."""
+    """Lists nothing; ``choices`` is the whole catalogue."""
 
     def __init__(self):
         super().__init__("hub", models=THREE)
-        self.picked = []
 
     def choices(self, workspace):
         return THREE
 
     def models(self, workspace):
-        return {alias: THREE[alias] for alias in self.picked}
-
-    def select(self, alias):
-        self.picked.append(alias)
+        return {}
 
 
-def test_sign_in_picks_from_choices_and_remembers_the_pick(monkeypatch, isolated, no_server):
+def test_sign_in_picks_from_choices_and_writes_only_the_pick(monkeypatch, isolated, no_server):
     from nooa_atom.acp.cli import command
 
-    source = PickingSource()
-    _install(monkeypatch, source)
+    from nooa import paths
+
+    _install(monkeypatch, PickingSource())
     result = click.testing.CliRunner().invoke(command, ["--sign-in", "hub"], input="hub-b\n")
     assert result.exit_code == 0, result.output
-    assert source.picked == ["hub-b"]
     saved = json.loads((isolated / terminal_auth.RESULT_FILE).read_text())
     assert saved["alias"] == "hub-b" and saved["model"] == "openai/b"
+    written = yaml.safe_load(paths.get_user_dir("llm_config.yaml").read_text())["models"]
+    assert list(written) == ["hub-b"]
+    assert written["hub-b"]["model_name"] == "openai/b"
 
 
 @pytest.mark.parametrize(

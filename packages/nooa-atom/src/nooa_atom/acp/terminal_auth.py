@@ -245,6 +245,20 @@ def ask_secret(label: str) -> str:
     return prompts.prompt(label, hide_input=True, default="", show_default=False).strip()
 
 
+def save_model(alias: str, entry: dict[str, Any]) -> Path:
+    """Write ``entry`` as ``alias`` into the user ``llm_config.yaml``, as ``nooa connect`` saves it.
+
+    Only this alias is replaced; other entries and comments are kept.
+    Returns the file's path.
+    """
+    from nooa import paths
+    from nooa.unifiedllm import connect
+
+    path = paths.get_user_dir("llm_config.yaml")
+    connect.write(entry, path, alias=alias)
+    return path
+
+
 def choose_model(source_name: str, models: dict[str, Any], default: str) -> str:
     """Ask which of a source's ``models`` to use; Enter keeps ``default``.
 
@@ -300,15 +314,16 @@ def run_terminal_sign_in(source_id: str) -> int:
     models = models if isinstance(models, dict) else {}
     if len(models) > 1:
         alias = choose_model(source.name, models, alias)
-    remember = getattr(source, "select", None)
-    if callable(remember):
-        try:
-            remember(alias)
-        except Exception as exc:
-            click.echo(f"Could not remember {alias}: {exc}", err=True)
-            return 1
     entry = models.get(alias)
-    entry = entry if isinstance(entry, dict) else {}
+    if isinstance(entry, dict) and entry:
+        try:
+            path = save_model(alias, entry)
+        except Exception as exc:
+            click.echo(f"Could not save {alias}: {exc}", err=True)
+            return 1
+        click.echo(f"Saved {alias} in {path}.")
+    else:
+        entry = {}
     write_result(alias, str(entry.get("model_name") or ""), str(entry.get("api_base") or ""))
     click.echo("Return to the client; it reconnects with the new model.")
     return 0
@@ -321,6 +336,7 @@ __all__ = [
     "SIGN_IN_ARG",
     "auth_method_ids",
     "ask_secret",
+    "save_model",
     "auth_methods",
     "choose_model",
     "clear_result",

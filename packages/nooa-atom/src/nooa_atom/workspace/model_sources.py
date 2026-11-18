@@ -57,11 +57,10 @@ class ModelSource(Protocol):
         """Set the source up in a real terminal (it may prompt).
 
         Returns the alias to switch to, or ``None`` when nothing was set up.
-        After it, the user picks one of the source's models (``alias`` is the
-        default). Two optional methods change that step: ``choices(workspace)``
-        returns the models to pick from when they differ from ``models()``
-        (for example a whole catalogue), and ``select(alias)`` is called with
-        the pick (for example so ``models()`` lists only picked models).
+        After it, the user picks one model (``alias`` is the default) from the
+        optional ``choices(workspace)`` (for example every model the key can
+        use; else ``models()``), and only the picked entry is written to the
+        user ``llm_config.yaml``, as ``nooa connect`` saves one.
         """
         ...
 

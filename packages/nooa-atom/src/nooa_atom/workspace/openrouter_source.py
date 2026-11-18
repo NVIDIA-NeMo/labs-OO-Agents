@@ -4,15 +4,14 @@
 
 Once an OpenRouter key is set up (``OPENROUTER_API_KEY`` in the environment
 or in NOOA's ``secrets.yaml``), each sign-in lets you pick one model of
-OpenRouter's public text-model catalogue, and Atom lists the models picked so
-far (kept in ``openrouter_selected.json`` in the user NOOA directory) as
-``openrouter/<OpenRouter model ID>``, for example
+OpenRouter's public text-model catalogue, and writes that model to the user
+``llm_config.yaml`` as ``openrouter/<OpenRouter model ID>``, for example
 ``openrouter/anthropic/claude-sonnet-4.5``. Each entry is exactly what
 ``nooa connect --provider openrouter`` saves for that model, without its test
 calls (see ``nooa.unifiedllm.connect.openrouter_entry``).
 
 The catalogue is cached in ``openrouter_models.json`` in the user NOOA
-directory and fetched again when it is older than 24 hours. ``models()``
+directory and fetched again when it is older than 24 hours. ``choices()``
 sends a request only when the cache is missing or stale, waits at most 10
 seconds, and then falls back to the stale cache (or no models); it never
 raises.
@@ -45,9 +44,9 @@ CACHE_FILE = "openrouter_models.json"
 MAX_AGE = 24 * 60 * 60
 """Seconds before the cached catalogue is fetched again."""
 FETCH_TIMEOUT = 10.0
-"""Seconds a catalogue fetch may take on the ``models()`` path."""
+"""Seconds a catalogue fetch may take on the ``choices()`` path."""
 RETRY_AFTER = 10 * 60
-"""Seconds before ``models()`` tries again after a failed fetch."""
+"""Seconds before ``choices()`` tries again after a failed fetch."""
 KEY_URL = "https://openrouter.ai/api/v1/key"
 PREFERRED = (
     "anthropic/claude-sonnet-4.5",
@@ -69,45 +68,6 @@ def cache_path() -> Path:
     from nooa import paths
 
     return paths.get_user_dir(CACHE_FILE)
-
-
-SELECTED_FILE = "openrouter_selected.json"
-"""The aliases picked at sign-in; ``models()`` lists only these."""
-
-
-def selected_path() -> Path:
-    """Where the picked aliases are kept."""
-    from nooa import paths
-
-    return paths.get_user_dir(SELECTED_FILE)
-
-
-def selected() -> list[str]:
-    """The aliases picked at sign-in, oldest first; ``[]`` when none or unreadable."""
-    try:
-        data = json.loads(selected_path().read_text())
-    except (OSError, ValueError):
-        return []
-    if not isinstance(data, dict) or not isinstance(data.get("models"), list):
-        return []
-    return [alias for alias in data["models"] if isinstance(alias, str)]
-
-
-def select(alias: str) -> None:
-    """Add ``alias`` to the picked models (kept once, in pick order)."""
-    names = selected()
-    if alias in names:
-        return
-    path = selected_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp = tempfile.mkstemp(dir=str(path.parent), prefix=".openrouter-selected-")
-    try:
-        with os.fdopen(fd, "w") as stream:
-            json.dump({"models": [*names, alias]}, stream, indent=1)
-        os.replace(temp, path)
-    finally:
-        if os.path.exists(temp):
-            os.unlink(temp)
 
 
 def api_key() -> str | None:
@@ -243,9 +203,9 @@ def reset() -> None:
 class OpenRouterSource:
     """OpenRouter text models, configured as ``nooa connect`` would save them.
 
-    ``choices()`` is the whole catalogue; ``models()`` lists only the models
-    picked at sign-in (``select()``), so ``/model`` does not fill up with
-    every OpenRouter model.
+    ``choices()`` is the whole catalogue, to pick from at sign-in; only the
+    picked model is written to ``llm_config.yaml``, so ``models()`` lists
+    nothing and ``/model`` does not fill up with every OpenRouter model.
     """
 
     id = "openrouter"
@@ -253,16 +213,8 @@ class OpenRouterSource:
     description = "All OpenRouter models with one key"
 
     def models(self, workspace: Path) -> dict[str, dict[str, Any]]:
-        """The models picked at sign-in, by alias; ``{}`` without a key. Never raises."""
-        picked = selected()
-        if not picked:
-            return {}
-        listed = self.choices(workspace)
-        return {alias: listed[alias] for alias in picked if alias in listed}
-
-    def select(self, alias: str) -> None:
-        """Remember ``alias`` as picked, so ``models()`` lists it."""
-        select(alias)
+        """Nothing: the sign-in writes the one model you pick into ``llm_config.yaml``."""
+        return {}
 
     def choices(self, workspace: Path) -> dict[str, dict[str, Any]]:
         """Every OpenRouter text model by alias, to pick from; ``{}`` without a key or a catalogue. Never raises."""

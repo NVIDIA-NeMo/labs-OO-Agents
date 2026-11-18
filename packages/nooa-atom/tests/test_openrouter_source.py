@@ -376,30 +376,11 @@ def test_the_source_is_valid_and_listed_after_the_files(monkeypatch, tmp_path):
         )
     )
     monkeypatch.setenv("NEMO_OO_LLM_CONFIG", str(config))
-    assert list(workspace_models(tmp_path)) == ["mine"]  # nothing picked yet
-    for alias in _aliases():
-        orsrc.select(alias)
-    aliases = list(workspace_models(tmp_path))
-    assert aliases[0] == "mine"
-    assert aliases[1:] == [a for a in _aliases() if a != "openrouter/openai/gpt-5"]
+    assert list(workspace_models(tmp_path)) == ["mine"]  # the source lists nothing
 
 
-def test_models_lists_only_the_picked_models_in_pick_order(monkeypatch, tmp_path):
+def test_models_lists_nothing_and_choices_list_the_catalogue(monkeypatch, tmp_path):
     monkeypatch.setenv(orsrc.KEY_ENV, "sk-or-test")
     _fetch(monkeypatch)
     assert orsrc.source.models(tmp_path) == {}
-    first, second = _aliases()[-1], _aliases()[0]
-    orsrc.source.select(first)
-    orsrc.source.select(second)
-    orsrc.source.select(first)  # kept once
-    assert orsrc.selected() == [first, second]
-    assert list(orsrc.source.models(tmp_path)) == [first, second]
-    assert orsrc.source.models(tmp_path)[first] == orsrc.source.choices(tmp_path)[first]
-
-
-def test_a_picked_model_the_catalogue_dropped_is_not_listed(monkeypatch, tmp_path):
-    monkeypatch.setenv(orsrc.KEY_ENV, "sk-or-test")
-    _fetch(monkeypatch)
-    orsrc.select("openrouter/gone/model")
-    orsrc.select(_aliases()[0])
-    assert list(orsrc.source.models(tmp_path)) == [_aliases()[0]]
+    assert list(orsrc.source.choices(tmp_path)) == _aliases()
