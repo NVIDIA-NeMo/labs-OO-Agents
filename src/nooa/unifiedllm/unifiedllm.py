@@ -27,6 +27,7 @@ from nooa.llm_types import (
     LLMUsage,
     ToolCall,
 )
+from nooa.snapshot import cut, render_output
 from nooa.unifiedllm.cache_policy import (
     add_session_affinity_header,
     apply_cache_policy,
@@ -81,6 +82,11 @@ _media_probe: ContextVar[bool] = ContextVar("media_probe", default=False)
 # where the connection's committed set applies. A concurrent call on the same
 # client keeps its attachments.
 _media_trial: ContextVar[frozenset | None] = ContextVar("media_trial", default=None)
+
+
+def _error_preview(exc: BaseException) -> str:
+    """``str(exc)`` shortened for a log line by ``nooa.snapshot``."""
+    return render_output(cut(str(exc), head=300, tail=100))
 
 
 # Errors the general media fallback never probes: the request as a whole is
@@ -1659,7 +1665,7 @@ class UnifiedLLM(ABC):
             logger.warning(
                 "Request failed (%s); probing once with every attachment replaced by a note: %s",
                 type(original).__name__,
-                str(original)[:300],
+                _error_preview(original),
             )
             response, error = yield baseline | frozenset(keys)
             if error is None:
@@ -1667,7 +1673,7 @@ class UnifiedLLM(ABC):
             else:
                 logger.warning(
                     "The probe without attachments failed too; giving up: %s",
-                    str(error)[:300],
+                    _error_preview(error),
                 )
                 raise original
             logger.warning(
@@ -1784,7 +1790,7 @@ class UnifiedLLM(ABC):
             len(found),
             ", ".join(kinds[key] for key in found),
             used,
-            str(original)[:300],
+            _error_preview(original),
         )
         return replies[final]
 
