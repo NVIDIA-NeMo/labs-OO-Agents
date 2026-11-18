@@ -18,6 +18,10 @@ Then send SIGUSR2 to dump debug info:
 Debug output is written to:
     debug_dump_<pid>.txt  (in the current working directory, or dump_dir if set)
 
+Standard library only: ``import nooa`` installs the handler, so this module
+must not import the framework. ``nooa.runtime.debug_handler`` is the public
+path; it aliases this module.
+
 LLM Call Tracking:
     from nooa.runtime.debug_handler import llm_call_context
 
@@ -41,7 +45,8 @@ from pathlib import Path
 from types import FrameType
 from typing import IO, Any
 
-logger = logging.getLogger(__name__)
+# The logger keeps its name from the public path, nooa.runtime.debug_handler.
+logger = logging.getLogger("nooa.runtime.debug_handler")
 
 # Registry for tracking pending LLM calls
 # Key: unique call ID, Value: dict with metadata (model, start_time, prompt_tokens, etc.)

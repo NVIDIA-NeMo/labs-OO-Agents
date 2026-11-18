@@ -17,6 +17,7 @@ Each cell also gets ``self`` and ``asyncio`` from the runtime itself.
 
 from __future__ import annotations
 
+import importlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -40,6 +41,16 @@ class NamespaceProvider:
 
 _PROVIDERS: dict[str, NamespaceProvider] = {}
 
+# The packages that register a provider when imported. ``import nooa`` loads
+# nothing eagerly, so a namespace can be built (e.g. in the sandbox worker)
+# before anything imported them; the readers below import them first.
+_BUILTIN_PROVIDER_MODULES = ("nooa.media", "nooa.decorators")
+
+
+def _load_builtin_providers() -> None:
+    for module in _BUILTIN_PROVIDER_MODULES:
+        importlib.import_module(module)
+
 
 def register_namespace_provider(
     name: str,
@@ -55,6 +66,7 @@ def register_namespace_provider(
 
 def cell_namespace_names() -> dict[str, Any]:
     """Every registered provider's names, in registration order (a later one wins)."""
+    _load_builtin_providers()
     merged: dict[str, Any] = {}
     for provider in _PROVIDERS.values():
         merged.update(provider.names())
@@ -63,6 +75,7 @@ def cell_namespace_names() -> dict[str, Any]:
 
 def namespace_prompt_notes() -> tuple[str, ...]:
     """The prompt-note lines of the registered providers, in registration order."""
+    _load_builtin_providers()
     return tuple(line for provider in _PROVIDERS.values() for line in provider.prompt_note)
 
 
