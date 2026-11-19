@@ -42,6 +42,7 @@ _BOUNDED_CHUNK_CHARS = 65_536  # Pieces fed to the truncating buffer by _bounded
 _DRAIN_TIMEOUT = 0.05  # Seconds to wait for remaining output after sentinel
 _SIGTERM_GRACE = 5.0  # Seconds to wait for sentinel after SIGTERM
 _SIGKILL_GRACE = 2.0  # Seconds to wait for sentinel after SIGKILL
+_EXIT_POLL = 0.01  # Seconds between checks of whether bash has exited (_exited)
 
 # Reads the inherited pipe fds (argv) until every writer has exited, so
 # background jobs never write into a pipe without a reader after close().
@@ -962,19 +963,31 @@ class BashSession:
             # A non-interactive bash exits at EOF without signalling its jobs.
             try:
                 proc.stdin.close()
-                await asyncio.wait_for(proc.wait(), timeout=3.0)
-                return
-            except (TimeoutError, OSError):
+                if await _exited(proc, 3.0):
+                    return
+            except OSError:
                 pass
-        try:
-            os.kill(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, OSError):
-            pass
-        if same_loop:
+        if proc.returncode is None:  # once it has exited, its pid may belong to another process
             try:
-                await asyncio.wait_for(proc.wait(), timeout=3.0)
-            except TimeoutError:
+                os.kill(proc.pid, signal.SIGKILL)
+            except (ProcessLookupError, OSError):
                 pass
+        if same_loop:
+            await _exited(proc, 3.0)
+
+
+async def _exited(proc: asyncio.subprocess.Process, timeout: float) -> bool:
+    """Whether ``proc`` exits within ``timeout`` seconds.
+
+    Not ``proc.wait()``: that returns only once the process's pipes are closed too, and the
+    background jobs that close() keeps hold bash's stdout and stderr.
+    """
+    deadline = time.monotonic() + timeout
+    while proc.returncode is None:
+        if time.monotonic() >= deadline:
+            return False
+        await asyncio.sleep(_EXIT_POLL)
+    return True
 
 
 def _spawn_output_drainer(proc: asyncio.subprocess.Process) -> None:
