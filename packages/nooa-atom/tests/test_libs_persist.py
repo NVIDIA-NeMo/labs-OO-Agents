@@ -177,27 +177,27 @@ async def test_self_libs_is_gone(tmp_path):
 async def test_a_text_skill_named_like_an_agent_attribute_is_refused(tmp_path):
     agent = _agent(tmp_path)
     try:
-        shell = agent.shell
-        result = await agent.skill_writing.create("shell", "Shell tips.", text="Use rg.")
+        repo = agent.repo
+        result = await agent.skill_writing.create("repo", "Repo tips.", text="Use rg.")
         assert result.startswith("Not created")
-        assert "self.shell is already an attribute" in result
+        assert "self.repo is already an attribute" in result
         assert "choose another name" in result
-        # reload() does not import the directory and replace self.shell either.
-        skill_dir = tmp_path / ".nooa" / "skills" / "shell"
+        # reload() does not import the directory and replace self.repo either.
+        skill_dir = tmp_path / ".nooa" / "skills" / "repo"
         skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text("---\nname: shell\ndescription: x\n---\nHi.\n")
-        reloaded = await agent.skill_writing.reload("shell")
+        (skill_dir / "SKILL.md").write_text("---\nname: repo\ndescription: x\n---\nHi.\n")
+        reloaded = await agent.skill_writing.reload("repo")
         assert "OK — written and loaded" not in reloaded
         assert "choose another name" in reloaded
-        assert agent.shell is shell
-        assert "local.shell" not in agent.skills.registry.loaded()
+        assert agent.repo is repo
+        assert "local.repo" not in agent.skills.registry.loaded()
         # Control: the same SKILL.md under a free name does load, so the refusal
         # above is the collision, not the file.
-        free_dir = tmp_path / ".nooa" / "skills" / "shell_tips"
+        free_dir = tmp_path / ".nooa" / "skills" / "repo_tips"
         free_dir.mkdir(parents=True)
-        (free_dir / "SKILL.md").write_text("---\nname: shell_tips\ndescription: x\n---\nHi.\n")
-        assert "OK — written and loaded" in await agent.skill_writing.reload("shell_tips")
-        assert "local.shell_tips" in agent.skills.registry.loaded()
+        (free_dir / "SKILL.md").write_text("---\nname: repo_tips\ndescription: x\n---\nHi.\n")
+        assert "OK — written and loaded" in await agent.skill_writing.reload("repo_tips")
+        assert "local.repo_tips" in agent.skills.registry.loaded()
     finally:
         await agent.aclose()
 

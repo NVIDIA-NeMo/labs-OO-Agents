@@ -178,7 +178,7 @@ class AtomAgentBase(InteractiveAgent):
     # still told it has it.
 
     __protected_skill_attrs__ = frozenset(
-        {"shell", "repo", "todo", "skill_writing", "skills", "workspace_settings", "session"}
+        {"repo", "todo", "skill_writing", "skills", "workspace_settings", "session"}
     )
 
     cwd: Annotated[Path, nosnapshot]
@@ -196,12 +196,14 @@ class AtomAgentBase(InteractiveAgent):
     _command_registry: Annotated[Any, hidden, nosnapshot]
     _system_messages_in: Annotated[Channel, hidden, nosnapshot]
     system_messages: Annotated[Any, nosnapshot]
-    shell: Annotated[ActivityShellTools, nosnapshot]
     repo: Annotated[RepoTools, nosnapshot]
     todo: TodoManager
     skill_writing: Annotated[SkillWriting, nosnapshot]
     skills: Annotated[SkillManager, nosnapshot]
-    _base_shell: Annotated[ShellTools, hidden, nosnapshot]
+    # The workspace shell behind self.repo, skill_writing.run_tests() and
+    # AtomAgent's self.files; it reports commands and edits as activity events.
+    # The model runs its own commands in Shell()s, never in this one.
+    _workspace_shell: Annotated[ActivityShellTools, hidden, nosnapshot]
     _instructions: Annotated[RepositoryInstructions, hidden, nosnapshot]
     _summarizers: Annotated[list[Any], hidden, nosnapshot]
     _delegates_in: Annotated[Any, hidden, nosnapshot]
@@ -239,20 +241,16 @@ class AtomAgentBase(InteractiveAgent):
         self._system_messages_in = self.queue_manager.queue("system_messages")
         self.system_messages = self._system_messages_in.reader
         self.cwd = Path(cwd).resolve()
-        self._base_shell = ShellTools(cwd=str(self.cwd))
-        self.shell = ActivityShellTools(self._base_shell, self.event_manager)
-        self.repo = RepoTools(root=self.cwd, session=self.shell.session)
+        self._workspace_shell = ActivityShellTools(
+            ShellTools(cwd=str(self.cwd)), self.event_manager
+        )
         # The Session port finds this channel and does not declare its own.
         self._delegates_in = self.queue_manager.queue("delegates")
         self.delegates = self._delegates_in.reader
         self._jobs_in = self.queue_manager.queue("jobs")
         self._jobs_running = {}
         self.jobs = JobsApi(self)
-        self.todo = TodoManager()
         self.skills = SkillManager(self)
-        self.skills.register("nemo.shell", self.shell)
-        self.skills.register("nemo.repo", self.repo)
-        self.skills.register("nemo.todo", self.todo)
         # Skills the agent writes live at <project>/.nooa/skills (an older
         # <project>/.nooa/libs is not loaded). get_project_dir() resolves that
         # per process, which is what a one-workspace host like the TUI wants.
@@ -262,24 +260,35 @@ class AtomAgentBase(InteractiveAgent):
         # workspace's agent-authored code to another. Built after the
         # SkillManager so its skills are in the registry (self.skills.search).
         skills_dir = libs_dir or get_project_dir("skills")
-        self.skill_writing = SkillWriting(self, path=skills_dir)
-        self.skills.register("nemo.skill_writing", self.skill_writing)
-        self.skills.register("nemo.methodwriting", MethodWriting())
+        # Built-in tools are installed only through the registry, which sets
+        # self.repo, self.todo and self.skill_writing. Assigning them here as
+        # well would make register() report an overwrite.
         self.skills.registry.activate(
-            ["nemo.shell", "nemo.repo", "nemo.todo", "nemo.skill_writing", "nemo.methodwriting"]
+            {
+                "nemo.repo": RepoTools(root=self.cwd, session=self._workspace_shell.session),
+                "nemo.todo": TodoManager(),
+                "nemo.methodwriting": MethodWriting(),
+            }
+        )
+        # SkillWriting loads the saved local.* skills while it is built, so it
+        # is built after the tools above: a saved skill named like one of them
+        # is then refused instead of taking the name and failing this install.
+        self.skills.registry.activate(
+            {"nemo.skill_writing": SkillWriting(self, path=skills_dir, shell=self._workspace_shell)}
         )
         # Installed ``nooa.skills`` entry points are part of the shared host
         # surface. Load them so hosts can expose ``@slash_command`` methods,
         # but leave them inactive until the user opts in with ``/skills``.
         # Memory integration is deferred; do not auto-load its entry point.
         # Also ignore the retired web publisher entry point in older installed
-        # package metadata, and producers (core already sets ``self.producers``).
+        # package metadata, producers (core already sets ``self.producers``),
+        # and core's shell (the model runs commands in its own Shell()s).
         loaded = set(self.skills.loaded())
         installed = []
         for name in self.skills.discovered():
             attr_name = name.rsplit(".", 1)[-1].replace("-", "_")
             if (
-                name in {"nemo.memory", "nemo.web", "nemo.producers"}
+                name in {"nemo.memory", "nemo.web", "nemo.producers", "nemo.shell"}
                 or name in loaded
                 or hasattr(self, attr_name)
             ):
@@ -292,7 +301,7 @@ class AtomAgentBase(InteractiveAgent):
         self.slash_commands = SlashCommandRegistry(self, skills_dirs=skills_dirs or ())
 
         self.context["python_cell_tools"] = Context(
-            doc(RepoTools, ActivityShellTools, TodoManager, JobsApi, concise=True),
+            doc(RepoTools, TodoManager, JobsApi, concise=True),
             prefix=True,
         )
         self.context["todo_status"] = Context(expr="self.todo.status()")
@@ -337,7 +346,7 @@ class AtomAgentBase(InteractiveAgent):
             text = str(path).replace("\\", "\\\\").replace("\n", "\\n").replace("\r", "\\r")
             return escape(text[:159] + "…" if len(text) > 160 else text, quote=False)
 
-        cwd, root = shown(self.shell.cwd), shown(self.repo.root)
+        cwd, root = shown(self.repo.cwd), shown(self.repo.root)
         count = len(self.vars)
         return (
             f"Working directory (already active for `self.files`, `self.repo` and new `Shell()`s; persists across cells and turns): {cwd}\n"
@@ -876,8 +885,6 @@ class AtomAgentBase(InteractiveAgent):
         closed here: the session closes it when it created it, and a client
         passed in belongs to whoever passed it.
         """
-        # Closing the skills unregisters them, and with them self.shell.
-        shell = self.shell
         self.slash_commands.close()
         try:
             await super().aclose()
@@ -885,7 +892,7 @@ class AtomAgentBase(InteractiveAgent):
             try:
                 await self.skills.aclose()
             finally:
-                await shell.close()
+                await self._workspace_shell.close()
 
 
 # A ClassVar's Annotated metadata is not read by agentdoc; hide it explicitly.

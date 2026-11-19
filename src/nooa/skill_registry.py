@@ -3,11 +3,13 @@
 """SkillRegistry — discover, load, and activate skills on an agent."""
 
 import fnmatch
+import glob
 import importlib.util
 import inspect
 import logging
 import sys
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass
 from importlib.metadata import entry_points
 from pathlib import Path
@@ -748,14 +750,21 @@ class SkillRegistry(Skill):
                 managed.append(skill)
         return tuple(managed)
 
-    def activate(self, patterns: list[str]) -> None:
+    def activate(self, patterns: "list[str] | Mapping[str, Any]") -> None:
         """Make loaded skills matching patterns visible to the LLM.
 
         Also loads matching skills if not already loaded.
         Resolves dependencies transitively: if skill A requires B, activating A
         will auto-load B (but not activate it — deps stay hidden unless explicitly activated).
         Patterns support fnmatch globs.
+
+        A mapping of registered name to skill instance registers each one
+        (``register(name, skill)``) and then activates exactly those names.
         """
+        if isinstance(patterns, Mapping):
+            for name, skill in patterns.items():
+                self.register(name, skill)
+            patterns = [glob.escape(name) for name in patterns]
         # Auto-load if not already loaded
         not_loaded = self._match(patterns, set(self._discovered.keys()) - self._loaded)
         if not_loaded:

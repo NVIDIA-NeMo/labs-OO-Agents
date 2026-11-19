@@ -354,6 +354,28 @@ async def test_run_tests_passes(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_run_tests_uses_a_given_shell_and_then_requires_no_shell_skill(tmp_path: Path):
+    class _NoShellAgent:
+        runtime = SimpleNamespace()
+
+    class _RecordingShell:
+        def __init__(self) -> None:
+            self.commands: list[str] = []
+
+        async def run(self, cmd: str, timeout: float = 30) -> str:
+            self.commands.append(cmd)
+            return "1 passed"
+
+    shell = _RecordingShell()
+    libs = SkillWriting(_NoShellAgent(), path=tmp_path, shell=shell)
+    assert libs.requires == ()
+    assert SkillWriting.requires == ("nemo.shell",)
+    await libs.create("rt_given", DESCRIPTION)
+    assert await libs.run_tests("rt_given") == "1 passed"
+    assert len(shell.commands) == 1 and "pytest" in shell.commands[0]
+
+
+@pytest.mark.asyncio
 async def test_run_tests_passes_when_pythonpath_is_unset_and_shell_uses_nounset(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

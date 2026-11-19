@@ -138,8 +138,7 @@ async def test_manager_hides_internal_read_and_source_dir_only(agent, concise, t
 
 async def test_the_block_names_active_skills_and_counts_the_rest(agent):
     assert agent.skills.status() == (
-        "Active: methodwriting, repo, shell, skill_writing, todo\n"
-        f"4 more (code, text, MCP): {BLOCK_TAIL}"
+        f"Active: methodwriting, repo, skill_writing, todo\n4 more (code, text, MCP): {BLOCK_TAIL}"
     )
 
 
@@ -305,7 +304,8 @@ async def test_the_skills_control_lists_every_kind(agent, tmp_path):
     table = listed.outputs[0]
     assert table.columns == ["Name", "Kind", "State", "Description"]
     rows = {row[0]: row[1:3] for row in table.rows}
-    assert rows["shell"] == ["code", "active"]
+    assert rows["repo"] == ["code", "active"]
+    assert "shell" not in rows
     assert rows["review"] == ["text", "available"]
     assert rows["probe"] == ["mcp", "available"]
 
@@ -533,11 +533,11 @@ async def test_a_saved_skill_named_like_an_agent_attribute_is_reported_in_the_bl
 ):
     """A saved skill the agent already has a name for is not loaded, and the block says so."""
     saved = tmp_path / "saved"
-    (saved / "shell").mkdir(parents=True)
-    (saved / "shell" / "SKILL.md").write_text("---\nname: shell\ndescription: d\n---\nbody\n")
-    shell = agent.shell
+    (saved / "repo").mkdir(parents=True)
+    (saved / "repo" / "SKILL.md").write_text("---\nname: repo\ndescription: d\n---\nbody\n")
+    repo = agent.repo
     agent.skills.registry.discover_libs(saved)
-    assert agent.shell is shell
+    assert agent.repo is repo
     assert agent.skills.status().splitlines()[-1] == (
-        "skill 'shell' not loaded: the agent already has an attribute named shell; rename the skill"
+        "skill 'repo' not loaded: the agent already has an attribute named repo; rename the skill"
     )

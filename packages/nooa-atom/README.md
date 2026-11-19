@@ -347,6 +347,31 @@ Reflection may summarize only captured completed evidence, preserve archival
 originals, update its own notes block, and conservatively propose obsolete primitive
 bindings for deletion. It is not an automatic background expiry service.
 
+## Reflection
+
+Now and then a root session asks its agent to tidy up: an ordinary message on
+the agent's `system_messages` queue (source `reflection`) that the agent
+handles in a normal turn. It is independent of `experimental_done_reflection`.
+The `nemo.reflection` skill (`nooa_atom.skills.reflection`) owns it. After a
+turn ends with `Done` or `Waiting`, a reflection is due once both
+`min_cells` code cells ran and `min_minutes` minutes passed since the last
+one. Counting starts again after the turn that answers a reflection, and a
+due reflection waits while a prompt is still waiting on work. The message reports the agent's state: the
+context fill, the retained Python variables, the open todos and `self.v`.
+`/reflection` shows the state, `/reflection on|off` turns it on or off (and
+clears a `SessionOptions(reflection=...)` override), `/reflection config
+[BLOCK on|off]` lists or switches the blocks (`rename`, `compact`,
+`variables`, `todo`, `vars`). Changes are saved in `.nooa/settings.yaml`:
+
+```yaml
+atom:
+  reflection:
+    enabled: null          # null: on for ACP hosts, off elsewhere (Gym, nooa-bench)
+    min_cells: 50          # code cells since the last reflection
+    min_minutes: 60        # minutes since the last reflection; both must pass
+    blocks: {}             # name: false switches a block off
+```
+
 ### Native Gym benchmark policy (separate prerequisite)
 
 `nooa_atom.gym:AtomHarness` runs through `nooa_bench.gym_worker`. This native adapter

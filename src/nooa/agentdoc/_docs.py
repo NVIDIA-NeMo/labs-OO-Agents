@@ -38,58 +38,12 @@ Extension point:
 
 from __future__ import annotations
 
-import contextlib
 from typing import Annotated, Any, overload
 
 from nooa.agentdoc._metadata import set_docs_metadata, set_field_metadata
+from nooa.agentdoc.markers import SpecAnnotation, _sync_hidden
 
 _SENTINEL: Any = object()
-
-
-def _sync_hidden(target: Any, hidden_value: bool | None) -> None:
-    """Sync the ``_agentdoc_hidden`` attribute on *target* based on *hidden_value*.
-
-    Shared by ``SpecAnnotation.__call__`` (decorator form) and
-    ``Spec.__call__`` (imperative form).
-    """
-    if hidden_value is True:
-        with contextlib.suppress(AttributeError, TypeError):
-            target._agentdoc_hidden = True
-    elif hidden_value is False:
-        try:
-            target._agentdoc_hidden = False
-        except (AttributeError, TypeError):
-            # C-extension method: fall back to class-level metadata
-            owner = getattr(target, "__objclass__", None)
-            mname = getattr(target, "__name__", None)
-            if owner is not None and mname is not None:
-                set_field_metadata(owner, mname, hidden=False)
-
-
-class SpecAnnotation:
-    """A specification returned by ``spec(**kwargs)`` when no positional target is given.
-
-    Works as:
-    - Annotated metadata: ``Annotated[str, spec(hidden=True)]``
-    - Decorator: ``@spec(hidden=True)``
-    """
-
-    __slots__ = ("kwargs",)
-
-    def __init__(self, **kwargs: Any) -> None:
-        self.kwargs = kwargs
-
-    def __call__[T](self, target: T) -> T:
-        """Apply as decorator: ``@spec(...)``."""
-        # Sync _agentdoc_hidden attribute so is_hidden_method() and the _ prefix
-        # override check in _extract_methods() both see the correct state.
-        _sync_hidden(target, self.kwargs.get("hidden"))
-        set_docs_metadata(target, **self.kwargs)
-        return target
-
-    def __repr__(self) -> str:
-        kw = ", ".join(f"{k}={v!r}" for k, v in self.kwargs.items())
-        return f"spec({kw})"
 
 
 class Spec:

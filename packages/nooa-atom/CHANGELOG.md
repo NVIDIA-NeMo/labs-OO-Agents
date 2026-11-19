@@ -7,6 +7,12 @@ based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- `nooa-atom`: reflection. The `nemo.reflection` skill posts a housekeeping
+  message on a root session's `system_messages` queue when one is due (20
+  turns or 60 minutes since the last, or the context half full; at least 5
+  turns apart), reporting the context fill, Python variables, open todos and
+  `self.v`. `/reflection [on|off|config [BLOCK on|off]]`; settings in
+  `atom.reflection`. On for ACP hosts, off elsewhere.
 - `nooa-atom`: AtomAgent drops the core `<events_api>` guidance block (added on
   main for agents that expose `self.events`). `self.events` stays exposed, and
   Atom's `context_usage` block already names `self.events.collapse(...)` and
