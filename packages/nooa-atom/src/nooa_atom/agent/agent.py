@@ -182,6 +182,12 @@ def _name_error_hint(agent: Any, error: BaseException, formatted: str) -> str | 
     name = _error_name(error, formatted, NameError)
     if name is None:
         return None
+    if name == "display":  # IPython's display(); a cell has show() instead
+        atom_metrics().name_error_hint(name)
+        return (
+            "There is no display(); use show(obj), e.g. show(Image.from_file(path)) or "
+            "show(pil_image) (it also takes Audio, Video, File and matplotlib figures)."
+        )
     hint = (
         "Live names are listed in the python_cell_state block; python_cell_state() lists up to "
         "20 (both may omit some). Check both and your context before recreating a name."

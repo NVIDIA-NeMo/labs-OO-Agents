@@ -1324,6 +1324,34 @@ async def test_a_name_error_points_at_python_cell_state_and_is_counted(
     assert attrs["harness.atom.name_error_hint.names"] == ["sh", "results"]
 
 
+async def test_a_display_name_error_points_at_show(registry, options, models):
+    """IPython's ``display()`` does not exist in a cell; the hint names ``show()``."""
+    models.scripts[None] = [
+        cell("display(1)"),
+        cell("return_result(Done(explanation='ok'))"),
+    ]
+    root = await registry.create(options)
+    await asyncio.wait_for(root.prompt("go"), TIMEOUT)
+
+    messages = models.llms[None].calls[1].messages
+    seen = "\n".join(str(m.get("content", "")) for m in messages)
+    assert "name 'display' is not defined" in seen
+    assert (
+        "There is no display(); use show(obj), e.g. show(Image.from_file(path)) or show(pil_image)"
+    ) in seen
+    assert "Live names are listed in the python_cell_state block" not in seen
+
+
+def test_show_takes_a_pil_image():
+    """The display hint promises show(pil_image): show() converts a PIL image to PNG."""
+    from PIL import Image as PILImage
+
+    from nooa.runtime.media_capture import _try_auto_convert
+
+    block = _try_auto_convert(PILImage.new("RGB", (2, 2)))
+    assert block is not None
+
+
 async def test_a_module_not_found_error_points_at_the_task_python_and_is_counted(
     registry, options, models, monkeypatch
 ):
