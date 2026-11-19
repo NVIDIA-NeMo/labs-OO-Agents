@@ -613,16 +613,16 @@ Inspect in REPL: print(doc(self.events))
     def _state_block_expr(self) -> str:
         """The ``state`` context block's expression: ``pformat(self, ...)`` under ``state_format``.
 
-        The limits are the agent's ``TruncationConfig.state_format``
-        (``nooa.config.effective(TruncationConfig, self)``), by default
-        ``max_length=50, max_string=500, max_depth=4``. The prompt shows the
-        expression, so it is built once with the values as literals; a
-        method-level ``@strategy(truncation=...)`` does not change it.
+        The limits are the agent's own ``TruncationConfig.state_format``
+        (``self._truncation``: the instance's ``truncation=`` merged over the
+        classes' and the defaults), by default ``max_length=50,
+        max_string=500, max_depth=4``. The prompt shows the expression, so it
+        is built once with the values as literals; a method-level
+        ``@strategy(truncation=...)`` does not change it, not even the one of
+        a running parent method that constructs this agent (which
+        ``effective()`` would return first).
         """
-        from nooa.config.effective import effective
-        from nooa.config.truncation_config import TruncationConfig
-
-        limits = effective(TruncationConfig, self).state_format
+        limits = self._truncation.state_format
         return (
             f"pformat(self, max_length={limits.max_length}, "
             f"max_string={limits.max_string}, max_depth={limits.max_depth})"

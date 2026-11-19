@@ -128,20 +128,24 @@ def _safe_dict(owner: Any, raw: Any, state: _State) -> dict[str, Any] | None:
     # The pairs are taken in one C-level step (no key is hashed or compared)
     # before the loop: a live namespace such as ``sys.modules`` may change
     # while it runs (an import in another thread). ``dict.copy`` is avoided.
+    # A class namespace (``mappingproxy`` over a native dict) or an instance
+    # or module ``dict``: its entries are charged to the capture's work
+    # (``nodes_left``) before the copy. One larger than the work left is not
+    # copied at all (fail closed), so the budget is exact.
     if type(raw) is MappingProxyType:
-        # A class namespace: a native dict. Its entries are charged to the
-        # capture's work (``nodes_left``) before the copy. One larger than the
-        # work left is not copied at all (fail closed), so the budget is exact.
         size = len(raw)
-        if size > state.nodes_left:
-            state.namespaces[marker] = (owner, None)
-            return None
-        state.nodes_left -= size
-        items: Iterable[tuple[Any, Any]] = list(raw.items())
     elif type(raw) is dict:
-        items = list(dict.items(raw))
+        size = dict.__len__(raw)
     else:
         return None
+    if size > state.nodes_left:
+        state.namespaces[marker] = (owner, None)
+        return None
+    state.nodes_left -= size
+    if type(raw) is MappingProxyType:
+        items: Iterable[tuple[Any, Any]] = list(raw.items())
+    else:
+        items = list(dict.items(raw))
     safe: dict[str, Any] | None = {}
     for key, value in items:
         if type(key) is not str:

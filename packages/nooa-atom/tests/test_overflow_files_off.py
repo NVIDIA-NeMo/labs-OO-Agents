@@ -98,6 +98,39 @@ async def test_a_shell_under_a_switched_off_owner_keeps_memory_only(tmp_path, mo
     assert _output_files(tmp_path) == []
 
 
+async def test_a_method_level_switch_off_is_read_at_capture_time(tmp_path, monkeypatch):
+    # #580 review: the owner copied the agent's overflow_files once, at session
+    # start, so a method-level ``@strategy(truncation=...)`` was ignored. The
+    # owner now reads ``effective(TruncationConfig, agent)`` at each capture;
+    # the runtime sets the method's merged config in this context variable.
+    from nooa.config.effective import _current_truncation_config_var
+
+    class _Agent:  # what the owner reads: the agent's own truncation config
+        _truncation = TruncationConfig()  # spilling on
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    agent = _Agent()
+    owner = ShellOwner(agent=agent)
+    token = shell_owner.set(owner)
+    try:
+        async with Shell(cwd=tmp_path) as sh:
+            method = agent._truncation.merge_with(TruncationConfig(overflow_files=False))
+            override = _current_truncation_config_var.set(method)
+            try:
+                off = await sh.run(_BIG)
+                assert owner.overflow_dir() is None
+            finally:
+                _current_truncation_config_var.reset(override)
+            assert off.stdout_path is None and off.stderr_path is None
+            assert "bytes omitted; full output not kept]" in off.stdout
+            assert _output_files(tmp_path) == []
+            on = await sh.run(_BIG)  # outside the method: the agent's own config
+            assert on.stdout_path is not None and Path(on.stdout_path).is_file()
+    finally:
+        shell_owner.reset(token)
+        await owner.aclose()
+
+
 async def test_a_failed_stdin_file_leaves_no_handed_out_file(tmp_path, monkeypatch):
     # model.md C2 (work_shell.py:723): the captures were made before the stdin
     # file, outside the try that closes them, so a failing os.open left both

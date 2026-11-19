@@ -1016,8 +1016,10 @@ def _shape_fields(
         if omit_empty:
             try:
                 field_value = read()
-            except Exception:
-                pass  # read() raises again in the part: Unavailable("error")
+            except Exception as error:
+                # The accessor runs once: the part re-raises its error, so
+                # it still becomes Unavailable("error").
+                read = functools.partial(_reraise, error)
             else:
                 if _is_empty_field(field_value):
                     continue
@@ -1068,6 +1070,11 @@ def _is_empty_field(value: Any) -> bool:
 def _identity(value: Any) -> Any:
     """``value`` itself: the read of a field whose value was read already."""
     return value
+
+
+def _reraise(error: Exception) -> Any:
+    """Raise ``error``: the read of a field whose accessor already raised it."""
+    raise error
 
 
 def _class_overrides(mro: tuple[type[Any], ...], state: _State) -> dict[str, dict[str, Any]]:

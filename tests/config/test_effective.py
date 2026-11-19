@@ -220,6 +220,63 @@ def test_truncation_merge_with_is_the_generic_merge():
     assert base.merge_with(other).capture == CaptureConfig(max_stdout=1_000, max_stderr=7)
 
 
+class _OtherSub(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    z: int = 3
+
+
+class _Union(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    sub: _Sub | _OtherSub = _Sub()
+
+
+def test_a_sub_model_of_another_type_replaces_the_base_value():
+    # #580 review: _merge recursed whenever both values were models, so a
+    # union field holding another model type raised AttributeError.
+    merged = merge_config(_Union(sub=_Sub(x=5)), _Union(sub=_OtherSub(z=9)))
+    assert merged == _Union(sub=_OtherSub(z=9))
+    # The same type still merges field by field.
+    assert merge_config(_Union(sub=_Sub(x=5)), _Union(sub=_Sub(y=7))) == _Union(sub=_Sub(x=5, y=7))
+
+
+def test_an_invalid_merge_raises_and_a_valid_one_keeps_its_explicit_fields():
+    # #580 review: model_copy() skipped validation, so a merge could violate a
+    # cross-field rule (a tail as large as a stream's whole budget).
+    base = TruncationConfig(capture=CaptureConfig(tail=1_500))
+    with pytest.raises(ValueError, match="capture.tail"):
+        base.merge_with(TruncationConfig(capture=CaptureConfig(max_stdout=1_000)))
+    merged = base.merge_with(TruncationConfig(capture=CaptureConfig(max_stdout=2_000)))
+    assert (merged.capture.max_stdout, merged.capture.tail) == (2_000, 1_500)
+    # The result is the model_copy(): it can still be merged as an override.
+    assert "capture" in merged.model_fields_set
+    assert merge_config(TruncationConfig(), merged).capture.max_stdout == 2_000
+
+
+async def test_the_state_block_expression_ignores_a_method_level_override():
+    # #580 review: the expression read effective(TruncationConfig, self), which
+    # returns a running method's override first, so an agent built inside a
+    # parent's generated method embedded the parent method's state_format.
+    from nooa.config import FormatConfig
+    from nooa.config.effective import _current_truncation_config_var
+
+    expected = "pformat(self, max_length=50, max_string=500, max_depth=4)"
+    method = DEFAULT_TRUNCATION_CONFIG.merge_with(
+        TruncationConfig(state_format=FormatConfig(max_length=7, max_string=8, max_depth=1))
+    )
+    token = _current_truncation_config_var.set(method)
+    try:
+        agent = Agent(llm=FakeLLMClient([]))  # built while the method runs
+        assert agent._state_block_expr() == expected
+    finally:
+        _current_truncation_config_var.reset(token)
+    try:
+        assert agent._state_block_expr() == expected
+    finally:
+        await agent.aclose()
+
+
 async def test_a_subclass_overrides_only_the_fields_it_sets():
     class Other(BaseModel):
         model_config = ConfigDict(frozen=True)

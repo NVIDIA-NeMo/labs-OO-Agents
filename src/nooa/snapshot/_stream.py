@@ -126,6 +126,11 @@ class TextStream:
         self._file: OverflowWriter | None = None  # the open overflow file, if any
         self._path: str | None = None  # its path, for ``Text.full``
         self._file_failed = False
+        # A file error's warning waits here, not logged, while this is set:
+        # SharedTextStream logs it after releasing its lock (a logging handler
+        # that writes back into the stream would deadlock on it).
+        self._defer_file_warning = False
+        self._file_error: OSError | None = None
         self._kept = 0  # bytes written to the file
         self._produced = 0  # bytes produced
         # A chars stream, until its file opens: the (start, end) of each write holding a
@@ -174,7 +179,8 @@ class TextStream:
 
         The file keeps a prefix of the output, at most ``max_bytes``; a chars
         stream's prefix ends on a code point boundary. A write error is
-        logged and ends the file (``_fail``); it never raises.
+        logged (deferred to the caller under ``_defer_file_warning``) and ends
+        the file (``_fail``); it never raises.
         """
         writer = self._file
         if writer is None:
@@ -191,9 +197,12 @@ class TextStream:
             self._file_max = self._kept + len(part)
         try:
             self._kept += writer.write(part)
-        except OSError:
-            _log.warning("could not write the overflow file; keeping memory only", exc_info=True)
+        except OSError as error:
             self._fail()
+            if self._defer_file_warning:
+                self._file_error = error
+            else:
+                _warn_file_error(error)
 
     # --- writing ----------------------------------------------------------
 
@@ -424,6 +433,8 @@ class SharedTextStream:
         self._stream = TextStream(
             unit=unit, head=head, tail=tail, overflow=overflow, overflow_bytes=overflow_bytes
         )
+        # The file error warning is logged by write() after the lock is released.
+        self._stream._defer_file_warning = True
         self._lock = threading.Lock()
         self._dropped = 0
         _shared_streams.add(self)
@@ -452,12 +463,23 @@ class SharedTextStream:
         """Append ``data`` (as ``TextStream.write``) and return ``len(data)``; dropped after ``close()``, counted."""
         with self._lock:
             if self._stream._closed is None:
-                self._stream.write(data)
-                return len(data)
-            # Closed: the output is final, drop the write but count it.
-            size = _units(data, self._stream.unit)
-            first = self._dropped == 0 and size > 0
-            self._dropped += size
+                try:
+                    self._stream.write(data)
+                finally:
+                    error, self._stream._file_error = self._stream._file_error, None
+                written = True
+            else:
+                # Closed: the output is final, drop the write but count it.
+                written = False
+                size = _units(data, self._stream.unit)
+                first = self._dropped == 0 and size > 0
+                self._dropped += size
+        # Logged with the lock released: a logging handler that writes to this
+        # stream re-enters write(), which would wait on the lock forever.
+        if written:
+            if error is not None:
+                _warn_file_error(error)
+            return len(data)
         if first:
             _log.warning(
                 "%d %s written after the stream closed were dropped "
@@ -504,6 +526,11 @@ class SharedTextStream:
     def __exit__(self, *exc: object) -> None:
         """``close()`` the stream on leaving the ``with`` block."""
         self.close()
+
+
+def _warn_file_error(error: OSError) -> None:
+    """Log that the overflow file could not be written (``TextStream._to_file``)."""
+    _log.warning("could not write the overflow file; keeping memory only", exc_info=error)
 
 
 def _units(data: object, unit: Literal["chars", "bytes"]) -> int:

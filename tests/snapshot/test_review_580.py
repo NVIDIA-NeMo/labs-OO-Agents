@@ -126,6 +126,22 @@ def test_a_class_namespace_read_is_charged_to_the_work_budget() -> None:
     assert state.nodes_left == 100 - len(small.__dict__)
 
 
+def test_an_instance_or_module_dict_read_is_charged_to_the_work_budget() -> None:
+    # #580 review: ``_safe_dict`` charged a class namespace but copied a plain
+    # ``dict`` (an instance or module ``__dict__``) whole, whatever was left.
+    from nooa.snapshot._limits import _State
+    from nooa.snapshot._raw import _safe_dict
+
+    owner = object()
+    big = {f"a{i}": i for i in range(1_500)}
+    state = _State(Limits(max_nodes=100))
+    assert _safe_dict(owner, big, state) is None  # larger than the work left: fail closed
+    assert state.nodes_left == 100  # nothing copied, nothing charged
+    state = _State(Limits(max_nodes=2_000))
+    assert _safe_dict(owner, big, state) == big
+    assert state.nodes_left == 2_000 - len(big)
+
+
 def test_an_ordinary_class_is_still_read_by_small_nested_captures() -> None:
     class Model(BaseModel):  # BaseModel's own namespace has more than 50 entries
         a: int = 1

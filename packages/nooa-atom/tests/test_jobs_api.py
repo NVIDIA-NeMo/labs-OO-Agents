@@ -887,6 +887,25 @@ async def test_a_failing_stream_sends_its_pending_values_then_an_empty_done_upda
     assert agent.jobs.get("b").state == "failed"
 
 
+async def test_a_failing_pipe_reader_fails_the_shell_job(agent, monkeypatch):
+    # #580 review: a pump that raised only put the end-of-stream marker, so a
+    # read error looked like a clean end and the job reported success.
+    import nooa_atom.agent.jobs as jobs_module
+
+    real = jobs_module.bounded_lines
+
+    async def failing(stream, **kwargs):
+        async for line in real(stream, **kwargs):
+            yield line
+        raise OSError("pipe read failed")
+
+    monkeypatch.setattr(jobs_module, "bounded_lines", failing)
+    await agent.jobs.run("echo out", name="p")
+    item = await _next(agent)
+    assert item.done and item.error == "OSError: pipe read failed"
+    assert agent.jobs.get("p").state == "failed"
+
+
 async def test_a_stream_ends_with_its_last_pending_values(agent):
     async def three():
         for i in range(3):

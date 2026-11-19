@@ -669,7 +669,8 @@ class JobsApi(Skill):
             env=env,
             start_new_session=True,
         )
-        queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue(_QUEUE_ITEMS)
+        # A line, ``None`` (a stream ended) or the exception a pump failed with.
+        queue: asyncio.Queue[tuple[str, str] | Exception | None] = asyncio.Queue(_QUEUE_ITEMS)
 
         def to_log(data: bytes) -> None:
             if not log.closed:  # the job ended: a pump still stopping writes nothing
@@ -678,7 +679,8 @@ class JobsApi(Skill):
         async def pump(stream: asyncio.StreamReader, kind: str) -> None:
             # The end marker is put only when the stream ends or fails, never
             # on cancellation: then nobody reads the queue any more, and a put
-            # on a full queue would block the cleanup below forever.
+            # on a full queue would block the cleanup below forever. A failure
+            # puts its exception, which the reader raises: it is not a clean end.
             try:
                 async for line in bounded_lines(
                     stream,
@@ -688,8 +690,8 @@ class JobsApi(Skill):
                     full_path=job.log_path if log is not None else None,
                 ):
                     await queue.put((kind, line))
-            except Exception:
-                await queue.put(None)
+            except Exception as error:
+                await queue.put(error)
                 raise
             await queue.put(None)
 
@@ -724,6 +726,8 @@ class JobsApi(Skill):
                 if entry is None:
                     open_streams -= 1
                     continue
+                if isinstance(entry, Exception):
+                    raise entry  # a pump failed: the job fails (cleanup below)
                 kind, text = entry
                 yield StreamEvent(kind=kind, text=text)
             if not timed_out:
@@ -737,11 +741,17 @@ class JobsApi(Skill):
             if timed_out:
                 _kill_group(proc)
                 await _stop_pumps(tasks)
-                # Lines the pumps had already queued still go out.
+                # Lines the pumps had already queued still go out; a pump's
+                # failure among them is raised once they are out.
+                failure: Exception | None = None
                 while not queue.empty():
                     entry = queue.get_nowait()
-                    if entry is not None:
+                    if isinstance(entry, Exception):
+                        failure = failure or entry
+                    elif entry is not None:
                         yield StreamEvent(kind=entry[0], text=entry[1])
+                if failure is not None:
+                    raise failure
                 await _reap(proc)
             code = 124 if timed_out else (proc.returncode or 0)
             yield StreamDone(kind="done", returncode=code, timed_out=timed_out)

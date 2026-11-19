@@ -32,6 +32,7 @@ def discover_agent_instruction_files(working_directory: str | Path) -> tuple[Pat
 
 
 _SECTION_SEPARATOR = "\n\n---\n\n"
+_TRUNCATED_MARKER = "\n\n[... truncated ...]"
 
 
 def render_agent_instructions(
@@ -55,10 +56,14 @@ def render_agent_instructions(
     sections: list[str] = []
     remaining = config.instructions_total_chars
     for path in discover_agent_instruction_files(working_directory):
-        if remaining <= 0:
+        header = f"Instructions from {path}:\n\n"
+        # The header and the separator before this section (none before the
+        # first) come out of the total first; what is left bounds the content.
+        available = remaining - len(header) - (len(_SECTION_SEPARATOR) if sections else 0)
+        if available <= 0:
             logger.warning("Skipping repository instructions from %s: total limit reached", path)
             continue
-        budget = min(config.instructions_file_chars, remaining)
+        budget = min(config.instructions_file_chars, available)
         try:
             with path.open("r", encoding="utf-8") as stream:
                 # One char past the budget is enough to know it was cut.
@@ -67,15 +72,22 @@ def render_agent_instructions(
             continue
         truncated = len(content) > budget
         if truncated:
+            # A cut file also carries the marker, which must fit in the total.
+            budget = min(budget, available - len(_TRUNCATED_MARKER))
+            if budget <= 0:
+                logger.warning(
+                    "Skipping repository instructions from %s: total limit reached", path
+                )
+                continue
             content = content[:budget]
             logger.warning("Truncating repository instructions from %s at %d chars", path, budget)
         content = content.strip()
         if not content:
             continue
         if truncated:
-            content += "\n\n[... truncated ...]"
-        section = f"Instructions from {path}:\n\n{content}"
-        remaining -= len(section) + len(_SECTION_SEPARATOR)
+            content += _TRUNCATED_MARKER
+        section = header + content
+        remaining -= len(section) + (len(_SECTION_SEPARATOR) if sections else 0)
         sections.append(section)
     return _SECTION_SEPARATOR.join(sections)
 

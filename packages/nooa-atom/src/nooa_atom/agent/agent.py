@@ -756,7 +756,9 @@ class AtomAgent(
             on_wait_cancelled=note_running_job,
         )
         # ``TruncationConfig.overflow_files`` off: no Shell, job or cell writes a file.
-        self._shells = work_shell.ShellOwner(overflow_files=self._truncation.overflow_files)
+        # The owner reads it at each capture (``effective(TruncationConfig, self)``),
+        # so a method-level ``@strategy(truncation=...)`` override applies too.
+        self._shells = work_shell.ShellOwner(agent=self)
         self.files = Files(self._workspace_shell)
         # Atom's own to-do list: membership on the list, content on each item.
         self._install_todo_list()

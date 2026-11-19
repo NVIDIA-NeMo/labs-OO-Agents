@@ -319,7 +319,10 @@ def test_object_like_omit_empty_runs_no_code_of_the_value(registered) -> None:
 
         __hash__ = object.__hash__
 
+    calls: list[str] = []
+
     def fail(value: Any) -> Any:
+        calls.append("bad")
         raise KeyError("x")
 
     Wrapper = _named("Wrapper")
@@ -328,6 +331,7 @@ def test_object_like_omit_empty_runs_no_code_of_the_value(registered) -> None:
     assert isinstance(snapshot, Object)
     assert [name for name, _ in snapshot.fields] == ["loud", "bad"]
     assert snapshot.field("bad") == Unavailable("error")
+    assert calls == ["bad"]  # the failing accessor ran once, not again for its part
 
 
 def test_object_like_keeps_empty_fields_by_default(registered) -> None:

@@ -28,9 +28,10 @@ stay in memory, and the whole stream also goes to an overflow file
 (whole up to 1 MiB, else ``HEAD``, one ``[... N bytes omitted; ...]`` line
 that names the file, ``TAIL``) and the file path when the text was cut (short
 output keeps no file). With the agent's ``TruncationConfig.overflow_files``
-off (``ShellOwner(overflow_files=False)``) no file is written: a cut stream
-keeps its head and tail, its line says ``full output not kept``, and the
-path is None.
+off (``effective(TruncationConfig, agent)`` at the capture, so a method-level
+``@strategy(truncation=...)`` counts; ``ShellOwner(overflow_files=False)``
+without an agent) no file is written: a cut stream keeps its head and tail,
+its line says ``full output not kept``, and the path is None.
 
 Retention of those files: an ``OverflowDir`` keeps at most 20 files (the
 newest) and deletes the oldest closed files when it needs room, so a path in
@@ -72,6 +73,7 @@ from typing import Annotated, Any, Literal
 
 from nooa import hidden
 from nooa.agentdoc import spec
+from nooa.config import TruncationConfig, effective
 from nooa.overflow import OverflowDir
 from nooa.runtime.cell_deadline import deadline_cancel
 from nooa.snapshot import Text, TextStream, cut, render_output, render_python
@@ -374,12 +376,29 @@ class ShellOwner:
 
     __nosnapshot__ = True
 
-    def __init__(self, *, overflow_files: bool = True) -> None:
+    def __init__(self, *, overflow_files: bool = True, agent: Any = None) -> None:
         self._shells: weakref.WeakSet[Shell] = weakref.WeakSet()
         self._closed = False
-        # The agent's ``TruncationConfig.overflow_files``: False writes no file at all.
-        self.overflow_files = overflow_files
+        # Whether files are written at all (False: none). With ``agent`` it is
+        # decided at each capture from ``effective(TruncationConfig, agent)``,
+        # so a method-level ``@strategy(truncation=...)`` applies; held weakly
+        # (the agent owns this owner). Without one, ``overflow_files`` as given.
+        self._overflow_files = overflow_files
+        self._agent = weakref.ref(agent) if agent is not None else None
         self._overflow: OverflowDir | None = None  # the agent's output files (``overflow_dir``)
+
+    @property
+    def overflow_files(self) -> bool:
+        """Whether output may go to files now: the ``TruncationConfig.overflow_files`` in force.
+
+        For an owner of an agent, ``nooa.config.effective(TruncationConfig,
+        agent)`` read at the call (a running method's override first, then
+        the agent's own); else the ``overflow_files`` it was made with.
+        """
+        agent = self._agent() if self._agent is not None else None
+        if agent is None:
+            return self._overflow_files
+        return effective(TruncationConfig, agent).overflow_files
 
     def overflow_dir(self) -> OverflowDir | None:
         """The agent's one ``OverflowDir`` (20 files, up to 64 MiB each); None once closed.

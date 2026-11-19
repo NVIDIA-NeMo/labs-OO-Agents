@@ -72,10 +72,20 @@ def _merge[ConfigT: BaseModel](base: ConfigT, override: ConfigT) -> ConfigT:
     for name in override.model_fields_set:
         value = getattr(override, name)
         base_value = getattr(base, name)
-        if isinstance(value, BaseModel) and isinstance(base_value, BaseModel):
+        # Merge field by field only when both hold the same model type: a
+        # union-typed field may hold another model, which then replaces the
+        # base's value whole (its fields need not exist on the base's model).
+        if isinstance(value, BaseModel) and type(value) is type(base_value):
             value = _merge(base_value, value)
         updates[name] = value
-    return base.model_copy(update=updates)
+    merged = base.model_copy(update=updates)
+    # model_copy() skips validation, so check the merged values against the
+    # model's own validators (cross-field rules included): an invalid merge
+    # raises here. The validated copy is only a check; the result stays the
+    # model_copy() one, which keeps the explicit-field metadata
+    # (model_fields_set) that merge_config() relies on.
+    type(base).model_validate(merged.model_dump())
+    return merged
 
 
 def default_config[ConfigT: BaseModel](config_type: type[ConfigT]) -> ConfigT:

@@ -117,6 +117,41 @@ def test_a_write_while_another_opens_the_file_waits_for_it(tmp_path, monkeypatch
         assert text.full is not None and text.full.kept == text.full.total == 204
 
 
+def test_a_file_error_warning_written_back_into_the_stream_does_not_deadlock(
+    tmp_path, monkeypatch
+) -> None:
+    # #580 review: the overflow file error was logged with the stream's lock
+    # held, so a logging handler writing into the same stream (a sys.stdout
+    # replacement) re-entered write() and waited on that lock forever.
+    from nooa.overflow import OverflowWriter
+
+    def broken(self: OverflowWriter, data: bytes) -> int:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    monkeypatch.setattr(OverflowWriter, "write", broken)
+    with OverflowDir() as folder:
+        stream = SharedTextStream(unit="chars", head=4, tail=4, overflow=folder)
+
+        class IntoTheStream(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                stream.write("[warning]")
+
+        logger = logging.getLogger("nooa.snapshot._stream")
+        handler = IntoTheStream()
+        logger.addHandler(handler)
+        try:
+            writer = threading.Thread(target=stream.write, args=("x" * 20,), daemon=True)
+            writer.start()
+            writer.join(timeout=5)
+            assert not writer.is_alive()  # was a deadlock
+        finally:
+            logger.removeHandler(handler)
+        text = stream.close()
+        assert text.full is None  # the file was given up: memory only
+        assert text.length == 20 + len("[warning]")
+
+
 def test_many_threads_lose_nothing(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
     with OverflowDir() as folder:

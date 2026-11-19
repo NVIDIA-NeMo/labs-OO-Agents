@@ -107,6 +107,27 @@ async def test_instructions_follow_the_instruction_budgets(tmp_path):
         assert text.endswith("[... truncated ...]")
 
 
+def test_the_total_budget_covers_headers_separators_and_markers(tmp_path):
+    # #580 review: the whole remaining budget went to file content, so the
+    # header, the separator and the truncation marker pushed the rendered
+    # block past instructions_total_chars.
+    (tmp_path / ".git").mkdir()
+    deep = tmp_path / "a" / "b"
+    deep.mkdir(parents=True)
+    for directory, letter in ((tmp_path, "x"), (tmp_path / "a", "y"), (deep, "z")):
+        (directory / "AGENTS.md").write_text(letter * 400)
+    header = len(f"Instructions from {tmp_path / 'AGENTS.md'}:\n\n")
+    for total in (header + 50, header * 2 + 150, 1_000, 1_300):
+        limits = CodingLimits(instructions_file_chars=300, instructions_total_chars=total)
+        rendered = render_agent_instructions(deep, limits)
+        assert len(rendered) <= total, (total, len(rendered))
+        assert rendered.startswith(f"Instructions from {tmp_path / 'AGENTS.md'}:\n\n")
+        assert rendered.endswith("[... truncated ...]")  # the marker fits whole
+    # No room for even the first header: nothing is rendered.
+    tiny = CodingLimits(instructions_file_chars=300, instructions_total_chars=10)
+    assert render_agent_instructions(deep, tiny) == ""
+
+
 def test_instruction_defaults_are_the_old_constants(tmp_path):
     (tmp_path / ".git").mkdir()
     (tmp_path / "AGENTS.md").write_text("q" * 150_000)
