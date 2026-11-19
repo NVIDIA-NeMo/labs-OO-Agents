@@ -32,9 +32,15 @@ Restore trusts code, not data. A snapshot can come from an untrusted place (a
 session store shipped in a cloned repository), so ``deserialize()`` builds only
 classes that are of the kind their envelope names (a Pydantic model, a
 dataclass, an ``@snapshotable`` class) and that live in code the process has
-already loaded: a class path whose top-level package is not imported yet is
-refused, so a snapshot cannot make Python import a new module. The allowlist
-stored next to a blob can only narrow this; it never permits a class.
+already loaded, or in modules that can only come from where that code is
+installed. A module already in ``sys.modules`` is used. A module not loaded yet
+is imported only if every parent package on its dotted path is loaded and is a
+regular package: its ``__path__`` is fixed to the directories it was loaded
+from, so a snapshot can import, say, ``mypkg.models`` next to an imported
+``mypkg``, but not a top-level module, nor a submodule of a namespace package
+(whose ``__path__`` follows ``sys.path`` and so may reach a file in the
+current directory). The allowlist stored next to a blob can only narrow this;
+it never permits a class.
 """
 
 from __future__ import annotations
@@ -182,14 +188,15 @@ def deserialize(blob: Any, allowlist: set[str]) -> Any:
 
     The allowlist usually comes from the stored snapshot, so it only narrows
     what may be built. Whatever it says, an envelope builds a class only if
-    the class is of the envelope's kind and its top-level package is already
-    imported (see the module docstring).
+    the class is of the envelope's kind and its module is loaded or may be
+    imported under the rule in the module docstring.
 
     Raises:
         DeserializationError: If the blob references a class not in the
             allowlist, a class that is not of its envelope's kind (e.g. a
             ``"dataclass"`` envelope naming ``subprocess.Popen``), a class whose
-            package is not loaded, or the class cannot be imported, the blob nests deeper
+            module may not be imported (see ``_import_class``), or the class
+            cannot be found, the blob nests deeper
             than ``MAX_SNAPSHOT_DEPTH`` (``reason`` is ``"depth"``), or
             restoring hits Python's recursion limit.
     """
@@ -786,41 +793,86 @@ def _import_class(fqn: str) -> type:
     (e.g. ``module.Outer.Inner``).  We try progressively shorter module
     paths so that ``getattr`` can traverse the class hierarchy.
 
-    Only code the process already loaded is used: a module is imported only
-    if its top-level package is already in ``sys.modules`` (a submodule of a
-    loaded package may still be imported). A snapshot therefore cannot make
-    Python import a module it names, e.g. one in the workspace when the
-    current directory is on ``sys.path``.
+    Only code the process already loaded is used. A module already in
+    ``sys.modules`` is used as is. A module that is not loaded yet is imported
+    only if every parent package on its dotted path is already in
+    ``sys.modules`` and is a regular package (see ``_is_regular_package``).
+    A regular package's ``__path__`` is a fixed list of the directories it
+    was loaded from, so the import can only run code installed next to that
+    package. A namespace package's ``__path__`` is recomputed from
+    ``sys.path``, which may hold the current directory, so a submodule of one
+    (e.g. ``opentelemetry.pwn``) could be a file in the workspace; such names
+    are refused unless the submodule is already loaded. A top-level module
+    that is not loaded is never imported.
 
     Raises:
-        DeserializationError: If the module or class cannot be found, or its
-            top-level package is not loaded.
+        DeserializationError: If the module or class cannot be found, or
+            finding it would need an import that the rule above refuses.
     """
     candidates = [fqn]
     old_prefix, new_prefix = _LEGACY_CORE_PREFIX
     if fqn.startswith(old_prefix):
         candidates.append(new_prefix + fqn.removeprefix(old_prefix))
 
-    unloaded = False
+    refused: str | None = None
     for candidate in candidates:
         parts = candidate.split(".")
         if len(parts) < 2:
             raise DeserializationError(f"Invalid fully qualified name: {fqn!r}")
         if parts[0] not in sys.modules:
-            unloaded = True
+            refused = refused or (
+                "its top-level package is not imported, and a snapshot may not import new modules"
+            )
             continue
         for i in range(len(parts) - 1, 0, -1):
             module_path = ".".join(parts[:i])
+            obj = sys.modules.get(module_path)
+            if obj is None:
+                if not _parents_are_loaded_regular_packages(parts[:i]):
+                    refused = refused or (
+                        f"importing {module_path!r} would need a parent package that is "
+                        f"not loaded or is a namespace package, and a snapshot may only "
+                        f"import submodules of loaded regular packages"
+                    )
+                    continue
+                try:
+                    obj = importlib.import_module(module_path)
+                except ImportError:
+                    continue
             try:
-                obj = sys.modules.get(module_path) or importlib.import_module(module_path)
                 for attr in parts[i:]:
                     obj = getattr(obj, attr)
                 return obj  # type: ignore[return-value]
-            except (ImportError, AttributeError):
+            except AttributeError:
                 continue
-    if unloaded:
+    if refused:
         raise DeserializationError(
-            f"Cannot import class {fqn!r}: its top-level package is not imported, "
-            f"and a snapshot may not import new modules. Import it before restoring."
+            f"Cannot import class {fqn!r}: {refused}. Import it before restoring."
         )
     raise DeserializationError(f"Cannot import class {fqn!r}: module or attribute not found")
+
+
+def _is_regular_package(module: Any) -> bool:
+    """Whether ``module`` is a regular package (a directory with ``__init__``).
+
+    A regular package has a ``__file__`` and a plain ``list`` as ``__path__``
+    (and as its spec's ``submodule_search_locations``). A namespace package
+    has neither: its ``__path__`` is a ``_NamespacePath`` that is recomputed
+    from ``sys.path``. A plain module has no ``__path__`` and cannot be a
+    parent of another module.
+    """
+    if not getattr(module, "__file__", None):
+        return False
+    if type(getattr(module, "__path__", None)) is not list:
+        return False
+    spec = getattr(module, "__spec__", None)
+    return spec is None or type(spec.submodule_search_locations) is list
+
+
+def _parents_are_loaded_regular_packages(parts: list[str]) -> bool:
+    """Whether every parent of the module ``".".join(parts)`` is a loaded regular package."""
+    for j in range(1, len(parts)):
+        parent = sys.modules.get(".".join(parts[:j]))
+        if parent is None or not _is_regular_package(parent):
+            return False
+    return True

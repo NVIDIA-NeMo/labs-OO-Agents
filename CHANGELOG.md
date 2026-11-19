@@ -27,14 +27,19 @@ to follow semantic versioning.
   cloned repository (`<workspace>/.nooa/sessions`) ran a command when the
   session was loaded. Now each envelope builds only its own kind (`pydantic`:
   a `BaseModel` subclass, `dataclass`: a dataclass, `dict_class`: an
-  `@snapshotable` class), a class path whose top-level package is not
-  imported yet is refused instead of imported, and an `@snapshotable`
-  envelope cannot set dunder attributes. The stored allowlist can only narrow
-  this. A refused attribute is skipped with a warning, as for any attribute
-  that fails to restore. Compatibility: an attribute whose class lives in a
-  package the process has not imported at restore time (for example a model
-  from a library a cell imported in the earlier process) is now dropped;
-  import the package before restoring to keep it.
+  `@snapshotable` class), and an `@snapshotable` envelope cannot set dunder
+  attributes. A class path may name a module that is not loaded yet only if
+  every parent package on its path is already imported and is a regular
+  package (its `__path__` is fixed to where it is installed), so `mypkg.models`
+  next to an imported `mypkg` still loads; a top-level module that is not
+  imported yet, or a submodule of a namespace package such as `opentelemetry`
+  (whose `__path__` follows `sys.path` and can reach the current directory), is
+  refused instead of imported. The stored allowlist can only narrow this. A
+  refused attribute or static context block is skipped with a warning, as for
+  any attribute that fails to restore. Compatibility: an attribute or context
+  block whose class lives in a package the process has not imported at restore
+  time (for example a model from a library a cell imported in the earlier
+  process) is now dropped; import the package before restoring to keep it.
 - An inline image in a format models do not accept (anything but PNG, JPEG,
   GIF or WebP, for example SVG from `show(Image.from_file("chart.svg"))`) is now
   replaced by a note before each request, instead of being sent. Every MIME

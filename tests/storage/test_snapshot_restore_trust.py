@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import dataclasses
 import enum
+import logging
 import sys
 import textwrap
 from pathlib import Path
@@ -24,7 +25,7 @@ from nooa import Agent
 from nooa.errors.storage import DeserializationError
 from nooa.storage.markers import snapshotable
 from nooa.storage.serialization import deserialize, serialize
-from nooa.storage.snapshot import AgentSnapshot
+from nooa.storage.snapshot import AgentSnapshot, StaticContextBlock
 from nooa.storage.snapshot_vars import SnapshotVars
 from nooa.unifiedllm import FakeLLMClient
 
@@ -168,6 +169,53 @@ class TestNoNewModuleImports:
         assert not marker.exists()
         assert "evil_snapshot_pkg" not in sys.modules
 
+    def test_namespace_package_submodule_is_not_imported(self, tmp_path: Path, monkeypatch) -> None:
+        # A namespace package's ``__path__`` follows ``sys.path``, so once it is
+        # loaded, a directory of the same name anywhere on ``sys.path`` (e.g. the
+        # workspace) adds submodules to it. Restore must not import one.
+        marker = tmp_path / "imported"
+        installed = tmp_path / "site"
+        (installed / "nooa_test_ns_pkg").mkdir(parents=True)
+        (installed / "nooa_test_ns_pkg" / "legit.py").write_text("X = 1\n")
+        attacker = tmp_path / "workspace" / "nooa_test_ns_pkg"
+        attacker.mkdir(parents=True)
+        (attacker / "pwn.py").write_text(
+            textwrap.dedent(f"""
+                from pathlib import Path
+                Path({str(marker)!r}).write_text("ran")
+                import dataclasses
+
+                @dataclasses.dataclass
+                class Gadget:
+                    x: int = 0
+            """)
+        )
+        monkeypatch.syspath_prepend(str(installed))
+        import importlib
+
+        ns = importlib.import_module("nooa_test_ns_pkg")
+        try:
+            assert ns.__spec__.origin is None or not getattr(ns, "__file__", None)
+            monkeypatch.syspath_prepend(str(tmp_path / "workspace"))
+            importlib.invalidate_caches()
+            blob = _envelope("dataclass", "nooa_test_ns_pkg.pwn.Gadget", {"x": 1})
+            with pytest.raises(DeserializationError, match="namespace package"):
+                _restore(blob)
+            assert not marker.exists()
+            assert "nooa_test_ns_pkg.pwn" not in sys.modules
+        finally:
+            for name in [m for m in sys.modules if m.split(".")[0] == "nooa_test_ns_pkg"]:
+                del sys.modules[name]
+
+    def test_submodule_of_loaded_regular_package_is_imported(self) -> None:
+        # Supported case: the parent is a loaded regular package, so the
+        # submodule can only come from where that package is installed.
+        sys.modules.pop("json.tool", None)
+        from nooa.storage.serialization import _import_class
+
+        assert _import_class("json.tool.main").__name__ == "main"
+        assert "json.tool" in sys.modules
+
 
 class _Holder(Agent, llm=FakeLLMClient()):
     value: int = 0
@@ -188,6 +236,46 @@ class TestAgentSnapshotRestore:
         assert "is not a dataclass" in skipped["zz_evil"]
         assert "zz_evil" not in agent.__dict__
         assert not marker.exists()
+
+    def test_context_block_of_unloaded_package_is_skipped(
+        self, tmp_path: Path, monkeypatch, caplog
+    ) -> None:
+        # A static context block whose class lives in a package that is not
+        # imported yet is skipped with a warning; the rest of the restore goes on.
+        marker = tmp_path / "imported"
+        pkg = tmp_path / "user_ctx_pkg"
+        pkg.mkdir()
+        (pkg / "__init__.py").write_text(
+            textwrap.dedent(f"""
+                from pathlib import Path
+                Path({str(marker)!r}).write_text("ran")
+                import dataclasses
+
+                @dataclasses.dataclass
+                class Note:
+                    x: int = 0
+            """)
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+        snap = AgentSnapshot(
+            context=[
+                StaticContextBlock(
+                    key="note", value=_envelope("dataclass", "user_ctx_pkg.Note", {"x": 1})
+                ),
+                StaticContextBlock(key="plain", value="kept"),
+            ],
+            attributes={"value": 4},
+            type_allowlist={"user_ctx_pkg.Note"},
+        )
+        agent = _Holder()
+        with caplog.at_level(logging.WARNING, logger="nooa.storage.snapshot"):
+            snap.restore(agent)
+        assert agent.value == 4
+        assert agent.context_manager["plain"] == "kept"
+        assert "note" not in agent.context_manager
+        assert any("context block 'note'" in r.getMessage() for r in caplog.records)
+        assert not marker.exists()
+        assert "user_ctx_pkg" not in sys.modules
 
 
 class TestTrustedRoundTripsStillWork:
