@@ -61,6 +61,8 @@ RUNTIME_NAMES = frozenset(
 OUTPUT_NAMES = frozenset({"print", "pprint", "show"})
 # What a call keeps once it ended: the only runtime names that keep working.
 AFTERLIFE_NAMES = OUTPUT_NAMES | {"self"}
+# Runtime names a call argument never replaces: the engine finishes the call with them.
+ENGINE_NAMES = frozenset({"_call", "return_result"})
 
 
 def framework_name_allowed(name: str, reserved: frozenset[str]) -> bool:
@@ -473,10 +475,13 @@ def enter_call_namespace(
             for name, value in (call.session_locals or {}).items()
             if framework_name_allowed(name, allowed)
         }
+        # A call argument wins over a runtime name (``show=False`` stays the
+        # caller's False, as on main); only the names the engine itself needs
+        # to finish the call are never rebound.
         own = {
             name: value
             for name, value in (arguments or {}).items()
-            if framework_name_allowed(name, allowed)
+            if name not in ENGINE_NAMES and framework_name_allowed(name, frozenset())
         }
         # An argument wins over a same-named seed.
         for values in (seeds, own):
