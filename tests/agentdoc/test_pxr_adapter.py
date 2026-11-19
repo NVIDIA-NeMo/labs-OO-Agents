@@ -296,3 +296,46 @@ def test_doc_loads_the_pxr_adapter_without_an_explicit_import():
         "assert 'familyName' in text and 'materialBind' in text, text[:400]\n"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+def test_doc_on_curated_boost_method_shows_signature_and_pitfalls():
+    out = doc(UsdGeom.Subset.CreateGeomSubset)
+    assert "No docstring or signature" not in out
+    assert out.startswith("def UsdGeom.Subset.CreateGeomSubset(geom: UsdGeom.Imageable, ")
+    params = ["geom", "subsetName", "elementType", "indices", "familyName", "familyType"]
+    positions = [out.index(f"{name}: ") for name in params]
+    assert positions == sorted(positions)
+    assert "'materialBind' is never an elementType" in out
+    assert "UsdShade.MaterialBindingAPI.Apply(subset.GetPrim()).Bind(material)" in out
+    assert out.rstrip().endswith('Other members: doc(UsdGeom.Subset)\n    """'.rstrip())
+
+
+def test_doc_on_get_geom_subsets_shows_its_curated_entry():
+    out = doc(UsdGeom.Subset.GetGeomSubsets)
+    assert out.startswith(
+        "def UsdGeom.Subset.GetGeomSubsets(geom: UsdGeom.Imageable, elementType: str = '', "
+        "familyName: str = '') -> list[UsdGeom.Subset]:"
+    )
+    assert "Child subsets filtered by elementType and familyName" in out
+    assert "Other members: doc(UsdGeom.Subset)" in out
+
+
+def test_doc_on_curated_method_bound_to_an_instance():
+    stage = Usd.Stage.CreateInMemory()
+    out = doc(stage.DefinePrim)
+    assert out.startswith(
+        "def Usd.Stage.DefinePrim(self, path: Sdf.Path | str, typeName: str = '')"
+    )
+    assert "Other members: doc(Usd.Stage)" in out
+
+
+def test_concise_doc_on_curated_method_shows_only_its_line():
+    out = doc(UsdGeom.Subset.CreateGeomSubset, concise=True)
+    assert "elementType: str" in out
+    assert "never an elementType" not in out
+
+
+def test_uncurated_compiled_function_keeps_the_compiled_note():
+    out = doc(Sdf.Path.IsAbsolutePath)
+    assert "No docstring or signature is available for this compiled function." in out
+    assert "doc(Path)" in out

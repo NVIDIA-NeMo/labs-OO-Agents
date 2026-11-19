@@ -20,6 +20,13 @@ to follow semantic versioning.
   `Sdf.Layer.OpenAsAnonymous`), `Export` does not save the root layer, and
   prim handles expire after `RemovePrim`. `register_all()` registers it when
   `pxr` is installed.
+- `doc()` on a method that a curated class view documents (for example
+  `doc(UsdGeom.Subset.CreateGeomSubset)`, `doc(stage.DefinePrim)`) now shows
+  that member's curated signature and description, the owner's notes and
+  recipe (whole when at most 20 lines, else the lines naming the member) and a
+  pointer to `doc(<Owner>)`. Before, a compiled method showed only the
+  "no docstring or signature" note. The owner is found among the classes
+  registered with `spec.define_doc`; uncurated callables are unchanged.
 - `doc()` now documents compiled callables and classes (C extensions and
   Boost.Python, for example OpenUSD's `pxr`). Before, `doc(UsdGeom.Subset.CreateGeomSubset)`
   printed only `class function:` and `doc(UsdGeom.Subset)` showed no methods.
