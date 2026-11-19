@@ -13,10 +13,12 @@ Architecture:
   fd 3   <- exit code + cwd + background job PIDs + sentinel (control channel)
 
 Background jobs (``server &``) started by earlier commands are spared when a
-later command times out. With ``keep_background_on_close=True``, close() ends
-only bash itself and hands the output pipes to a detached drainer, so such jobs
-outlive the session (e.g. servers a benchmark verifier checks after the agent
-exits).
+later command times out. A call cancelled while its command runs (e.g. by a
+python_cell timeout) leaves that command to the next call, which stops it in
+the same way, unless it has finished, and drops its output; the shell keeps its
+state. With ``keep_background_on_close=True``, close() ends only bash itself
+and hands the output pipes to a detached drainer, so such jobs outlive the
+session (e.g. servers a benchmark verifier checks after the agent exits).
 """
 
 import asyncio
@@ -136,10 +138,10 @@ class BashSession:
         self._last_successful_command: float | None = None
         self._last_command: str = ""
         self._start_count: int = 0
-        # True while a command's sentinel is outstanding. Still True when the next call starts
-        # means the call that sent it was cancelled mid-command (e.g. by a python_cell timeout):
-        # that command still holds bash's foreground, so the next call starts a fresh session.
-        self._command_in_flight = False
+        # The sentinel of the last command sent, until a read of the control channel consumes
+        # it. Still set when the next call starts: the call that sent it was cancelled (e.g. by
+        # a python_cell timeout), and its command may still hold bash's foreground.
+        self._outstanding_sentinel: str | None = None
         from nooa.tools.shell_lifecycle import _current_scope
 
         if scope := _current_scope.get():
@@ -394,6 +396,9 @@ class BashSession:
         On timeout, exit_code is 124 — same as the ``timeout(1)`` command.
         Use ``run_with_timeout_flag()`` if you need to distinguish a real
         timeout from a command that exits 124 naturally.
+
+        If this call is cancelled while the command runs (e.g. by a cell
+        timeout), the next call first stops that command, as on a timeout.
         """
         self._ensure_lock_on_current_loop()
         async with self._lock:
@@ -419,12 +424,13 @@ class BashSession:
         """The session's current directory and exported environment, if it is idle.
 
         Returns ``None`` without waiting or starting bash when the session is
-        not started yet, is busy (``is_busy()``), or the capture fails or
+        not started yet, is busy (``is_busy()``), may still run the command of
+        a cancelled call (the next ``run()`` ends it), or the capture fails or
         takes longer than ``timeout``. The capture runs as one command in the
         session and changes nothing in it.
         """
         self._ensure_lock_on_current_loop()
-        if not self._ready or self.is_busy():
+        if not self._ready or self.is_busy() or self._outstanding_sentinel is not None:
             return None
         try:
             async with self._lock:
@@ -470,7 +476,7 @@ class BashSession:
         elif self._started_on_loop is not asyncio.get_running_loop():
             await self._reset_for_loop_change()
 
-        if self._command_in_flight:
+        if self._outstanding_sentinel is not None:
             await self._recover_abandoned_command()
 
         self._last_command = command
@@ -533,7 +539,7 @@ class BashSession:
         elif self._started_on_loop is not asyncio.get_running_loop():
             await self._reset_for_loop_change()
 
-        if self._command_in_flight:
+        if self._outstanding_sentinel is not None:
             await self._recover_abandoned_command()
 
         self._last_command = command
@@ -551,6 +557,8 @@ class BashSession:
                 raise RuntimeError("Bash session failed to restart")
 
         try:
+            # Before the write: a cancel in drain() still leaves this command to the next call.
+            self._outstanding_sentinel = sentinel
             proc.stdin.write(script.encode())
             await proc.stdin.drain()
         except (BrokenPipeError, ConnectionResetError, OSError) as e:
@@ -561,6 +569,7 @@ class BashSession:
             if proc is None or proc.stdin is None or ctrl is None:
                 raise RuntimeError("Bash session failed to restart") from None
             try:
+                self._outstanding_sentinel = sentinel  # reset() cleared it
                 proc.stdin.write(script.encode())
                 await proc.stdin.drain()
             except (BrokenPipeError, ConnectionResetError, OSError) as e2:
@@ -591,16 +600,14 @@ class BashSession:
         stdout_task = asyncio.create_task(_read_stream(proc.stdout, "stdout", stdout_queue))
         stderr_task = asyncio.create_task(_read_stream(proc.stderr, "stderr", stderr_queue))
 
-        self._command_in_flight = True
         try:
             ctrl_lines, timed_out = await self._read_control_until(sentinel, timeout)
         except BaseException:
             # Cancelled mid-command: these readers would otherwise keep consuming the pipes,
-            # and every later command would see empty output.
+            # and every later command would see empty output. The next call ends the command.
             stdout_task.cancel()
             stderr_task.cancel()
             raise
-        self._command_in_flight = False
 
         # Sentinel received — cancel readers and drain remaining.
         stdout_task.cancel()
@@ -675,6 +682,8 @@ class BashSession:
                 raise RuntimeError("Bash session failed to restart")
 
         try:
+            # Before the write: a cancel in drain() still leaves this command to the next call.
+            self._outstanding_sentinel = sentinel
             proc.stdin.write(script.encode())
             await proc.stdin.drain()
         except (BrokenPipeError, ConnectionResetError, OSError) as e:
@@ -686,6 +695,7 @@ class BashSession:
             if proc is None or proc.stdin is None or ctrl is None:
                 raise RuntimeError("Bash session failed to restart") from e
             try:
+                self._outstanding_sentinel = sentinel  # reset() cleared it
                 proc.stdin.write(script.encode())
                 await proc.stdin.drain()
             except (BrokenPipeError, ConnectionResetError, OSError) as e2:
@@ -713,16 +723,15 @@ class BashSession:
         stdout_task = asyncio.create_task(accumulate(proc.stdout, stdout_buf))
         stderr_task = asyncio.create_task(accumulate(proc.stderr, stderr_buf))
 
-        self._command_in_flight = True
         try:
             ctrl_lines, timed_out = await self._read_control_until(sentinel, timeout)
         except BaseException:
             # Cancelled mid-command (e.g. a python_cell timeout): these readers would otherwise
-            # keep consuming the pipes, and every later command would see empty output.
+            # keep consuming the pipes, and every later command would see empty output. The
+            # next call ends the command.
             stdout_task.cancel()
             stderr_task.cancel()
             raise
-        self._command_in_flight = False
 
         # Cancel accumulators FIRST to avoid concurrent StreamReader access.
         # StreamReader does not support multiple concurrent readers.
@@ -762,10 +771,12 @@ class BashSession:
                 timed_out = True
                 break
             if not raw:
+                self._sentinel_done(sentinel)  # bash is gone: nothing will send it
                 self._diagnose_death("control_fd_eof")
                 break  # EOF — bash died
             line = raw.decode("utf-8", errors="replace").rstrip("\n")
             if sentinel in line:
+                self._sentinel_done(sentinel)
                 break
             lines.append(line)
 
@@ -803,6 +814,8 @@ class BashSession:
                 if not raw:
                     return False
                 if sentinel in raw.decode("utf-8", errors="replace"):
+                    # Now, not on return: a cancel in the escalation below must not leave it.
+                    self._sentinel_done(sentinel)
                     return True
 
         async def snapshot_children() -> dict[int, str | None]:
@@ -892,18 +905,62 @@ class BashSession:
         return False
 
     async def _recover_abandoned_command(self) -> None:
-        """Start a fresh session (cwd kept) after a call was cancelled while its command ran.
+        """End the command of a call that was cancelled while it ran, in this same bash.
 
-        That command still holds bash's foreground, so a new script would wait behind it, and
-        its sentinel would arrive first. With keep_background_on_close the abandoned command's
-        processes keep running, with their output drained; otherwise close() ends them.
+        Unless it has finished (its sentinel is already there), the command is stopped as on
+        a timeout: earlier background jobs are spared, also with keep_background_on_close,
+        and the session restarts only if that fails. So cwd, variables, functions and
+        background jobs are kept. Its output is dropped rather than given to the next command.
         """
+        sentinel = self._outstanding_sentinel
+        proc = self._process
+        if (
+            sentinel is None
+            or proc is None
+            or proc.returncode is not None
+            or self._control_reader is None
+            or proc.stdout is None
+            or proc.stderr is None
+        ):
+            self._outstanding_sentinel = None  # bash is gone: the next pre-check restarts it
+            return
+        # Not the command itself: it may carry credentials.
         logger.warning(
-            "BashSession: a call was cancelled while its command ran (%r); "
-            "starting a fresh session",
-            self._last_command[:200],
+            "BashSession: a call was cancelled while its command ran; "
+            "stopping that command if it still runs"
         )
-        await self.reset()
+
+        async def discard(stream: asyncio.StreamReader) -> None:
+            try:
+                while await stream.read(65536):
+                    pass
+            except Exception:
+                pass
+
+        # Keep the pipes read meanwhile: the command may be blocked writing to a full one.
+        readers = [asyncio.create_task(discard(stream)) for stream in (proc.stdout, proc.stderr)]
+        try:
+            # Returns at once if the command has finished; else it times out and stops the
+            # command as a timeout does, and resets the session if that fails.
+            await self._read_control_until(sentinel, _DRAIN_TIMEOUT)
+        finally:
+            for task in readers:
+                task.cancel()
+            await asyncio.gather(*readers, return_exceptions=True)
+        if self._process is proc:
+            # What is left of its output (now the sole reader of each stream).
+            for stream in (proc.stdout, proc.stderr):
+                while True:
+                    try:
+                        if not await asyncio.wait_for(stream.read(65536), _DRAIN_TIMEOUT):
+                            break
+                    except (TimeoutError, Exception):
+                        break
+
+    def _sentinel_done(self, sentinel: str) -> None:
+        """``sentinel`` is no longer outstanding: it was read, or bash is gone."""
+        if self._outstanding_sentinel == sentinel:
+            self._outstanding_sentinel = None
 
     async def _reset_for_loop_change(self) -> None:
         """Reset after detecting that the event loop changed (gl-212)."""
@@ -944,7 +1001,7 @@ class BashSession:
     async def close(self) -> None:
         """Terminate the bash session cleanly."""
         # Whatever ran, this session's sentinel is no longer awaited.
-        self._command_in_flight = False
+        self._outstanding_sentinel = None
         if self._control_transport is not None:
             try:
                 self._control_transport.close()

@@ -6,6 +6,15 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- A shell call (`ShellTools.run`, `BashSession.run`/`run_stream`) cancelled
+  while its command runs, for example by a cell timeout, no longer breaks the
+  shell. Before, every later command returned empty output, and the first one
+  waited behind the abandoned command until its own timeout. Now the next call
+  stops that command as a timeout does, unless it has finished, drops its
+  output, and runs in the same bash: the directory, variables, functions and
+  earlier background jobs are kept, also with `keep_background_on_close`.
+  While such a command is pending, `BashSession.snapshot_cwd_env()` returns
+  `None` at once.
 - `SandboxConfig.env_allowlist` keeps only the listed environment variables in
   the sandbox worker. The worker is a fork, so it inherited every variable of the
   parent, model API keys included, and a cell could print them. Removing them
