@@ -100,7 +100,9 @@ def test_arc_obsolete_yaml_is_never_ignored(arc_module, tmp_path, value):
 
 @pytest.mark.parametrize("key", ["CELLS", "WORKSPACE", "MEM_MB", "CPU_S", "REQUIRE", "UNKNOWN"])
 @pytest.mark.parametrize("entry", ["run_solver", "run_multi", "solver_agent"])
-def test_arc_legacy_environment_rejected_every_entrypoint(arc_module, monkeypatch, key, entry):
+def test_arc_legacy_environment_rejected_every_entrypoint(
+    arc_module, monkeypatch, capsys, key, entry
+):
     # Even CELLS=0 must not silently acknowledge an obsolete isolation configuration.
     monkeypatch.setenv(f"ARC_SANDBOX_{key}", "0")
     if entry == "solver_agent":
@@ -124,10 +126,13 @@ def test_arc_legacy_environment_rejected_every_entrypoint(arc_module, monkeypatc
             namespace["_arc_cell_config"]()
     elif entry == "run_solver":
         runner = arc_module(entry)
-        monkeypatch.setattr(sys, "argv", ["run_solver", "--game", "test"])
+        monkeypatch.setattr(sys, "argv", ["run_solver", "--game", "test", "--variant", "memory"])
         with pytest.raises(SystemExit) as error:
             runner.parse_args()
         assert error.value.code == 2
+        stderr = capsys.readouterr().err
+        assert f"ARC_SANDBOX_{key}" in stderr
+        assert "per-cell CodeAct OS sandbox was removed" in stderr
     else:
         with pytest.raises(ValueError, match=f"ARC_SANDBOX_{key}"):
             arc_module(entry).load_config(None, argparse.Namespace())
