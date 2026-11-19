@@ -6,6 +6,7 @@ import asyncio
 import contextvars
 import re
 import threading
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -358,6 +359,66 @@ def test_a_merge_check_that_raises_leaves_the_base_config_alone():
     with pytest.raises(ValueError, match="cannot exceed"):
         merge_config(base, _ParentChecks(size=200))
     assert base.nested.items == ["sentinel"]
+
+
+class _CallbackOwner:
+    """An object a config holds a bound callback of."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+
+    def callback(self) -> str:
+        return "ran"
+
+
+class _HoldsCallback(BaseModel):
+    callback: Callable[[], str] | None = None
+
+
+class _OuterHoldsCallback(BaseModel):
+    nested: _HoldsCallback = Field(default_factory=_HoldsCallback)
+    size: int = 10
+
+
+def test_the_merge_check_does_not_copy_a_bound_callback_or_its_owner():
+    # #580 review: a nested model was deep-copied whole, which took the
+    # callables it holds with it -- copying a bound method copies the object it
+    # is bound to, and an owner holding a lock cannot be copied at all, so an
+    # unrelated override failed with a TypeError before validation started.
+    owner = _CallbackOwner()
+    base = _OuterHoldsCallback(nested=_HoldsCallback(callback=owner.callback))
+    merged = merge_config(base, _OuterHoldsCallback(size=20))
+    callback = merged.nested.callback
+    assert merged.size == 20
+    assert callback is not None and callback.__self__ is owner
+    assert callback() == "ran"
+
+
+class _HoldsItself(BaseModel):
+    """A payload an ``Any`` field accepts: a list that holds itself."""
+
+    payload: Any = None
+    size: int = 10
+
+    @model_validator(mode="after")
+    def _touch_payload(self) -> "_HoldsItself":
+        if isinstance(self.payload, list):
+            self.payload.append("sentinel")
+        return self
+
+
+def test_the_merge_check_survives_a_payload_that_holds_itself():
+    # #580 review: rebuilding a container element by element never returned, so
+    # a cyclic payload raised RecursionError before validation started.
+    payload: list[Any] = []
+    payload.append(payload)
+    base = _HoldsItself(payload=payload)
+    before = len(base.payload)
+    merged = merge_config(base, _HoldsItself(size=20))
+    assert merged.size == 20
+    # The check ran on a copy: the cycle is intact and nothing was appended.
+    assert base.payload[0] is base.payload
+    assert len(base.payload) == before
 
 
 async def test_the_state_block_expression_ignores_a_method_level_override():

@@ -108,7 +108,7 @@ def _validation_input(model: BaseModel) -> dict[str, Any]:
     return {name: _isolated(getattr(model, name)) for name in type(model).model_fields}
 
 
-def _isolated(value: Any) -> Any:
+def _isolated(value: Any, memo: dict[int, Any] | None = None) -> Any:
     """``value``, copied far enough that re-validating it cannot write back.
 
     Pydantic re-runs a nested model's validators on the very instance it is
@@ -117,17 +117,46 @@ def _isolated(value: Any) -> Any:
     config -- ``model_copy()`` copies the top level only -- so the check would
     otherwise change a config it only meant to read.
 
-    A model is deep-copied and the plain containers that can hold one are
-    rebuilt, so their models are reached. Anything else is passed through: a
-    callable may be bound to an object (an agent, say) that copying would drag
-    along, and pydantic re-validates nothing outside models.
+    A model is copied field by field with this same policy rather than deep
+    copied whole: a deep copy takes the callables the model holds with it, and
+    copying a bound callable copies the object it is bound to -- an agent
+    holding a lock, say -- which cannot be copied at all. The plain containers
+    that can hold a model are rebuilt, so the models inside them are reached;
+    anything else is passed through, and pydantic re-validates nothing outside
+    models.
+
+    ``memo`` maps the identity of every value already copied to its copy, so a
+    value reached twice is copied once and a container that holds itself (which
+    an ``Any`` field accepts) terminates.
     """
+    if callable(value) and not isinstance(value, BaseModel):
+        return value
+    if memo is None:
+        memo = {}
+    elif id(value) in memo:
+        return memo[id(value)]
     if isinstance(value, BaseModel):
-        return value.model_copy(deep=True)
-    if type(value) in (list, tuple, set, frozenset):
-        return type(value)(_isolated(item) for item in value)
+        clone = value.model_copy(deep=False)
+        memo[id(value)] = clone
+        for name, field_value in value.__dict__.items():
+            clone.__dict__[name] = _isolated(field_value, memo)
+        extra = value.__pydantic_extra__
+        if extra:
+            clone.__pydantic_extra__ = {name: _isolated(item, memo) for name, item in extra.items()}
+        return clone
+    if type(value) is list:
+        items: list[Any] = []
+        memo[id(value)] = items
+        items.extend(_isolated(item, memo) for item in value)
+        return items
     if type(value) is dict:
-        return {key: _isolated(item) for key, item in value.items()}
+        entries: dict[Any, Any] = {}
+        memo[id(value)] = entries
+        for key, item in value.items():
+            entries[key] = _isolated(item, memo)
+        return entries
+    if type(value) in (tuple, set, frozenset):
+        return type(value)(_isolated(item, memo) for item in value)
     return value
 
 
