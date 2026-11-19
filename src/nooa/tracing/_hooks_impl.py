@@ -1095,6 +1095,16 @@ class OpenInferenceHooks:
                     max_length=_TRACE_MAX_LENGTH,
                     max_string=_TRACE_MAX_STRING,
                 )
+        images = getattr(result, "images", None)
+        if isinstance(images, list) and images:
+            # Payload-free references to show() media. The blocks themselves
+            # reach the viewer through the message journal (same hash), so the
+            # span stays small and the viewer serves them from its store.
+            from nooa.tracing._media_parts import media_summary
+
+            refs = [ref for ref in (media_summary(b) for b in images[:64]) if ref is not None]
+            if refs:
+                data["media"] = refs
         return json.dumps(data)
 
     @staticmethod
