@@ -474,8 +474,10 @@ def _with_own_overrides(raw: dict[Any, Any], storage: dict[str, Any]) -> dict[st
     (a set of the types would hash them: a metaclass ``__hash__`` /
     ``__eq__``), so neither the check nor the lookup runs user code.
 
-    That check is one C-level pass over the keys (``len(raw)`` steps, no
-    allocation, no user code) and is deliberately **not** charged to
+    That check is one pass over the keys view (``len(raw)`` Python-level
+    steps of ``type(key) is str``; only the view and the generator are
+    allocated, no key is copied, and no user code runs) and is deliberately
+    **not** charged to
     ``state.nodes_left``: this function is reached only with the partial copy
     of a ``__dict__`` larger than a quarter of the work left, whose documented
     behaviour is to list its first attributes (``_object_like``). Charging the
