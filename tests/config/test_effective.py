@@ -9,7 +9,7 @@ import threading
 from typing import Any
 
 import pytest
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import AliasPath, BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from nooa import Agent, CodeActStrategy, strategy
 from nooa.config import CaptureConfig, TruncationConfig, effective, merge_config
@@ -276,6 +276,38 @@ def test_the_merge_check_reads_an_aliased_model_the_way_validation_does():
     assert (merged.size, merged.enabled) == (20, False)
     assert merged.model_fields_set == {"size", "enabled"}
     assert merged.label == "20:False"
+
+
+class _PathAliased(BaseModel):
+    """A config whose field is read through an ``AliasPath`` validation alias."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    size: int = Field(10, validation_alias=AliasPath("limits", "size"))
+    enabled: bool = False
+
+    @model_validator(mode="after")
+    def _check(self) -> "_PathAliased":
+        if self.enabled and self.size > 100:
+            raise ValueError("an enabled limit cannot exceed 100")
+        return self
+
+
+def test_the_merge_check_reads_a_field_that_a_path_alias_nests():
+    # #580 review: _validation_input() fell back to the field name for an
+    # AliasPath alias, which validation rejects -- the value lives at a nested
+    # key, so under extra="forbid" the name is an unexpected one. The name is
+    # accepted now (by_name=True), so the merge stays valid, the nested field
+    # can be overridden, and the model's own cross-field rule still runs.
+    base = _PathAliased.model_validate({"limits": {"size": 20}})
+    merged = merge_config(base, _PathAliased(enabled=True))
+    assert (merged.size, merged.enabled) == (20, True)
+    assert merged.model_fields_set == {"size", "enabled"}
+    assert merge_config(base, _PathAliased.model_validate({"limits": {"size": 50}})).size == 50
+    # Each value is valid alone; the merge violates the rule.
+    high = _PathAliased.model_validate({"limits": {"size": 500}})
+    with pytest.raises(ValueError, match="cannot exceed"):
+        merge_config(high, _PathAliased(enabled=True))
 
 
 async def test_the_state_block_expression_ignores_a_method_level_override():
