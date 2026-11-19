@@ -146,6 +146,54 @@ async def test_close_can_keep_background_jobs(tmp_path, reap):
     assert _alive(pid)
 
 
+async def test_close_keeping_jobs_returns_once_bash_exits(tmp_path, reap):
+    """Kept jobs hold bash's stdout and stderr, so close() must not wait for those to close.
+
+    asyncio's Process.wait() returns only once those pipes are closed too, so close() took 3 s
+    whenever a kept job was running.
+    """
+    session = BashSession(cwd=tmp_path, keep_background_on_close=True)
+    pid = await _start_job(session, "sleep 60")
+    reap.append(pid)
+    bash_pid = session._process.pid
+
+    started = time.monotonic()
+    await session.close()
+
+    assert time.monotonic() - started < 2
+    assert not _alive(bash_pid)
+    assert _alive(pid)
+    os.kill(pid, signal.SIGKILL)  # here, so its pipes close while this test's loop runs
+    assert await _wait_dead(pid)
+
+
+async def test_close_keeping_jobs_kills_a_busy_bash_without_waiting_for_its_pipes(tmp_path, reap):
+    """A bash still running a command does not exit at EOF: close() kills it, then returns.
+
+    Before, close() then waited 3 s more for the pipes, which the command still holds.
+    """
+    session = BashSession(cwd=tmp_path, keep_background_on_close=True)
+    await session.run("true")
+    pid_file = tmp_path / "busy.pid"
+    # Straight to bash, as a call cancelled mid-command leaves it: busy, no sentinel awaited.
+    session._process.stdin.write(f"sh -c 'echo $$ > {pid_file}; exec sleep 30'\n".encode())
+    for _ in range(250):
+        if pid_file.exists() and pid_file.read_text().strip():
+            break
+        await asyncio.sleep(0.02)
+    busy = int(pid_file.read_text())
+    reap.append(busy)
+    bash_pid = session._process.pid
+
+    started = time.monotonic()
+    await session.close()
+
+    assert time.monotonic() - started < 5  # 3 s for bash to exit at EOF, then SIGKILL
+    assert not _alive(bash_pid)
+    os.kill(busy, signal.SIGKILL)  # here, so its pipes close while this test's loop runs
+    assert await _wait_dead(busy)
+
+
 def test_kept_job_can_write_after_owner_exits(tmp_path):
     """Output pipes stay drained, so a kept job does not die on EPIPE/SIGPIPE."""
     marker = tmp_path / "ticks"

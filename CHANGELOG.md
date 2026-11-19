@@ -6,6 +6,13 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `BashSession.close()` with `keep_background_on_close` (as in `BenchAgent`,
+  or for every shell in a `preserve_background_services()` scope) returns as
+  soon as bash has exited. Before, it took 3 seconds whenever a kept
+  background job was running, because asyncio's `Process.wait()` also waits
+  until the job closes bash's stdout and stderr; and when bash had to be killed
+  (a command still running), it took 6 seconds instead of 3. It no longer
+  sends SIGKILL to the pid of a bash that has already exited.
 - `SandboxConfig.env_allowlist` keeps only the listed environment variables in
   the sandbox worker. The worker is a fork, so it inherited every variable of the
   parent, model API keys included, and a cell could print them. Removing them
