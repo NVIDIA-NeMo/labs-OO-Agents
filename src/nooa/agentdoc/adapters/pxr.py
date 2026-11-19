@@ -21,7 +21,7 @@ import pxr
 from pxr import Gf, Sdf, Usd, UsdGeom, UsdShade, Vt
 
 from nooa.agentdoc import spec
-from nooa.agentdoc.ext import CallableInfo, ModuleInfo, TypeInfo
+from nooa.agentdoc.ext import CallableInfo, ModuleInfo, TypeInfo, register_attribute_hint
 
 # Executable recipe (tests run it): bind a material to a set of mesh faces.
 # Needs: mesh (UsdGeom.Mesh), material (UsdShade.Material), subset_name (valid
@@ -123,6 +123,10 @@ _register_module(
         ("Attribute", "typed value on a prim: Get/Set (optionally per time code)"),
         ("Relationship", "targets other paths (e.g. material:binding)"),
         ("TimeCode", "Usd.TimeCode.Default() (non-animated) or a frame number"),
+        ("Object", "base of Prim/Attribute/Relationship: name, path, metadata, customData"),
+        ("Property", "base of Attribute and Relationship"),
+        ("SchemaBase", "base of all schema classes: GetPrim(), GetPath()"),
+        ("EditTarget", "stage.GetEditTarget().GetLayer(): where edits go"),
         ("StageCache", "explicit stage cache; used only inside Usd.StageCacheContext"),
         ("StageCacheContext", "with Usd.StageCacheContext(cache): Open() reuses cached stages"),
     ],
@@ -131,7 +135,8 @@ _register_module(
 _register_module(
     UsdGeom,
     "Geometry schemas. Wrap a prim: UsdGeom.Mesh(prim); create: UsdGeom.Mesh.Define(stage, path).\n"
-    "Materials are NOT here: use UsdShade.Material / UsdShade.MaterialBindingAPI.",
+    "Materials are NOT here: use UsdShade.Material / UsdShade.MaterialBindingAPI.\n"
+    "There is no UsdGeom.GeomSubset (use UsdGeom.Subset) or UsdGeom.MaterialBindingAPI.",
     [
         ("Mesh", "polygon mesh: points, faceVertexCounts, faceVertexIndices"),
         ("Subset", "GeomSubset: a named set of faces of a mesh (material assignment)"),
@@ -140,7 +145,11 @@ _register_module(
         ("XformCommonAPI", "simple SetTranslate/SetRotate/SetScale"),
         ("Scope", "untransformable grouping prim (UsdGeom.Scope, not Usd.Scope)"),
         ("Imageable", "visibility, purpose, ComputeWorldBound"),
+        ("Boundable", "extent: GetExtentAttr, ComputeExtentFromPlugins"),
+        ("Gprim", "displayColor, doubleSided, orientation"),
         ("PrimvarsAPI", "primvars (e.g. UVs: primvars:st)"),
+        ("Primvar", "one primvar: Get/Set, interpolation, indices"),
+        ("XformOp", "one transform op: Get/Set, GetOpName"),
         ("BBoxCache", "fast bounds: BBoxCache(time, [UsdGeom.Tokens.default_])"),
         ("Tokens", "string constants: face, partition, y, z, ..."),
     ],
@@ -171,6 +180,7 @@ _register_module(
         ("Shader", "shading node, e.g. info:id = 'UsdPreviewSurface'"),
         ("MaterialBindingAPI", "Apply(prim).Bind(material); ComputeBoundMaterial()"),
         ("Input", "shader/material input: Set(value), ConnectToSource(...)"),
+        ("ConnectableAPI", "connections: ConnectToSource, HasConnectedSource"),
         ("Output", "shader/material output"),
         ("Tokens", "string constants: materialBind, surface, strongerThanDescendants, ..."),
     ],
@@ -185,6 +195,15 @@ _register_module(
         ("ValueTypeNames", "attribute types for CreateAttribute/CreateInput: Float, Color3f, ..."),
         ("ValueTypeName", "type of each Sdf.ValueTypeNames entry"),
     ],
+    functions=[
+        _m(
+            "CopySpec",
+            "(srcLayer: Sdf.Layer, srcPath: Sdf.Path, dstLayer: Sdf.Layer, dstPath: Sdf.Path)",
+            "bool",
+            "Copy a prim/property spec and everything below it between layers (or within one); "
+            "the destination parent must exist (Sdf.CreatePrimInLayer).",
+        ),
+    ],
 )
 
 _register_module(
@@ -198,6 +217,7 @@ _register_module(
         ("Rotation", "Gf.Rotation(Gf.Vec3d(axis), degrees)"),
         ("Range3d", "axis-aligned box: GetMin(), GetMax(), GetSize()"),
         ("Quatf", "quaternion (Gf.Quatf(real, i, j, k))"),
+        ("BBox3d", "box + transform from ComputeWorldBound: ComputeAlignedRange()"),
     ],
     functions=[
         _m("Dot", "(a: Gf.Vec3f, b: Gf.Vec3f)", "float", "Dot product (also Vec3d etc.)."),
@@ -321,6 +341,19 @@ _register(
             "Usd.Prim",
             "Author an 'over' (no type) at path.",
         ),
+        _m(
+            "GetEditTarget",
+            "(self)",
+            "Usd.EditTarget",
+            "Where edits go; .GetLayer() is the target layer.",
+        ),
+        _m(
+            "SetEditTarget",
+            "(self, editTarget: Usd.EditTarget)",
+            "None",
+            "Redirect edits; an Sdf.Layer of the layer stack is accepted too.",
+        ),
+        _m("GetSessionLayer", "(self)", "Sdf.Layer", "The stage's session layer."),
     ],
 )
 
@@ -401,6 +434,25 @@ _register(
             "(self, active: bool)",
             "bool",
             "Deactivate instead of removing (non-destructive).",
+        ),
+        _m("GetRelationships", "(self)", "list[Usd.Relationship]", "All relationships."),
+        _m(
+            "GetProperty",
+            "(self, propName: str)",
+            "Usd.Property",
+            "Attribute or relationship by name (invalid if absent).",
+        ),
+        _m(
+            "GetPropertyNames",
+            "(self, predicate: object = None)",
+            "list[str]",
+            "Names of all properties; predicate(name) -> bool filters.",
+        ),
+        _m(
+            "GetPrimStack",
+            "(self)",
+            "list[Sdf.PrimSpec]",
+            "Prim specs contributing to this prim, strongest first.",
         ),
     ],
 )
@@ -536,6 +588,18 @@ _register(
             "Usd.Attribute",
             "Set UsdGeom.Tokens.none for polygons.",
         ),
+        _m(
+            "GetFaceVaryingLinearInterpolationAttr",
+            "(self)",
+            "Usd.Attribute",
+            "faceVarying primvar (UV) interpolation on subdivision: default 'cornersPlus1'.",
+        ),
+        _m(
+            "CreateFaceVaryingLinearInterpolationAttr",
+            f"(self, {_DEF})",
+            "Usd.Attribute",
+            "e.g. 'all' (UVs linear everywhere) or 'none'.",
+        ),
         _m("CreateExtentAttr", f"(self, {_DEF})", "Usd.Attribute", "Bounds [(min), (max)]."),
         _s(
             "ComputeExtent",
@@ -555,7 +619,9 @@ _SUBSET_DOC = (
     "Verify like a consumer:\n"
     f"{_indent(VERIFY_SUBSETS_RECIPE)}\n"
     "Subset.Define(stage, path) authors nothing else: set familyName, indices and display name\n"
-    "yourself. Attribute getters: GetFamilyNameAttr, GetElementTypeAttr, GetIndicesAttr."
+    "yourself. Attribute getters: GetFamilyNameAttr, GetElementTypeAttr, GetIndicesAttr.\n"
+    "Not in usd-core: Subset.CreateSubset, CreateFamily, GetGeomSubset(ByName), GetSubset,\n"
+    "Mesh.CreateGeomSubset, UsdGeom.GeomSubset. Family type: Subset.SetFamilyType/GetFamilyType."
 )
 
 _register(
@@ -613,6 +679,12 @@ _register(
             "(geom: UsdGeom.Imageable, elementType: str = '', familyName: str = '')",
             "tuple[bool, str]",
             "(valid, reason); needs the mesh's faceVertexCounts authored.",
+        ),
+        _s(
+            "ValidateSubsets",
+            "(subsets: list[UsdGeom.Subset], elementCount: int, familyType: str)",
+            "tuple[bool, str]",
+            "(valid, reason) for these subsets against elementCount faces and a family type.",
         ),
         _s(
             "GetUnassignedIndices",
@@ -710,17 +782,44 @@ _XFORMABLE_DOC = (
 )
 
 
-@spec.define_doc(UsdGeom.Xformable)
-def _xformable_doc(cls_or_instance) -> TypeInfo:
-    # Registered on the base class, so subclasses (Sphere, Camera, ...) show their own name.
-    cls = cls_or_instance if isinstance(cls_or_instance, type) else type(cls_or_instance)
-    name = f"UsdGeom.{cls.__name__}"
-    doc = (
-        _XFORMABLE_DOC
-        if cls is UsdGeom.Xformable
-        else f"{name}: only its UsdGeom.Xformable (transform) API is curated here.\n{_XFORMABLE_DOC}"
-    )
-    return TypeInfo(name=name, base=None, fields=[], methods=list(_XFORM_METHODS), docstring=doc)
+# Curated views of pxr base classes, merged down the MRO: doc() on a subclass that
+# has no view of its own (UsdGeom.Cube, UsdGeom.Sphere, ...) lists the API of all its
+# curated bases under its own name.
+_SCHEMA_VIEWS: dict[type, tuple[str, str, list[CallableInfo]]] = {}
+
+
+def _pxr_name(cls: type) -> str:
+    """'UsdGeom.Cube' for pxr.UsdGeom.Cube."""
+    return f"{cls.__module__.removeprefix('pxr.')}.{cls.__qualname__}"
+
+
+def _register_schema(target: type, name: str, docstring: str, methods=()) -> None:
+    """Register a view whose subclasses inherit its methods (and those of curated bases)."""
+    _SCHEMA_VIEWS[target] = (name, docstring, list(methods))
+
+    def _extract(cls_or_instance) -> TypeInfo:
+        cls = cls_or_instance if isinstance(cls_or_instance, type) else type(cls_or_instance)
+        bases = [base for base in cls.__mro__ if base in _SCHEMA_VIEWS]
+        methods: list[CallableInfo] = []
+        seen: set[str] = set()
+        for base in bases:
+            for method in _SCHEMA_VIEWS[base][2]:
+                if method.name not in seen:
+                    seen.add(method.name)
+                    methods.append(method)
+        own_name, own_doc, _ = _SCHEMA_VIEWS[bases[0]]
+        if cls is bases[0]:
+            doc = own_doc
+        else:
+            own_name = _pxr_name(cls)
+            curated = ", ".join(_SCHEMA_VIEWS[base][0] for base in bases)
+            doc = f"{own_name}: only the API inherited from {curated} is curated here.\n{own_doc}"
+        return TypeInfo(name=own_name, base=None, fields=[], methods=methods, docstring=doc)
+
+    spec.define_doc(target)(_extract)
+
+
+_register_schema(UsdGeom.Xformable, "UsdGeom.Xformable", _XFORMABLE_DOC, _XFORM_METHODS)
 
 
 _register(
@@ -925,6 +1024,12 @@ _register(
             "e.g. UsdGeom.Tokens.nonOverlapping or partition.",
         ),
         _m("GetMaterialBindSubsetsFamilyType", "(self)", "str", "Default 'unrestricted'."),
+        _s(
+            "ComputeBoundMaterials",
+            "(prims: list[Usd.Prim], materialPurpose: str = '', supportLegacyBindings: bool = True)",
+            "tuple[list[UsdShade.Material], list[Usd.Relationship]]",
+            "Bound material and binding rel for each prim (batched ComputeBoundMaterial).",
+        ),
     ],
 )
 
@@ -992,6 +1097,12 @@ _register(
         ),
         _m("Reload", "(self, force: bool = False)", "bool", "Re-read from disk."),
         _m("ExportToString", "(self)", "str", "usda text."),
+        _m(
+            "GetCompositionAssetDependencies",
+            "(self)",
+            "list[str]",
+            "Asset paths of sublayers, references and payloads, as authored.",
+        ),
     ],
 )
 
@@ -1128,3 +1239,586 @@ _register(
         ),
     ],
 )
+
+
+# --------------------------------------------------------------------------- base classes
+# Signatures checked against the Boost.Python C++ signatures of usd-core 26.8.
+
+_register_schema(
+    Usd.Object,
+    "Usd.Object",
+    "Base of Usd.Prim and Usd.Property (Usd.Attribute, Usd.Relationship): name, path,\n"
+    "validity and metadata. customData is a free-form dict; keyPath 'a:b' addresses\n"
+    "nested keys: prim.SetCustomDataByKey('myTool:id', 7); prim.GetCustomDataByKey('myTool:id').",
+    methods=[
+        _m(
+            "IsValid", "(self)", "bool", "False for missing or expired objects (same as bool(obj))."
+        ),
+        _m(
+            "GetName",
+            "(self)",
+            "str",
+            "Prim: last path element; property: full namespaced name, e.g. 'inputs:diffuseColor'.",
+        ),
+        _m("GetPath", "(self)", "Sdf.Path", "Prim path or property path '/Prim.attr'."),
+        _m("GetPrim", "(self)", "Usd.Prim", "The prim itself, or a property's owning prim."),
+        _m("GetStage", "(self)", "Usd.Stage", "Owning stage."),
+        _m("GetMetadata", "(self, key: str)", "object", "Metadata value (None if unset)."),
+        _m("SetMetadata", "(self, key: str, value: object)", "bool", "Author metadata."),
+        _m("HasMetadata", "(self, key: str)", "bool", "Metadata authored or has a fallback."),
+        _m("GetAllMetadata", "(self)", "dict", "All authored and fallback metadata."),
+        _m("GetCustomData", "(self)", "dict", "customData dict ({} if unset)."),
+        _m(
+            "GetCustomDataByKey",
+            "(self, keyPath: str)",
+            "object",
+            "One customData value; 'a:b' for nested dicts (None if unset).",
+        ),
+        _m(
+            "SetCustomData",
+            "(self, customData: dict)",
+            "None",
+            "Replace the whole customData dict.",
+        ),
+        _m(
+            "SetCustomDataByKey",
+            "(self, keyPath: str, value: object)",
+            "None",
+            "Author one customData entry; 'a:b' creates nested dicts. Returns None.",
+        ),
+        _m("HasCustomDataKey", "(self, keyPath: str)", "bool", "customData has keyPath."),
+        _m("GetDocumentation", "(self)", "str", "'documentation' metadata ('' if unset)."),
+        _m("SetDocumentation", "(self, doc: str)", "bool", "Author 'documentation' metadata."),
+    ],
+)
+
+_register_schema(
+    Usd.Property,
+    "Usd.Property",
+    "Base of Usd.Attribute and Usd.Relationship. Names may be namespaced with ':'\n"
+    "(GetName() 'primvars:st', GetNamespace() 'primvars', GetBaseName() 'st').",
+    methods=[
+        _m("GetBaseName", "(self)", "str", "Name without namespace."),
+        _m("GetNamespace", "(self)", "str", "Namespace part ('' if none)."),
+        _m("IsAuthored", "(self)", "bool", "Has an authored spec in some layer."),
+        _m("IsCustom", "(self)", "bool", "Custom (not from a schema)."),
+        _m("IsDefined", "(self)", "bool", "Authored or defined by a schema."),
+    ],
+)
+
+_register_schema(
+    Usd.Relationship,
+    "Usd.Relationship",
+    "Targets other paths (e.g. material:binding, proxyPrim). Create with\n"
+    "prim.CreateRelationship(name); targets are Sdf.Path values (str paths are accepted).",
+    methods=[
+        _m("GetTargets", "(self)", "list[Sdf.Path]", "Authored target paths."),
+        _m(
+            "GetForwardedTargets",
+            "(self)",
+            "list[Sdf.Path]",
+            "Targets with relationships-to-relationships resolved.",
+        ),
+        _m(
+            "AddTarget",
+            "(self, target: Sdf.Path, position: Usd.ListPosition = Usd.ListPositionBackOfPrependList)",
+            "bool",
+            "Add one target.",
+        ),
+        _m("SetTargets", "(self, targets: list[Sdf.Path])", "bool", "Replace all targets."),
+        _m("RemoveTarget", "(self, target: Sdf.Path)", "bool", "Remove one target."),
+        _m(
+            "ClearTargets",
+            "(self, removeSpec: bool)",
+            "bool",
+            "Clear targets; removeSpec=True also removes the relationship spec.",
+        ),
+    ],
+)
+
+_register_schema(
+    Usd.SchemaBase,
+    "Usd.SchemaBase",
+    "Base of every schema class (UsdGeom.Mesh, UsdShade.Material, UsdGeom.PrimvarsAPI...).\n"
+    "A schema object wraps a prim: schema.GetPrim(); falsy if the prim is invalid.",
+    methods=[
+        _m("GetPrim", "(self)", "Usd.Prim", "The wrapped prim."),
+        _m("GetPath", "(self)", "Sdf.Path", "Path of the wrapped prim."),
+        _m("IsConcrete", "(self)", "bool", "Concrete typed schema (can be Define()d)."),
+        _m("GetSchemaKind", "(self)", "Usd.SchemaKind", "e.g. Usd.SchemaKind.ConcreteTyped."),
+        _s(
+            "GetSchemaAttributeNames",
+            "(includeInherited: bool = True)",
+            "list[str]",
+            "Attribute names the schema defines; call on the class, e.g. "
+            "UsdGeom.Mesh.GetSchemaAttributeNames().",
+        ),
+    ],
+)
+
+_register(
+    Usd.TimeCode,
+    "Usd.TimeCode",
+    "Time at which to read/write a value. Usd.TimeCode.Default() is the non-animated value\n"
+    "(what Get()/Set() use without a time); Usd.TimeCode(24) is frame 24. A plain float also\n"
+    "works where a time code is expected.",
+    methods=[
+        _m("__init__", "(self, time: float)", "None", "Time code at a frame; Usd.TimeCode() is 0."),
+        _s("Default", "()", "Usd.TimeCode", "The default (non-animated) time."),
+        _s("EarliestTime", "()", "Usd.TimeCode", "Earliest time sample (for range queries)."),
+        _m("IsDefault", "(self)", "bool", "This is Usd.TimeCode.Default()."),
+        _m("GetValue", "(self)", "float", "Frame number."),
+    ],
+)
+
+_register(
+    Usd.EditTarget,
+    "Usd.EditTarget",
+    "Which layer new edits go to: stage.GetEditTarget().GetLayer(). Author into another\n"
+    "layer with stage.SetEditTarget(layer) (an Sdf.Layer of the stage's layer stack, e.g.\n"
+    "stage.GetSessionLayer()); stage.SetEditTarget(stage.GetRootLayer()) switches back.",
+    methods=[
+        _m("GetLayer", "(self)", "Sdf.Layer", "The layer edits are written to."),
+        _m("IsValid", "(self)", "bool", "Has a layer."),
+    ],
+)
+
+_register_schema(
+    UsdGeom.Imageable,
+    "UsdGeom.Imageable",
+    "Base of renderable prims (Xform, Scope, Mesh...): visibility, purpose and bounds.\n"
+    "    bbox = UsdGeom.Imageable(prim).ComputeWorldBound(Usd.TimeCode.Default(), UsdGeom.Tokens.default_)\n"
+    "    rng = bbox.ComputeAlignedRange()   # Gf.Range3d: GetMin(), GetMax(), GetSize()\n"
+    "Many bounds: UsdGeom.BBoxCache(Usd.TimeCode.Default(), [UsdGeom.Tokens.default_]).",
+    methods=[
+        _m("GetVisibilityAttr", "(self)", "Usd.Attribute", "'inherited' or 'invisible'."),
+        _m("MakeVisible", f"(self, time: {_T})", "None", "Make visible (and its ancestors)."),
+        _m("MakeInvisible", f"(self, time: {_T})", "None", "Author visibility 'invisible'."),
+        _m(
+            "ComputeVisibility",
+            f"(self, time: {_T})",
+            "str",
+            "'inherited' or 'invisible', taking ancestors into account.",
+        ),
+        _m(
+            "GetPurposeAttr",
+            "(self)",
+            "Usd.Attribute",
+            "purpose: UsdGeom.Tokens.default_ | render | proxy | guide.",
+        ),
+        _m("CreatePurposeAttr", f"(self, {_DEF})", "Usd.Attribute", "Create/set purpose."),
+        _m(
+            "ComputeWorldBound",
+            "(self, time: Usd.TimeCode, purpose1: str = '', purpose2: str = '', "
+            "purpose3: str = '', purpose4: str = '')",
+            "Gf.BBox3d",
+            "World-space bounds; pass at least one purpose, e.g. UsdGeom.Tokens.default_ "
+            "(none gives an empty box).",
+        ),
+        _m(
+            "ComputeLocalBound",
+            "(self, time: Usd.TimeCode, purpose1: str = '', purpose2: str = '', "
+            "purpose3: str = '', purpose4: str = '')",
+            "Gf.BBox3d",
+            "Bounds in the prim's local space (includes its own transform).",
+        ),
+    ],
+)
+
+_register_schema(
+    UsdGeom.Boundable,
+    "UsdGeom.Boundable",
+    "Base of prims with an extent (Mesh, Points, Cube, ...): extent is the local bounding\n"
+    "box [(min), (max)] as a float3[] attribute. Compute it from the geometry with\n"
+    "    mesh.GetExtentAttr().Set(UsdGeom.Boundable.ComputeExtentFromPlugins(mesh, Usd.TimeCode.Default()))",
+    methods=[
+        _m("GetExtentAttr", "(self)", "Usd.Attribute", "float3[] extent [(min), (max)]."),
+        _m("CreateExtentAttr", f"(self, {_DEF})", "Usd.Attribute", "Create/set extent."),
+        _s(
+            "ComputeExtentFromPlugins",
+            "(boundable: UsdGeom.Boundable, time: Usd.TimeCode)",
+            "Vt.Vec3fArray",
+            "Extent [min, max] from the prim's geometry (also with a transform: Gf.Matrix4d).",
+        ),
+    ],
+)
+
+_register_schema(
+    UsdGeom.Gprim,
+    "UsdGeom.Gprim",
+    "Base of geometric primitives (Mesh, Cube, Sphere...): display color/opacity,\n"
+    "doubleSided, orientation ('rightHanded' default; UsdGeom.Tokens.leftHanded flips\n"
+    "the face winding).",
+    methods=[
+        _m("GetDisplayColorAttr", "(self)", "Usd.Attribute", "primvars:displayColor (color3f[])."),
+        _m(
+            "CreateDisplayColorAttr",
+            f"(self, {_DEF})",
+            "Usd.Attribute",
+            "Create/set display color.",
+        ),
+        _m("GetDoubleSidedAttr", "(self)", "Usd.Attribute", "bool doubleSided."),
+        _m("CreateDoubleSidedAttr", f"(self, {_DEF})", "Usd.Attribute", "Create/set doubleSided."),
+        _m(
+            "GetOrientationAttr",
+            "(self)",
+            "Usd.Attribute",
+            "uniform token orientation: 'rightHanded' (default) or 'leftHanded'.",
+        ),
+        _m(
+            "CreateOrientationAttr",
+            f"(self, {_DEF})",
+            "Usd.Attribute",
+            "Create/set orientation (UsdGeom.Tokens.rightHanded / leftHanded).",
+        ),
+    ],
+)
+
+_register_schema(
+    UsdGeom.Scope,
+    "UsdGeom.Scope",
+    "Untransformable grouping prim (UsdGeom.Scope, not Usd.Scope); use it for /World/Looks\n"
+    "and other organizational groups. Use UsdGeom.Xform when children need a transform.",
+    methods=[
+        _s(
+            "Define",
+            "(stage: Usd.Stage, path: Sdf.Path | str)",
+            "UsdGeom.Scope",
+            "Define a Scope prim.",
+        ),
+        _s(
+            "Get",
+            "(stage: Usd.Stage, path: Sdf.Path | str)",
+            "UsdGeom.Scope",
+            "Wrap existing prim.",
+        ),
+    ],
+)
+
+_register_schema(
+    UsdGeom.PrimvarsAPI,
+    "UsdGeom.PrimvarsAPI",
+    "Create and read primvars (geometry data interpolated over a surface, e.g. UVs):\n"
+    "    api = UsdGeom.PrimvarsAPI(mesh.GetPrim())   # also UsdGeom.PrimvarsAPI(mesh)\n"
+    "    st = api.CreatePrimvar('st', Sdf.ValueTypeNames.TexCoord2fArray, UsdGeom.Tokens.faceVarying)\n"
+    "    st.Set(uvs); st.SetIndices(Vt.IntArray(uv_indices))   # optional indexing\n"
+    "Names are given without the 'primvars:' prefix.",
+    methods=[
+        _m("__init__", "(self, prim: Usd.Prim)", "None", "Wrap a prim (or a schema object)."),
+        _m(
+            "CreatePrimvar",
+            "(self, name: str, typeName: Sdf.ValueTypeName, interpolation: str = '', elementSize: int = -1)",
+            "UsdGeom.Primvar",
+            "Create primvars:<name>; interpolation constant|uniform|vertex|faceVarying.",
+        ),
+        _m(
+            "GetPrimvar",
+            "(self, name: str)",
+            "UsdGeom.Primvar",
+            "Primvar by name (falsy if absent).",
+        ),
+        _m("HasPrimvar", "(self, name: str)", "bool", "Primvar exists."),
+        _m("GetPrimvars", "(self)", "list[UsdGeom.Primvar]", "All primvars, incl. schema-defined."),
+        _m("GetAuthoredPrimvars", "(self)", "list[UsdGeom.Primvar]", "Authored primvars only."),
+        _m("RemovePrimvar", "(self, name: str)", "bool", "Remove a primvar (and its indices)."),
+    ],
+)
+
+_register(
+    UsdGeom.Primvar,
+    "UsdGeom.Primvar",
+    "A primvar wraps an attribute 'primvars:<name>' plus interpolation and optional indices.\n"
+    "Get it from UsdGeom.PrimvarsAPI(prim).GetPrimvar(name) or wrap UsdGeom.Primvar(attr).\n"
+    "Indexed primvars: Get() returns the unique values; ComputeFlattened() expands them.",
+    methods=[
+        _m("__init__", "(self, attr: Usd.Attribute)", "None", "Wrap a 'primvars:' attribute."),
+        _m("GetName", "(self)", "str", "Full attribute name, e.g. 'primvars:st'."),
+        _m("GetPrimvarName", "(self)", "str", "Name without 'primvars:', e.g. 'st'."),
+        _m("GetTypeName", "(self)", "Sdf.ValueTypeName", "Value type."),
+        _m(
+            "GetInterpolation",
+            "(self)",
+            "str",
+            "constant | uniform | vertex | varying | faceVarying (default 'constant').",
+        ),
+        _m(
+            "SetInterpolation",
+            "(self, interpolation: str)",
+            "bool",
+            "Use UsdGeom.Tokens.faceVarying etc.",
+        ),
+        _m("Get", f"(self, time: {_T})", "object", "Authored values (unique values if indexed)."),
+        _m("Set", f"(self, value: object, time: {_T})", "bool", "Author values."),
+        _m("HasValue", "(self)", "bool", "Has a value."),
+        _m("IsIndexed", "(self)", "bool", "Has authored indices."),
+        _m("GetIndices", f"(self, time: {_T})", "Vt.IntArray", "Indices into Get() values."),
+        _m(
+            "SetIndices",
+            f"(self, indices: Vt.IntArray, time: {_T})",
+            "bool",
+            "Author indices (makes the primvar indexed).",
+        ),
+        _m(
+            "ComputeFlattened",
+            f"(self, time: {_T})",
+            "object",
+            "Values expanded through the indices.",
+        ),
+        _m("GetAttr", "(self)", "Usd.Attribute", "The underlying attribute."),
+    ],
+)
+
+_register(
+    UsdGeom.XformOp,
+    "UsdGeom.XformOp",
+    "One transform operation of a UsdGeom.Xformable (from AddTranslateOp(), AddRotateXYZOp(),\n"
+    "GetOrderedXformOps()...). op.Set(value) / op.Get(); its attribute is named like\n"
+    "'xformOp:translate' (GetOpName).",
+    methods=[
+        _m("GetOpName", "(self)", "str", "Attribute name, e.g. 'xformOp:translate'."),
+        _m("GetOpType", "(self)", "UsdGeom.XformOp.Type", "e.g. UsdGeom.XformOp.TypeTranslate."),
+        _m("GetPrecision", "(self)", "UsdGeom.XformOp.Precision", "e.g. PrecisionDouble."),
+        _m("Get", f"(self, time: {_T})", "object", "Op value, e.g. Gf.Vec3d for translate."),
+        _m("Set", f"(self, value: object, time: {_T})", "bool", "Author the op value."),
+        _m(
+            "GetOpTransform",
+            "(self, time: Usd.TimeCode)",
+            "Gf.Matrix4d",
+            "Matrix of this op alone.",
+        ),
+        _m("GetAttr", "(self)", "Usd.Attribute", "The underlying attribute."),
+    ],
+)
+
+_CONNECT_DOC = (
+    "Connect to a source; also ConnectToSource(sourceOutput|sourceInput|sourcePath). "
+    "sourceName is the source output name without 'outputs:'. Returns True on success."
+)
+
+_register_schema(
+    UsdShade.ConnectableAPI,
+    "UsdShade.ConnectableAPI",
+    "Connections between shading attributes. Usually call the method on the input/output:\n"
+    "    shader.CreateInput('diffuseColor', Sdf.ValueTypeNames.Color3f).ConnectToSource(\n"
+    "        texture.ConnectableAPI(), 'rgb')\n"
+    "    material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), 'surface')\n"
+    "The static forms take the shading attribute (Usd.Attribute, UsdShade.Input or Output)\n"
+    "first: UsdShade.ConnectableAPI.ConnectToSource(input, source, 'rgb').\n"
+    "The source output must exist (texture.CreateOutput('rgb', Sdf.ValueTypeNames.Float3)).",
+    methods=[
+        _m(
+            "__init__",
+            "(self, prim: Usd.Prim)",
+            "None",
+            "Wrap a shader/material prim; also shader.ConnectableAPI().",
+        ),
+        _s(
+            "ConnectToSource",
+            "(shadingAttr: Usd.Attribute | UsdShade.Input | UsdShade.Output, "
+            "source: UsdShade.ConnectableAPI, sourceName: str, "
+            "sourceType: UsdShade.AttributeType = UsdShade.AttributeType.Output, "
+            "typeName: Sdf.ValueTypeName = Sdf.ValueTypeName())",
+            "bool",
+            _CONNECT_DOC.replace("ConnectToSource(source", "ConnectToSource(shadingAttr, source"),
+        ),
+        _s(
+            "HasConnectedSource",
+            "(shadingAttr: Usd.Attribute | UsdShade.Input | UsdShade.Output)",
+            "bool",
+            "Attribute has a valid connection.",
+        ),
+        _s(
+            "GetConnectedSources",
+            "(shadingAttr: Usd.Attribute | UsdShade.Input | UsdShade.Output)",
+            "tuple[list[UsdShade.ConnectionSourceInfo], list[Sdf.Path]]",
+            "(valid sources, invalid source paths); info.source, info.sourceName.",
+        ),
+        _s(
+            "DisconnectSource",
+            "(shadingAttr: Usd.Attribute | UsdShade.Input | UsdShade.Output, "
+            "sourceAttr: Usd.Attribute = Usd.Attribute())",
+            "bool",
+            "Remove one connection (all if sourceAttr is omitted).",
+        ),
+        _s(
+            "ClearSources",
+            "(shadingAttr: Usd.Attribute | UsdShade.Input | UsdShade.Output)",
+            "bool",
+            "Remove all connections.",
+        ),
+        _m("GetInputs", "(self, onlyAuthored: bool = True)", "list[UsdShade.Input]", "Inputs."),
+        _m("GetOutputs", "(self, onlyAuthored: bool = True)", "list[UsdShade.Output]", "Outputs."),
+    ],
+)
+
+_INPUT_OUTPUT_METHODS = [
+    _m(
+        "ConnectToSource",
+        "(self, source: UsdShade.ConnectableAPI, sourceName: str, "
+        "sourceType: UsdShade.AttributeType = UsdShade.AttributeType.Output, "
+        "typeName: Sdf.ValueTypeName = Sdf.ValueTypeName())",
+        "bool",
+        _CONNECT_DOC,
+    ),
+    _m("HasConnectedSource", "(self)", "bool", "Has a valid connection."),
+    _m(
+        "GetConnectedSources",
+        "(self)",
+        "tuple[list[UsdShade.ConnectionSourceInfo], list[Sdf.Path]]",
+        "(valid sources, invalid source paths).",
+    ),
+    _m(
+        "DisconnectSource",
+        "(self, sourceAttr: Usd.Attribute = Usd.Attribute())",
+        "bool",
+        "Remove one connection (all if omitted).",
+    ),
+    _m("GetAttr", "(self)", "Usd.Attribute", "The underlying attribute."),
+    _m("GetBaseName", "(self)", "str", "Name without 'inputs:' / 'outputs:'."),
+    _m("GetTypeName", "(self)", "Sdf.ValueTypeName", "Value type."),
+]
+
+_register(
+    UsdShade.Input,
+    "UsdShade.Input",
+    "Shader or material input 'inputs:<name>' (from shader.CreateInput(name, type)).\n"
+    "Set a value with Set(value) or connect it with ConnectToSource(source, 'outputName').",
+    methods=[
+        _m("Set", f"(self, value: object, time: {_T})", "bool", "Author the input value."),
+        _m("Get", f"(self, time: {_T})", "object", "Authored value (None if unset)."),
+        *_INPUT_OUTPUT_METHODS,
+    ],
+)
+
+_register(
+    UsdShade.Output,
+    "UsdShade.Output",
+    "Shader or material output 'outputs:<name>' (shader.CreateOutput(name, type),\n"
+    "material.CreateSurfaceOutput()). Material outputs connect to a shader output:\n"
+    "material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), 'surface').",
+    methods=list(_INPUT_OUTPUT_METHODS),
+)
+
+_register(
+    Gf.BBox3d,
+    "Gf.BBox3d",
+    "A box (Gf.Range3d) with a transform (Gf.Matrix4d), returned by ComputeWorldBound /\n"
+    "ComputeLocalBound. Axis-aligned extent: bbox.ComputeAlignedRange().",
+    methods=[
+        _m("__init__", "(self, box: Gf.Range3d, matrix: Gf.Matrix4d)", "None", "Also BBox3d(box)."),
+        _m("GetRange", "(self)", "Gf.Range3d", "The untransformed box."),
+        _m("GetMatrix", "(self)", "Gf.Matrix4d", "The box's transform."),
+        _m(
+            "ComputeAlignedRange",
+            "(self)",
+            "Gf.Range3d",
+            "Axis-aligned range of the transformed box.",
+        ),
+        _m("ComputeCentroid", "(self)", "Gf.Vec3d", "Center of the transformed box."),
+    ],
+)
+
+_register(
+    Gf.Range3d,
+    "Gf.Range3d",
+    "Axis-aligned box of Gf.Vec3d min/max. Empty when min > max (e.g. bounds of nothing).",
+    methods=[
+        _m("GetMin", "(self)", "Gf.Vec3d", "Minimum corner."),
+        _m("GetMax", "(self)", "Gf.Vec3d", "Maximum corner."),
+        _m("GetSize", "(self)", "Gf.Vec3d", "max - min."),
+        _m("GetMidpoint", "(self)", "Gf.Vec3d", "Center."),
+        _m("IsEmpty", "(self)", "bool", "min > max in some axis."),
+    ],
+)
+
+
+# --------------------------------------------------------------------------- invented names
+# Names agents guessed that do not exist in usd-core: the AttributeError they raise
+# (shown to the model by NOOA's error formatting) names the real API.
+_CREATE_SUBSET = (
+    "UsdGeom.Subset.CreateGeomSubset(mesh, name, UsdGeom.Tokens.face, indices, "
+    "UsdShade.Tokens.materialBind) - doc(UsdGeom.Subset.CreateGeomSubset)"
+)
+_GET_SUBSETS = (
+    "UsdGeom.Subset.GetGeomSubsets(mesh, UsdGeom.Tokens.face, familyName) and filter by "
+    "s.GetPrim().GetName(), or UsdGeom.Subset(mesh.GetPrim().GetChild(name)) - doc(UsdGeom.Subset)"
+)
+_ATTRIBUTE_HINTS = [
+    (UsdGeom.Subset, "CreateSubset", f"UsdGeom.Subset has no CreateSubset; use {_CREATE_SUBSET}"),
+    (
+        UsdGeom.Subset,
+        "CreateFamily",
+        "UsdGeom.Subset has no CreateFamily: a family exists once a subset uses its familyName "
+        "(CreateGeomSubset(..., familyName)); set its type with "
+        "UsdGeom.Subset.SetFamilyType(mesh, familyName, UsdGeom.Tokens.partition) - doc(UsdGeom.Subset)",
+    ),
+    (
+        UsdGeom.Subset,
+        "GetGeomSubsetByName",
+        f"UsdGeom.Subset has no GetGeomSubsetByName; use {_GET_SUBSETS}",
+    ),
+    (UsdGeom.Subset, "GetGeomSubset", f"UsdGeom.Subset has no GetGeomSubset; use {_GET_SUBSETS}"),
+    (UsdGeom.Subset, "GetSubset", f"UsdGeom.Subset has no GetSubset; use {_GET_SUBSETS}"),
+    (
+        UsdGeom.Subset,
+        "GetGeomSubsetFamilies",
+        "UsdGeom.Subset has no GetGeomSubsetFamilies; use "
+        "UsdGeom.Subset.GetAllGeomSubsetFamilyNames(mesh) - doc(UsdGeom.Subset)",
+    ),
+    (
+        UsdGeom.Subset,
+        "GetFamilyTypeAttr",
+        "UsdGeom.Subset has no GetFamilyTypeAttr: the family type is stored on the mesh; use "
+        "UsdGeom.Subset.GetFamilyType(mesh, familyName) / SetFamilyType(mesh, familyName, "
+        "familyType) - doc(UsdGeom.Subset)",
+    ),
+    (
+        UsdGeom.Mesh,
+        "CreateGeomSubset",
+        f"UsdGeom.Mesh has no CreateGeomSubset; use {_CREATE_SUBSET}",
+    ),
+    (UsdGeom.Mesh, "CreateSubset", f"UsdGeom.Mesh has no CreateSubset; use {_CREATE_SUBSET}"),
+    (
+        UsdGeom,
+        "GeomSubset",
+        "UsdGeom has no GeomSubset; the class is UsdGeom.Subset - doc(UsdGeom.Subset)",
+    ),
+    (
+        UsdGeom,
+        "MaterialBindingAPI",
+        "UsdGeom has no MaterialBindingAPI; use UsdShade.MaterialBindingAPI "
+        "(from pxr import UsdShade) - doc(UsdShade.MaterialBindingAPI)",
+    ),
+    (
+        UsdGeom,
+        "BindingAPI",
+        "UsdGeom has no BindingAPI; use UsdShade.MaterialBindingAPI - doc(UsdShade.MaterialBindingAPI)",
+    ),
+    (
+        UsdGeom,
+        "Material",
+        "UsdGeom has no Material; use UsdShade.Material - doc(UsdShade.Material)",
+    ),
+    (
+        UsdShade,
+        "BindingAPI",
+        "UsdShade has no BindingAPI; use UsdShade.MaterialBindingAPI - doc(UsdShade.MaterialBindingAPI)",
+    ),
+    (UsdShade, "Subset", "UsdShade has no Subset; use UsdGeom.Subset - doc(UsdGeom.Subset)"),
+    (
+        Usd,
+        "Mesh",
+        "Usd has no Mesh; use UsdGeom.Mesh (from pxr import UsdGeom) - doc(UsdGeom.Mesh)",
+    ),
+    (Usd, "Scope", "Usd has no Scope; use UsdGeom.Scope - doc(UsdGeom.Scope)"),
+    (Usd, "Xform", "Usd has no Xform; use UsdGeom.Xform - doc(UsdGeom.Xform)"),
+    (Usd, "Material", "Usd has no Material; use UsdShade.Material - doc(UsdShade.Material)"),
+    (
+        Vt,
+        "IntArrayFromPython",
+        "Vt has no IntArrayFromPython; use Vt.IntArray(list_of_ints) or "
+        "Vt.IntArray.FromNumpy(array) - doc(Vt.IntArray)",
+    ),
+]
+for _owner, _name, _hint in _ATTRIBUTE_HINTS:
+    register_attribute_hint(_owner, _name, _hint)

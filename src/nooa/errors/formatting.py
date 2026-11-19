@@ -234,6 +234,23 @@ def _bad_call_agentdoc(error: BaseException, target: object | None = None) -> st
         return None
 
 
+def _missing_attribute_hint(error: BaseException) -> str | None:
+    """The real API for a guessed attribute name, from agentdoc's adapter hints.
+
+    ``UsdGeom.Subset.CreateSubset`` raises a bare AttributeError; the pxr adapter
+    registers what to call instead. Best-effort: None on any miss or failure.
+    """
+    if not isinstance(error, AttributeError):
+        return None
+    try:
+        from nooa.agentdoc.core import attribute_error_hint
+
+        hint = attribute_error_hint(error)
+        return hint if isinstance(hint, str) and hint else None
+    except BaseException:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Traceback rendering and normalization helpers
 # ---------------------------------------------------------------------------
@@ -893,6 +910,9 @@ class IPythonErrorFormatter:
             await_hint = _sync_await_hint(error) or _coroutine_misuse_hint(error)
             if await_hint:
                 formatted = f"{formatted}\n\n{await_hint}"
+            attribute_hint = _missing_attribute_hint(error)
+            if attribute_hint:
+                formatted = f"{formatted}\n\nHint: {attribute_hint}"
 
         return _bound_diagnostic(formatted, max_error, tail_chars)
 

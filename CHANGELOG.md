@@ -27,6 +27,27 @@ to follow semantic versioning.
   pointer to `doc(<Owner>)`. Before, a compiled method showed only the
   "no docstring or signature" note. The owner is found among the classes
   registered with `spec.define_doc`; uncurated callables are unchanged.
+- The curated-member lookup of `doc()` also resolves curated module functions
+  (`doc(Gf.Dot)`, `doc(UsdGeom.GetStageUpAxis)`) and aliases whose function
+  object has another name (`Vt.IntArray.FromNumpy` is `IntArrayFromBuffer`).
+  An unbound method that several curated classes share (Boost.Python exposes
+  one function object on every subclass) shows the entry of the class that
+  defines it (`doc(UsdGeom.Subset.GetPrim)` shows `Usd.SchemaBase.GetPrim`),
+  or, when that class is not curated, every sharing class's entry; a bound
+  method shows its instance's most derived curated class.
+- Adapters can register `register_attribute_hint(owner, name, hint)` for
+  attribute names agents guess but that do not exist; model-facing error
+  formatting appends the hint to the `AttributeError`. The pxr adapter
+  registers hints for `UsdGeom.Subset.CreateSubset`, `UsdGeom.Mesh.CreateGeomSubset`,
+  `UsdGeom.GeomSubset`, `UsdGeom.MaterialBindingAPI`, `Usd.Mesh` and similar
+  names, each naming the real API and its `doc()`.
+- The pxr adapter adds curated views of `Usd.Object`, `Usd.Property`,
+  `Usd.Relationship`, `Usd.SchemaBase`, `Usd.TimeCode`, `Usd.EditTarget`,
+  `UsdGeom.Imageable`, `Boundable`, `Gprim`, `Scope`, `Primvar`, `PrimvarsAPI`,
+  `XformOp`, `UsdShade.ConnectableAPI`, `Input`, `Output`, `Gf.BBox3d` and
+  `Gf.Range3d`, and more members of existing views (signatures checked against
+  usd-core 26.8). Base-class views are inherited: `doc(UsdGeom.Sphere)` lists
+  the curated API of all its bases.
 - `doc()` now documents compiled callables and classes (C extensions and
   Boost.Python, for example OpenUSD's `pxr`). Before, `doc(UsdGeom.Subset.CreateGeomSubset)`
   printed only `class function:` and `doc(UsdGeom.Subset)` showed no methods.

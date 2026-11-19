@@ -50,6 +50,7 @@ from nooa.agentdoc.protocols import (
 from nooa.agentdoc.registry import (
     clear_registry,
     get_type_info_extractor,
+    register_attribute_hint,
     register_type_info_extractor,
     unregister_type_info_extractor,
 )
@@ -83,6 +84,7 @@ __all__ = [
     "get_type_info_extractor",
     "unregister_type_info_extractor",
     "clear_registry",
+    "register_attribute_hint",
     # Helpers
     "has_type_info",
 ]

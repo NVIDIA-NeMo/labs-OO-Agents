@@ -71,6 +71,20 @@ def _load_adapters_for_imported_libraries() -> None:
             pass
 
 
+def attribute_error_hint(error: BaseException) -> str | None:
+    """What to use instead of a missing attribute, when an adapter registered a hint.
+
+    Loads the adapters of imported libraries first, like :func:`doc`, so a hint is
+    found even before the first doc() call. Returns None for other errors.
+    """
+    if not isinstance(error, AttributeError):
+        return None
+    _load_adapters_for_imported_libraries()
+    from nooa.agentdoc.registry import get_attribute_hint
+
+    return get_attribute_hint(error)
+
+
 def doc(
     *objs: Any,
     concise: Annotated[bool, "Show first-line docstrings only"] = False,

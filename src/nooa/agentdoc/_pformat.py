@@ -27,6 +27,7 @@ from nooa.agentdoc._metadata import is_expand_false
 from nooa.agentdoc._structured import _ClassRef, _InstanceRef, is_compiled_callable
 from nooa.agentdoc._visibility import _resolve_type_hints, _type_hint_scope
 from nooa.agentdoc.protocols import SupportsInstanceValues
+from nooa.agentdoc.registry import CuratedMember
 
 
 def _truncate_docstring_lines(docstring: str | None, max_lines: int = 1) -> str:
@@ -232,7 +233,7 @@ def _pformat(
             # curated entry and the owner's notes instead of bare introspection.
             _stream.write(
                 _format_callable_info(
-                    _curated_member_info(*curated), concise=concise, indent=_indent
+                    _curated_member_info(curated), concise=concise, indent=_indent
                 )
             )
         case _ if inspect.isfunction(_object) or inspect.ismethod(_object):
@@ -435,10 +436,10 @@ def _instance_dict(obj: Any) -> dict[str, Any] | None:
 _OWNER_NOTES_MAX_LINES = 20
 
 
-def _curated_member(obj: Any) -> tuple[TypeInfo, CallableInfo] | None:
-    """``(owner, member)`` when a registered class view documents callable ``obj``."""
+def _curated_member(obj: Any) -> CuratedMember | None:
+    """Where a registered class or module view documents callable ``obj``, if any."""
     # Any callable qualifies (Cython methods are neither functions nor builtins); the
-    # lookup only matches objects that a registered class exposes under their name.
+    # lookup only matches objects that a registered view exposes under a curated name.
     if isinstance(obj, type) or inspect.ismodule(obj) or not callable(obj):
         return None
     from nooa.agentdoc.registry import find_curated_member
@@ -458,21 +459,68 @@ def _lines_naming(lines: list[str], name: str) -> list[str]:
     return [line for item in items if pattern.search("\n".join(item)) for line in item]
 
 
-def _curated_member_info(owner: TypeInfo, member: CallableInfo) -> CallableInfo:
-    """The member's curated entry, then its owner's notes and a pointer to the owner."""
+def _shared_member_docstring(curated: CuratedMember) -> str:
+    """One entry for a method several curated classes share, naming none of them as owner."""
+    short_name = curated.member.name.rsplit(".", 1)[-1]
+    owners = [owner for owner, _entry in curated.shared]
+    texts = {(entry.signature, entry.return_type, entry.docstring) for _o, entry in curated.shared}
+    parts = []
+    if len(texts) == 1:
+        if curated.member.docstring:
+            parts.append(curated.member.docstring)
+    else:
+        lines = ["The curated entry depends on the class:"]
+        for owner, entry in curated.shared:
+            signature = ""
+            if (entry.signature, entry.return_type) != (
+                curated.member.signature,
+                curated.member.return_type,
+            ):
+                signature = (
+                    f"{entry.signature} -> {entry.return_type}"
+                    if entry.return_type
+                    else entry.signature
+                )
+                signature = f" {signature}"
+            lines.append(f"- {owner}.{short_name}{signature}: {entry.docstring or ''}".rstrip())
+        parts.append("\n".join(lines))
+    parts.append(
+        f"Inherited from {curated.owner_name} by {', '.join(owners)}; this access does not "
+        f"say which class was named. Class notes: " + ", ".join(f"doc({owner})" for owner in owners)
+    )
+    return "\n\n".join(parts)
+
+
+def _curated_member_info(
+    owner: TypeInfo | ModuleInfo | CuratedMember, member: CallableInfo | None = None
+) -> CallableInfo:
+    """The member's curated entry, then its owner's notes and a pointer to the owner.
+
+    Pass a :class:`CuratedMember`, or ``(owner, member)``.
+    """
+    if isinstance(owner, CuratedMember):
+        curated = owner
+    else:
+        assert member is not None
+        curated = CuratedMember(owner.name, owner, member)
+    member = curated.member
     short_name = member.name.rsplit(".", 1)[-1]
-    parts = [member.docstring] if member.docstring else []
-    lines = (owner.docstring or "").strip("\n").splitlines()
-    if len(lines) > _OWNER_NOTES_MAX_LINES:
-        lines = _lines_naming(lines, short_name)
-    if lines:
-        parts.append(f"From doc({owner.name}):\n" + "\n".join(lines))
-    parts.append(f"Other members: doc({owner.name})")
+    if curated.owner is None:
+        docstring = _shared_member_docstring(curated)
+    else:
+        parts = [member.docstring] if member.docstring else []
+        lines = (curated.owner.docstring or "").strip("\n").splitlines()
+        if len(lines) > _OWNER_NOTES_MAX_LINES:
+            lines = _lines_naming(lines, short_name)
+        if lines:
+            parts.append(f"From doc({curated.owner_name}):\n" + "\n".join(lines))
+        parts.append(f"Other members: doc({curated.owner_name})")
+        docstring = "\n\n".join(parts)
     return CallableInfo(
-        name=f"{owner.name}.{short_name}",
+        name=f"{curated.owner_name}.{short_name}",
         signature=member.signature,
         return_type=member.return_type,
-        docstring="\n\n".join(parts),
+        docstring=docstring,
         is_async=member.is_async,
         is_classmethod=member.is_classmethod,
     )
