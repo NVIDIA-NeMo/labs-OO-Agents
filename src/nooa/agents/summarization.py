@@ -631,7 +631,8 @@ class TokenBudgetSummarizer(SummarizationAgent):
     cache key and tool choice stay unchanged so the provider can reuse its prefix.
     The appended instruction requests text; executable-tool replies are rejected.
     Only events present before that request are eligible for collapse; the latest
-    response/tool work stays active.
+    response/tool work stays active. The current task's input (Task event and
+    inspect-inputs prefill) is never collapsed; see ``EventManager.collapse``.
 
     The fork never executes tools. A nonempty string returned through one
     return_result call is read as data. Failed or unusable replies leave history
@@ -752,6 +753,8 @@ class TokenBudgetSummarizer(SummarizationAgent):
                     f"in approximately {self.config.target_chars} characters. Other events are "
                     "context only. Preserve decisions, exact numbers, outcomes, files, failed "
                     "approaches and pending work. Distinguish completed work from proposals. "
+                    "The current task's input events stay verbatim in history: do not restate "
+                    "or reword their requirements. "
                     "For this request only, produce a memory summary rather than continuing "
                     "the original task. Respond directly with the summary as text. Do not call "
                     "python_cell, execute_python, return_result, or any other tool; do not "
