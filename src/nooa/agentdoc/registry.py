@@ -9,9 +9,11 @@ This is the recommended approach for third-party library integration.
 """
 
 import inspect
+import re
+import sys
 import threading
 from collections.abc import Callable
-from typing import Any
+from typing import Any, NamedTuple
 
 from nooa.agentdoc._info import CallableInfo, ModuleInfo, TypeInfo
 
@@ -183,26 +185,84 @@ def unregister_module_info_extractor(target_module: Any) -> None:
         _module_extractor_registry.pop(target_module.__name__, None)
 
 
-def _owner_score(cls: type, obj: Any, name: str) -> int:
-    """Rank candidate owner classes: the defining class and its named owner first."""
-    score = 0
-    if name in getattr(cls, "__dict__", {}):
-        score += 2
-    # Boost.Python functions carry the class name in __module__; Python and C
-    # methods carry "Class.method" in __qualname__.
-    owner_hint = getattr(obj, "__module__", None)
-    qualname = getattr(obj, "__qualname__", None)
-    if isinstance(qualname, str) and "." in qualname:
-        owner_hint = qualname.rsplit(".", 1)[0]
-    if owner_hint == cls.__name__ or owner_hint == cls.__qualname__:
-        score += 1
-    return score
+# Missing-attribute hints: owner key -> {attribute name: hint}. The owner key is a
+# module's __name__ or a class's "module.qualname"; see register_attribute_hint.
+_attribute_hint_registry: dict[str, dict[str, str]] = {}
+
+_MODULE_ATTRIBUTE_ERROR = re.compile(r"^module '([^']+)' has no attribute ")
 
 
-def _is_member_of(cls: type, name: str, obj: Any) -> bool:
-    """True when ``cls.<name>`` is ``obj`` (or the same method, re-bound on access)."""
+def _owner_key(owner: Any) -> str:
+    if inspect.ismodule(owner):
+        return owner.__name__
+    return f"{owner.__module__}.{owner.__qualname__}"
+
+
+def register_attribute_hint(owner: Any, name: str, hint: str) -> None:
+    """Register what to use instead of ``owner.<name>``, an attribute that does not exist.
+
+    ``owner`` is a class (its subclasses and instances inherit the hint) or a module.
+    Agents often guess plausible names (``UsdGeom.Subset.CreateSubset``); the hint
+    is appended to the AttributeError that model-facing error formatting shows.
+    """
+    if not (inspect.ismodule(owner) or isinstance(owner, type)):
+        raise TypeError(f"register_attribute_hint expects a class or module, got {owner!r}")
+    with _registry_lock:
+        _attribute_hint_registry.setdefault(_owner_key(owner), {})[name] = hint
+
+
+def get_attribute_hint(error: BaseException) -> str | None:
+    """The registered hint for an ``AttributeError`` (``error.obj``/``error.name``), or None."""
+    if not isinstance(error, AttributeError):
+        return None
+    name = getattr(error, "name", None)
+    obj = getattr(error, "obj", None)
+    if not isinstance(name, str) or obj is None:
+        return None
+    keys: list[str] = []
+    if inspect.ismodule(obj):
+        # A package that forwards to an extension module (pxr.UsdGeom -> _usdGeom)
+        # raises with the extension as obj; the message names the package.
+        match = _MODULE_ATTRIBUTE_ERROR.match(str(error))
+        keys = [match.group(1)] if match else []
+        keys.append(obj.__name__)
+    else:
+        cls = obj if isinstance(obj, type) else type(obj)
+        keys = [_owner_key(base) for base in cls.__mro__]
+    with _registry_lock:
+        for key in keys:
+            hint = _attribute_hint_registry.get(key, {}).get(name)
+            if hint is not None:
+                return hint
+    return None
+
+
+def unregister_attribute_hint(owner: Any, name: str) -> None:
+    """Remove a missing-attribute hint (mainly for tests)."""
+    with _registry_lock:
+        _attribute_hint_registry.get(_owner_key(owner), {}).pop(name, None)
+
+
+class CuratedMember(NamedTuple):
+    """Where :func:`find_curated_member` found a callable's curated entry.
+
+    ``owner`` is the registered class or module view (``TypeInfo``/``ModuleInfo``)
+    whose entry ``member`` documents the callable, and ``owner_name`` its display
+    name. When an unbound method is shared by several curated classes and the class
+    that defines it is not curated, ``owner`` is ``None``, ``owner_name`` names the
+    defining class, and ``shared`` holds each curated class's ``(name, entry)``.
+    """
+
+    owner_name: str
+    owner: TypeInfo | ModuleInfo | None
+    member: CallableInfo
+    shared: tuple[tuple[str, CallableInfo], ...] = ()
+
+
+def _is_member_of(owner: Any, name: str, obj: Any) -> bool:
+    """True when ``owner.<name>`` is ``obj`` (or the same method, re-bound on access)."""
     try:
-        attr = getattr(cls, name, None)
+        attr = getattr(owner, name, None)
     except Exception:  # noqa: BLE001 - odd metaclass __getattr__
         return False
     if attr is None:
@@ -212,8 +272,12 @@ def _is_member_of(cls: type, name: str, obj: Any) -> bool:
     bound_self = getattr(obj, "__self__", None)
     if bound_self is not None and not isinstance(bound_self, type):
         # Method bound to an instance (img.resize): its class resolves the same
-        # function or descriptor as ``cls`` unless a subclass overrides it.
-        if inspect.ismodule(bound_self) or not isinstance(bound_self, cls):
+        # function or descriptor as ``owner`` unless a subclass overrides it.
+        if (
+            not isinstance(owner, type)
+            or inspect.ismodule(bound_self)
+            or not isinstance(bound_self, owner)
+        ):
             return False
         try:
             return getattr(type(bound_self), name, None) is attr
@@ -226,32 +290,133 @@ def _is_member_of(cls: type, name: str, obj: Any) -> bool:
         return False
 
 
-def find_curated_member(obj: Any) -> tuple[TypeInfo, CallableInfo] | None:
-    """Find the curated class view that documents callable ``obj`` as a member.
+def _entry(info: TypeInfo | ModuleInfo, name: str) -> CallableInfo | None:
+    """The curated entry called ``name`` in a class or module view."""
+    entries = info.methods if isinstance(info, TypeInfo) else info.functions or []
+    for entry in entries:
+        if entry.name.rsplit(".", 1)[-1] == name:
+            return entry
+    return None
 
-    Searches the classes registered with :func:`register_type_info_extractor` for
-    one whose attribute ``obj.__name__`` is ``obj`` and whose curated ``TypeInfo``
-    lists a method of that name. Returns ``(owner_type_info, member_info)`` or
-    ``None``. Only attributes are read; ``obj`` is never called.
+
+def _view(extractor: Any, target: Any) -> TypeInfo | ModuleInfo | None:
+    try:
+        result = extractor(target)
+    except Exception:  # noqa: BLE001 - an adapter must never break doc()
+        return None
+    return result[0] if isinstance(result, tuple) else result
+
+
+def _defining_class(cls: type, name: str) -> type | None:
+    """The class in ``cls``'s MRO whose own namespace holds ``name``."""
+    for base in getattr(cls, "__mro__", ()):
+        if name in getattr(base, "__dict__", {}):
+            return base
+    return None
+
+
+def _display_name(cls: type, views: list[tuple[type, TypeInfo]]) -> str:
+    """Name a class the way its module's curated views name their classes."""
+    for other, info in views:
+        if other.__module__ == cls.__module__ and info.name.endswith("." + other.__qualname__):
+            return info.name[: -len(other.__qualname__)] + cls.__qualname__
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _class_views() -> list[tuple[type, TypeInfo]]:
+    """Every registered class with its curated view (to name an uncurated class alike)."""
+    with _registry_lock:
+        entries = list(_extractor_registry.items())
+    views = []
+    for cls, extractor in entries:
+        info = _view(extractor, cls)
+        if isinstance(info, TypeInfo):
+            views.append((cls, info))
+    return views
+
+
+def _class_members(
+    obj: Any, name: str, entries: list[tuple[type, Any]]
+) -> list[tuple[type, TypeInfo, CallableInfo]]:
+    """Registered classes whose attribute ``name`` is ``obj`` and whose view lists it."""
+    found = []
+    for cls, extractor in entries:
+        if not _is_member_of(cls, name, obj):
+            continue
+        info = _view(extractor, cls)
+        entry = _entry(info, name) if isinstance(info, TypeInfo) else None
+        if entry is not None:
+            found.append((cls, info, entry))
+    return found
+
+
+def _choose(obj: Any, name: str, found: list[tuple[type, TypeInfo, CallableInfo]]) -> CuratedMember:
+    """Pick the entry for ``obj`` among the curated classes that expose it as ``name``."""
+    bound_self = getattr(obj, "__self__", None)
+    if bound_self is not None and not isinstance(bound_self, type):
+        # Bound to an instance: its class is known, so its most derived curated class wins.
+        mro = list(type(bound_self).__mro__)
+        cls, info, entry = min(found, key=lambda f: mro.index(f[0]) if f[0] in mro else len(mro))
+        return CuratedMember(info.name, info, entry)
+    if len(found) == 1:
+        cls, info, entry = found[0]
+        return CuratedMember(info.name, info, entry)
+    # Unbound and shared (Boost.Python exposes one function object on every schema
+    # class): the access does not say which class was named. The defining class's
+    # entry fits all of them; without one, list each curated class's entry.
+    definer = _defining_class(found[0][0], name)
+    for cls, info, entry in found:
+        if cls is definer:
+            return CuratedMember(info.name, info, entry)
+    found = sorted(found, key=lambda f: f[1].name)
+    shared = tuple((info.name, entry) for _cls, info, entry in found)
+    owner_name = _display_name(definer, _class_views()) if definer is not None else found[0][1].name
+    return CuratedMember(owner_name, None, found[0][2], shared)
+
+
+def find_curated_member(obj: Any) -> CuratedMember | None:
+    """Find the curated class or module view that documents callable ``obj``.
+
+    Matches registered classes (:func:`register_type_info_extractor`) and modules
+    (:func:`register_module_info_extractor`) whose attribute, named in their curated
+    view, is ``obj``: by ``obj.__name__`` first, then any curated name, so aliases
+    (``Vt.IntArray.FromNumpy is Vt.IntArray.FromBuffer``) resolve too. Returns a
+    :class:`CuratedMember` or ``None``. Only attributes are read; ``obj`` is never
+    called.
     """
     if isinstance(obj, type) or not callable(obj):
         return None
     name = getattr(obj, "__name__", None)
-    if not isinstance(name, str) or not name:
-        return None
     with _registry_lock:
         entries = list(_extractor_registry.items())
-    candidates = [(cls, extractor) for cls, extractor in entries if _is_member_of(cls, name, obj)]
-    candidates.sort(key=lambda entry: -_owner_score(entry[0], obj, name))
-    for cls, extractor in candidates:
-        try:
-            result = extractor(cls)
-        except Exception:  # noqa: BLE001 - an adapter must never break doc()
+        module_entries = list(_module_extractor_registry.items())
+    if isinstance(name, str) and name:
+        found = _class_members(obj, name, entries)
+        if found:
+            return _choose(obj, name, found)
+    # Aliases: a curated name other than __name__ that resolves to obj.
+    for cls, extractor in entries:
+        info = _view(extractor, cls)
+        if not isinstance(info, TypeInfo):
             continue
-        type_info = result[0] if isinstance(result, tuple) else result
-        for method in type_info.methods:
-            if method.name.rsplit(".", 1)[-1] == name:
-                return type_info, method
+        for entry in info.methods:
+            alias = entry.name.rsplit(".", 1)[-1]
+            if alias != name and _is_member_of(cls, alias, obj):
+                found = _class_members(obj, alias, entries)
+                if found:
+                    return _choose(obj, alias, found)
+    # Module-level functions of a curated module (Gf.Dot, UsdGeom.GetStageUpAxis).
+    for module_name, extractor in module_entries:
+        module = sys.modules.get(module_name)
+        if module is None:
+            continue
+        info = _view(extractor, module)
+        if not isinstance(info, ModuleInfo):
+            continue
+        for entry in info.functions or []:
+            short = entry.name.rsplit(".", 1)[-1]
+            if _is_member_of(module, short, obj):
+                return CuratedMember(info.name, info, entry)
     return None
 
 
@@ -263,3 +428,4 @@ def clear_registry() -> None:
     with _registry_lock:
         _extractor_registry.clear()
         _module_extractor_registry.clear()
+        _attribute_hint_registry.clear()
