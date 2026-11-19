@@ -542,10 +542,11 @@ async def test_first_call_offers_one_work_vocabulary(
         "do other things (builds, servers; subagents too, see the python_cell_tools block)."
     ) in flat
     assert "sh.run(cmd, timeout=600)" not in rendered and "timeout=600)  # wait" not in rendered
-    # Task Python goes on stdin (#517 A), right after the triple-quote rule.
+    # Task packages: import in a cell first, stdin as the fallback (#517 A).
     assert (
-        "the same way, not as heredocs. Run Python in the task environment by passing the "
-        'code on stdin: ``sh.run("python3 -", stdin=code)``, not inside ``python3 -c "..."``.'
+        "the same way, not as heredocs. Import task packages in cells first; loaded "
+        "objects stay live. If that fails, pass the code on stdin: "
+        '``sh.run("python3 -", stdin=code)``, not ``python3 -c "..."``.'
     ) in flat
     # The skills block is back (#517 P04), now the manager's own state: active
     # skills, connected MCP servers with the call form, and a count of the rest
