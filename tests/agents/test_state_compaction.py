@@ -491,6 +491,72 @@ async def test_custom_view_cannot_hide_compactor_source():
     await agent.aclose()
 
 
+async def test_call_filtering_view_keeps_the_summary_of_its_history():
+    """A view filtering on related_call_ids still shows a summary covering its call."""
+    from nooa import CacheBoundary, is_model_visible, replayable
+    from nooa.events import Summary
+
+    class CallView:  # the quickstart 16 filter
+        async def assemble(self, owner, call):
+            yield Block(key="api", content="Use execute_python.")
+            for event in replayable(
+                e
+                for e in owner.event_manager.values()
+                if call.id in e.related_call_ids and is_model_visible(e)
+            ):
+                yield event
+            yield CacheBoundary()
+
+    def python(code, call_id, tokens=10):
+        return LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(id=call_id, name="execute_python", arguments=json.dumps({"code": code}))
+            ],
+            finish_reason="tool_calls",
+            usage=LLMUsage(input_tokens=tokens),
+        )
+
+    client = FakeLLMClient(
+        [
+            python("print('A OUTPUT'); return_result('a')", "a1"),
+            python("print('B STEP ONE')", "b1"),
+            python("print('B STEP TWO')", "b2", tokens=1000),  # over budget
+            LLMResponse(content=json.dumps({"value": "SUMMARY OF A AND B STEP ONE"})),
+            python("return_result('b')", "b3"),
+        ],
+        strict_exhaustion=True,
+    )
+
+    class Solver(Agent, llm=client):
+        @strategy(context_view=CallView())
+        async def solve(self, problem: str) -> str:
+            """Solve."""
+            ...
+
+    agent = Solver()
+    TokenBudgetSummarizer.install(
+        agent, config=TokenBudgetConfig(max_tokens=100, preserve_recent=1)
+    )
+    try:
+        assert await agent.solve("PROBLEM A") == "a"
+        assert await agent.solve("PROBLEM B") == "b"
+        (summary,) = [e for e in agent.event_manager.values() if isinstance(e, Summary)]
+        call_b = client.calls[-1]
+        b_ids = {
+            e.call_id
+            for e in agent.event_manager.values()
+            if e.call_id is not None and "B STEP" in str(e)
+        }
+        assert b_ids and len(summary.source_call_ids) == 2
+        assert b_ids <= set(summary.source_call_ids)
+        # B's view does not carry A's events, so the summary used stored history.
+        assert "PROBLEM A" in str(client.calls[3].messages)
+        assert "SUMMARY OF A AND B STEP ONE" in str(call_b.messages)
+    finally:
+        await agent.aclose()
+
+
 @pytest.mark.parametrize("outcomes", [["", ""], ["", "summary", ""]])
 async def test_consecutive_failures_disable_compaction_and_success_resets(outcomes):
     agent, summarizer, ctx = setup()
