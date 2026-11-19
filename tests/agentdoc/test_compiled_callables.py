@@ -42,7 +42,13 @@ def _boost_fn(name: str, module: str = "Mesh") -> object:
     return fn
 
 
-FakeCompiled = type(
+class _BoostClassMeta(type):
+    """Stands in for Boost.Python's metaclass (``Boost.Python.class``)."""
+
+
+_BoostClassMeta.__module__ = "Boost.Python"
+
+FakeCompiled = _BoostClassMeta(
     "FakeCompiled",
     (),
     {
@@ -130,3 +136,17 @@ def test_doc_of_several_compiled_callables():
     result = doc([len, str.join])
     assert "def len(obj):" in result
     assert "def str.join(self, iterable):" in result
+
+
+def test_python_subclass_of_a_c_type_lists_only_its_own_methods():
+    import collections
+
+    from nooa.agentdoc.core import doc
+
+    class Ordered(collections.OrderedDict):
+        def mine(self):
+            """Mine."""
+
+    text = doc(Ordered)
+    assert "def mine(self)" in text
+    assert "setdefault" not in text and "fromkeys" not in text

@@ -58,6 +58,17 @@ def is_compiled_callable(obj: Any) -> bool:
     )
 
 
+def is_compiled_type(cls: type) -> bool:
+    """Return True for classes implemented in C or C++ (C types, Boost.Python classes).
+
+    Python classes (heap types with a Python metaclass) return False, also when
+    they subclass a C type.
+    """
+    if getattr(type(cls), "__module__", None) == "Boost.Python":
+        return True
+    return not (getattr(cls, "__flags__", 0) & (1 << 9))  # Py_TPFLAGS_HEAPTYPE
+
+
 def compiled_callable_owner(obj: Any) -> str | None:
     """Name the class or module a compiled callable belongs to, if known.
 
@@ -1609,6 +1620,9 @@ def _extract_methods(obj: type) -> list[CallableInfo]:
 
     methods = []
     seen_names = set()
+    # Compiled methods are listed only for compiled classes (pxr, C types), so a
+    # Python subclass of a C type keeps listing only its own Python methods.
+    list_compiled = is_compiled_type(obj)
 
     # Walk the MRO dictionaries directly instead of inspect.getmembers().
     # inspect.getmembers() calls getattr() for every name and can execute arbitrary
@@ -1621,9 +1635,13 @@ def _extract_methods(obj: type) -> list[CallableInfo]:
             compiled = False
             if not inspect.isfunction(value) and not inspect.ismethod(value):
                 # Compiled methods (builtin methods, method descriptors, Boost.Python
-                # functions) count only on non-builtins classes, so plain Python
-                # classes do not inherit listings of object/dict/str methods.
-                if klass.__module__ == "builtins" or not is_compiled_callable(value):
+                # functions) count only for compiled classes and never from builtins
+                # bases (object/dict/str methods are not listed).
+                if (
+                    not list_compiled
+                    or klass.__module__ == "builtins"
+                    or not is_compiled_callable(value)
+                ):
                     continue
                 compiled = True
 
