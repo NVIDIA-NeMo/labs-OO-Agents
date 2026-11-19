@@ -92,8 +92,8 @@ def test_a_write_while_another_opens_the_file_waits_for_it(tmp_path, monkeypatch
     entered, resume = threading.Event(), threading.Event()
 
     class GatedFolder(OverflowDir):
-        def open(self, max_bytes=None):
-            writer = super().open(max_bytes=max_bytes)
+        def open(self, max_bytes=None, *, warn=None):
+            writer = super().open(max_bytes=max_bytes, warn=warn)
             entered.set()
             resume.wait(timeout=5)
             return writer
@@ -150,6 +150,99 @@ def test_a_file_error_warning_written_back_into_the_stream_does_not_deadlock(
         text = stream.close()
         assert text.full is None  # the file was given up: memory only
         assert text.length == 20 + len("[warning]")
+
+
+def test_a_file_creation_warning_written_back_into_the_stream_does_not_deadlock(
+    tmp_path, monkeypatch
+) -> None:
+    # #580 review (CodeRabbit): the deferral covered the write error alone, but
+    # opening the overflow file warns too (the folder's own "could not create an
+    # overflow file" in OverflowDir.open) and it warned with the stream's lock
+    # held: a logging handler writing into the same stream re-entered write() and
+    # waited on that lock forever.
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    real_open = os.open
+
+    def broken(path, *args, **kwargs):
+        if str(path).startswith(str(tmp_path)):
+            raise OSError("no room")
+
+        return real_open(path, *args, **kwargs)
+
+    with OverflowDir() as folder:
+        stream = SharedTextStream(unit="chars", head=4, tail=4, overflow=folder)
+        records: list[str] = []
+
+        class IntoTheStream(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record.getMessage())
+                stream.write("[warning]")
+
+        logger = logging.getLogger("nooa.overflow._overflow")
+        handler = IntoTheStream()
+        logger.addHandler(handler)
+        monkeypatch.setattr(os, "open", broken)
+        try:
+            writer = threading.Thread(target=stream.write, args=("x" * 20,), daemon=True)
+            writer.start()
+            writer.join(timeout=5)
+            assert not writer.is_alive()  # was a deadlock
+        finally:
+            monkeypatch.setattr(os, "open", real_open)  # not the folder's own cleanup
+            logger.removeHandler(handler)
+        text = stream.close()
+    assert any("could not create an overflow file" in message for message in records)
+    assert text.full is None  # the file was given up: memory only
+    assert text.length == 20 + len("[warning]")
+
+
+def test_a_close_error_warning_written_back_into_the_stream_does_not_deadlock(
+    tmp_path, monkeypatch
+) -> None:
+    # #580 review (CodeRabbit): the file's close failure is warned by the folder
+    # too (OverflowWriter.finish), reached from SharedTextStream.close(), while
+    # that caller still holds the stream's lock -- the same deadlock.
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    real_close = os.close
+    with OverflowDir() as folder:
+        stream = SharedTextStream(unit="chars", head=4, tail=4, overflow=folder)
+        stream.write("x" * 20)  # cuts the output: the file is open now
+        writer = stream._stream._file
+        assert writer is not None
+        fd = writer._fd
+
+        def broken(candidate: int) -> None:
+            if candidate == fd:
+                raise OSError("disk full")
+
+            real_close(candidate)
+
+        records: list[str] = []
+
+        class IntoTheStream(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record.getMessage())
+                stream.write("[warning]")
+
+        logger = logging.getLogger("nooa.overflow._overflow")
+        handler = IntoTheStream()
+        logger.addHandler(handler)
+        monkeypatch.setattr(os, "close", broken)
+        try:
+            closer = threading.Thread(target=stream.close, daemon=True)
+            closer.start()
+            closer.join(timeout=5)
+            assert not closer.is_alive()  # was a deadlock
+        finally:
+            monkeypatch.setattr(os, "close", real_close)  # not the folder's own cleanup
+            logger.removeHandler(handler)
+            try:
+                real_close(fd)  # the fake close never closed it
+            except OSError:  # pragma: no cover - the descriptor was already gone
+                pass
+        assert any("could not close overflow file" in message for message in records)
+        assert stream.snapshot().full is None  # the file was given up
+        assert stream.dropped_after_close == len("[warning]")
 
 
 def test_many_threads_lose_nothing(tmp_path, monkeypatch) -> None:

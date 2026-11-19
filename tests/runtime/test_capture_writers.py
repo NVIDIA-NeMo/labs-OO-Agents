@@ -79,8 +79,8 @@ async def test_a_write_while_the_file_opens_still_reaches_the_file(
     entered, resume = threading.Event(), threading.Event()
     real_open = OverflowDir.open
 
-    def gated_open(self, max_bytes=None):
-        writer = real_open(self, max_bytes=max_bytes)
+    def gated_open(self, max_bytes=None, *, warn=None):
+        writer = real_open(self, max_bytes=max_bytes, warn=warn)
         entered.set()
         resume.wait(timeout=5)
         return writer
