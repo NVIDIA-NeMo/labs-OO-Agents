@@ -98,3 +98,12 @@ class TestIdioms:
 
 def test_register_all_includes_pil():
     assert "pil" in register_all()
+
+
+def test_doc_on_curated_image_method_shows_entry_and_pitfall():
+    out = doc(Image.Image.resize)
+    assert out.startswith("def Image.resize(self, size: ")
+    assert "size=(width, height)" in out
+    assert "- Methods return new images (resize, crop, convert, rotate); paste, putpixel,\n" in out
+    assert "thumbnail and ImageDraw edit in place." in out  # the bullet's continuation line
+    assert "Other members: doc(Image)" in out

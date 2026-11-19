@@ -193,3 +193,13 @@ class TestWiring:
             return CallableInfo(name="target", signature="(x)", return_type="int", docstring="Hi.")
 
         assert doc(target) == 'def target(x) -> int:\n    """Hi."""'
+
+
+def test_doc_on_curated_ndarray_method_shows_entry_and_pitfalls():
+    out = doc(np.ndarray.reshape)
+    assert out.startswith("def ndarray.reshape(self, shape, /, ")
+    assert "Same data, new shape" in out
+    assert "Shapes (N,) and (N, 1) broadcast differently" in out  # a pitfall naming reshape
+    assert "a.sort() sorts in place" not in out  # pitfalls about other members stay out
+    assert out.rstrip().endswith('Other members: doc(ndarray)\n    """')
+    assert "def ndarray.astype(" in doc(np.zeros(2).astype)  # bound to an instance
