@@ -164,7 +164,7 @@ class TestNoNewModuleImports:
         )
         monkeypatch.syspath_prepend(str(tmp_path))
         blob = _envelope("dataclass", "evil_snapshot_pkg.Gadget", {"x": 1})
-        with pytest.raises(DeserializationError, match="top-level package is not imported"):
+        with pytest.raises(DeserializationError, match="never imports"):
             _restore(blob)
         assert not marker.exists()
         assert "evil_snapshot_pkg" not in sys.modules
@@ -199,7 +199,7 @@ class TestNoNewModuleImports:
             monkeypatch.syspath_prepend(str(tmp_path / "workspace"))
             importlib.invalidate_caches()
             blob = _envelope("dataclass", "nooa_test_ns_pkg.pwn.Gadget", {"x": 1})
-            with pytest.raises(DeserializationError, match="namespace package"):
+            with pytest.raises(DeserializationError, match="never imports"):
                 _restore(blob)
             assert not marker.exists()
             assert "nooa_test_ns_pkg.pwn" not in sys.modules
@@ -207,14 +207,63 @@ class TestNoNewModuleImports:
             for name in [m for m in sys.modules if m.split(".")[0] == "nooa_test_ns_pkg"]:
                 del sys.modules[name]
 
-    def test_submodule_of_loaded_regular_package_is_imported(self) -> None:
-        # Supported case: the parent is a loaded regular package, so the
-        # submodule can only come from where that package is installed.
-        sys.modules.pop("json.tool", None)
-        from nooa.storage.serialization import _import_class
+    def test_extend_path_package_submodule_is_not_imported(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # A regular package whose ``__init__`` calls ``pkgutil.extend_path``
+        # gets every same-named directory on ``sys.path`` (e.g. the workspace)
+        # in its plain-list ``__path__``. Restore must not import from it.
+        marker = tmp_path / "imported"
+        installed = tmp_path / "site" / "nooa_test_ext_pkg"
+        installed.mkdir(parents=True)
+        (installed / "__init__.py").write_text(
+            "from pkgutil import extend_path\n__path__ = extend_path(__path__, __name__)\n"
+        )
+        attacker = tmp_path / "workspace" / "nooa_test_ext_pkg"
+        attacker.mkdir(parents=True)
+        (attacker / "pwn.py").write_text(
+            textwrap.dedent(f"""
+                from pathlib import Path
+                Path({str(marker)!r}).write_text("ran")
+                import dataclasses
 
-        assert _import_class("json.tool.main").__name__ == "main"
-        assert "json.tool" in sys.modules
+                @dataclasses.dataclass
+                class Gadget:
+                    x: int = 0
+            """)
+        )
+        monkeypatch.syspath_prepend(str(tmp_path / "workspace"))
+        monkeypatch.syspath_prepend(str(tmp_path / "site"))
+        import importlib
+
+        importlib.invalidate_caches()
+        pkg = importlib.import_module("nooa_test_ext_pkg")
+        try:
+            assert str(attacker) in list(pkg.__path__)
+            blob = _envelope("dataclass", "nooa_test_ext_pkg.pwn.Gadget", {"x": 1})
+            with pytest.raises(DeserializationError, match="never imports"):
+                _restore(blob)
+            assert not marker.exists()
+            assert "nooa_test_ext_pkg.pwn" not in sys.modules
+        finally:
+            for name in [m for m in sys.modules if m.split(".")[0] == "nooa_test_ext_pkg"]:
+                del sys.modules[name]
+
+    def test_unloaded_submodule_of_loaded_package_is_refused(self) -> None:
+        # Restore never imports, not even a submodule of a loaded package.
+        saved = sys.modules.pop("json.tool", None)
+        try:
+            from nooa.storage.serialization import _import_class
+
+            with pytest.raises(DeserializationError, match="never imports"):
+                _import_class("json.tool.main")
+            assert "json.tool" not in sys.modules
+            import json.tool
+
+            assert _import_class("json.tool.main") is json.tool.main
+        finally:
+            if saved is not None:
+                sys.modules["json.tool"] = saved
 
 
 class _Holder(Agent, llm=FakeLLMClient()):

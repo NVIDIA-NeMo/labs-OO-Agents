@@ -31,23 +31,18 @@ escape existed contain no ``plain_dict`` envelopes and load unchanged.
 Restore trusts code, not data. A snapshot can come from an untrusted place (a
 session store shipped in a cloned repository), so ``deserialize()`` builds only
 classes that are of the kind their envelope names (a Pydantic model, a
-dataclass, an ``@snapshotable`` class) and that live in code the process has
-already loaded, or in modules that can only come from where that code is
-installed. A module already in ``sys.modules`` is used. A module not loaded yet
-is imported only if every parent package on its dotted path is loaded and is a
-regular package: its ``__path__`` is fixed to the directories it was loaded
-from, so a snapshot can import, say, ``mypkg.models`` next to an imported
-``mypkg``, but not a top-level module, nor a submodule of a namespace package
-(whose ``__path__`` follows ``sys.path`` and so may reach a file in the
-current directory). The allowlist stored next to a blob can only narrow this;
-it never permits a class.
+dataclass, an ``@snapshotable`` class) and that live in modules the process
+has already loaded. Restoring never imports a module: any import could run a
+file the snapshot chose, since even a submodule of a loaded package can
+resolve to the current directory (through a namespace package or a
+``pkgutil.extend_path`` ``__path__``). The allowlist stored next to a blob can
+only narrow this; it never permits a class.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import enum
-import importlib
 import inspect
 import logging
 import sys
@@ -787,92 +782,46 @@ def _fqn(cls: type) -> str:
 
 
 def _import_class(fqn: str) -> type:
-    """Import a class by its fully qualified name.
+    """Find a class by its fully qualified name in modules already loaded.
 
     Supports nested/inner classes whose ``__qualname__`` contains dots
     (e.g. ``module.Outer.Inner``).  We try progressively shorter module
     paths so that ``getattr`` can traverse the class hierarchy.
 
-    Only code the process already loaded is used. A module already in
-    ``sys.modules`` is used as is. A module that is not loaded yet is imported
-    only if every parent package on its dotted path is already in
-    ``sys.modules`` and is a regular package (see ``_is_regular_package``).
-    A regular package's ``__path__`` is a fixed list of the directories it
-    was loaded from, so the import can only run code installed next to that
-    package. A namespace package's ``__path__`` is recomputed from
-    ``sys.path``, which may hold the current directory, so a submodule of one
-    (e.g. ``opentelemetry.pwn``) could be a file in the workspace; such names
-    are refused unless the submodule is already loaded. A top-level module
-    that is not loaded is never imported.
+    Restoring never imports anything: only modules already in
+    ``sys.modules`` are used. Any import could run code from a file the
+    snapshot chose. Even a submodule of a loaded package can resolve to the
+    workspace, through a namespace package or a ``pkgutil.extend_path``
+    ``__path__``. A class whose module is not loaded yet is refused; import
+    it before restoring.
 
     Raises:
-        DeserializationError: If the module or class cannot be found, or
-            finding it would need an import that the rule above refuses.
+        DeserializationError: If the module is not loaded or the class is not found.
     """
     candidates = [fqn]
     old_prefix, new_prefix = _LEGACY_CORE_PREFIX
     if fqn.startswith(old_prefix):
         candidates.append(new_prefix + fqn.removeprefix(old_prefix))
 
-    refused: str | None = None
+    not_loaded = False
     for candidate in candidates:
         parts = candidate.split(".")
         if len(parts) < 2:
             raise DeserializationError(f"Invalid fully qualified name: {fqn!r}")
-        if parts[0] not in sys.modules:
-            refused = refused or (
-                "its top-level package is not imported, and a snapshot may not import new modules"
-            )
-            continue
         for i in range(len(parts) - 1, 0, -1):
-            module_path = ".".join(parts[:i])
-            obj = sys.modules.get(module_path)
+            obj = sys.modules.get(".".join(parts[:i]))
             if obj is None:
-                if not _parents_are_loaded_regular_packages(parts[:i]):
-                    refused = refused or (
-                        f"importing {module_path!r} would need a parent package that is "
-                        f"not loaded or is a namespace package, and a snapshot may only "
-                        f"import submodules of loaded regular packages"
-                    )
-                    continue
-                try:
-                    obj = importlib.import_module(module_path)
-                except ImportError:
-                    continue
+                not_loaded = True
+                continue
             try:
                 for attr in parts[i:]:
                     obj = getattr(obj, attr)
                 return obj  # type: ignore[return-value]
             except AttributeError:
                 continue
-    if refused:
+    if not_loaded:
         raise DeserializationError(
-            f"Cannot import class {fqn!r}: {refused}. Import it before restoring."
+            f"Cannot import class {fqn!r}: its module is not imported, and restoring a "
+            f"snapshot never imports modules. Import it before restoring."
         )
     raise DeserializationError(f"Cannot import class {fqn!r}: module or attribute not found")
-
-
-def _is_regular_package(module: Any) -> bool:
-    """Whether ``module`` is a regular package (a directory with ``__init__``).
-
-    A regular package has a ``__file__`` and a plain ``list`` as ``__path__``
-    (and as its spec's ``submodule_search_locations``). A namespace package
-    has neither: its ``__path__`` is a ``_NamespacePath`` that is recomputed
-    from ``sys.path``. A plain module has no ``__path__`` and cannot be a
-    parent of another module.
-    """
-    if not getattr(module, "__file__", None):
-        return False
-    if type(getattr(module, "__path__", None)) is not list:
-        return False
-    spec = getattr(module, "__spec__", None)
-    return spec is None or type(spec.submodule_search_locations) is list
-
-
-def _parents_are_loaded_regular_packages(parts: list[str]) -> bool:
-    """Whether every parent of the module ``".".join(parts)`` is a loaded regular package."""
-    for j in range(1, len(parts)):
-        parent = sys.modules.get(".".join(parts[:j]))
-        if parent is None or not _is_regular_package(parent):
-            return False
-    return True

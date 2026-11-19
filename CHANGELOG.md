@@ -28,13 +28,11 @@ to follow semantic versioning.
   session was loaded. Now each envelope builds only its own kind (`pydantic`:
   a `BaseModel` subclass, `dataclass`: a dataclass, `dict_class`: an
   `@snapshotable` class), and an `@snapshotable` envelope cannot set dunder
-  attributes. A class path may name a module that is not loaded yet only if
-  every parent package on its path is already imported and is a regular
-  package (its `__path__` is fixed to where it is installed), so `mypkg.models`
-  next to an imported `mypkg` still loads; a top-level module that is not
-  imported yet, or a submodule of a namespace package such as `opentelemetry`
-  (whose `__path__` follows `sys.path` and can reach the current directory), is
-  refused instead of imported. The stored allowlist can only narrow this. A
+  attributes. Restoring never imports a module: a class is looked up only in
+  modules already in `sys.modules`, because any import (even a submodule of a
+  loaded package, through a namespace package such as `opentelemetry` or a
+  `pkgutil.extend_path` package) could run a file from the current directory.
+  The stored allowlist can only narrow this. A
   refused attribute or static context block is skipped with a warning, as for
   any attribute that fails to restore. Compatibility: an attribute or context
   block whose class lives in a package the process has not imported at restore
