@@ -196,8 +196,9 @@ class Spec:
     def define_doc(self, target) -> Any:
         """Define a custom extractor for *target* in ``doc()``.
 
-        Completely replaces the default introspection. Works for both types and
-        modules.
+        Completely replaces the default introspection. Works for types, modules
+        and function objects (a function's extractor receives the function and
+        returns ``CallableInfo``; it must not call it).
 
         **For a type** — extractor receives the type or an instance, returns
         ``TypeInfo`` (or ``(TypeInfo, values_dict)`` to include current values)::
@@ -228,6 +229,12 @@ class Spec:
             from nooa.agentdoc.registry import register_module_info_extractor
 
             return register_module_info_extractor(target)
+
+        if not isinstance(target, type) and callable(target):
+            # A function object (e.g. numpy.zeros): replace its CallableInfo.
+            from nooa.agentdoc.registry import register_callable_info_extractor
+
+            return register_callable_info_extractor(target)
 
         from nooa.agentdoc.registry import register_type_info_extractor
 

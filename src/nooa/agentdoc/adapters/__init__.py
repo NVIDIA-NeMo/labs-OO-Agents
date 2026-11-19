@@ -19,7 +19,13 @@ Available adapters:
     plotly — plotly, plotly.express, plotly.graph_objects
     pandas — pandas.DataFrame, pandas.Series
     pxr    — OpenUSD: pxr.Usd, UsdGeom, UsdShade, Sdf, Gf, Vt (stage, mesh, subsets, materials)
+    numpy  — numpy, ndarray, linalg, random.Generator; condensed views of all public functions
+    pil    — Pillow: PIL.Image, PIL.Image.Image, PIL.ImageDraw
+    scipy  — scipy.sparse.csgraph, scipy.spatial (KDTree, ConvexHull), scipy.ndimage
+    trimesh — trimesh, trimesh.Trimesh, trimesh.graph
 """
+
+import importlib
 
 
 def register_all():
@@ -52,6 +58,13 @@ def register_all():
         registered.append("pxr")
     except ImportError:
         pass
+
+    for name in ("numpy", "pil", "scipy", "trimesh"):
+        try:
+            importlib.import_module(f"nooa.agentdoc.adapters.{name}")
+        except ImportError:
+            continue
+        registered.append(name)
 
     return registered
 

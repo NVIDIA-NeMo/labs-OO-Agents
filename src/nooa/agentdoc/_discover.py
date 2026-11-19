@@ -89,6 +89,13 @@ def discover_referenced_types(
         ]
         return sorted(custom_types, key=lambda t: t.__name__)
 
+    # Wrapper objects around a function (numpy dispatchers) document as that
+    # function; their wrapper class is not part of the API.
+    from nooa.agentdoc._structured import is_wrapped_callable
+
+    if is_wrapped_callable(obj):
+        return []
+
     # Instances use their type-level contract, with per-instance visibility.
     # Built-in values are not documentable API objects.
     visibility_obj = None

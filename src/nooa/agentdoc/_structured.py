@@ -31,6 +31,7 @@ __all__ = [
     "extract_module_info",
     "format_type",
     "is_compiled_callable",
+    "is_wrapped_callable",
 ]
 
 
@@ -55,6 +56,30 @@ def is_compiled_callable(obj: Any) -> bool:
     return (
         getattr(obj_type, "__name__", None) == "function"
         and getattr(obj_type, "__module__", None) == "Boost.Python"
+    )
+
+
+def is_wrapped_callable(obj: Any) -> bool:
+    """Return True for a callable object that wraps a function via ``__wrapped__``.
+
+    Covers wrapper objects that are not functions themselves, such as NumPy's
+    ``_ArrayFunctionDispatcher`` (most public NumPy functions) or
+    ``functools.lru_cache`` wrappers. They document as the wrapped function:
+    ``inspect.signature`` and ``inspect.getdoc`` follow the wrapper. Only
+    attributes are read; nothing is called.
+    """
+    if isinstance(obj, type) or inspect.ismodule(obj) or not callable(obj):
+        return False
+    if inspect.isfunction(obj) or inspect.ismethod(obj) or is_compiled_callable(obj):
+        return False
+    try:
+        if getattr(obj, "__wrapped__", None) is None:
+            return False
+        target = inspect.unwrap(obj)
+    except Exception:  # noqa: BLE001 - odd __getattr__/__dir__ implementations
+        return False
+    return target is not obj and (
+        inspect.isfunction(target) or inspect.ismethod(target) or is_compiled_callable(target)
     )
 
 
