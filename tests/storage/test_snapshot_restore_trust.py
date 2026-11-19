@@ -293,6 +293,34 @@ class TestNoNewModuleImports:
             _import_class("nooa_test_lazy_pkg.Gadget")
         assert calls == []
 
+    def test_custom_getattribute_is_not_run(self, monkeypatch) -> None:
+        # A loaded object with a custom ``__getattribute__`` must not have it
+        # called while a class path is resolved through it.
+        import types
+
+        calls: list[str] = []
+
+        class _Hooked(types.ModuleType):
+            def __getattribute__(self, name: str):
+                calls.append(name)
+                return super().__getattribute__(name)
+
+        hooked = _Hooked("nooa_test_hooked_mod")
+
+        @dataclasses.dataclass
+        class Inner:
+            x: int = 0
+
+        types.ModuleType.__setattr__(hooked, "Inner", Inner)
+        monkeypatch.setitem(sys.modules, "nooa_test_hooked_mod", hooked)
+        from nooa.storage.serialization import _import_class
+
+        calls.clear()
+        assert _import_class("nooa_test_hooked_mod.Inner") is Inner
+        with pytest.raises(DeserializationError):
+            _import_class("nooa_test_hooked_mod.Missing")
+        assert calls == []
+
 
 class _Holder(Agent, llm=FakeLLMClient()):
     value: int = 0

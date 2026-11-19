@@ -781,6 +781,9 @@ def _fqn(cls: type) -> str:
     return f"{cls.__module__}.{cls.__qualname__}"
 
 
+_MISSING = object()
+
+
 def _import_class(fqn: str) -> type:
     """Find a class by its fully qualified name in modules already loaded.
 
@@ -793,8 +796,8 @@ def _import_class(fqn: str) -> type:
     snapshot chose. Even a submodule of a loaded package can resolve to the
     workspace, through a namespace package or a ``pkgutil.extend_path``
     ``__path__``. A class whose module is not loaded yet is refused; import
-    it before restoring. Names are read from each module's or class's own
-    ``__dict__``, so a module-level ``__getattr__`` hook never runs.
+    it before restoring. Names are resolved with ``inspect.getattr_static``,
+    so no ``__getattr__``/``__getattribute__`` hook or descriptor runs.
 
     Raises:
         DeserializationError: If the module is not loaded or the class is not found.
@@ -814,18 +817,14 @@ def _import_class(fqn: str) -> type:
             if obj is None:
                 not_loaded = True
                 continue
-            # Look names up in each namespace's own ``__dict__``, not with
-            # ``getattr``: a module-level ``__getattr__`` (lazy packages) could
-            # import a submodule the snapshot named.
+            # Static lookup (``inspect.getattr_static``), not ``getattr``: a
+            # module-level ``__getattr__``, a custom ``__getattribute__`` or a
+            # descriptor could run code, e.g. import a submodule the snapshot named.
             for attr in parts[i:]:
-                namespace = getattr(obj, "__dict__", None)
-                if not isinstance(namespace, dict) and type(namespace).__name__ != "mappingproxy":
-                    obj = None
+                obj = inspect.getattr_static(obj, attr, _MISSING)
+                if obj is _MISSING:
                     break
-                obj = namespace.get(attr)
-                if obj is None:
-                    break
-            if obj is not None:
+            if obj is not _MISSING:
                 return obj  # type: ignore[return-value]
     if not_loaded:
         raise DeserializationError(
