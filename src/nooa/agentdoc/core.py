@@ -45,6 +45,32 @@ def _is_documentable_collection(obj: list | tuple) -> bool:
     return True
 
 
+# Curated doc() adapters for third-party libraries (nooa.agentdoc.adapters), loaded
+# lazily: once its library has been imported, the first doc() call registers the
+# adapter. Nothing is imported for a library the process has not loaded.
+_LAZY_ADAPTERS = {
+    "pxr": "nooa.agentdoc.adapters.pxr",
+    "pandas": "nooa.agentdoc.adapters.pandas",
+    "plotly": "nooa.agentdoc.adapters.plotly",
+}
+_loaded_adapters: set[str] = set()
+
+
+def _load_adapters_for_imported_libraries() -> None:
+    """Register adapters for adapted libraries already in ``sys.modules`` (once each)."""
+    import importlib
+    import sys
+
+    for library, adapter in _LAZY_ADAPTERS.items():
+        if adapter in _loaded_adapters or library not in sys.modules:
+            continue
+        _loaded_adapters.add(adapter)
+        try:
+            importlib.import_module(adapter)
+        except Exception:  # noqa: BLE001 - an adapter must never break doc()
+            pass
+
+
 def doc(
     *objs: Any,
     concise: Annotated[bool, "Show first-line docstrings only"] = False,
@@ -84,6 +110,8 @@ def doc(
 
     if not flat_objs:
         raise ValueError("doc() requires at least one object")
+
+    _load_adapters_for_imported_libraries()
 
     if not isinstance(inline_depth, int) or isinstance(inline_depth, bool):
         raise TypeError("inline_depth must be a non-negative integer")
