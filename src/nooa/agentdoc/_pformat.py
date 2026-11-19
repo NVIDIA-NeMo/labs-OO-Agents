@@ -24,7 +24,7 @@ from typing import Any
 from nooa.agentdoc._format_observation import record_truncation
 from nooa.agentdoc._info import REQUIRED, CallableInfo, ModuleInfo, TypeInfo
 from nooa.agentdoc._metadata import is_expand_false
-from nooa.agentdoc._structured import _ClassRef, _InstanceRef
+from nooa.agentdoc._structured import _ClassRef, _InstanceRef, is_compiled_callable
 from nooa.agentdoc._visibility import _resolve_type_hints, _type_hint_scope
 from nooa.agentdoc.protocols import SupportsInstanceValues
 
@@ -238,6 +238,25 @@ def _pformat(
                     type_depth=inline_depth,
                     indent=_indent,
                     context_obj=_object,  # Pass the function/method for type discovery
+                )
+            )
+        case _ if is_compiled_callable(_object):
+            # C-extension / Boost.Python callable: render as a function entry. The
+            # callable is never invoked; with no docstring and no signature, a short
+            # note points to where related names can be found.
+            from nooa.agentdoc._structured import compiled_callable_note, extract_callable_info
+
+            callable_info = extract_callable_info(_object)
+            note = None
+            if not callable_info.docstring and callable_info.signature == "(...)":
+                note = compiled_callable_note(_object)
+            _stream.write(
+                _format_callable_info(
+                    callable_info,
+                    concise=concise,
+                    type_depth=0,
+                    indent=_indent,
+                    note=note,
                 )
             )
         case _ if _is_structured_instance(_object, respect_custom_repr=instance_mode != "type"):
@@ -777,6 +796,7 @@ def _format_callable_info(
     indent: int,
     as_method: bool = False,
     context_obj: Any = None,
+    note: str | None = None,
 ) -> str:
     """Format CallableInfo as Python function/method syntax.
 
@@ -787,6 +807,7 @@ def _format_callable_info(
         indent: Indentation level
         as_method: If True, format as method (no standalone header)
         context_obj: Original callable object for type discovery (None if formatting CallableInfo directly)
+        note: Comment lines shown in place of ``...`` when there is no docstring
 
     Returns:
         Python-style function definition string
@@ -825,6 +846,8 @@ def _format_callable_info(
             lines.append(f'{ind}    """')
         else:
             lines.append(f'{ind}    """{doc_text}"""')
+    elif note:
+        lines.extend(f"{ind}    # {line}" for line in note.split("\n"))
     else:
         lines.append(f"{ind}    ...")
 

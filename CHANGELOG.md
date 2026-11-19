@@ -6,6 +6,17 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `doc()` now documents compiled callables and classes (C extensions and
+  Boost.Python, for example OpenUSD's `pxr`). Before, `doc(UsdGeom.Subset.CreateGeomSubset)`
+  printed only `class function:` and `doc(UsdGeom.Subset)` showed no methods.
+  A builtin function, method descriptor or `Boost.Python.function` now renders
+  as `def name(signature):`, or `def name(...):` when `inspect.signature`
+  fails. If it has no docstring either, a two-line comment says so and points
+  to `doc()` of its class or module, `dir()`, and the signature a wrong-type
+  call reports. The function is never called. A class lists the compiled
+  methods it and its bases define, except bases from `builtins` (so a Python
+  subclass of `dict` still lists only its own methods). The usual visibility
+  rules (private names, `@hidden`) apply.
 - `SandboxConfig.env_allowlist` keeps only the listed environment variables in
   the sandbox worker. The worker is a fork, so it inherited every variable of the
   parent, model API keys included, and a cell could print them. Removing them
