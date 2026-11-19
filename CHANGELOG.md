@@ -25,6 +25,28 @@ to follow semantic versioning.
   contents. The viewer frontend uses React 19.3.1. The `exclude-newer` cutoff
   moves to 2026-11-11 for the root project and the cybergym example, which is
   also locked at LiteLLM 1.100.5.
+- `doc()` gives short curated views for NumPy, Pillow, SciPy and trimesh
+  (`nooa.agentdoc.adapters.numpy`, `.pil`, `.scipy`, `.trimesh`). They load
+  lazily once the library is imported, and `register_all()` includes them.
+  `doc(np.ndarray)` goes from 1,539 to 97 lines, `doc(numpy)` from 27,033 to 35,
+  `doc(np.zeros)` from 64 to 14, `doc(PIL.Image.Image)` from 894 to 74 and
+  `doc(PIL.Image)` from 615 to 43. Each view lists the key attributes and
+  methods with the installed library's signatures, plus tested idioms and
+  pitfalls. Every public function of numpy, numpy.linalg, numpy.fft,
+  numpy.random, scipy.sparse.csgraph, scipy.spatial and scipy.ndimage now shows
+  its signature, its first summary paragraph and one line per parameter and
+  return value; the Examples and Notes sections are dropped.
+- `doc()` renders callable wrapper objects that set `__wrapped__` as the
+  function they wrap. This covers NumPy's `_ArrayFunctionDispatcher` (most
+  NumPy 2.x functions) and `functools.lru_cache`. Before,
+  `doc(np.linalg.norm)` printed `class _ArrayFunctionDispatcher`. The wrapper
+  is never called.
+- `spec.define_doc(func)` now also accepts a function object. It registers a
+  `CallableInfo` extractor that is looked up by identity
+  (`registry.register_callable_info_extractor`). A class whose `TypeInfo` comes
+  from a registered extractor no longer gets a `Referenced Types` section built
+  from the real class's annotations, so curated views stay self-contained.
+
 - `nooa.agentdoc.adapters.pxr` gives `doc()` curated views of the OpenUSD
   Python API (`pxr.Usd`, `UsdGeom`, `UsdShade`, `Sdf`, `Gf`, `Vt`), whose
   usd-core bindings have no docstrings. Each covered type (Stage, Prim,

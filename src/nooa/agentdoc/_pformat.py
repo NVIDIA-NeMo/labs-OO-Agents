@@ -24,7 +24,12 @@ from typing import Any
 from nooa.agentdoc._format_observation import record_truncation
 from nooa.agentdoc._info import REQUIRED, CallableInfo, ModuleInfo, TypeInfo
 from nooa.agentdoc._metadata import is_expand_false
-from nooa.agentdoc._structured import _ClassRef, _InstanceRef, is_compiled_callable
+from nooa.agentdoc._structured import (
+    _ClassRef,
+    _InstanceRef,
+    is_compiled_callable,
+    is_wrapped_callable,
+)
 from nooa.agentdoc._visibility import _resolve_type_hints, _type_hint_scope
 from nooa.agentdoc.protocols import SupportsInstanceValues
 from nooa.agentdoc.registry import CuratedMember
@@ -198,13 +203,16 @@ def _pformat(
         case type():
             # Python type (class) - extract and format
             from nooa.agentdoc._structured import extract_type_info
+            from nooa.agentdoc.registry import get_type_info_extractor
 
             type_info = extract_type_info(_object)
             _stream.write(
                 _format_type_info(
                     type_info,
                     concise=concise,
-                    type_depth=inline_depth,
+                    # A registered (curated) view is self-contained: the real class's
+                    # annotations would otherwise pull in unrelated referenced types.
+                    type_depth=0 if get_type_info_extractor(_object) else inline_depth,
                     max_length=max_length,
                     indent=_indent,
                     context_obj=_object,  # Pass the original type for discovery
@@ -228,6 +236,16 @@ def _pformat(
                     indent=_indent,
                 )
             )
+        case _ if (callable_extractor := _registered_callable_extractor(_object)) is not None:
+            # Curated CallableInfo registered for this exact function object.
+            _stream.write(
+                _format_callable_info(
+                    callable_extractor(_object),
+                    concise=concise,
+                    type_depth=0,
+                    indent=_indent,
+                )
+            )
         case _ if (curated := _curated_member(_object)) is not None:
             # A method documented by a registered (curated) class view: show its
             # curated entry and the owner's notes instead of bare introspection.
@@ -247,6 +265,19 @@ def _pformat(
                     type_depth=inline_depth,
                     indent=_indent,
                     context_obj=_object,  # Pass the function/method for type discovery
+                )
+            )
+        case _ if is_wrapped_callable(_object):
+            # A callable wrapper object around a function (numpy's
+            # _ArrayFunctionDispatcher, functools.lru_cache): document the function.
+            from nooa.agentdoc._structured import extract_callable_info
+
+            _stream.write(
+                _format_callable_info(
+                    extract_callable_info(_object),
+                    concise=concise,
+                    type_depth=0,
+                    indent=_indent,
                 )
             )
         case _ if is_compiled_callable(_object):
@@ -358,7 +389,8 @@ def _pformat(
                     _format_type_info(
                         type_info,
                         concise=concise,
-                        type_depth=inline_depth,
+                        # Curated (registered) views are self-contained; see the type case.
+                        type_depth=0 if extractor else inline_depth,
                         max_length=max_length,
                         indent=_indent,
                         context_obj=obj_type,
@@ -429,6 +461,15 @@ def _instance_dict(obj: Any) -> dict[str, Any] | None:
     except AttributeError:
         return None
     return value if isinstance(value, dict) else None
+
+
+def _registered_callable_extractor(obj: Any):
+    """The curated CallableInfo extractor registered for this function object, if any."""
+    if isinstance(obj, type) or inspect.ismodule(obj):
+        return None
+    from nooa.agentdoc.registry import get_callable_info_extractor
+
+    return get_callable_info_extractor(obj)
 
 
 # Owner docstrings up to this many lines are shown whole with a curated member;

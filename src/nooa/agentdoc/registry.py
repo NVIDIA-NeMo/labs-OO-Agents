@@ -32,6 +32,13 @@ _extractor_registry: dict[type, TypeInfoExtractorFunc] = {}
 # Global registry: module qualified name -> extractor function
 _module_extractor_registry: dict[str, ModuleInfoExtractorFunc] = {}
 
+# Callable extractor: receives the function object, returns CallableInfo
+CallableInfoExtractorFunc = Callable[[Any], CallableInfo]
+
+# Global registry: id(callable) -> (callable, extractor). Keyed by identity because
+# many callables are not hashable by value; holding the callable keeps its id unique.
+_callable_extractor_registry: dict[int, tuple[Any, CallableInfoExtractorFunc]] = {}
+
 
 def register_type_info_extractor(
     target_type: type,
@@ -183,6 +190,51 @@ def unregister_module_info_extractor(target_module: Any) -> None:
         return
     with _registry_lock:
         _module_extractor_registry.pop(target_module.__name__, None)
+
+
+def register_callable_info_extractor(
+    target_callable: Any,
+) -> Callable[[CallableInfoExtractorFunc], CallableInfoExtractorFunc]:
+    """Decorator to register a CallableInfo extractor for one function object.
+
+    Use this for third-party functions whose own docstring is too long or whose
+    signature cannot be introspected (e.g. ``numpy.zeros``). The extractor receives
+    the function object and returns a CallableInfo; it must not call the function.
+
+    Args:
+        target_callable: The function (or other non-type callable) to document
+
+    Returns:
+        Decorator function
+    """
+    if isinstance(target_callable, type) or not callable(target_callable):
+        raise TypeError(
+            f"register_callable_info_extractor expects a non-type callable, got {target_callable!r}"
+        )
+
+    def decorator(func: CallableInfoExtractorFunc) -> CallableInfoExtractorFunc:
+        with _registry_lock:
+            _callable_extractor_registry[id(target_callable)] = (target_callable, func)
+        return func
+
+    return decorator
+
+
+def get_callable_info_extractor(obj: Any) -> CallableInfoExtractorFunc | None:
+    """Get the CallableInfo extractor registered for this exact callable, if any."""
+    with _registry_lock:
+        entry = _callable_extractor_registry.get(id(obj))
+    if entry is None or entry[0] is not obj:
+        return None
+    return entry[1]
+
+
+def unregister_callable_info_extractor(target_callable: Any) -> None:
+    """Remove a callable from the extractor registry (mainly for tests)."""
+    with _registry_lock:
+        entry = _callable_extractor_registry.get(id(target_callable))
+        if entry is not None and entry[0] is target_callable:
+            del _callable_extractor_registry[id(target_callable)]
 
 
 # Missing-attribute hints: owner key -> {attribute name: hint}. The owner key is a
@@ -429,3 +481,4 @@ def clear_registry() -> None:
         _extractor_registry.clear()
         _module_extractor_registry.clear()
         _attribute_hint_registry.clear()
+        _callable_extractor_registry.clear()
