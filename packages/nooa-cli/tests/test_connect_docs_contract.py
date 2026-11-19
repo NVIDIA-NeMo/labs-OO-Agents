@@ -24,7 +24,7 @@ from nooa_cli.commands import _connect_stages as stages
 from nooa_cli.commands.connect import command
 
 from nooa import agent as agent_module
-from nooa import llm_config, tracing
+from nooa import tracing
 from nooa.skill import TextSkill
 from nooa.unifiedllm import connect
 from tests.unifiedllm.connect.connect_http import mock_http, response_body
@@ -98,7 +98,6 @@ def offline(monkeypatch, tmp_path):
         "OPENROUTER_API_KEY",
     ]:
         monkeypatch.setenv(variable, "dummy-docs-key")
-    monkeypatch.setattr(llm_config, "bundled_config_paths", lambda: [])
     monkeypatch.delenv("OTLP_ENDPOINT", raising=False)
     monkeypatch.delenv("NOOA_LLM_TRANSPORT", raising=False)
     monkeypatch.setattr(agent_module, "_auto_tracing_attempted", False)

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Test that empty response with finish_reason='length' raises immediately with an actionable message."""
+"""Replies cut off at max_tokens get bounded recovery nudges, then an actionable error."""
 
 import json
 from types import SimpleNamespace
@@ -12,7 +12,11 @@ from nooa import Agent, return_text_as_result, strategy
 from nooa.config import CodeActConfig
 from nooa.errors import GenerationError
 from nooa.events import DebugTrace, Error
-from nooa.strategies.codeact import CodeActStrategy
+from nooa.strategies.codeact import (
+    MAX_LENGTH_RECOVERIES,
+    OUTPUT_LIMIT_NUDGE,
+    CodeActStrategy,
+)
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
 _TEST_LLM = FakeLLMClient()
@@ -38,9 +42,9 @@ class TestMaxTokensExhaustedError:
     """Tests for the max_tokens exhaustion error in CodeAct strategy."""
 
     @pytest.mark.asyncio
-    async def test_finish_reason_length_raises_immediately(self):
-        """When model hits max_tokens (finish_reason='length') with no output,
-        GenerationError is raised immediately (no retry) with an actionable message."""
+    async def test_finish_reason_length_raises_after_bounded_nudges(self):
+        """Repeated max_tokens cut-offs (finish_reason='length') get MAX_LENGTH_RECOVERIES
+        nudges, then GenerationError with an actionable message."""
 
         class TestAgent(Agent, llm=_TEST_LLM):
             @strategy(CodeActStrategy(config=CodeActConfig(max_retries=3, max_iterations=10)))
@@ -51,6 +55,8 @@ class TestMaxTokensExhaustedError:
         fake_llm = FakeLLMClient(
             scripted_responses=[
                 _resp("", finish_reason="length"),  # Reasoning ate all tokens
+                _resp("", finish_reason="length"),
+                _resp("", finish_reason="length"),
             ]
         )
 
@@ -71,7 +77,11 @@ class TestMaxTokensExhaustedError:
         assert len(max_tokens_errors) == 0, (
             f"max_tokens error should not be an Error event (LLM-visible), got: {max_tokens_errors}"
         )
-        assert [event.content for event in all_events if isinstance(event, LLMResponse)] == [""]
+        assert [event.content for event in all_events if isinstance(event, LLMResponse)] == [""] * (
+            MAX_LENGTH_RECOVERIES + 1
+        )
+        nudges = [e for e in error_events if e.content == OUTPUT_LIMIT_NUDGE]
+        assert len(nudges) == MAX_LENGTH_RECOVERIES
 
     @pytest.mark.asyncio
     async def test_finish_reason_length_does_not_return_partial_text(self):
@@ -87,6 +97,8 @@ class TestMaxTokensExhaustedError:
             llm=FakeLLMClient(
                 scripted_responses=[
                     _resp("truncated partial", finish_reason="length"),
+                    _resp("truncated partial", finish_reason="length"),
+                    _resp("truncated partial", finish_reason="length"),
                 ]
             )
         )
@@ -97,7 +109,7 @@ class TestMaxTokensExhaustedError:
         events = agent_instance.event_manager.values()
         assert [event.content for event in events if isinstance(event, LLMResponse)] == [
             "truncated partial"
-        ]
+        ] * (MAX_LENGTH_RECOVERIES + 1)
         assert not any(event.event_type == "TextOnlyReply" for event in events)
 
     @pytest.mark.asyncio
@@ -120,7 +132,7 @@ class TestMaxTokensExhaustedError:
                 {"type": "message", "content": []},
             ]
         )
-        agent_instance = TestAgent(llm=FakeLLMClient(scripted_responses=[response]))
+        agent_instance = TestAgent(llm=FakeLLMClient(scripted_responses=[response] * 3))
 
         with pytest.raises(GenerationError, match="max_tokens"):
             await agent_instance.my_task()
@@ -168,3 +180,46 @@ class TestMaxTokensExhaustedError:
             and not message.get("tool_calls")
             for message in fake_llm.last_messages
         )
+
+    @pytest.mark.asyncio
+    async def test_cut_off_reply_recovers_after_nudge(self):
+        """One cut-off reply is not fatal: the nudge lets the next reply finish."""
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActStrategy(config=CodeActConfig(max_retries=3)))
+            async def my_task(self) -> str:
+                """A task."""
+                ...
+
+        ret = ToolCall(id="c1", name="return_result", arguments=json.dumps({"result": "ok"}))
+        fake_llm = FakeLLMClient(
+            scripted_responses=[
+                _resp("loop loop loop", finish_reason="length"),
+                _resp("", tool_calls=[ret], finish_reason="tool_calls"),
+            ]
+        )
+        agent_instance = TestAgent(llm=fake_llm)
+        assert await agent_instance.my_task() == "ok"
+        nudges = [
+            e
+            for e in agent_instance.event_manager.values()
+            if isinstance(e, Error) and e.content == OUTPUT_LIMIT_NUDGE
+        ]
+        assert len(nudges) == 1
+        assert "cut off at the output-token limit" in OUTPUT_LIMIT_NUDGE
+
+    @pytest.mark.asyncio
+    async def test_cut_off_nudges_respect_max_retries(self):
+        """With max_retries=1 the first cut-off already exhausts the call: no nudge."""
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActStrategy(config=CodeActConfig(max_retries=1)))
+            async def my_task(self) -> str:
+                """A task."""
+                ...
+
+        agent_instance = TestAgent(
+            llm=FakeLLMClient(scripted_responses=[_resp("", finish_reason="length")])
+        )
+        with pytest.raises(GenerationError, match="max_tokens"):
+            await agent_instance.my_task()

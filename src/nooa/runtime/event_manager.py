@@ -203,6 +203,29 @@ class EventManager:
 
         return str(event.id)
 
+    def record_batch(self, events: list[EventBase]) -> list[str]:
+        """Atomically append fresh durable events, without observer delivery.
+
+        This explicit recorder path is for mandatory ledger transitions.
+        A backend without atomic append support fails rather than degrading
+        to partial single-event writes. Runtime events and summaries are not
+        accepted. Tags are assigned with the model's own setter before storage;
+        a failing setter fails the batch with nothing stored and every tag
+        reset to None. Use add() for ordinary context/observer events.
+        """
+        if any(
+            not isinstance(event, EventBase)
+            or event._role == Role.RUNTIME_EVENT
+            or isinstance(event, Summary)
+            for event in events
+        ):
+            raise ValueError("record_batch requires fresh durable non-summary events")
+        append = getattr(self._backend, "append_batch", None)
+        if append is None:
+            raise TypeError("backend does not support atomic batch recording")
+        # The backend validates the whole batch once, under its own lock.
+        return append(events)
+
     def register_event_type(self, cls: type[EventBase]) -> None:
         """Register a custom EventBase subclass for deserialization.
 
@@ -354,13 +377,13 @@ class EventManager:
         for handler in list(self._handlers[event_type]):
             try:
                 handler(event)
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 logger.warning("Event handler %r raised", handler, exc_info=True)
 
         for handler in list(self._handlers["*"]):
             try:
                 handler(event)
-            except Exception:
+            except (Exception, asyncio.CancelledError):
                 logger.warning("Wildcard handler %r raised", handler, exc_info=True)
 
     # === Middleware (intercept) ===
@@ -679,17 +702,44 @@ class EventManager:
         if not tags_to_collapse:
             raise ValueError(f"No active events in range '{start_tag}'..'{end_tag}'")
 
-        # Archive the events and remove from active list
-        for tag in tags_to_collapse:
-            self._backend.set_status(tag, EventStatus.ARCHIVED)
-            self._backend.remove_active_tag(tag)
-
         # Calculate the full range for the new summary (flatten nested summaries)
         actual_start = min(self._parse_tag_start(t) for t in tags_to_collapse)
         actual_end = max(self._parse_tag_end(t) for t in tags_to_collapse)
 
         # Create the summary tag (flattened range)
         summary_tag = f"{actual_start}..{actual_end}"
+
+        # A range that only one existing summary covers flattens to that summary's own tag.
+        # Archiving it and storing a new Summary under the same tag would put two events under one
+        # tag; the SQLite backend rejects the second (IntegrityError on events.tag) after the first
+        # is already archived, so the summary vanished from history. Decide before changing
+        # anything: the summary's exact range rewrites its text in place; a range strictly inside it
+        # is an error that leaves history unchanged.
+        if tags_to_collapse == [summary_tag]:
+            existing = self._backend.get(summary_tag)
+            if (start_num, end_num) != (actual_start, actual_end):
+                raise ValueError(
+                    f"Events '{start_tag}'..'{end_tag}' are already collapsed into "
+                    f"summary '{summary_tag}'. To rewrite its text, "
+                    f"collapse('{actual_start}', '{actual_end}', summary_text=...)."
+                )
+            if (
+                summary_text is not None
+                and isinstance(existing, Summary)
+                and summary_text != existing.summary_text
+            ):
+                self._backend.update(summary_tag, summary_text=summary_text)
+            return summary_tag
+        if self._backend.get(summary_tag) is not None:
+            raise ValueError(
+                f"Cannot collapse '{start_tag}'..'{end_tag}': "
+                f"summary tag '{summary_tag}' already exists"
+            )
+
+        # Archive the events and remove from active list
+        for tag in tags_to_collapse:
+            self._backend.set_status(tag, EventStatus.ARCHIVED)
+            self._backend.remove_active_tag(tag)
 
         # Find insertion point (where first collapsed tag was)
         first_collapsed_start = self._parse_tag_start(tags_to_collapse[0])
@@ -818,7 +868,7 @@ class EventManager:
         except ValueError as e:
             raise ValueError(
                 f"Invalid tag format '{tag}': tags must be numeric (e.g., '5') "
-                f"or ranges (e.g., '2..40')"
+                f"or ranges (e.g., '2..40'); use the number N from <sys tag=\"N\">"
             ) from e
 
     def _parse_tag_end(self, tag: str) -> int:
@@ -834,7 +884,7 @@ class EventManager:
         except ValueError as e:
             raise ValueError(
                 f"Invalid tag format '{tag}': tags must be numeric (e.g., '5') "
-                f"or ranges (e.g., '2..40')"
+                f"or ranges (e.g., '2..40'); use the number N from <sys tag=\"N\">"
             ) from e
 
     def _validate_tag(self, tag: str) -> None:

@@ -36,7 +36,20 @@ export function applyEvalFilters(
 
   for (const [key, val] of Object.entries(filters.meta)) {
     if (val) {
-      result = result.filter((t) => String(t[key] ?? "") === val);
+      result = result.filter((t) => {
+        const value = t[key];
+        // Metadata filters use the backend's Python scalar spelling.
+        const text = value === true
+          ? "True"
+          : value === false
+            ? "False"
+            : value === null
+              ? "None"
+              : String(value ?? "");
+        return val.startsWith("~")
+          ? text.toLowerCase().includes(val.slice(1).toLowerCase())
+          : text === val;
+      });
     }
   }
 

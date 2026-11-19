@@ -1,0 +1,170 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""capture_trace_context / attach_trace_context hand a trace to a fresh context."""
+
+import contextvars
+
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+from nooa.tracing import (
+    attach_trace_context,
+    capture_trace_context,
+    get_span_attributes,
+    session_scope,
+    with_span_attributes,
+)
+from nooa.tracing._hooks_impl import _current_code_execution
+from nooa.tracing._session import get_session
+from nooa.tracing._session_processor import SessionSpanProcessor
+
+
+def _provider():
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SessionSpanProcessor())
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    return provider.get_tracer("t"), exporter
+
+
+def test_a_fresh_context_continues_the_captured_trace_under_the_running_cell():
+    tracer, exporter = _provider()
+    with session_scope("root-session"), tracer.start_as_current_span("turn"):
+        cell = tracer.start_span("code_execution")
+        token = _current_code_execution.set((cell, None))
+        try:
+            captured = capture_trace_context()
+        finally:
+            _current_code_execution.reset(token)
+        cell.end()
+
+    def child() -> None:
+        attach_trace_context(captured, {"nooa.atom.session.id": "child-1"})
+        assert get_session() == "root-session"
+        with tracer.start_as_current_span("child.turn"):
+            pass
+
+    contextvars.Context().run(child)
+    spans = {s.name: s for s in exporter.get_finished_spans()}
+    child_span = spans["child.turn"]
+    assert child_span.parent.span_id == spans["code_execution"].context.span_id
+    assert child_span.context.trace_id == spans["turn"].context.trace_id
+    assert child_span.attributes["session.id"] == "root-session"
+    assert child_span.attributes["nooa.atom.session.id"] == "child-1"
+    assert "nooa.atom.session.id" not in spans["turn"].attributes
+
+
+def test_without_a_running_cell_the_current_span_is_captured():
+    tracer, exporter = _provider()
+    with tracer.start_as_current_span("method") as method:
+        captured = capture_trace_context()
+    assert trace.get_current_span(captured) is method
+
+
+def test_span_attributes_merge_and_a_later_key_wins():
+    first = with_span_attributes({"a": 1, "b": "x"})
+    second = with_span_attributes({"b": "y"}, first)
+    assert get_span_attributes(second) == {"a": 1, "b": "y"}
+    assert get_span_attributes(first) == {"a": 1, "b": "x"}
+    assert get_span_attributes() == {}
+
+
+def test_in_a_method_called_from_a_cell_that_methods_span_is_captured():
+    """``delegate()`` run from a cell: the child nests under the call, not beside it."""
+    from nooa.runtime.context_vars import _pop_agent_call_id, _push_agent_call_id
+    from nooa.tracing._hooks_impl import _get_active_spans
+
+    tracer, _ = _provider()
+    cell = tracer.start_span("code_execution")
+    method = tracer.start_span("method.delegate")
+    token = _current_code_execution.set((cell, "owner-call"))
+    _get_active_spans()["owner-call"] = tracer.start_span("method.handle")
+    _get_active_spans()["delegate-call"] = method
+    try:
+        _push_agent_call_id("owner-call")
+        # In the cell itself, the cell's span.
+        assert trace.get_current_span(capture_trace_context()) is cell
+        _push_agent_call_id("delegate-call")
+        # In a method the cell called, that method's span.
+        assert trace.get_current_span(capture_trace_context()) is method
+    finally:
+        _pop_agent_call_id()
+        _pop_agent_call_id()
+        _get_active_spans().clear()
+        _current_code_execution.reset(token)
+
+
+def test_an_agent_trace_name_belongs_to_that_instance():
+    from nooa.tracing import agent_trace_name, set_agent_trace_name
+
+    class Worker:
+        pass
+
+    named, other = Worker(), Worker()
+    set_agent_trace_name(named, "Multiply")
+    assert agent_trace_name(named) == "Multiply"
+    assert agent_trace_name(other) == "Worker"
+    set_agent_trace_name(named, None)
+    assert agent_trace_name(named) == "Worker"
+
+    class Unhashable:
+        __hash__ = None
+
+    thing = Unhashable()
+    set_agent_trace_name(thing, "X")  # keyed by identity, so hashing is not needed
+    assert agent_trace_name(thing) == "X"
+
+    class NoWeakref:
+        __slots__ = ()
+
+    plain = NoWeakref()
+    set_agent_trace_name(plain, "Y")  # cannot be weakly referenced: keeps its class name
+    assert agent_trace_name(plain) == "NoWeakref"
+
+
+def test_agents_that_compare_equal_keep_their_own_trace_names():
+    import gc
+
+    from nooa.tracing import agent_trace_name, set_agent_trace_name
+    from nooa.tracing._hooks_impl import _agent_trace_names
+
+    class Same:
+        def __eq__(self, other):
+            return isinstance(other, Same)
+
+        def __hash__(self):
+            return 1
+
+    first, second = Same(), Same()
+    set_agent_trace_name(first, "First")
+    set_agent_trace_name(second, "Second")
+    assert agent_trace_name(first) == "First"
+    assert agent_trace_name(second) == "Second"
+    set_agent_trace_name(second, None)
+    assert agent_trace_name(first) == "First"
+    assert agent_trace_name(second) == "Same"
+
+    key = id(first)
+    del first
+    gc.collect()
+    assert key not in _agent_trace_names  # the entry goes with the agent
+
+
+def test_a_method_without_a_registry_entry_keeps_the_current_span_over_the_cell():
+    """A method resumed in another task has no registry entry, but its span is current."""
+    from nooa.runtime.context_vars import _pop_agent_call_id, _push_agent_call_id
+
+    tracer, _ = _provider()
+    cell = tracer.start_span("code_execution")
+    token = _current_code_execution.set((cell, "owner-call"))
+    try:
+        _push_agent_call_id("resumed-call")
+        with tracer.start_as_current_span("method.resumed") as method:
+            assert trace.get_current_span(capture_trace_context()) is method
+        # Without a valid current span, the running cell is the fallback.
+        assert trace.get_current_span(capture_trace_context()) is cell
+    finally:
+        _pop_agent_call_id()
+        _current_code_execution.reset(token)

@@ -138,3 +138,62 @@ class TestSessionSpanProcessor:
             )
             spans = read_otlp_jsonl_spans(session_file)
             assert spans[0]["attributes"]["session.id"] == "via-otel-ctx"
+
+
+class TestExplicitParentContext:
+    """A span started with ``context=`` takes its session and attributes from that context."""
+
+    @staticmethod
+    def _provider():
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+        exporter = InMemorySpanExporter()
+        provider = TracerProvider()
+        provider.add_span_processor(SessionSpanProcessor())
+        provider.add_span_processor(SimpleSpanProcessor(exporter))
+        return provider, exporter
+
+    def test_attributes_and_session_come_from_the_explicit_context(self):
+        from opentelemetry import context as otel_context
+
+        from nooa.tracing._session import _KEY, session_scope, with_span_attributes
+
+        provider, exporter = self._provider()
+        explicit = with_span_attributes(
+            {"which": "explicit", "only.explicit": 1},
+            otel_context.set_value(_KEY, "explicit-session", otel_context.Context()),
+        )
+        ambient = with_span_attributes({"which": "ambient", "only.ambient": 2})
+        token = otel_context.attach(ambient)
+        try:
+            with session_scope("ambient-session"):
+                tracer = provider.get_tracer(__name__)
+                tracer.start_span("explicit", context=explicit).end()
+                tracer.start_span("ambient").end()
+        finally:
+            otel_context.detach(token)
+        spans = {s.name: s.attributes for s in exporter.get_finished_spans()}
+        assert spans["explicit"]["which"] == "explicit"
+        assert spans["explicit"]["only.explicit"] == 1
+        assert "only.ambient" not in spans["explicit"]
+        assert spans["explicit"]["session.id"] == "explicit-session"
+        # Without ``context=`` the ambient context is used, as before.
+        assert spans["ambient"]["which"] == "ambient"
+        assert spans["ambient"]["session.id"] == "ambient-session"
+
+    def test_an_explicit_context_without_attributes_gets_none_of_the_ambient_ones(self):
+        from opentelemetry import context as otel_context
+
+        from nooa.tracing._session import with_span_attributes
+
+        provider, exporter = self._provider()
+        token = otel_context.attach(with_span_attributes({"which": "ambient"}))
+        try:
+            set_session("ambient-session")
+            provider.get_tracer(__name__).start_span("bare", context=otel_context.Context()).end()
+        finally:
+            otel_context.detach(token)
+            set_session(None)
+        [span] = exporter.get_finished_spans()
+        assert "which" not in span.attributes
+        assert "session.id" not in span.attributes

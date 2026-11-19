@@ -209,18 +209,18 @@ async def run_cell_source(
                 n for n in tree.body if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
             ]
             if func_defs:
-                exec(
-                    compile(ast.Module(body=func_defs, type_ignores=[]), cell_filename, "exec"),
-                    namespace,
-                )
                 # Persisted helpers are compiled directly from the cell AST, not
                 # through the async wrapper. Keep their source cache aligned with
-                # those original line numbers for later-cell tracebacks.
+                # those original line numbers before decorators inspect bodies.
                 linecache.cache[cell_filename] = (
                     len(source_code),
                     None,
                     source_code.splitlines(keepends=True),
                     cell_filename,
+                )
+                exec(
+                    compile(ast.Module(body=func_defs, type_ignores=[]), cell_filename, "exec"),
+                    namespace,
                 )
             for name, src in method_sources.items():
                 fn = namespace.get(name)

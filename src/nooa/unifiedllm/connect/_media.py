@@ -9,9 +9,9 @@ handle that media. Generating the fixtures needs no encoder, text-to-speech,
 upload, network access or extra dependency.
 
 The module also turns failed media test calls into short, safe explanations
-(``exception_reason``, ``reply_failure_reason``, ``explicitly_rejected``) and
-checks that the attachment really reached the request that was sent
-(``media_on_wire``). "Wire" means the request body as actually sent to the
+(``exception_reason``, ``reply_failure_reason``; ``explicitly_rejected`` lives
+in ``nooa.unifiedllm.media_inputs``) and checks that the attachment really
+reached the request that was sent (``media_on_wire``). "Wire" means the request body as actually sent to the
 provider, after the client adapter has translated it.
 """
 
@@ -217,71 +217,6 @@ def reply_failure_reason(kind, record):
     else:
         cause = "Generated attachment or output settings were missing from the observed request"
     return f"{cause}; {kind} support was not confirmed"
-
-
-def explicitly_rejected(exc, kind):
-    """Return True if ``exc`` is the provider refusing this kind of media.
-
-    Requires HTTP 400/415/422 and an error message that is specifically about
-    the media (or the content part used to send it), for example "image input
-    is not supported" or "Unsupported content part type: 'file'". A generic
-    400, or an error about another parameter (model, max_tokens, ...), does
-    not count.
-    """
-    status = getattr(exc, "_connect_http_status", getattr(exc, "status_code", None))
-    if status not in {400, 415, 422}:
-        return False
-    body = getattr(exc, "body", None)
-    error = body.get("error", body) if isinstance(body, dict) else {}
-    param = error.get("param") if isinstance(error, dict) else None
-    text = (
-        str(error.get("message", str(exc))).lower() if isinstance(error, dict) else str(exc).lower()
-    )
-    if isinstance(param, str) and param.split(".")[0] in {
-        "model",
-        "include",
-        "store",
-        "max_tokens",
-        "max_output_tokens",
-        "api_key",
-    }:
-        return False
-    # Only match statements about the media input itself: a model name that
-    # contains e.g. "vision" next to an unrelated "invalid" parameter must not
-    # count as a rejection.
-    names = {
-        "image": r"images?|vision inputs?",
-        "audio": r"audio|wav",
-        "video": r"videos?",
-        "pdf": r"pdfs?|documents?|files?",
-    }[kind]
-    noun = rf"(?:{names})(?: (?:input|content|format|type|data|url|attachment|processing)s?)?"
-    # Text-only models: the whole request is refused because it has media.
-    if re.search(r"\bnot a multimodal model\b|\bdoes(?: not|n't) support multimodal", text):
-        return True
-    # "Unsupported content part type: 'file'" names the wire part for this format.
-    part = re.search(
-        r"unsupported (?:chat )?(?:content(?: part)?|media) type:?\s*[\\'\"]*([a-z_]+)", text
-    )
-    parts = {
-        "image": {"image_url", "input_image"},
-        "audio": {"input_audio", "audio_url"},
-        "video": {"video_url"},
-        "pdf": {"file", "input_file", "document"},
-    }[kind]
-    if part and part.group(1) in parts:
-        return True
-    # A strict server whose message schema has no variant for this media part.
-    if "did not match any variant of untagged enum" in text and "messagecontent" in text:
-        return True
-    return bool(
-        re.search(
-            rf"\b{noun}\b (?:is |are |was |were )?(?:not supported|unsupported|not allowed|rejected|invalid)\b",
-            text,
-        )
-        or re.search(rf"\b(?:unsupported|invalid|rejected) {noun}\b(?![-\w])", text)
-        or re.search(rf"\b(?:does not|doesn't|cannot) (?:support|accept|process) {noun}\b", text)
-    )
 
 
 def media_on_wire(kind, probe_body, wire):

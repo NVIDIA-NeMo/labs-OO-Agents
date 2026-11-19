@@ -178,6 +178,21 @@ async def test_wrapper_is_per_use_and_delegates_runtime_attributes_with_fake_llm
     assert events == ["provider:plain", "acquire", "provider:controlled", "release"]
 
 
+def test_wrapper_forwards_retry_config():
+    class FakeLLM:
+        retry_config = RetryConfig(max_retries=7)
+
+        async def acall(self) -> None:
+            return None
+
+    class Controller:
+        async def acquire(self, observer: Callable[[dict[str, Any]], None]) -> None:
+            del observer
+
+    wrapped = AdmissionControl(FakeLLM(), AdmissionControlConfig(controller=Controller()))
+    assert wrapped.retry_config is FakeLLM.retry_config
+
+
 @pytest.mark.parametrize("value", [0, -1])
 def test_max_in_flight_must_be_positive(value: int):
     with pytest.raises(ValueError, match="greater than zero"):

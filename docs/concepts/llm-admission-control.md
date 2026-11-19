@@ -95,11 +95,11 @@ headers in an underlying exception: parsing follows explicit causes or
 unsuppressed contexts, with a limit of eight exceptions and cycle protection.
 The nearest `Retry-After` field remains authoritative even when malformed; a
 non-overload failure cannot inherit an earlier overload's headers.
-The configured positive `max_cooldown` caps each reported delay: a value of
-60 seconds bounds a single server request for a
-longer pause, but repeated reports may extend the overall pause. This cap is an
-application tradeoff; resuming before the server's requested deadline can still
-produce overload errors.
+The configured positive `max_cooldown` caps each reported delay. For example,
+with `max_cooldown=60`, one `Retry-After` of one hour pauses the group for at
+most 60 seconds. Repeated reports can still extend the overall pause. This cap
+is an application tradeoff; resuming before the server's requested deadline can
+still produce overload errors.
 
 Both settings default to `None`, preserving concurrency-only admission. Pacing
 and cooldown share the group's scope: one process for the built-in policy, or

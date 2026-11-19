@@ -59,7 +59,7 @@ GATE_MODELS = [
 GATE_RUNS = 3
 GATE_PARALLEL = 40
 CAPABILITY_CONFIG = Path("tests/capability/config.yaml")
-PACKAGES = ["nooa", "nooa-cli", "nooa-acp", "nooa-memory", "nooa-bench"]
+PACKAGES = ["nooa", "nooa-cli", "nooa-acp", "nooa-memory", "nooa-bench", "nooa-atom"]
 QUICKSTART_EXAMPLES = [
     "01_first_generation_method.py",
     "02_structured_outputs.py",
@@ -723,7 +723,7 @@ def build_and_smoke(
                 [
                     str(python),
                     "-c",
-                    "import nooa, nooa_acp, nooa_cli, nooa_memory, nooa_bench; print(nooa.__version__)",
+                    "import nooa, nooa_acp, nooa_cli, nooa_memory, nooa_bench, nooa_atom; print(nooa.__version__)",
                 ],
                 text=True,
                 capture_output=True,

@@ -13,6 +13,8 @@ requires-python = ">=3.12,<3.14"
 dependencies = [
     "nooa",
     "nooa-cli",
+    # No nooa-atom dependency: nooa-atom registers the `atom` agent in the
+    # `nooa_bench.agents` entry-point group (see nooa_bench.agents).
     "click>=8.1",
 ]
 
@@ -23,6 +25,7 @@ Issues = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/issues"
 
 [project.scripts]
 nemo-harbor = "nooa_bench.runner:main"
+nooa-bench = "nooa_bench.cli:main"
 
 [tool.uv.sources]
 nooa = { workspace = true }
