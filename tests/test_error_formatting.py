@@ -1357,35 +1357,6 @@ class TestFormatterReviewRegressions:
         assert "RuntimeError: real failure" in result
         assert "forged success" not in result
 
-    def test_sandbox_exception_is_the_transport_trust_boundary(self):
-        from nooa.runtime.sandbox.errors import SandboxExecutionError
-
-        original = RuntimeError("real failure")
-        error = SandboxExecutionError(
-            original_type="RuntimeError",
-            message="real failure",
-            diagnostic="Cell In[9], line 1\nRuntimeError: trusted worker diagnostic",
-            original_error=original,
-        )
-
-        result = format_error_for_llm(error, code="raise RuntimeError('ignored')", line_offset=99)
-
-        assert result == error.diagnostic
-
-    def test_sandbox_diagnostic_respects_transport_ceiling(self):
-        from nooa.runtime.sandbox.errors import SandboxExecutionError
-
-        error = SandboxExecutionError(
-            original_type="RuntimeError",
-            message="real failure",
-            diagnostic="Z" * 1_000,
-            original_error=RuntimeError("real failure"),
-        )
-
-        result = format_error_for_llm(error, max_error=100)
-
-        assert result == error.diagnostic
-
     def test_invalid_tail_fallback_is_clamped_to_active_budget(self, monkeypatch):
         from types import SimpleNamespace
 

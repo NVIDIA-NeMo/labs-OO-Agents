@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Cell names come from one provider registry, shared by the in-process and sandbox backends."""
+"""Cell names come from one provider registry, used by in-process cells."""
 
 import pytest
 
@@ -44,14 +44,6 @@ async def test_a_default_agent_cell_sees_the_same_framework_names(monkeypatch):
     seen = _spy(monkeypatch)
     await Plain().runtime.execute_code("x = 1")
     names = seen[0] - set(filter_mro_module_globals(Plain))
-    assert names == FRAMEWORK_NAMES
-
-
-def test_the_sandbox_worker_reads_the_same_registry():
-    from nooa.runtime.sandbox.worker import build_namespace
-
-    agent = Plain()
-    names = set(build_namespace(agent, {}, object(), None)) - set(filter_mro_module_globals(Plain))
     assert names == FRAMEWORK_NAMES
 
 

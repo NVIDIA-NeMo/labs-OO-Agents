@@ -528,7 +528,7 @@ def test_strict_fast_checks_sync_all_public_ci_dependencies_first(mr, monkeypatc
 
     monkeypatch.setattr(mr, "run", fake_run)
 
-    mr.fast_checks(verify_containment=True)
+    mr.fast_checks(sync_environment=True)
 
     assert commands[0] == [
         "uv",

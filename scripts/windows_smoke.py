@@ -188,17 +188,10 @@ def main() -> None:
 
             asyncio.run(first())
 
-        def _sandbox() -> None:
-            from nooa.runtime.sandbox.config import SandboxConfig
-            from nooa.runtime.sandbox.executor import SandboxedExecutor
-
-            SandboxedExecutor(Adder(), SandboxConfig(), cell_timeout=5)
-
         for name, fn in {
             "sqlite": _sqlite,
             "bash": _bash,
             "monitor": _monitor,
-            "sandbox": _sandbox,
         }.items():
             try:
                 fn()

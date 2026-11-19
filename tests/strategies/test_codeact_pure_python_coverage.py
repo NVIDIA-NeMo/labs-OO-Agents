@@ -923,24 +923,6 @@ class TestFormatErrorCustomFormatter:
 
         assert result == "custom[4/321/17]: surrogate: bad()"
 
-    def test_builtin_formatter_receives_worker_diagnostic_and_error_budget(self):
-        from nooa.errors import IPythonErrorFormatter
-        from nooa.runtime.sandbox.errors import SandboxExecutionError
-
-        strat = CodeActStrategy(error_formatter=IPythonErrorFormatter())
-        diagnostic = "Cell In[7], line 1\nValueError: " + "x" * 500
-        error = SandboxExecutionError(
-            original_type="ValueError",
-            message="surrogate",
-            diagnostic=diagnostic,
-            original_error=ValueError("surrogate"),
-        )
-
-        result = strat._format_error(error, "bad()", line_offset=4, max_error=100)
-
-        assert result == diagnostic
-        assert "surrogate" not in result
-
     def test_incomplete_custom_formatter_is_rejected(self):
         class IncompleteFormatter:
             def format(self, error, code):

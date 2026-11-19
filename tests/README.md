@@ -55,9 +55,6 @@ Provider compatibility checks across model backends and API shapes.
 ### `runtime/` - Runtime internals
 Context building, event manager, code execution, hooks, pure Python executor/REPL, structured output executor, async deadlock prevention, span relationships, truncation behavior, and runtime evaluation.
 
-### `runtime/sandbox/` - Sandbox executor
-Sandbox executor behavior, broker deadlines, CodeAct sandbox integration, guard enforcement, sandbox config, nested async proxies, read-only module state, teardown behavior, and implicit return handling.
-
 ### `storage/` - Storage backends
 In-memory storage, snapshot markers, serialization, snapshot variables, and snapshot persistence.
 
@@ -103,7 +100,6 @@ Viewer main routes, journal and OTLP stores, OTLP ingest, stress coverage, image
 ```bash
 uv run pytest                          # all tests
 uv run pytest tests/runtime/ -v        # single directory
-uv run pytest tests/runtime/sandbox/   # nested runtime area
 uv run pytest tests/test_metaclass.py  # single file
 uv run pytest -k "test_codeact" -v     # by name pattern
 ```

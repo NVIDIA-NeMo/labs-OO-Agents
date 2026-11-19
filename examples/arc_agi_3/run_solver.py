@@ -162,30 +162,21 @@ def parse_args() -> argparse.Namespace:
         "absent); inproc: only the in-process guards; full: L3 OS namespace "
         "sandbox (needs user namespaces — fails closed if absent); off: no guards",
     )
-    # Per-cell OS sandbox (execution_backend="sandbox") for the CodeAct cells. This
-    # is ORTHOGONAL to --sandbox above (which isolates the whole agent process): it
-    # runs each generated cell in a guarded worker with a hard cell_timeout kill plus
-    # kernel-enforced memory/CPU/filesystem/network limits. Configured here (or via a
-    # run_multi `sandbox:` config block) rather than a hand-exported env var; the
-    # legacy ARC_SANDBOX_* env vars still work when these flags are absent.
-    p.add_argument(
+    from cell_config import REMOVED_CELL_SANDBOX, reject_cell_sandbox_environment
+
+    removed_flags = (
         "--sandbox-cells",
-        action="store_true",
-        help="run each CodeAct cell in a guarded worker process (hard cell_timeout, "
-        "memory/CPU caps, Landlock FS confinement, seccomp network block)",
-    )
-    p.add_argument(
         "--sandbox-workspace",
-        default=None,
-        help="writable workspace for sandboxed cells (default: the agent cwd)",
-    )
-    p.add_argument("--sandbox-mem-mb", type=int, default=4096, help="per-cell memory cap (MiB)")
-    p.add_argument("--sandbox-cpu-s", type=int, default=90, help="per-cell CPU-time cap (seconds)")
-    p.add_argument(
+        "--sandbox-mem-mb",
+        "--sandbox-cpu-s",
         "--sandbox-require",
-        action="store_true",
-        help="fail closed if Landlock/seccomp can't be enforced on this host",
     )
+    if any(arg.split("=", 1)[0] in removed_flags for arg in sys.argv[1:]):
+        p.error(REMOVED_CELL_SANDBOX)
+    try:
+        reject_cell_sandbox_environment()
+    except ValueError as error:
+        p.error(str(error))
     return p.parse_args()
 
 
@@ -362,18 +353,6 @@ def main() -> int:
     otlp = os.environ.get("OTLP_ENDPOINT", "")
     if otlp:
         launcher_env["OTLP_ENDPOINT"] = otlp
-    # Translate the per-cell sandbox flags into the ARC_SANDBOX_* env the agent
-    # reads at import (solver_agent._arc_cell_config). Flags win over any inherited
-    # env; when no flag is given the inherited env (legacy path) passes through.
-    if args.sandbox_cells:
-        launcher_env["ARC_SANDBOX_CELLS"] = "1"
-        launcher_env["ARC_SANDBOX_MEM_MB"] = str(args.sandbox_mem_mb)
-        launcher_env["ARC_SANDBOX_CPU_S"] = str(args.sandbox_cpu_s)
-        if args.sandbox_workspace:
-            launcher_env["ARC_SANDBOX_WORKSPACE"] = args.sandbox_workspace
-        if args.sandbox_require:
-            launcher_env["ARC_SANDBOX_REQUIRE"] = "1"
-
     launcher_err = None  # opened here so the finally below can always close it safely
     launcher_err = open(run_dir / "launcher.err", "w")
     launcher = subprocess.Popen(

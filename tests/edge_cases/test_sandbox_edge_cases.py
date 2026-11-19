@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Edge cases for sandbox.
+"""Edge cases for CodeAct cells.
 
 Focus on:
 - REPL command that modifies agent state during generation
@@ -8,8 +8,7 @@ Focus on:
 - Generated code that calls REPL command (should fail)
 
 "REPL command" means a CodeAct ``execute_python`` cell. With
-``execution_backend="sandbox"``, cells run in a worker process and broker
-``self.*`` to the live parent agent.
+the default in-process execution, cells access the live agent.
 """
 
 from __future__ import annotations
@@ -21,7 +20,6 @@ import pytest
 
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig
-from nooa.runtime.sandbox.config import SandboxConfig
 from nooa.strategies.codeact import CodeActStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
@@ -43,27 +41,14 @@ def _ret(result: Any = None, call_id: str = "cret") -> ToolCall:
     return ToolCall(id=call_id, name="return_result", arguments=json.dumps({"result": result}))
 
 
-# Fail-open for CI hosts without Landlock/seccomp; network stays on so parent-side
-# FakeLLM traffic is unrelated to worker filesystem/network policy.
-_SANDBOX = SandboxConfig(require=False, network=True, filesystem=False)
-_CODEACT = CodeActStrategy(
-    config=CodeActConfig(
-        execution_backend="sandbox",
-        cell_timeout=15.0,
-        sandbox=_SANDBOX,
-        prefill=None,
-    )
-)
-
-
 class _StateAgent(Agent, llm=FakeLLMClient()):
     def __init__(self, **kwargs: Any):
         super().__init__(**kwargs)
         self.counter = 0
 
-    @strategy(_CODEACT)
+    @strategy(CodeActStrategy(config=CodeActConfig(prefill=None)))
     async def work(self) -> int:
-        """Bump counter via a sandboxed cell assignment."""
+        """Bump counter via a cell assignment."""
         ...
 
 
@@ -73,13 +58,13 @@ class _ToolAgent(Agent, llm=FakeLLMClient()):
         self.hits = 0
 
     def bump(self) -> int:
-        """Deterministic tool callable from a sandboxed cell."""
+        """Deterministic tool callable from a cell."""
         self.hits += 1
         return self.hits
 
-    @strategy(_CODEACT)
+    @strategy(CodeActStrategy(config=CodeActConfig(prefill=None)))
     async def work(self) -> int:
-        """Call bump() from a sandboxed cell."""
+        """Call bump() from a cell."""
         ...
 
 
@@ -92,7 +77,7 @@ class _ReplCallAgent(Agent, llm=FakeLLMClient()):
         if "execute_python" in msg and "not defined" in msg:
             self.saw_execute_python_error = True
 
-    @strategy(_CODEACT)
+    @strategy(CodeActStrategy(config=CodeActConfig(prefill=None)))
     async def work(self) -> int:
         """Attempt to invoke execute_python from inside a cell (should fail)."""
         ...
@@ -114,7 +99,7 @@ async def test_repl_command_modifies_agent_state_during_generation():
 
 @pytest.mark.asyncio
 async def test_repl_command_calls_tool_during_generation():
-    """Cell call ``self.bump()`` brokers to the live parent and records side effects."""
+    """Cell call ``self.bump()`` calls the live agent and records side effects."""
     llm = FakeLLMClient(
         scripted_responses=[
             _resp("", [_exec("x = self.bump()\nprint(x)")]),

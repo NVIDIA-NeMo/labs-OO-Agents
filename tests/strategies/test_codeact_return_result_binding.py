@@ -8,12 +8,9 @@ import pytest
 
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig
-from nooa.runtime.sandbox.config import SandboxConfig
 from nooa.strategies.codeact import CodeActStrategy
 from nooa.strategies.codeact_v2 import CodeActV2
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
-
-BACKENDS = ["inprocess", pytest.param("sandbox", marks=pytest.mark.sandbox)]
 
 
 def _client(
@@ -38,7 +35,6 @@ def _client(
     )
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("strategy_type", [CodeActStrategy, CodeActV2])
 @pytest.mark.parametrize(
     "binding",
@@ -60,7 +56,7 @@ def _client(
         "def helper():\n    global return_result\n    return_result = 0\nhelper()",
     ],
 )
-async def test_rejected_cell_does_not_poison_completion(backend, strategy_type, binding):
+async def test_rejected_cell_does_not_poison_completion(strategy_type, binding):
     """An invalid cell has no effects and the next scripted cell can still submit."""
     tool_name = "python_cell" if strategy_type is CodeActV2 else "execute_python"
     llm = _client("self.effects.append('executed')\n" + binding, tool_name)
@@ -77,8 +73,6 @@ async def test_rejected_cell_does_not_poison_completion(backend, strategy_type, 
             strategy_type(
                 config=CodeActConfig(
                     prefill=None,
-                    execution_backend=backend,
-                    sandbox=SandboxConfig(require=False, filesystem=False, network=True),
                 )
             )
         )
@@ -102,7 +96,6 @@ async def test_rejected_cell_does_not_poison_completion(backend, strategy_type, 
         await agent.aclose()
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize(
     "strategy_type,name",
     [
@@ -115,7 +108,7 @@ async def test_rejected_cell_does_not_poison_completion(backend, strategy_type, 
     "binding",
     ["{name} = 0", "del {name}", "def helper():\n    global {name}\n    {name} = 0\nhelper()"],
 )
-async def test_all_advertised_helpers_are_protected(backend, strategy_type, name, binding):
+async def test_all_advertised_helpers_are_protected(strategy_type, name, binding):
     """Each strategy protects all of its advertised helpers before cell side effects."""
     tool_name = "python_cell" if strategy_type is CodeActV2 else "execute_python"
     recovery = "print('ready')\npprint('ready')\nassert doc(self)\n"
@@ -135,8 +128,6 @@ async def test_all_advertised_helpers_are_protected(backend, strategy_type, name
             strategy_type(
                 config=CodeActConfig(
                     prefill=None,
-                    execution_backend=backend,
-                    sandbox=SandboxConfig(require=False, filesystem=False, network=True),
                 )
             )
         )
@@ -159,10 +150,9 @@ async def test_all_advertised_helpers_are_protected(backend, strategy_type, name
         await agent.aclose()
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("strategy_type", [CodeActStrategy, CodeActV2])
 @pytest.mark.parametrize("name", ["return_result", "doc", "print"])
-async def test_binding_and_missing_await_are_reported_together(backend, strategy_type, name):
+async def test_binding_and_missing_await_are_reported_together(strategy_type, name):
     """One rejection includes both independent diagnostics and the next cell can finish."""
     tool_name = "python_cell" if strategy_type is CodeActV2 else "execute_python"
     llm = _client(f"{name} = 0\nself.work()", tool_name)
@@ -178,8 +168,6 @@ async def test_binding_and_missing_await_are_reported_together(backend, strategy
             strategy_type(
                 config=CodeActConfig(
                     prefill=None,
-                    execution_backend=backend,
-                    sandbox=SandboxConfig(require=False, filesystem=False, network=True),
                 )
             )
         )
@@ -202,7 +190,6 @@ async def test_binding_and_missing_await_are_reported_together(backend, strategy
         await agent.aclose()
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("strategy_type", [CodeActStrategy, CodeActV2])
 @pytest.mark.parametrize(
     "deep_code",
@@ -215,7 +202,7 @@ async def test_binding_and_missing_await_are_reported_together(backend, strategy
         ),
     ],
 )
-async def test_deep_cell_is_rejected_and_next_cell_can_complete(backend, strategy_type, deep_code):
+async def test_deep_cell_is_rejected_and_next_cell_can_complete(strategy_type, deep_code):
     """Depth failures return correctable feedback without executing or poisoning the session."""
     tool_name = "python_cell" if strategy_type is CodeActV2 else "execute_python"
     code = "self.effects.append('executed')\n" + deep_code + "\nreturn_result = 0"
@@ -228,8 +215,6 @@ async def test_deep_cell_is_rejected_and_next_cell_can_complete(backend, strateg
             strategy_type(
                 config=CodeActConfig(
                     prefill=None,
-                    execution_backend=backend,
-                    sandbox=SandboxConfig(require=False, filesystem=False, network=True),
                 )
             )
         )
@@ -255,7 +240,6 @@ async def test_deep_cell_is_rejected_and_next_cell_can_complete(backend, strateg
         await agent.aclose()
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("strategy_type", [CodeActStrategy, CodeActV2])
 @pytest.mark.parametrize(
     "code",
@@ -271,7 +255,7 @@ async def test_deep_cell_is_rejected_and_next_cell_can_complete(backend, strateg
         "return_result = 0\nreturn 42\nglobal return_result",
     ],
 )
-async def test_semantic_syntax_error_precedes_helper_compilation(backend, strategy_type, code):
+async def test_semantic_syntax_error_precedes_helper_compilation(strategy_type, code):
     """Invalid declarations report SyntaxError without running code or helper decorators."""
     tool_name = "python_cell" if strategy_type is CodeActV2 else "execute_python"
     llm = _client("self.effects.append('executed')\n" + code, tool_name)
@@ -292,8 +276,6 @@ async def test_semantic_syntax_error_precedes_helper_compilation(backend, strate
             strategy_type(
                 config=CodeActConfig(
                     prefill=None,
-                    execution_backend=backend,
-                    sandbox=SandboxConfig(require=False, filesystem=False, network=True),
                 )
             )
         )
@@ -319,7 +301,6 @@ async def test_semantic_syntax_error_precedes_helper_compilation(backend, strate
         await agent.aclose()
 
 
-@pytest.mark.parametrize("backend", BACKENDS)
 @pytest.mark.parametrize("strategy_type", [CodeActStrategy, CodeActV2])
 @pytest.mark.parametrize(
     "code",
@@ -333,7 +314,7 @@ async def test_semantic_syntax_error_precedes_helper_compilation(backend, strate
         "def helper():\n    return_result = 42\n    return return_result\nanswer = helper()",
     ],
 )
-async def test_independent_local_bindings_remain_valid(backend, strategy_type, code):
+async def test_independent_local_bindings_remain_valid(strategy_type, code):
     """Normal locals and names confined to nested scopes do not shadow completion."""
     tool_name = "python_cell" if strategy_type is CodeActV2 else "execute_python"
     llm = _client(code, tool_name)
@@ -345,8 +326,6 @@ async def test_independent_local_bindings_remain_valid(backend, strategy_type, c
             strategy_type(
                 config=CodeActConfig(
                     prefill=None,
-                    execution_backend=backend,
-                    sandbox=SandboxConfig(require=False, filesystem=False, network=True),
                 )
             )
         )

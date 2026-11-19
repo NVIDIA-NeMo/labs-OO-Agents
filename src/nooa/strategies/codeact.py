@@ -66,7 +66,6 @@ from nooa.events import (
 from nooa.runtime.execution_namespace import ExecutionNamespace
 from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.runtime.hooks import call_after_hook, call_before_hook
-from nooa.runtime.sandbox.errors import SandboxExecutionError
 from nooa.strategies._completion_guard import completion_binding_errors
 from nooa.strategies.base import RuntimeServices, build_sampling_kwargs
 from nooa.strategies.codeact_errors import (
@@ -446,7 +445,6 @@ class CodeActSession:
     length_recoveries: int = 0  # Cut-off (finish_reason=length) replies nudged so far
     session_locals: dict[str, Any] = field(default_factory=dict)
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
-    sandbox_executor: Any = field(default=None)  # SandboxedExecutor when backend="sandbox"
     # The namespace the cells run in (CurrentCall.execution_namespace), else None.
     execution_namespace: ExecutionNamespace | None = field(default=None)
     execution_count: int = 0
@@ -667,31 +665,20 @@ class CodeActStrategy(CompositeStrategy):
             "strategy_prompt": DynamicContext("strategy.strategy_instructions(runtime)"),
             "execution_context": DynamicContext("strategy.execution_context(runtime)"),
         }
-        # Tell the agent about the active sandbox guardrails (only when enabled).
-        if self.config.execution_backend == "sandbox" and self.config.sandbox.context_block:
-            overrides["sandbox"] = DynamicContext("strategy.sandbox_context(runtime)")
         return overrides
 
     def get_static_block_keys(self) -> set[str]:
         """Block keys from get_block_overrides() that should be in the static partition."""
-        # The sandbox constraints are fixed for the session -> static (cacheable) prefix.
-        return {"execution_context", "strategy_prompt", "sandbox"}
+        return {"execution_context", "strategy_prompt"}
 
     def get_block_order(self) -> list[str] | None:
         """Place doc(self) after execution_context so the LLM sees instructions first."""
         return [
             "system_prompt",
             "strategy_prompt",
-            "sandbox",
             "execution_context",
             "self",
         ]
-
-    async def sandbox_context(self, runtime: RuntimeServices) -> str:
-        """Render the active sandbox constraints as an agent-facing context block."""
-        from nooa.runtime.sandbox.context_block import render_sandbox_block
-
-        return render_sandbox_block(self.config.sandbox, cell_timeout=self.config.cell_timeout)
 
     async def execution_context(self, runtime: RuntimeServices) -> str:
         """Generate execution context block showing available imports and types.
@@ -1048,42 +1035,6 @@ Standard Python builtins and agent instance (`self`) are available."""
         call.session_locals.clear()
         call.session_locals.update(filtered)
 
-    def _create_sandbox_executor(
-        self, runtime: RuntimeServices, call: "CurrentCall", builtins: dict[str, Any]
-    ) -> Any:
-        """Build the per-session sandboxed executor (fails closed on unavailable guards)."""
-        from nooa.runtime.sandbox.executor import SandboxedExecutor
-
-        # ``_call`` is referenced by prefill/introspection cells (doc(_call.return_type));
-        # inject it alongside the framework builtins so the worker namespace has it.
-        framework_builtins = {**builtins, "_call": call}
-        max_media = getattr(
-            getattr(runtime.truncation_config, "media_capture", None),
-            "max_attachments_per_execution",
-            None,
-        )
-        return SandboxedExecutor(
-            runtime.agent,
-            self.config.sandbox,
-            cell_timeout=self.config.cell_timeout,
-            framework_builtins=framework_builtins,
-            restrictions=self.config.restrictions,
-            max_error=runtime.truncation_config.capture.max_error,
-            error_tail=runtime.truncation_config.capture.tail,
-            max_media_attachments=max_media,
-        )
-
-    async def _close_sandbox(self, session: "CodeActSession") -> None:
-        """Tear down the session's sandbox worker, if any."""
-        executor = getattr(session, "sandbox_executor", None)
-        if executor is None:
-            return
-        session.sandbox_executor = None
-        try:
-            await executor.aclose()
-        except Exception as exc:  # noqa: BLE001 - teardown must not mask the result
-            logger.debug(f"[CODEACT] sandbox teardown error (ignored): {exc}")
-
     async def execute(self, runtime: RuntimeServices, call: "CurrentCall") -> Any:
         """Execute CodeAct strategy with two-tool approach.
 
@@ -1105,38 +1056,24 @@ Standard Python builtins and agent instance (`self`) are available."""
         owned :class:`~nooa.runtime.execution_namespace.ExecutionNamespace`
         from :meth:`Agent.execution_namespace_for(call)
         <nooa.agent.Agent.execution_namespace_for>` (called once per call; a
-        fresh namespace per call by default). The sandbox backend keeps its
-        worker's namespace.
+        fresh namespace per call by default).
         """
-        # Guarantee the sandbox worker is torn down on EVERY exit — including the
-        # GenerationError paths inside the loop — not just the success returns.
-        session_holder: dict[str, Any] = {}
-        namespace = None  # The sandbox backend keeps its worker's namespace.
-        if self.config.execution_backend == "inprocess":
-            from nooa.runtime.execution_namespace import default_execution_namespace
+        from nooa.runtime.execution_namespace import default_execution_namespace
 
-            selector = getattr(runtime.agent, "execution_namespace_for", None)  # None: not an Agent
-            namespace = selector(call) if selector is not None else None
-            if namespace is None:
-                namespace = default_execution_namespace(call)
+        selector = getattr(runtime.agent, "execution_namespace_for", None)  # None: not an Agent
+        namespace = selector(call) if selector is not None else None
+        if namespace is None:
+            namespace = default_execution_namespace(call)
         call.execution_namespace = namespace
-        try:
-            if namespace is None:
-                return await self._run_generation(runtime, call, session_holder)
-            with namespace.enter({}):
-                return await self._run_generation(runtime, call, session_holder)
-        finally:
-            session = session_holder.get("session")
-            if session is not None:
-                await self._close_sandbox(session)
+        with namespace.enter({}):
+            return await self._run_generation(runtime, call)
 
     async def _run_generation(
         self,
         runtime: RuntimeServices,
         call: "CurrentCall",
-        session_holder: dict[str, Any],
     ) -> Any:
-        """Body of :meth:`execute`; ``session_holder`` receives the session for teardown."""
+        """Run generation in the call's execution namespace."""
         # Return type is pre-resolved by _execute_with_generation (handles PEP 563).
         return_type = call.return_type
         if return_type is None:
@@ -1155,9 +1092,6 @@ Standard Python builtins and agent instance (`self`) are available."""
                 LoopGuard(self.config.loop_guard) if self.config.loop_guard is not None else None
             ),
         )
-        # Publish to the caller so execute()'s finally can tear down the worker.
-        session_holder["session"] = session
-
         session.execution_namespace = call.execution_namespace
         if session.execution_namespace is not None:
             namespace = session.execution_namespace
@@ -1183,12 +1117,6 @@ Standard Python builtins and agent instance (`self`) are available."""
             if session.execution_namespace is not None:
                 builtins["Out"] = session.out_accessor
                 session.execution_namespace.update_framework(self._framework_bindings(runtime))
-
-            # Sandbox backend: create the per-session guarded executor. Fails
-            # closed here (before any cell) if a requested guardrail can't be
-            # enforced; the worker itself is forked lazily on the first cell.
-            if self.config.execution_backend == "sandbox":
-                session.sandbox_executor = self._create_sandbox_executor(runtime, call, builtins)
 
             tools = self._build_tools(return_type, call.method_name)
 
@@ -2288,11 +2216,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         hm = get_harness_metrics()
         hm.exec_python(success=not result.error)
         if result.error:
-            error_type = (
-                result.error.original_type
-                if isinstance(result.error, SandboxExecutionError)
-                else type(result.error).__name__
-            )
+            error_type = type(result.error).__name__
             hm.exec_error(error_type, str(result.error)[:500], session.iteration, code[:200])
 
         # Preserve the already-rendered receipt and update only lifecycle status.
@@ -3566,11 +3490,6 @@ Standard Python builtins and agent instance (`self`) are available."""
             logger.warning(f"[CODEACT] Validation errors: {validation_errors}")
             return ExecutionResult(stdout="", error=Exception(error_msg), defined_methods={})
 
-        # Sandbox backend: the worker owns the persistent namespace and compiles
-        # its own helpers, so we skip the parent-side namespace/helper build and
-        # delegate the cell to the guarded worker process. Routing through
-        # execute_code (rather than the executor directly) keeps the execute_python
-        # middleware, before/after_code_execution hooks and events firing.
         run_kwargs: dict[str, Any]
         if session.execution_namespace is not None:
             # One compiler executes definitions once. No predefinition, copying,
@@ -3580,9 +3499,6 @@ Standard Python builtins and agent instance (`self`) are available."""
                 "execution_namespace": session.execution_namespace,
                 "framework_bindings": self._framework_bindings(runtime),
             }
-        elif session.sandbox_executor is not None:
-            # Validation of restrictions and the cell guard still runs on the parent.
-            run_kwargs = {"sandbox_executor": session.sandbox_executor}
         else:
             # Build execution namespace
             strategy_extras: dict[str, Any] = {

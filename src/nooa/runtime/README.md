@@ -179,5 +179,4 @@ fresh namespace per call by default; Atom's `handle` keeps one per live
 session). Runtime names (`self`, `print`, `return_result`...) resolve through
 the builtin fallback; framework names come from the namespace providers
 (`nooa.runtime.namespace_providers`). Caller `_session_locals` seed the
-namespace and are written back when the call ends. The sandbox backend keeps
-its worker's namespace.
+namespace and are written back when the call ends.

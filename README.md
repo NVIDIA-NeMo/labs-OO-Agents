@@ -80,7 +80,7 @@ cd my-agent-project
 uv add nooa
 ```
 
-> **Windows:** use [WSL 2](https://learn.microsoft.com/windows/wsl/install). Native Windows is not supported: `import nooa` and the `nooa` command stop with an error that points to WSL 2. Setting `NOOA_SKIP_PLATFORM_CHECK=1` skips that check. The pure-Python core (agents, PredictStrategy, in-process CodeAct, in-memory storage) and `nooa connect` are tested on native Windows. Other features may work but are unsupported; those that need POSIX (shell tools, the CodeAct sandbox, file-backed SQLite storage, `monitor()`) stop with a `PosixOnlyFeatureError`.
+> **Windows:** use [WSL 2](https://learn.microsoft.com/windows/wsl/install). Native Windows is not supported: `import nooa` and the `nooa` command stop with an error that points to WSL 2. Setting `NOOA_SKIP_PLATFORM_CHECK=1` skips that check. The pure-Python core (agents, PredictStrategy, in-process CodeAct, in-memory storage) and `nooa connect` are tested on native Windows. Other features may work but are unsupported; those that need POSIX (shell tools, file-backed SQLite storage, `monitor()`) stop with a `PosixOnlyFeatureError`.
 
 <details>
 <summary><b>Optional sub-packages</b> — CLI, ACP, memory, benchmarks, evaluation pipeline</summary>

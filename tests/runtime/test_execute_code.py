@@ -239,7 +239,7 @@ if __name__ == "__main__":
 
 
 @pytest.mark.asyncio
-async def test_sandbox_cancellation_is_reported_to_after_code_hook(test_agent) -> None:
+async def test_cancellation_is_reported_to_after_code_hook(test_agent) -> None:
     exceptions: list[BaseException | None] = []
 
     class Hooks:
@@ -250,16 +250,12 @@ async def test_sandbox_cancellation_is_reported_to_after_code_hook(test_agent) -
             assert context == "code-context"
             exceptions.append(exception)
 
-    class CancellingSandbox:
-        async def run_cell(
-            self, code: str, *, execution_count: int = 1, media_inputs=(), max_attachments=100
-        ):
-            raise asyncio.CancelledError
-
     set_hooks(Hooks())  # type: ignore[arg-type]
     try:
         with pytest.raises(asyncio.CancelledError):
-            await test_agent.runtime.execute_code("pass", sandbox_executor=CancellingSandbox())
+            await test_agent.runtime.execute_code(
+                "raise asyncio.CancelledError", wrap_in_function=True
+            )
     finally:
         set_hooks(None)
 

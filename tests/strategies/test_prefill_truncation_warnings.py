@@ -104,40 +104,6 @@ def test_dictionary_key_warning_explains_fixed_limit():
     assert "prefill_format" not in message
 
 
-@pytest.mark.asyncio
-async def test_worker_omissions_survive_transport():
-    """A worker reports omissions to its parent rather than warning inside its stderr."""
-    from nooa.runtime.pprint import pprint
-    from nooa.runtime.sandbox.cell_core import run_cell_source
-    from nooa.runtime.sandbox.serialization import (
-        dto_from_wire,
-        dto_to_result,
-        dto_to_wire,
-        result_to_dto,
-    )
-    from nooa.runtime.sandbox.wire import Codec
-
-    result = await run_cell_source(
-        "pprint(data, max_string=3)", {"pprint": pprint, "data": "long input"}
-    )
-    assert result.success
-    assert result.truncation_reasons == ["max_string"]
-    assert not result.stderr
-    codec = Codec()
-    transported = dto_from_wire(codec.loads(codec.dumps(dto_to_wire(result_to_dto(result)))))
-    assert dto_to_result(transported).truncation_reasons == ["max_string"]
-
-
-@pytest.mark.parametrize("reason", [123, "untrusted\nwarning", ["max_string"]])
-def test_worker_omission_names_are_validated(reason):
-    """Untrusted worker metadata cannot inject arbitrary text into developer warnings."""
-    from nooa.runtime.sandbox.errors import CellSerializationError
-    from nooa.runtime.sandbox.serialization import dto_from_wire
-
-    with pytest.raises(CellSerializationError):
-        dto_from_wire({"truncation_reasons": [reason]})
-
-
 def test_warning_bypasses_model_stderr(monkeypatch):
     """A nested call's warning goes to the developer, not an enclosing REPL cell."""
 

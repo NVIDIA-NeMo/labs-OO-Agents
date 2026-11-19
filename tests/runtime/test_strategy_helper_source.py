@@ -9,18 +9,16 @@ import linecache
 import pytest
 
 from nooa import Agent, strategy
-from nooa.runtime.sandbox.cell_core import run_cell_source
 from nooa.strategies import PredictStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse
 
 
-@pytest.mark.parametrize("backend", ["actor", "sandbox"])
 @pytest.mark.parametrize(
     "prefix", ["offset = 1\n", "from typing import Literal\n\n"], ids=["assignment", "import"]
 )
 @pytest.mark.parametrize("body", ["...", "pass", ""], ids=["ellipsis", "pass", "docstring-only"])
 @pytest.mark.asyncio
-async def test_strategy_helper_source_across_cells(backend, prefix, body, monkeypatch):
+async def test_strategy_helper_source_across_cells(prefix, body, monkeypatch):
     """Valid helpers persist and call the LLM; missing ellipses still fail."""
     monkeypatch.setattr(linecache, "cache", linecache.cache.copy())
     fake = FakeLLMClient(
@@ -34,12 +32,10 @@ async def test_strategy_helper_source_across_cells(backend, prefix, body, monkey
         ]
     )
     namespace = {"strategy": strategy, "PredictStrategy": PredictStrategy, "fake": fake}
-    agent = Agent(llm=fake) if backend == "actor" else None
+    agent = Agent(llm=fake)
 
     async def execute(code, execution_count):
         """Run a cell with the selected backend and persist its locals."""
-        if agent is None:
-            return await run_cell_source(code, namespace, execution_count=execution_count)
         result = await agent.runtime.execute_code(
             code,
             builtins=namespace,
