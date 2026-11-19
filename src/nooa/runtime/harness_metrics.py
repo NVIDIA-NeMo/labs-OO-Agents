@@ -293,6 +293,11 @@ class HarnessMetrics(BaseModel):
     llm_queue_max_depth: int = 0
     llm_queue_wait: TimingStat = Field(default_factory=TimingStat)
 
+    # ── LLM endpoint retries (from unifiedllm via callback) ──
+    llm_retries: int = 0
+    llm_retry_errors: list[str] = Field(default_factory=list)
+    llm_deadline_exceeded: int = 0
+
     # ── Code Execution ──
     exec_python_total: int = 0
     exec_python_success: int = 0
@@ -535,6 +540,17 @@ class HarnessMetrics(BaseModel):
         wait_s = detail.get("wait_s")
         if isinstance(wait_s, int | float) and not isinstance(wait_s, bool):
             self.llm_queue_wait.record(float(wait_s))
+
+    # LLM endpoint retries (dispatched from unifiedllm callback)
+    def record_llm_retry(self, detail: Any) -> None:
+        self.llm_retries += 1
+        if isinstance(detail, dict):
+            status = detail.get("status_code")
+            label = f"{detail.get('error_type')}" + (f" {status}" if status is not None else "")
+            self._append(self.llm_retry_errors, label)
+
+    def record_llm_deadline_exceeded(self, detail: Any = None) -> None:
+        self.llm_deadline_exceeded += 1
 
     # Code Execution
     def exec_python(self, *, success: bool) -> None:
@@ -1128,6 +1144,25 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Admission queue wait",
         "LLM Admission",
         lambda m: m.llm_queue_wait,
+    ),
+    # LLM endpoint retries
+    SchemaEntry(
+        "harness.llm_retry.count",
+        "LLM endpoint retries",
+        "LLM Retries",
+        lambda m: m.llm_retries,
+    ),
+    SchemaEntry(
+        "harness.llm_retry.errors",
+        "Errors that caused LLM retries",
+        "LLM Retries",
+        lambda m: m.llm_retry_errors,
+    ),
+    SchemaEntry(
+        "harness.llm_retry.deadline_exceeded",
+        "LLM calls stopped by their total deadline",
+        "LLM Retries",
+        lambda m: m.llm_deadline_exceeded,
     ),
     # Code Execution
     SchemaEntry(

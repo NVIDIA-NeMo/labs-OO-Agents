@@ -26,4 +26,11 @@ class RetryConfig(BaseModel):
         ConnectionError,
     )
     retry_on_empty_content: bool = False
+    # Total wall clock for one logical call across all attempts and backoff, in
+    # seconds; None (default) leaves only the per-attempt HttpConfig.request_timeout.
+    # Each attempt is clipped to the remaining time; see ``llm_deadline`` for a
+    # caller-set deadline that also applies.
+    total_timeout: float | None = None
+    # No retry starts unless at least this much time is left after its backoff.
+    min_attempt_seconds: float = 5.0
     on_retry: Callable[[int, Exception, float], None] | None = None

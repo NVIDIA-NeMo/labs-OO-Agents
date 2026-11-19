@@ -45,11 +45,11 @@ from nooa.unifiedllm.media_inputs import (
 
 from . import replay_state, response_parts
 from .admission import _current_admission_controller, _run_admitted_attempt
-from .errors import EmptyContentError
+from .errors import EmptyContentError, LLMDeadlineExceeded
 from .http_config import HttpConfig
 from .limits import REPLY_CAP_KEYS, ContextLimits
 from .reasoning import ReasoningConfig, apply_reasoning_level
-from .retry import sync_retry, with_retry
+from .retry import clip_attempt_timeout, sync_retry, with_retry
 from .retry_config import RetryConfig
 from .structured_output import (
     StructuredOutputMode,
@@ -82,25 +82,10 @@ except ImportError:
     _llm_call_context = None
 
 
-# Optional harness metrics callback — set by the agent framework via ContextVar.
-# No reverse import needed: the callback is injected by actor.py at session start.
-_llm_metrics_callback: ContextVar[Callable[[str, Any], None] | None] = ContextVar(
-    "llm_metrics_callback", default=None
-)
-
-
-def _record_llm_metric(event: str, detail: Any = None) -> None:
-    """Fire-and-forget metric recording. No-op if no callback is set.
-
-    Swallows any exception from the callback — instrumentation must never
-    break the LLM call flow.
-    """
-    cb = _llm_metrics_callback.get()
-    if cb is not None:
-        try:
-            cb(event, detail)
-        except Exception as e:  # noqa: BLE001
-            logger.debug("Metric callback failed for event %r: %s", event, e)
+# Optional harness metrics callback (set by the agent framework via ContextVar)
+# lives in ``_metrics`` so ``retry`` can record retries without importing this module.
+from ._metrics import _llm_metrics_callback as _llm_metrics_callback  # noqa: E402
+from ._metrics import _record_llm_metric  # noqa: E402
 
 
 def _record_admission_observation(detail: dict[str, Any]) -> None:
@@ -1871,23 +1856,35 @@ async def _run_async_provider_call[T](
     work or a stream is still active.
 
     ``request_timeout`` bounds the whole attempt, stream included. On expiry it
-    cancels the task and raises TimeoutError. None disables it.
+    cancels the task and raises TimeoutError. None disables it. A call deadline
+    (``llm_deadline`` / ``RetryConfig.total_timeout``) clips it to the time left;
+    an attempt cut short by that deadline raises ``LLMDeadlineExceeded``.
     """
     admission_controller = _current_admission_controller()
-    if admission_controller is None:
-        return await _await_provider_task(asyncio.create_task(call()), request_timeout)
-
-    permit = await admission_controller.acquire(_record_admission_observation)
-    if permit is None:
-        return await _await_provider_task(asyncio.create_task(call()), request_timeout)
-
+    permit = None
+    if admission_controller is not None:
+        permit = await admission_controller.acquire(_record_admission_observation)
     try:
-        task = asyncio.create_task(_run_admitted_attempt(call, permit))
+        # Clip after admission so a queue wait counts against the deadline.
+        timeout, clipped = clip_attempt_timeout(request_timeout)
+        if permit is None:
+            task = asyncio.create_task(call())
+        else:
+            task = asyncio.create_task(_run_admitted_attempt(call, permit))
     except BaseException:
-        permit.release()
+        if permit is not None:
+            permit.release()
         raise
 
-    return await _await_provider_task(task, request_timeout)
+    try:
+        return await _await_provider_task(task, timeout)
+    except TimeoutError as e:
+        if not clipped or isinstance(e, LLMDeadlineExceeded):
+            raise
+        raise LLMDeadlineExceeded(
+            f"LLM call deadline reached: the provider attempt was cut off after "
+            f"{timeout:.1f}s, the time left before the call deadline"
+        ) from e
 
 
 async def _await_provider_task[T](task: asyncio.Task[T], request_timeout: float | None) -> T:

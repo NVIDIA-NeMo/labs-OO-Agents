@@ -13,12 +13,14 @@ Used by benchmarks and scripts::
 """
 
 import asyncio
-from collections.abc import AsyncIterator
+import time
+from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
 from nooa.interactive import Done
+from nooa.unifiedllm.retry import set_llm_deadline_at
 from nooa_atom.session.items import (
     AgentEventUpdate,
     SessionEvent,
@@ -52,6 +54,7 @@ async def open_tree(
     *,
     agent_factory: AgentFactory | None = None,
     llm_factory: LLMFactory | None = None,
+    loop_context_hooks: Sequence[Callable[[], object]] = (),
 ) -> AsyncIterator[Tree]:
     """Create a registry and a root session; close every session on exit.
 
@@ -62,13 +65,20 @@ async def open_tree(
     ``create_session_agent``). ``llm_factory`` builds the model client of a
     session whose options carry none (see ``SessionRegistry``). The root's
     turn loop is traced when ``nooa.tracing`` is enabled.
+    ``loop_context_hooks`` run in the turn-loop context of every session of
+    the tree (``SessionRegistry``).
     """
     if agent_factory is None:
         from nooa_atom.agent.factory import create_session_agent
 
         agent_factory = create_session_agent
     store = SessionStore(sessions_root(options.workspace, options.sessions_dir))
-    registry = SessionRegistry(store, agent_factory=agent_factory, llm_factory=llm_factory)
+    registry = SessionRegistry(
+        store,
+        agent_factory=agent_factory,
+        llm_factory=llm_factory,
+        loop_context_hooks=loop_context_hooks,
+    )
     try:
         root = await registry.create(options, prepare=_trace_turns)
         yield Tree(registry=registry, root=root)
@@ -124,6 +134,17 @@ class TaskRun:
             return None
 
 
+def _llm_deadline_for(timeout: float | None) -> float | None:
+    """Seconds from the start of a run limited to ``timeout`` by which model calls must end.
+
+    Up to 30 s (at most a tenth of the run) before the run's own time limit,
+    so a call stopped by it fails visibly before the turn is cancelled.
+    """
+    if timeout is None:
+        return None
+    return timeout - min(30.0, timeout / 10)
+
+
 async def run_task(
     options: SessionOptions,
     task: str,
@@ -146,6 +167,12 @@ async def run_task(
     other, so it can be opened afterwards. ``llm_factory`` defaults to
     ``default_llm_factory()``: a session without a client (a root without
     ``options.llm``, or a child on another model) gets one for its model.
+
+    With a ``timeout``, every model call in the tree (root and children) must
+    end a little before it (``_llm_deadline_for``; see
+    ``nooa.unifiedllm.llm_deadline``): endpoint retries never outlive the run,
+    and a call cut short fails with ``LLMDeadlineExceeded``, which the trace
+    and harness metrics record, instead of being cancelled silently.
     """
     if llm_factory is None:
         from nooa_atom.agent.factory import default_llm_factory
@@ -170,7 +197,14 @@ async def run_task(
                 waiting_on[:] = update.outcome.get("on", [])
                 limit_reached.set()
 
-    async with open_tree(options, agent_factory=agent_factory, llm_factory=llm_factory) as tree:
+    hooks: list[Callable[[], object]] = []
+    llm_seconds = _llm_deadline_for(timeout)
+    if llm_seconds is not None:
+        deadline_at = time.monotonic() + llm_seconds
+        hooks.append(lambda: set_llm_deadline_at(deadline_at))
+    async with open_tree(
+        options, agent_factory=agent_factory, llm_factory=llm_factory, loop_context_hooks=hooks
+    ) as tree:
         root = tree.root
         root.subscribe(listen)
         prompt = asyncio.ensure_future(root.prompt(task))

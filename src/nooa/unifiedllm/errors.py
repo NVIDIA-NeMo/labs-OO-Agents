@@ -11,6 +11,19 @@ class ReasoningReplayError(RuntimeError):
     """A provider response or replay input violates the assistant-turn contract."""
 
 
+class LLMDeadlineExceeded(TimeoutError):
+    """One logical LLM call ran out of its total deadline (all attempts together).
+
+    Raised instead of starting a retry that cannot finish in time, or when an
+    attempt clipped to the remaining time expires. It is never retried.
+    """
+
+    def __init__(self, message: str, *, deadline_s: float | None = None, attempts: int = 0):
+        self.deadline_s = deadline_s
+        self.attempts = attempts
+        super().__init__(message)
+
+
 class EmptyContentError(Exception):
     """A model returned reasoning without the requested final content."""
 

@@ -22,6 +22,9 @@ Payload keys (all but ``task``, ``agent`` and ``model_url`` optional):
   additionally ships the same spans live to a collector (NOOA's native OTLP tracing).
 * ``model_url``, ``model_name``, ``max_policy_calls``, ``headers``, ``cookies``,
   ``context_window``, ``replay_reasoning``, ``media_inputs``: the model seam.
+* ``time_budget_seconds``: the agent's time budget. When set, every model call of the episode
+  must end ``llm_deadline_margin_seconds`` (default 30) before it (``nooa.unifiedllm.llm_deadline``):
+  attempts are clipped and no endpoint retry starts that would outlive the episode.
 
 When the sandbox supervisor stops the worker at the agent's time budget it sends
 SIGTERM and waits a short grace period before SIGKILL. The worker uses that window
@@ -47,6 +50,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from nooa.unifiedllm.retry import llm_deadline
 from nooa_bench.gym import bind_gym_tools, resource_tools, run_gym_episode
 
 
@@ -338,26 +342,30 @@ async def main(input_path: Path, output_path: Path) -> None:
 
     loop = asyncio.get_running_loop()
     loop.add_signal_handler(signal.SIGTERM, on_sigterm)
+    budget = payload.get("time_budget_seconds")
+    margin = float(payload.get("llm_deadline_margin_seconds") or 30)
+    deadline = llm_deadline(max(1.0, float(budget) - margin) if budget else None)
     try:
-        episode = await run_gym_episode(
-            lambda llm: agent_cls(llm=llm, **kwargs),
-            lambda agent: getattr(agent, turn_method)(payload["task"]),
-            model_url=payload["model_url"],
-            model_name=payload.get("model_name", "gym-policy"),
-            max_policy_calls=payload.get("max_policy_calls"),
-            extra_headers=payload.get("headers") or {},
-            cookies=payload.get("cookies") or {},
-            resource_cookies=resource_cookies,
-            context_window=payload.get("context_window"),
-            replay_reasoning=bool(payload.get("replay_reasoning", False)),
-            media_inputs=tuple(payload.get("media_inputs") or ()),
-            tools=tools,
-            bind_tools=bind_tools,
-            interrupt=lambda: "timeout_exceeded" if stop["signal"] else None,
-            snapshot=render.append,
-            policy_required=policy_required,
-            policy_path=policy_path,
-        )
+        with deadline:
+            episode = await run_gym_episode(
+                lambda llm: agent_cls(llm=llm, **kwargs),
+                lambda agent: getattr(agent, turn_method)(payload["task"]),
+                model_url=payload["model_url"],
+                model_name=payload.get("model_name", "gym-policy"),
+                max_policy_calls=payload.get("max_policy_calls"),
+                extra_headers=payload.get("headers") or {},
+                cookies=payload.get("cookies") or {},
+                resource_cookies=resource_cookies,
+                context_window=payload.get("context_window"),
+                replay_reasoning=bool(payload.get("replay_reasoning", False)),
+                media_inputs=tuple(payload.get("media_inputs") or ()),
+                tools=tools,
+                bind_tools=bind_tools,
+                interrupt=lambda: "timeout_exceeded" if stop["signal"] else None,
+                snapshot=render.append,
+                policy_required=policy_required,
+                policy_path=policy_path,
+            )
     finally:
         loop.remove_signal_handler(signal.SIGTERM)
     write(episode)

@@ -14,7 +14,7 @@ import contextvars
 import json
 import logging
 import uuid
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from contextlib import suppress
 from pathlib import Path
 from typing import Any, Protocol
@@ -127,6 +127,7 @@ class SessionRegistry:
         *,
         agent_factory: AgentFactory,
         llm_factory: LLMFactory | None = None,
+        loop_context_hooks: Sequence[Callable[[], object]] = (),
     ) -> None:
         """``agent_factory(options, storage)`` builds each agent; the host
         chooses it (usually the agent layer's ``create_session_agent``,
@@ -136,8 +137,12 @@ class SessionRegistry:
         ``model_alias`` is ``options.model``, or ``None`` for the factory's
         default. The session owns that client and closes it. When the client
         has a non-empty ``alias`` attribute, it is recorded as ``info.model``.
+        ``loop_context_hooks`` run in every session's turn-loop context, the
+        root's and every child's (``Session.add_loop_context_hook``), e.g. a
+        host's model-call deadline.
         """
         self.store = store
+        self.loop_context_hooks: tuple[Callable[[], object], ...] = tuple(loop_context_hooks)
         self.llm_factory = llm_factory
         self.sessions: dict[str, Session] = {}
         self._reserved: dict[str, asyncio.Future[Session | None]] = {}
@@ -326,6 +331,8 @@ class SessionRegistry:
         resolved = getattr(owned_llm, "alias", None)
         if isinstance(resolved, str) and resolved:
             session.info.model = resolved
+        for hook in self.loop_context_hooks:
+            session.add_loop_context_hook(hook)
         install_port(agent, session, self)
         return session
 

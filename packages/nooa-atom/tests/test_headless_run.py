@@ -112,3 +112,57 @@ async def test_the_turn_loop_registers_the_tracing_hooks(tmp_path, monkeypatch):
 
     assert run.done is not None
     assert calls
+
+
+async def test_a_timeout_bounds_every_model_call_in_the_tree(tmp_path):
+    """With a time limit, model calls see an LLM deadline just before it (in the fresh loop context)."""
+    from atom_test_agents import CellLLM as _CellLLM
+
+    from nooa.unifiedllm import llm_time_remaining
+
+    seen: list[float | None] = []
+
+    class RecordingLLM(_CellLLM):
+        async def acall(self, *args, **kwargs):
+            seen.append(llm_time_remaining())
+            return await super().acall(*args, **kwargs)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    options = SessionOptions(
+        workspace=workspace, agent_spec=ATOM_SPEC, llm=RecordingLLM([cell(RESULT)])
+    )
+
+    run = await asyncio.wait_for(run_task(options, "Create hello.py", timeout=300), TIMEOUT)
+
+    assert run.stopped is None
+    assert seen and all(s is not None and 240 < s <= 270 for s in seen)  # 300 s - 30 s margin
+
+
+async def test_no_timeout_sets_no_model_call_deadline(tmp_path):
+    from atom_test_agents import CellLLM as _CellLLM
+
+    from nooa.unifiedllm import llm_time_remaining
+
+    seen: list[float | None] = []
+
+    class RecordingLLM(_CellLLM):
+        async def acall(self, *args, **kwargs):
+            seen.append(llm_time_remaining())
+            return await super().acall(*args, **kwargs)
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    options = SessionOptions(
+        workspace=workspace, agent_spec=ATOM_SPEC, llm=RecordingLLM([cell(RESULT)])
+    )
+    await asyncio.wait_for(run_task(options, "Create hello.py"), TIMEOUT)
+    assert seen == [None]
+
+
+def test_the_llm_deadline_leaves_a_margin_before_the_time_limit():
+    from nooa_atom.hosts.headless import _llm_deadline_for
+
+    assert _llm_deadline_for(None) is None
+    assert _llm_deadline_for(870) == 840
+    assert _llm_deadline_for(100) == 90

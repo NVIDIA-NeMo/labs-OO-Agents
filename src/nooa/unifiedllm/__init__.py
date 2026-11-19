@@ -27,7 +27,7 @@ from nooa.unifiedllm.broker_admission import (
     BrokerAdmissionSnapshot,
 )
 from nooa.unifiedllm.controlled import AdmissionControl
-from nooa.unifiedllm.errors import EmptyContentError, ReasoningReplayError
+from nooa.unifiedllm.errors import EmptyContentError, LLMDeadlineExceeded, ReasoningReplayError
 from nooa.unifiedllm.fake import (
     FakeLLMCall,
     FakeLLMClient,
@@ -46,6 +46,8 @@ from nooa.unifiedllm.registry import (
 )
 from nooa.unifiedllm.retry import (
     RetryingWrapper,
+    llm_deadline,
+    llm_time_remaining,
     sync_retry,
     with_retry,
 )
@@ -104,7 +106,10 @@ __all__ = [
     "HttpConfig",
     # Retry utilities
     "EmptyContentError",
+    "LLMDeadlineExceeded",
     "RetryConfig",
+    "llm_deadline",
+    "llm_time_remaining",
     "RetryingWrapper",
     "with_retry",
     "sync_retry",

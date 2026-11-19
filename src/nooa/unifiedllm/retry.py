@@ -11,17 +11,175 @@ import asyncio
 import logging
 import random
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any, TypeVar
 
+from nooa.unifiedllm._metrics import _record_llm_metric
 from nooa.unifiedllm.admission import AdmissionError
-from nooa.unifiedllm.errors import EmptyContentError
+from nooa.unifiedllm.errors import EmptyContentError, LLMDeadlineExceeded
 from nooa.unifiedllm.media_inputs import unsupported_attachment_format
 from nooa.unifiedllm.retry_config import RetryConfig
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
+
+# Absolute ``time.monotonic()`` by which the current logical LLM call must end.
+# Set by ``llm_deadline`` (a harness's task budget) and, inside one call, by
+# ``with_retry`` from ``RetryConfig.total_timeout``; the earlier deadline wins.
+_llm_call_deadline: ContextVar[float | None] = ContextVar("nooa_llm_call_deadline", default=None)
+
+
+@contextmanager
+def llm_deadline(seconds: float | None) -> Iterator[None]:
+    """Make every LLM call in this context end within ``seconds`` from now.
+
+    A harness with a task or turn budget wraps the run in it, e.g.
+    ``with llm_deadline(budget - margin): await agent.solve(task)``. Each
+    provider attempt is clipped to the remaining time, no retry starts that
+    cannot finish, and an expired call raises ``LLMDeadlineExceeded``. Nested
+    deadlines keep the earliest. ``None`` changes nothing. Tasks created inside
+    the context inherit it (ContextVar copy semantics).
+    """
+    if seconds is None:
+        yield
+        return
+    deadline = time.monotonic() + max(0.0, float(seconds))
+    current = _llm_call_deadline.get()
+    token = _llm_call_deadline.set(deadline if current is None else min(current, deadline))
+    try:
+        yield
+    finally:
+        _llm_call_deadline.reset(token)
+
+
+def set_llm_deadline_at(deadline: float | None) -> None:
+    """Set the absolute ``time.monotonic()`` call deadline in the current context.
+
+    For code that starts work in a fresh ``contextvars.Context`` (Atom's
+    session turn loops) and so cannot use the ``llm_deadline`` context
+    manager around it: run this in that context first. An earlier deadline
+    already set there wins.
+    """
+    if deadline is None:
+        return
+    current = _llm_call_deadline.get()
+    _llm_call_deadline.set(deadline if current is None else min(current, deadline))
+
+
+def llm_time_remaining() -> float | None:
+    """Seconds left before the current LLM call deadline, or None without one."""
+    deadline = _llm_call_deadline.get()
+    return None if deadline is None else deadline - time.monotonic()
+
+
+def clip_attempt_timeout(request_timeout: float | None) -> tuple[float | None, bool]:
+    """Clip one attempt's timeout to the call deadline: ``(timeout, clipped)``.
+
+    Raises ``LLMDeadlineExceeded`` when the deadline has already passed, so no
+    attempt is dispatched without time to run.
+    """
+    remaining = llm_time_remaining()
+    if remaining is None:
+        return request_timeout, False
+    if remaining <= 0:
+        raise LLMDeadlineExceeded(
+            "LLM call deadline reached before the provider attempt could start"
+        )
+    if request_timeout is None or remaining < request_timeout:
+        return remaining, True
+    return request_timeout, False
+
+
+def _error_status(error: Exception) -> int | None:
+    status_code = getattr(error, "status_code", None)
+    if not isinstance(status_code, int):
+        status_code = getattr(getattr(error, "response", None), "status_code", None)
+    return status_code if isinstance(status_code, int) else None
+
+
+def _record_event(name: str, detail: dict[str, Any]) -> None:
+    """Record a retry-loop event as a harness metric and on the active LLM span."""
+    _record_llm_metric(name, detail)
+    try:
+        from opentelemetry import trace as otel_trace
+
+        span = otel_trace.get_current_span()
+        if span and span.is_recording():
+            span.add_event(
+                name.replace("_", ".", 1),
+                attributes={k: v for k, v in detail.items() if v is not None},
+            )
+    except Exception as e:  # noqa: BLE001
+        logger.debug("Could not record %s event: %s", name, e)
+
+
+def _deadline_error(
+    error: Exception, attempt: int, total_timeout: float | None, delay: float
+) -> LLMDeadlineExceeded:
+    remaining = llm_time_remaining() or 0.0
+    budget = f"total_timeout={total_timeout:g}s" if total_timeout is not None else "llm_deadline"
+    exc = LLMDeadlineExceeded(
+        f"LLM call deadline ({budget}) leaves {max(0.0, remaining):.1f}s after attempt "
+        f"{attempt}: not enough for another attempt after a {delay:.1f}s backoff. "
+        f"Last error: {type(error).__name__}: {str(error)[:200]}",
+        deadline_s=total_timeout,
+        attempts=attempt,
+    )
+    _record_event(
+        "llm_deadline_exceeded",
+        {
+            "attempts": attempt,
+            "error_type": type(error).__name__,
+            "status_code": _error_status(error),
+            "remaining_s": round(max(0.0, remaining), 3),
+        },
+    )
+    return exc
+
+
+def _call_deadline_for(config: RetryConfig) -> float | None:
+    """The deadline one ``with_retry`` call runs under: caller's or total_timeout, earliest."""
+    current = _llm_call_deadline.get()
+    if config.total_timeout is None:
+        return current
+    own = time.monotonic() + max(0.0, config.total_timeout)
+    return own if current is None else min(current, own)
+
+
+def _note_retry(
+    attempt: int, max_attempts: int, error: Exception, delay: float, config: RetryConfig
+) -> None:
+    """Log, trace and count one retry; call ``config.on_retry``."""
+    status = _error_status(error)
+    remaining = llm_time_remaining()
+    logger.warning(
+        "LLM retry: attempt %d/%d failed (%s%s: %s); retrying in %.1fs%s",
+        attempt,
+        max_attempts,
+        f"status {status}, " if status is not None else "",
+        type(error).__name__,
+        str(error)[:200],
+        delay,
+        f", {remaining:.1f}s left before the call deadline" if remaining is not None else "",
+    )
+    _record_event(
+        "llm_retry",
+        {
+            "attempt": attempt,
+            "max_attempts": max_attempts,
+            "error_type": type(error).__name__,
+            "status_code": status,
+            "error": str(error)[:200],
+            "delay_s": round(delay, 3),
+            "remaining_s": round(remaining, 3) if remaining is not None else None,
+        },
+    )
+    if config.on_retry:
+        config.on_retry(attempt, error, delay)
+
 
 # Provider/LiteLLM error substrings to fall back on when an error only carries a
 # stringified form (e.g. raw gateway HTML) without a usable ``.status_code`` or a
@@ -158,6 +316,10 @@ def _is_retryable_error(error: Exception, config: RetryConfig) -> tuple[bool, bo
     if isinstance(error, EmptyContentError) and config.retry_on_empty_content:
         return True, False
 
+    # The call's total deadline is spent: another attempt cannot finish in time.
+    if isinstance(error, LLMDeadlineExceeded):
+        return False, False
+
     # An HTTP 500 that says an attachment's format is unsupported (the NVIDIA
     # Inference Hub sends "Unsupported image format: svg+xml" as 500) fails the
     # same way every time: the client's media recovery replaces the attachment
@@ -228,67 +390,55 @@ async def with_retry(
         Result of func
 
     Raises:
-        The last exception if all retries are exhausted
+        The last exception if all retries are exhausted, or
+        ``LLMDeadlineExceeded`` when the call deadline (``config.total_timeout``
+        or an enclosing ``llm_deadline``) leaves no room for another attempt.
     """
     config = config or RetryConfig()
-    last_error: Exception | None = None
+    deadline = _call_deadline_for(config)
+    token = _llm_call_deadline.set(deadline)
+    try:
+        return await _with_retry_loop(func, args, kwargs, config)
+    finally:
+        _llm_call_deadline.reset(token)
+
+
+def _retry_delay_or_raise(error: Exception, attempt: int, config: RetryConfig) -> tuple[float, int]:
+    """After attempt ``attempt`` (0-based) failed: ``(delay, max_attempts)``, or raise.
+
+    Raises ``error`` when it is terminal or retries are spent, and
+    ``LLMDeadlineExceeded`` when the call deadline leaves no room for the
+    backoff plus ``config.min_attempt_seconds``.
+    """
+    is_retryable, is_rate_limit = _is_retryable_error(error, config)
+    if not is_retryable:
+        raise error
+    # Rate limits can retry up to max_retries + rate_limit_extra_retries;
+    # other errors only get normal retries.
+    allowed = config.max_retries + (config.rate_limit_extra_retries if is_rate_limit else 0)
+    if attempt >= allowed:
+        raise error
+    delay = _calculate_delay(attempt, config, is_rate_limit)
+    remaining = llm_time_remaining()
+    if remaining is not None and remaining < delay + config.min_attempt_seconds:
+        raise _deadline_error(error, attempt + 1, config.total_timeout, delay) from error
+    return delay, allowed + 1
+
+
+async def _with_retry_loop(
+    func: Callable[..., Any], args: tuple, kwargs: dict, config: RetryConfig
+) -> Any:
     attempt = 0
-
-    # Calculate max attempts: normal retries + potential rate limit extra retries
-    max_total_attempts = config.max_retries + 1 + config.rate_limit_extra_retries
-
-    while attempt < max_total_attempts:
+    while True:
         try:
             return await func(*args, **kwargs)
-
         except asyncio.CancelledError:
             raise
-
         except Exception as e:
-            last_error = e
-            is_retryable, is_rate_limit = _is_retryable_error(e, config)
-
-            # Check if we should retry
-            if not is_retryable:
-                raise
-
-            # For rate limits, we allow extra retries
-            if is_rate_limit:
-                # Rate limits can retry up to max_retries + rate_limit_extra_retries
-                total_rate_limit_allowed = config.max_retries + config.rate_limit_extra_retries
-                if attempt >= total_rate_limit_allowed:
-                    raise
-            else:
-                # Non-rate-limit errors only get normal retries
-                if attempt >= config.max_retries:
-                    raise
-
-            # Calculate delay
-            delay = _calculate_delay(attempt, config, is_rate_limit)
-
-            # Determine max retries for logging
-            max_for_logging = (
-                config.max_retries + config.rate_limit_extra_retries
-                if is_rate_limit
-                else config.max_retries
-            )
-
-            # Log retry
-            logger.warning(
-                f"Retry {attempt + 1}/{max_for_logging + 1}: {type(e).__name__}: {str(e)[:100]}... Waiting {delay:.1f}s"
-            )
-
-            # Call retry callback if provided
-            if config.on_retry:
-                config.on_retry(attempt + 1, e, delay)
-
+            delay, max_attempts = _retry_delay_or_raise(e, attempt, config)
+            _note_retry(attempt + 1, max_attempts, e, delay, config)
             await asyncio.sleep(delay)
             attempt += 1
-
-    # Should not reach here, but just in case
-    if last_error:
-        raise last_error
-    raise RuntimeError("Retry loop completed without result or error")
 
 
 def sync_retry(
@@ -310,63 +460,25 @@ def sync_retry(
         Result of func
 
     Raises:
-        The last exception if all retries are exhausted
+        The last exception if all retries are exhausted, or
+        ``LLMDeadlineExceeded`` when the call deadline (``config.total_timeout``
+        or an enclosing ``llm_deadline``) leaves no room for another attempt.
     """
     config = config or RetryConfig()
-    last_error: Exception | None = None
-    attempt = 0
-
-    # Calculate max attempts: normal retries + potential rate limit extra retries
-    max_total_attempts = config.max_retries + 1 + config.rate_limit_extra_retries
-
-    while attempt < max_total_attempts:
-        try:
-            return func(*args, **kwargs)
-
-        except Exception as e:
-            last_error = e
-            is_retryable, is_rate_limit = _is_retryable_error(e, config)
-
-            # Check if we should retry
-            if not is_retryable:
-                raise
-
-            # For rate limits, we allow extra retries
-            if is_rate_limit:
-                total_rate_limit_allowed = config.max_retries + config.rate_limit_extra_retries
-                if attempt >= total_rate_limit_allowed:
-                    raise
-            else:
-                # Non-rate-limit errors only get normal retries
-                if attempt >= config.max_retries:
-                    raise
-
-            # Calculate delay
-            delay = _calculate_delay(attempt, config, is_rate_limit)
-
-            # Determine max retries for logging
-            max_for_logging = (
-                config.max_retries + config.rate_limit_extra_retries
-                if is_rate_limit
-                else config.max_retries
-            )
-
-            # Log retry
-            logger.warning(
-                f"Retry {attempt + 1}/{max_for_logging + 1}: {type(e).__name__}: {str(e)[:100]}... Waiting {delay:.1f}s"
-            )
-
-            # Call retry callback if provided
-            if config.on_retry:
-                config.on_retry(attempt + 1, e, delay)
-
-            time.sleep(delay)
-            attempt += 1
-
-    # Should not reach here, but just in case
-    if last_error:
-        raise last_error
-    raise RuntimeError("Retry loop completed without result or error")
+    deadline = _call_deadline_for(config)
+    token = _llm_call_deadline.set(deadline)
+    try:
+        attempt = 0
+        while True:
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                delay, max_attempts = _retry_delay_or_raise(e, attempt, config)
+                _note_retry(attempt + 1, max_attempts, e, delay, config)
+                time.sleep(delay)
+                attempt += 1
+    finally:
+        _llm_call_deadline.reset(token)
 
 
 class RetryingWrapper:
