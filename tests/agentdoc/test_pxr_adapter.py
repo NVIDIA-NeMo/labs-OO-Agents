@@ -282,3 +282,17 @@ def test_adapter_import_without_pxr_fails_only_inside_register_all(monkeypatch):
     with pytest.raises(ImportError):
         importlib.import_module("nooa.agentdoc.adapters.pxr")
     assert "pxr" not in register_all()
+
+
+def test_doc_loads_the_pxr_adapter_without_an_explicit_import():
+    """An agent cell that imports pxr and calls doc() gets the curated view."""
+    import subprocess
+    import sys
+
+    code = (
+        "from pxr import UsdGeom\n"
+        "from nooa.agentdoc import doc\n"
+        "text = doc(UsdGeom.Subset)\n"
+        "assert 'familyName' in text and 'materialBind' in text, text[:400]\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
