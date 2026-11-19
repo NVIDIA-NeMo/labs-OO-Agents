@@ -227,6 +227,14 @@ def _pformat(
                     indent=_indent,
                 )
             )
+        case _ if (curated := _curated_member(_object)) is not None:
+            # A method documented by a registered (curated) class view: show its
+            # curated entry and the owner's notes instead of bare introspection.
+            _stream.write(
+                _format_callable_info(
+                    _curated_member_info(*curated), concise=concise, indent=_indent
+                )
+            )
         case _ if inspect.isfunction(_object) or inspect.ismethod(_object):
             from nooa.agentdoc._structured import extract_callable_info
 
@@ -420,6 +428,54 @@ def _instance_dict(obj: Any) -> dict[str, Any] | None:
     except AttributeError:
         return None
     return value if isinstance(value, dict) else None
+
+
+# Owner docstrings up to this many lines are shown whole with a curated member;
+# longer ones contribute only the lines that mention the member.
+_OWNER_NOTES_MAX_LINES = 20
+
+
+def _curated_member(obj: Any) -> tuple[TypeInfo, CallableInfo] | None:
+    """``(owner, member)`` when a registered class view documents callable ``obj``."""
+    # Any callable qualifies (Cython methods are neither functions nor builtins); the
+    # lookup only matches objects that a registered class exposes under their name.
+    if isinstance(obj, type) or inspect.ismodule(obj) or not callable(obj):
+        return None
+    from nooa.agentdoc.registry import find_curated_member
+
+    return find_curated_member(obj)
+
+
+def _lines_naming(lines: list[str], name: str) -> list[str]:
+    """Docstring items that mention ``name``; a ``- `` bullet keeps its continuation lines."""
+    items: list[list[str]] = []
+    for line in lines:
+        if items and items[-1][0].startswith("- ") and line.startswith("  ") and line.strip():
+            items[-1].append(line)
+        else:
+            items.append([line])
+    pattern = re.compile(rf"\b{re.escape(name)}\b")
+    return [line for item in items if pattern.search("\n".join(item)) for line in item]
+
+
+def _curated_member_info(owner: TypeInfo, member: CallableInfo) -> CallableInfo:
+    """The member's curated entry, then its owner's notes and a pointer to the owner."""
+    short_name = member.name.rsplit(".", 1)[-1]
+    parts = [member.docstring] if member.docstring else []
+    lines = (owner.docstring or "").strip("\n").splitlines()
+    if len(lines) > _OWNER_NOTES_MAX_LINES:
+        lines = _lines_naming(lines, short_name)
+    if lines:
+        parts.append(f"From doc({owner.name}):\n" + "\n".join(lines))
+    parts.append(f"Other members: doc({owner.name})")
+    return CallableInfo(
+        name=f"{owner.name}.{short_name}",
+        signature=member.signature,
+        return_type=member.return_type,
+        docstring="\n\n".join(parts),
+        is_async=member.is_async,
+        is_classmethod=member.is_classmethod,
+    )
 
 
 def _is_structured_instance(obj: Any, *, respect_custom_repr: bool = True) -> bool:
