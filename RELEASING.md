@@ -21,8 +21,7 @@ the gate; GitLab YAML only provisions and invokes it.
 
 The strict gate performs:
 
-1. Ruff lint and formatting, SPDX checks, unit tests, and explicit OS sandbox
-   containment tests.
+1. Ruff lint and formatting, SPDX checks, unit tests.
 2. Builds all six wheels and source distributions under a temporary local tag,
    verifies their versions, and smoke-tests imports and `nooa --version` in a
    clean environment. In a separate core-only environment, installs the built

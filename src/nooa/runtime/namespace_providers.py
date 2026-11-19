@@ -4,9 +4,8 @@
 
 A *namespace provider* is a name, a loader returning ``{name: object}`` and an
 optional prompt note (lines a code strategy shows next to "always available").
-The in-process cell namespace (``ActorRuntime.execute_code``) and the sandbox
-worker (``runtime/sandbox/worker.py``) both read :func:`cell_namespace_names`,
-so the two cannot drift; CodeAct renders :func:`namespace_prompt_notes`.
+The cell namespace (``ActorRuntime.execute_code``) reads
+:func:`cell_namespace_names`; CodeAct renders :func:`namespace_prompt_notes`.
 
 The loader runs each time a namespace is built, so a provider can import its
 objects lazily. This module registers the core provider (``typing`` names,

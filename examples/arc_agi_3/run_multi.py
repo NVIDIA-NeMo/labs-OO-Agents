@@ -88,17 +88,6 @@ DEFAULTS = {
     "png_scale": 8,  # grid-as-image: off | only | additive
     "reflect_every": 8,
     "allowed_game_overs": -1,
-    # Per-cell OS sandbox for CodeAct cells (execution_backend="sandbox"), applied
-    # to every agent in the fleet. Configured here instead of a hand-exported
-    # ARC_SANDBOX_* env var. `cells: true` turns it on; the rest are the guardrail
-    # knobs. workspace null -> the agent cwd.
-    "sandbox": {
-        "cells": False,
-        "workspace": None,
-        "max_memory_mb": 4096,
-        "max_cpu_seconds": 90,
-        "require": False,
-    },
     "games": [],
     # Live TUI dashboard (viewer.py). On by default; pass --no-tui for automated runs.
     "no_tui": False,
@@ -107,16 +96,19 @@ DEFAULTS = {
 
 
 def load_config(path: str | None, args: argparse.Namespace) -> dict:
+    from cell_config import reject_cell_sandbox_environment
+
+    reject_cell_sandbox_environment()
     cfg = dict(DEFAULTS)
     if path:
         import yaml
 
-        raw = {k: v for k, v in yaml.safe_load(Path(path).read_text()).items() if v is not None}
-        # Merge the nested `sandbox:` block over its defaults so a partial block
-        # (e.g. just `cells: true`) keeps the default guardrail knobs.
-        if isinstance(raw.get("sandbox"), dict):
-            raw["sandbox"] = {**DEFAULTS["sandbox"], **raw["sandbox"]}
-        cfg.update(raw)
+        raw = yaml.safe_load(Path(path).read_text())
+        if "sandbox" in raw:
+            from cell_config import REMOVED_CELL_SANDBOX
+
+            raise ValueError(f"Obsolete YAML sandbox: block. {REMOVED_CELL_SANDBOX}")
+        cfg.update({k: v for k, v in raw.items() if v is not None})
     # CLI overrides
     for key in (
         "model",
@@ -401,17 +393,6 @@ class MultiRunner:
                 cmd += ["--model", str(self.cfg["model"])]
             if self.cfg["reasoning_effort"]:
                 cmd += ["--reasoning-effort", self.cfg["reasoning_effort"]]
-            # Per-cell OS sandbox — driven by the config `sandbox:` block, forwarded
-            # to run_solver as flags (no ARC_SANDBOX_* env var needed at launch).
-            sb = self.cfg.get("sandbox") or {}
-            if sb.get("cells"):
-                cmd += ["--sandbox-cells"]
-                if sb.get("workspace"):
-                    cmd += ["--sandbox-workspace", str(sb["workspace"])]
-                cmd += ["--sandbox-mem-mb", str(sb.get("max_memory_mb", 4096))]
-                cmd += ["--sandbox-cpu-s", str(sb.get("max_cpu_seconds", 90))]
-                if sb.get("require"):
-                    cmd += ["--sandbox-require"]
             # Own process group so _shutdown_games() can killpg the run_solver +
             # its harness child together on TUI quit.
             proc = subprocess.Popen(

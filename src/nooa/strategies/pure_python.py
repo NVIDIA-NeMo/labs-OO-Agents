@@ -38,7 +38,6 @@ from nooa.events import (
     Task,
 )
 from nooa.runtime.harness_metrics import get_harness_metrics
-from nooa.runtime.sandbox.errors import SandboxExecutionError
 from nooa.strategies.base import RuntimeServices
 from nooa.strategies.codeact_errors import format_validation_error
 from nooa.strategies.composite import CompositeStrategy
@@ -439,11 +438,7 @@ class PurePythonStrategy(CompositeStrategy):
                         execution_count=session.execution_count,
                         line_offset=getattr(result, "wrapper_line_offset", 0),
                     )
-                    turn_exception = (
-                        result.error.original_type
-                        if isinstance(result.error, SandboxExecutionError)
-                        else type(result.error).__name__
-                    )
+                    turn_exception = type(result.error).__name__
                     continue
 
                 session.record_iteration()

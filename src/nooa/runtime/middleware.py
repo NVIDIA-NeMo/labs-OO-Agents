@@ -16,7 +16,7 @@ Four hooks are available:
   :class:`AgentCallContext`.
 - ``llm_call``: wraps ``runtime.generate()`` (the LLM round-trip)
 - ``decision_call``: wraps ``runtime.decide()`` (the decision-model round-trip)
-- ``execute_python``: wraps ``runtime.execute_code()`` (sandbox execution)
+- ``execute_python``: wraps ``runtime.execute_code()`` (in-process execution)
 
 Each middleware is ``async def(ctx, nxt) -> result`` where *ctx* is a typed
 context object and *nxt* calls the rest of the chain.

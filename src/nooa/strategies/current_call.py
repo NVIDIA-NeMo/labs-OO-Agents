@@ -230,9 +230,9 @@ class CurrentCall:
     var_positional_param_name: str | None = None
     var_keyword_param_name: str | None = None
     # The owned namespace this call's cells run in (CodeAct in-process: from the
-    # agent's ``execution_namespace_for`` hook; None for the sandbox backend and
-    # strategies without one); never copied into snapshot/user state. Last so main's
-    # positional constructor order above stays unchanged.
+    # agent's ``execution_namespace_for`` hook; None for strategies without one).
+    # Never copied into snapshot/user state. Last so main's positional constructor
+    # order above stays unchanged.
     execution_namespace: ExecutionNamespace | None = None
 
     def __hash__(self) -> int:

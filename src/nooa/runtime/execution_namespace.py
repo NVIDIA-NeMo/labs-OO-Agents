@@ -8,7 +8,7 @@ supplies it: the default is a fresh namespace per call
 (:func:`default_execution_namespace`); an agent overrides the hook to share
 one across calls (Atom's ``handle`` keeps one per live session). Caller
 ``_session_locals`` seed the namespace as user globals and are written back
-when the call ends. The sandbox backend keeps its worker's namespace.
+when the call ends.
 
 The async wrapper preserves Python's return/await/finally semantics. Only its
 bindings are lifted into one authoritative globals dictionary. Runtime names
@@ -30,7 +30,7 @@ import weakref
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from nooa.runtime import cells
@@ -112,7 +112,7 @@ class _CellBindings(ast.NodeVisitor):
             if value is not None:
                 self.visit(value)
 
-    def visit_FunctionDef(self, node):
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef):
         self.names.add(node.name)
         self._defaults(node.args)
         for decorator in node.decorator_list:
@@ -157,7 +157,7 @@ class _CellBindings(ast.NodeVisitor):
 class _LocalAnnotations(ast.NodeTransformer):
     """Normalize only cell-local name annotations before global lifting."""
 
-    def visit_FunctionDef(self, node):
+    def visit_FunctionDef(self, node: ast.AST):
         return node
 
     visit_AsyncFunctionDef = visit_FunctionDef
@@ -181,7 +181,7 @@ class _ScopeGlobals(ast.NodeVisitor):
     def visit_Global(self, node):
         self.names.update(node.names)
 
-    def visit_FunctionDef(self, node):
+    def visit_FunctionDef(self, node: ast.AST):
         pass
 
     visit_AsyncFunctionDef = visit_FunctionDef
@@ -209,7 +209,7 @@ class _GlobalDeletes(ast.NodeTransformer):
                 return "_" + prefix + name
         return name
 
-    def visit_FunctionDef(self, node):
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
         previous = self.global_names
         declarations = _ScopeGlobals()
         for statement in node.body:
@@ -259,7 +259,7 @@ class _GlobalDeletes(ast.NodeTransformer):
 
 
 class _SourceMetadata(ast.NodeTransformer):
-    def visit_FunctionDef(self, node):
+    def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef):
         source = ast.unparse(node)
         self.generic_visit(node)
         # Innermost: user decorator expressions still evaluate in source order;
@@ -309,7 +309,10 @@ def compile_cell(source: str, filename: str, reserved: frozenset[str]) -> Compil
     # and escaped newlines. Move the original nodes, including their locations,
     # into a synthetic async function so await/return keep function semantics.
     tree = ast.parse(source, filename=filename)
-    wrapper = ast.parse("async def " + name + "(): pass", filename=filename).body[0]
+    wrapper = cast(
+        ast.AsyncFunctionDef,
+        ast.parse("async def " + name + "(): pass", filename=filename).body[0],
+    )
     wrapper.body = tree.body or wrapper.body
     wrapper.end_lineno = wrapper.body[-1].end_lineno
     wrapper.end_col_offset = wrapper.body[-1].end_col_offset
@@ -411,7 +414,7 @@ def _in_context(context: contextvars.Context, function):
         # shares the same capture buffers, so output still lands in the cell.
         return context.copy().run(function, *args, **kwargs)
 
-    run.__wrapped__ = function
+    run.__dict__["__wrapped__"] = function
     run.__doc__ = getattr(function, "__doc__", None)
     return run
 

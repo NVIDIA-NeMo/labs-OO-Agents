@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     )
     from nooa.runtime.event_query import EventQuery
     from nooa.runtime.restrictions import RestrictionsConfig
+    from nooa.unifiedllm import CacheBoundary, LLMResponse
 
 from nooa.errors.formatting import rewrite_never_awaited_warnings
 from nooa.events import (
@@ -1242,7 +1243,7 @@ class ActorRuntime:
                 if output_model is not None:
                     params["output_model"] = output_model
                 ctx = LLMCallContext(
-                    messages=messages,
+                    messages=cast("list[dict[str, Any] | LLMResponse | CacheBoundary]", messages),
                     params=params,
                     agent=self.agent,
                     runtime=self,
@@ -1292,7 +1293,7 @@ class ActorRuntime:
 
                 async def _rebuild_middleware_messages() -> None:
                     nonlocal _dynamic_context
-                    ctx.messages = await self._build_messages(
+                    rebuilt_messages = await self._build_messages(
                         self._current_method,
                         call_args=self._current_call.args if self._current_call else (),
                         call_kwargs=self._current_call.kwargs if self._current_call else {},
@@ -1300,8 +1301,11 @@ class ActorRuntime:
                         request_params=ctx.params,
                         llm_client=ctx.client,
                     )
+                    ctx.messages = cast(
+                        "list[dict[str, Any] | LLMResponse | CacheBoundary]", rebuilt_messages
+                    )
                     _dynamic_context = _snapshot_llm_request(
-                        self.event_manager, ctx.messages, current_generation_id or ""
+                        self.event_manager, rebuilt_messages, current_generation_id or ""
                     )
 
                 async def _run_middleware() -> LLMCallContext:
@@ -1475,7 +1479,6 @@ class ActorRuntime:
         tool_call_id: str | None = None,
         execution_count: int = 1,
         restrictions: "RestrictionsConfig | None" = None,
-        sandbox_executor: Any = None,
         execution_namespace: ExecutionNamespace | None = None,
         framework_bindings: dict[str, Any] | None = None,
     ) -> "ExecutionResult":
@@ -1486,15 +1489,12 @@ class ActorRuntime:
             builtins: Strategy-provided functions (return_result, message, method args, etc.)
             validate: Run planning language validation first.
             wrap_in_function: If True, wrap code in async function and capture return value.
-            timeout: Maximum execution time in seconds (default 30s). None to disable.
+            timeout: Cooperative timeout in seconds (default 90s). None to disable.
+                Cannot terminate synchronous blocking code.
             tool_call_id: LLM's tool call ID for trace correlation (OpenAI format).
             execution_count: Execution number for Jupyter-style "Cell In[N]" filename.
             restrictions: Code execution restrictions (blocked modules/calls).
                 None uses defaults from RestrictionsConfig().
-            sandbox_executor: When set (a ``SandboxedExecutor``), the cell runs in the
-                guarded worker process instead of in-process. The surrounding
-                middleware pipeline, before/after_code_execution hooks and events
-                still run here on the parent, so the sandbox composes with them.
             execution_namespace: When set, the cell runs in this namespace (its
                 globals persist across the call's cells); None runs it in a
                 fresh per-cell namespace.
@@ -1518,7 +1518,6 @@ class ActorRuntime:
                 "tool_call_id": tool_call_id,
                 "execution_count": execution_count,
                 "restrictions": restrictions,
-                "sandbox_executor": sandbox_executor,
                 "execution_namespace": execution_namespace,
                 "framework_bindings": framework_bindings,
             }
@@ -1586,6 +1585,22 @@ class ActorRuntime:
         stderr_buffer: Any = None
         media_buffer: Any = None
         capture_scope: Any = None
+
+        def _frozen_output() -> dict[str, Any]:
+            """Freeze the capture scope, then read this cell's captured output.
+
+            The single place a result's output is taken: ``finish()`` runs
+            first so no late (descendant) write can land after the read.
+            The scope's ``__exit__`` in the ``finally`` below closes it.
+            """
+            if capture_scope is not None:
+                capture_scope.finish()
+            return {
+                "stdout": stdout_buffer.getvalue(),
+                "stderr": stderr_buffer.getvalue(),
+                "images": media_buffer.blocks if media_buffer is not None else [],
+            }
+
         # Set parent agent context for LLM inheritance by subagents
         parent_token = _parent_agent_var.set(self.agent)
         try:
@@ -1597,9 +1612,8 @@ class ActorRuntime:
 
             exec_globals = filter_mro_module_globals(type(self.agent))
 
-            # The names every cell sees (core, media, strategies...): one registry,
-            # shared with the sandbox worker. NOTE: stdout/stderr capture is
-            # handled by ContextVarStream wrappers installed below.
+            # The names every cell sees (core, media, strategies...): one registry.
+            # ContextVarStream wrappers installed below capture stdout/stderr.
             from nooa.runtime.namespace_providers import cell_namespace_names
 
             core_globals = {"self": self.agent, "asyncio": asyncio, **cell_namespace_names()}
@@ -1631,7 +1645,7 @@ class ActorRuntime:
             )
 
             if execution_namespace is not None:
-                if sandbox_executor is not None or not wrap_in_function:
+                if not wrap_in_function:
                     raise ValueError("Owned namespaces require the in-process async cell engine")
                 if framework_bindings is not None:
                     execution_namespace.update_framework(
@@ -1719,24 +1733,6 @@ class ActorRuntime:
                     except Exception as e:
                         result = ExecutionResult(stdout="", error=e, defined_methods={})
                         return result
-
-            # Sandbox backend: delegate the exec to the guarded worker AFTER the
-            # shared cleanup + validation above (so restrictions/cell-guard parity
-            # holds), while the middleware pipeline, before/after hooks and events
-            # still wrap the cell on the parent. The worker owns the namespace,
-            # stdout capture and wrapper, so we skip the in-process exec below.
-            if sandbox_executor is not None:
-                # Bind ``result``: the finally block below finalizes its stderr
-                # (never-awaited warning rewrite) for every backend.
-                result = cast(
-                    ExecutionResult,
-                    await sandbox_executor.run_cell(code, execution_count=execution_count),
-                )
-                from nooa.agentdoc._format_observation import record_truncation
-
-                for reason in result.truncation_reasons:
-                    record_truncation(reason)
-                return result
 
             # Set up stdout/stderr capture BEFORE ast.parse/compile so that
             # SyntaxWarnings (e.g. invalid escape sequences in LLM-generated code)
@@ -1844,21 +1840,6 @@ class ActorRuntime:
             captured_locals: dict[str, Any] = {}
             wrapper_line_offset = 0  # Lines of wrapper before user code (for error adjustment)
 
-            def _frozen_output() -> dict[str, Any]:
-                """Freeze the capture scope, then read this cell's captured output.
-
-                The single place a result's output is taken: ``finish()`` runs
-                first so no late (descendant) write can land after the read.
-                The scope's ``__exit__`` in the ``finally`` below closes it.
-                """
-                if capture_scope is not None:
-                    capture_scope.finish()
-                return {
-                    "stdout": stdout_buffer.getvalue(),
-                    "stderr": stderr_buffer.getvalue(),
-                    "images": media_buffer.blocks if media_buffer is not None else [],
-                }
-
             try:
                 if execution_namespace is not None:
                     from nooa.runtime.async_safety import agent_async_safety_context
@@ -1947,8 +1928,7 @@ class ActorRuntime:
                     # them into this cell's exec_globals, which is the __globals__ of the
                     # top-level functions re-bound below, so those functions still
                     # resolve them when called from a later cell (and their default
-                    # arguments evaluate). Mirrors sandbox/cell_core.py, which writes the
-                    # captured locals back into its namespace before re-binding.
+                    # arguments evaluate).
                     exec_globals.update(captured_locals)
 
                     # Capture return value based on return type:
@@ -2200,9 +2180,8 @@ class ActorRuntime:
                 pass
             # Reset parent agent context
             _parent_agent_var.reset(parent_token)
-            # The one place a cell's stderr is finalized, for every backend
-            # (in-process and sandbox) and every outcome, including the partial
-            # result this frame appended for a cancelled cell.
+            # Finalize stderr for every outcome, including the partial result
+            # this frame appended for a cancelled cell.
             partial_results = getattr(execution_exception, "execution_results", None) or []
             for finished in (result, *partial_results[-1:]):
                 if finished is not None and finished.stderr:

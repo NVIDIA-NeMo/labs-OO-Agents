@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from nooa.runtime.restrictions import RestrictionsConfig
-from nooa.runtime.sandbox.config import SandboxConfig
 from nooa.strategy_validation import (
     MethodPostcondition,
     MethodPrecondition,
@@ -103,6 +102,24 @@ class CodeActConfig(BaseModel):
             )
         return value
 
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_removed_sandbox_options(cls, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            if "sandbox" in value or (
+                "execution_backend" in value and value["execution_backend"] != "inprocess"
+            ):
+                raise ValueError(
+                    "The CodeAct OS sandbox backend and sandbox config were removed. "
+                    "Run the whole agent in external OS isolation (container, VM or OpenShell). "
+                    "Remove sandbox settings only after migrating isolation; in-process "
+                    "cell_timeout is cooperative, with no hard deadline or kernel resource limits."
+                )
+        return value
+
+    # Retained for callers explicitly selecting the existing default.
+    execution_backend: Literal["inprocess"] = "inprocess"
+    # Cooperative timeout; cannot terminate synchronous blocking code.
     cell_timeout: float | None = None
     max_tokens: int | None = None
     temperature: float | None = None
@@ -112,16 +129,6 @@ class CodeActConfig(BaseModel):
     # Opt-in detection of repeated identical tool calls; ``None`` disables it.
     loop_guard: LoopGuardConfig | None = None
     restrictions: RestrictionsConfig = RestrictionsConfig()
-
-    # Execution backend for execute_python cells:
-    #   * "inprocess" (default) — run cells in the agent's own process/event loop.
-    #     Zero behavior change; the historical path.
-    #   * "sandbox" — run each cell in a locked-down worker process with
-    #     OS-enforced guardrails (hard timeout, memory/CPU caps, filesystem
-    #     confinement, network off). Turns ``cell_timeout`` into a *hard* bound.
-    # The ``sandbox`` sub-config below is ignored unless this is "sandbox".
-    execution_backend: Literal["inprocess", "sandbox"] = "inprocess"
-    sandbox: SandboxConfig = SandboxConfig()
 
     # Method-local deterministic validators (see nooa.strategy_validation).
     # ``preconditions`` run before generation (fail-fast); ``postconditions`` run

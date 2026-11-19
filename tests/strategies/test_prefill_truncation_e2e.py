@@ -8,23 +8,11 @@ from typing import Annotated
 import pytest
 
 from nooa import Agent, CodeActStrategy, spec, strategy
-from nooa.config.strategy_config import CodeActConfig
 from nooa.config.truncation_config import CaptureConfig, FormatConfig, TruncationConfig
 from nooa.prompts import build_prompt_data
-from nooa.runtime.sandbox.config import SandboxConfig
 from nooa.strategies.prefill import PrefillTruncationWarning
 from nooa.strategies.pure_python import PurePythonStrategy
 from nooa.unifiedllm import FakeLLMClient
-
-
-def _sandbox_codeact():
-    """Exercise worker transport without filesystem restrictions on test imports."""
-    return CodeActStrategy(
-        config=CodeActConfig(
-            execution_backend="sandbox",
-            sandbox=SandboxConfig(filesystem=False),
-        )
-    )
 
 
 @pytest.mark.asyncio
@@ -34,8 +22,7 @@ def _sandbox_codeact():
         (factory, mode)
         for factory in (CodeActStrategy, PurePythonStrategy)
         for mode in ("method", "parameter", "format", "capture")
-    ]
-    + [(_sandbox_codeact, mode) for mode in ("method", "parameter", "format")],
+    ],
 )
 async def test_prefill_request_and_warning(strategy_type, mode):
     """Check the real REPL, developer warning, and first model request together."""

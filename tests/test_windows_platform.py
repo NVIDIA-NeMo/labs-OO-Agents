@@ -230,6 +230,6 @@ def test_core_runs_under_windows_simulation() -> None:
     assert "platform: win32" in result.stdout
     assert "predict: hello" in result.stdout
     assert "codeact: 5" in result.stdout
-    for feature in ("sqlite", "bash", "monitor", "sandbox"):
+    for feature in ("sqlite", "bash", "monitor"):
         assert f"clear error [{feature}]" in result.stdout
     assert "SMOKE OK" in result.stdout

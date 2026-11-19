@@ -41,10 +41,10 @@ from nooa.runtime import show  # CodeAct builtin — attach an image to the turn
 with hidden:
     import importlib.util
     import io
-    import os  # module-level only (hidden from cells; cells' os access stays blocked)
     import time
     from typing import Annotated
 
+    from cell_config import reject_cell_sandbox_environment
     from PIL import Image as _PILImage  # PNG rendering only
 
     from nooa.agentdoc import pformat, spec
@@ -55,7 +55,6 @@ with hidden:
         DEFAULT_BLOCKED_MODULES,
         RestrictionsConfig,
     )
-    from nooa.runtime.sandbox import SandboxConfig
     from nooa.skill_registry import SkillRegistry
     from nooa.storage.markers import nosnapshot
     from nooa.strategies import CodeActStrategy
@@ -145,37 +144,12 @@ def _wait_requires_submission(agent, result, call) -> None:
 
 
 def _arc_cell_config() -> CodeActConfig:
-    """Build the per-cell CodeAct config, optionally with the OS sandbox backend.
-
-    Default keeps the historical in-process backend: ``cell_timeout`` is advisory
-    and the module denylist plus the external uid-drop are the guardrails. Enable
-    the per-cell OS sandbox — where ``cell_timeout`` becomes a *hard* kill and the
-    filesystem / network / memory / CPU limits are kernel-enforced (Landlock +
-    seccomp + rlimits) — via ``run_solver.py --sandbox-cells`` (or a run_multi
-    ``sandbox:`` config block), which set the ``ARC_SANDBOX_*`` env this reads. The
-    cell's ``self.*`` tool calls broker back to this live agent, so it needs no
-    network of its own.
-    """
-    base = {
-        "restrictions": _ARC_RESTRICTIONS,
-        "cell_timeout": 60.0,
-        "postconditions": (_wait_requires_submission,),
-    }
-    if os.environ.get("ARC_SANDBOX_CELLS") != "1":
-        return CodeActConfig(**base)
-    workspace = os.environ.get("ARC_SANDBOX_WORKSPACE") or os.getcwd()
+    """Build in-process cells; whole-agent isolation is configured by the runner."""
+    reject_cell_sandbox_environment()
     return CodeActConfig(
-        **base,
-        execution_backend="sandbox",
-        sandbox=SandboxConfig(
-            workspace=workspace,
-            network=False,
-            max_memory_mb=int(os.environ.get("ARC_SANDBOX_MEM_MB", "4096")),
-            max_cpu_seconds=int(os.environ.get("ARC_SANDBOX_CPU_S", "90")),
-            # Fail open in the example so a host lacking Landlock/seccomp still runs;
-            # production callers should keep the default require=True.
-            require=os.environ.get("ARC_SANDBOX_REQUIRE", "0") == "1",
-        ),
+        restrictions=_ARC_RESTRICTIONS,
+        cell_timeout=60.0,  # Cooperative only; no per-cell hard deadline.
+        postconditions=(_wait_requires_submission,),
     )
 
 
@@ -326,8 +300,8 @@ def _redact(text: str, reps: list[tuple[str, str]]) -> str:
 
 
 # L1 guard (isolation plan §L1): helper modules are importlib-loaded, so their
-# module-level code runs OUTSIDE the CodeAct cell sandbox — the one in-process
-# path that could `import urllib`/`open(...)` a game-source file. Restrict helper
+# module-level code runs outside CodeAct's AST checks and could attempt
+# `import urllib`/`open(...)` on a game-source file. Restrict helper
 # source to pure computation: only these imports, no file/network/process/dunder.
 _HELPER_IMPORT_ALLOW = frozenset(
     {

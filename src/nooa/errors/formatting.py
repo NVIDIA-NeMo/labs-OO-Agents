@@ -17,9 +17,7 @@ shown to an agent.  It is intentionally responsible for one complete pipeline:
 
 The module does *not* execute code, register generated source with ``linecache``,
 or serialize exceptions across process boundaries.  Those jobs belong to the
-runtime and sandbox layers.  A trusted backend may pass its already-rendered
-text to :func:`format_error_for_llm`; that preserves worker-side source context
-but still applies the final size bound.
+runtime.
 
 Formatting must never replace the original failure with a formatter failure.
 Resolution of optional hints is therefore defensive, and the public entry point
@@ -858,16 +856,6 @@ class IPythonErrorFormatter:
         Returns:
             Formatted error string with adjusted line numbers.
         """
-        from nooa.runtime.sandbox.errors import SandboxExecutionError
-
-        if isinstance(error, SandboxExecutionError):
-            limit, _ = _diagnostic_budget(max_error, tail_chars)
-            return _hard_bound_text(
-                error.diagnostic.rstrip() or str(error),
-                limit + 1_024,
-                closing="\n</truncated-output>",
-            )
-
         wrapped_syntax = _wrapped_syntax_error(error)
         if isinstance(error, SyntaxError):
             formatted = self._format_syntax_error(error, code, line_offset)

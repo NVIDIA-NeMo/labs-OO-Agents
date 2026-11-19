@@ -77,6 +77,16 @@ Notes:
 
 ## Run
 
+CodeAct cells run in process. The legacy per-cell OS backend is removed:
+`--sandbox-cells`, `--sandbox-workspace`, `--sandbox-mem-mb`, `--sandbox-cpu-s`,
+`--sandbox-require`, all `ARC_SANDBOX_*` environment inputs, and run_multi's
+`sandbox:` YAML block now fail with migration errors (even disabled/null inputs).
+Remove these settings only after migrating isolation. Cells no longer have hard
+per-cell deadlines or Landlock/seccomp/rlimit protection; `cell_timeout` is
+cooperative and cannot stop synchronous blocking code. The existing whole-agent
+`--sandbox` modes, default `drop`, uid guards and container isolation remain.
+See [migration details](../../docs/codeact-sandbox-removal.md).
+
 ### Offline — a single game
 
 ```bash

@@ -12,7 +12,6 @@ from nooa.config import CodeActConfig
 from nooa.events import PythonOutput, ResultStatus
 from nooa.media import Audio, File, Image, Video
 from nooa.runtime.media_capture import _media_buffer_var
-from nooa.runtime.sandbox.cell_core import run_cell_source
 from nooa.strategies.codeact import CodeActStrategy
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 from nooa.unifiedllm.media_inputs import attachment_kind, removed_media_notice
@@ -81,16 +80,6 @@ async def test_show_succeeds_and_the_next_request_has_the_media_or_a_notice(kind
         assert kinds == []
         assert removed_media_notice(kind) in notices
     assert _media_buffer_var.get() is None
-
-
-async def test_sandbox_cell_has_no_media_setting():
-    """The worker cell captures show() output; the request decides what is sent."""
-    from nooa.runtime.media_capture import show
-
-    namespace = {"attachment": MEDIA[0], "show": show}
-    result = await run_cell_source("show(attachment)", namespace)
-    assert result.error is None
-    assert len(result.images) == 1
 
 
 @pytest.mark.parametrize("kind", [*ALL, "file"])

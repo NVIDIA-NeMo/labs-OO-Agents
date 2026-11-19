@@ -6,6 +6,11 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Removed the legacy CodeAct OS sandbox backend and `nooa.runtime.sandbox`.
+  Legacy backend/config and ARC per-cell isolation requests now fail explicitly.
+  In-process cell timeouts are cooperative, without hard per-cell deadlines or
+  kernel limits. Whole-agent/container and OpenShell isolation remain available;
+  see [migration details](docs/codeact-sandbox-removal.md).
 - `SandboxConfig.env_allowlist` keeps only the listed environment variables in
   the sandbox worker. The worker is a fork, so it inherited every variable of the
   parent, model API keys included, and a cell could print them. Removing them

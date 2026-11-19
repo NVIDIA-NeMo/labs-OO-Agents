@@ -40,7 +40,6 @@ dependencies = [
     # from mcp-nemo-oo-agents (now internal)
     "httpx>=0.27.0",
     "openinference-instrumentation-litellm>=0.1.30",
-    "msgpack>=1.2.1",
     # `nooa connect` locks its registry with fcntl on POSIX and with filelock on
     # native Windows (no fcntl there). Only filelock's Windows lock is used, so
     # CVE-2026-112940 (ReadWriteLock) and CVE-2026-112909 (UnixFileLock) do not apply.
@@ -144,6 +143,7 @@ viewer = [
     "python-multipart>=0.0.5",
 ]
 # trace_explorer is now nooa.trace_explorer (internal, no extra deps)
+# External OpenShell isolation; independent of CodeAct cell execution.
 sandbox = [
     "openshell",
 ]
@@ -275,12 +275,11 @@ pythonpath = [
     "packages/nooa-atom/src",
     "packages/nooa-atom/tests",
 ]
-addopts = "-v --tb=short --import-mode=importlib -m 'not integration and not stress and not sandbox'"
+addopts = "-v --tb=short --import-mode=importlib -m 'not integration and not stress'"
 markers = [
     "integration: marks tests as integration tests that make real API calls (run with '-m integration')",
     "provider_compat_ollama: marks live Ollama provider compatibility tests",
     "provider_compat_vllm: marks live vLLM provider compatibility tests",
-    "sandbox: marks tests that fork a real sandbox worker to exercise OS-level containment (run with '-m sandbox'); no credentials needed, but heavier than unit tests",
     "stress: marks tests as stress/load tests that simulate high concurrency (run with '-m stress')",
 ]
 filterwarnings = [
