@@ -347,3 +347,21 @@ def test_a_colliding_key_past_the_copied_prefix_keeps_a_hidden_field_hidden() ->
     text = render_python(capture(big, Limits(fallback="repr")))
     assert "TOPSECRET" not in text
     assert calls == []
+
+
+def test_a_non_str_key_in_a_huge_dict_does_not_fail_the_whole_object_closed() -> None:
+    # 4618578913: the overrides walk skips a key whose type is not exactly
+    # ``str`` instead of failing the object closed, so the copied prefix stays
+    # listed and the instance's own override still hides its field.
+    class Plain:
+        pass
+
+    big = Plain()
+    big.secret = "TOPSECRET"  # type: ignore[attr-defined]
+    for index in range(5_000):
+        setattr(big, f"a{index:05d}", index)
+    big.__dict__[1234] = "a key that is not a str"
+    set_field_metadata(big, "secret", hidden=True)
+    text = render_python(capture(big, Limits(fallback="repr")))
+    assert "a00000" in text  # the partial copy still lists its first attributes
+    assert "TOPSECRET" not in text and "attributes)" in text

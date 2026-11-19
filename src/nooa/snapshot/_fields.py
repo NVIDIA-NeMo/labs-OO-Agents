@@ -469,13 +469,17 @@ def _with_own_overrides(raw: dict[Any, Any], storage: dict[str, Any]) -> dict[st
     """``storage`` (a partial copy of ``raw``) plus the instance's own ``spec`` overrides, wherever ``raw`` holds them.
 
     The overrides (``FIELD_METADATA_ATTR``) may lie past the copied entries;
-    without them a field hidden on the instance would show. Every key of
-    ``raw`` is checked to be an exact ``str`` first, by identity of its type
-    (a set of the types would hash them: a metaclass ``__hash__`` /
-    ``__eq__``), so neither the check nor the lookup runs user code.
+    without them a field hidden on the instance would show. One walk over
+    ``dict.items(raw)`` finds them: a key is compared with the attribute name
+    only when its type is exactly ``str``, tested by identity of the type, so
+    no key is hashed and no user ``__eq__`` / ``__hash__`` runs (a ``set`` of
+    the types, or a lookup that meets a key of another type, would call them).
+    A key whose type is not exactly ``str`` is skipped instead of failing
+    closed: it can never supply the overrides or shadow them, and the walk
+    never compares it.
 
-    That check is one pass over the keys view (``len(raw)`` Python-level
-    steps of ``type(key) is str``; only the view and the generator are
+    That walk is one pass over the items view (``len(raw)`` Python-level steps
+    of ``type(key) is str`` and an exact ``str`` compare; only the view is
     allocated, no key is copied, and no user code runs) and is deliberately
     **not** charged to
     ``state.nodes_left``: this function is reached only with the partial copy
@@ -484,19 +488,11 @@ def _with_own_overrides(raw: dict[Any, Any], storage: dict[str, Any]) -> dict[st
     whole dict would fail such an object closed and lose them; the cost is
     bounded by the dict the value already holds
     (``test_a_million_attributes_list_the_first_and_say_how_many``).
-
-    Raises:
-        _FailClosed: a key is not an exact ``str``: visibility is unknown.
     """
-    if not all(type(key) is str for key in dict.keys(raw)):
-        raise _FailClosed
-    own = dict.get(raw, FIELD_METADATA_ATTR, _MISSING)
-    if own is _MISSING:
-        return storage
-    return {**storage, FIELD_METADATA_ATTR: own}
-
-
-_MISSING = object()
+    for key, own in dict.items(raw):
+        if type(key) is str and key == FIELD_METADATA_ATTR:
+            return {**storage, FIELD_METADATA_ATTR: own}
+    return storage
 
 
 def _is_empty(value: Any) -> bool:
