@@ -25,6 +25,20 @@ to follow semantic versioning.
   contents. The viewer frontend uses React 19.3.1. The `exclude-newer` cutoff
   moves to 2026-11-11 for the root project and the cybergym example, which is
   also locked at LiteLLM 1.100.5.
+- `nooa.agentdoc.adapters.pxr` gives `doc()` curated views of the OpenUSD
+  Python API (`pxr.Usd`, `UsdGeom`, `UsdShade`, `Sdf`, `Gf`, `Vt`), whose
+  usd-core bindings have no docstrings. Each covered type (Stage, Prim,
+  Attribute, Mesh, Subset, Xform, Material, Shader, MaterialBindingAPI,
+  Tokens, Sdf.Path, Vt arrays, Gf vectors and matrices...) shows its idioms
+  and real Python signatures taken from the Boost.Python C++ signatures. The
+  `UsdGeom.Subset` view carries a tested recipe for material-bound face subsets
+  (`familyName=UsdShade.Tokens.materialBind`, `SetDisplayName`,
+  `MaterialBindingAPI.Apply(...).Bind(...)`) and a consumer-side check. The
+  Stage and Prim views cover pitfalls: `Usd.Stage.Open` reuses an already-open
+  layer even after the file changed (use `Reload()` or
+  `Sdf.Layer.OpenAsAnonymous`), `Export` does not save the root layer, and
+  prim handles expire after `RemovePrim`. `register_all()` registers it when
+  `pxr` is installed.
 - `doc()` now documents compiled callables and classes (C extensions and
   Boost.Python, for example OpenUSD's `pxr`). Before, `doc(UsdGeom.Subset.CreateGeomSubset)`
   printed only `class function:` and `doc(UsdGeom.Subset)` showed no methods.
