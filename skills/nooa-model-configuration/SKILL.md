@@ -98,7 +98,7 @@ same scope and evidence rules as the headless skill.
   defines this shape; gateway acceptance and schema-subset support are unknown
   until checked. A declaration/HTTP 200 is not a typed baseline pass. See
   [the carrier scope and evidence contract](../../docs/model-connect.md#explicit-native-structured-output-profile).
-- Caching defaults to `auto`: use the default cached renderer's stable boundary,
+- Caching defaults to `auto`: use the default context view's stable boundary,
   not a test-only cache override. Other Chat routes may cache implicitly;
   Responses and recognized Anthropic routes have explicit marker mappings.
   `cache_breakpoint: null` opts out of NOOA markers, not provider implicit caching.
