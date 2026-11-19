@@ -448,10 +448,15 @@ def _curated_member(obj: Any) -> CuratedMember | None:
 
 
 def _lines_naming(lines: list[str], name: str) -> list[str]:
-    """Docstring items that mention ``name``; a ``- `` bullet keeps its continuation lines."""
+    """Docstring items that mention ``name``.
+
+    A ``- `` bullet keeps its continuation lines; an indented code block stays whole.
+    """
     items: list[list[str]] = []
     for line in lines:
         if items and items[-1][0].startswith("- ") and line.startswith("  ") and line.strip():
+            items[-1].append(line)
+        elif items and items[-1][0].startswith("    ") and line.startswith("    "):
             items[-1].append(line)
         else:
             items.append([line])
