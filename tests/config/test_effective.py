@@ -421,6 +421,57 @@ def test_the_merge_check_survives_a_payload_that_holds_itself():
     assert len(base.payload) == before
 
 
+class _HoldsATupleCycle(BaseModel):
+    """A payload an ``Any`` field accepts: a tuple that reaches itself through a list."""
+
+    payload: Any = None
+    size: int = 10
+
+    @model_validator(mode="after")
+    def _the_tuple_still_reaches_itself(self) -> "_HoldsATupleCycle":
+        if isinstance(self.payload, tuple) and self.payload[0][0] is not self.payload:
+            raise ValueError("a tuple that reaches itself through a list lost its own reference")
+        return self
+
+
+def test_the_merge_check_keeps_a_tuple_that_reaches_itself_through_a_list():
+    # CodeRabbit r4626670478: a tuple was rebuilt without a memo entry, so a
+    # tuple that reaches itself through a list came back as two tuples and the
+    # back-reference named a copy of it. The validator above rejects that.
+    items: list[Any] = []
+    payload: tuple[Any, ...] = (items,)
+    items.append(payload)
+    base = _HoldsATupleCycle(payload=payload)
+    merged = merge_config(base, _HoldsATupleCycle(size=20))
+    assert merged.size == 20
+    assert merged.payload[0][0] is merged.payload  # the merge keeps the cycle as it was
+
+
+class _TwoFieldsOneList(BaseModel):
+    """Two ``Any`` fields, holding one list between them."""
+
+    left: Any = None
+    right: Any = None
+    size: int = 10
+
+    @model_validator(mode="after")
+    def _both_fields_still_hold_one_list(self) -> "_TwoFieldsOneList":
+        if self.left is not None and self.left is not self.right:
+            raise ValueError("a list two fields share was copied once for each of them")
+        return self
+
+
+def test_the_merge_check_copies_a_value_two_fields_share_once():
+    # CodeRabbit r4626670478: _validation_input() started a fresh memo for each
+    # field, so a value two fields share was copied twice and the two fields
+    # stopped being one object. The validator above rejects that.
+    shared = [1, 2]
+    base = _TwoFieldsOneList(left=shared, right=shared)
+    merged = merge_config(base, _TwoFieldsOneList(size=20))
+    assert merged.size == 20
+    assert merged.left is merged.right is shared  # the merge keeps them one list
+
+
 async def test_the_state_block_expression_ignores_a_method_level_override():
     # #580 review: the expression read effective(TruncationConfig, self), which
     # returns a running method's override first, so an agent built inside a

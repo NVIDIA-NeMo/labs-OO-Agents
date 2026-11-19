@@ -103,9 +103,12 @@ def _validation_input(model: BaseModel) -> dict[str, Any]:
 
     Every value is isolated first (:func:`_isolated`), so re-validating runs
     this model's own validators -- the cross-field rules -- and cannot write to
-    the config it reads.
+    the config it reads. One memo covers every field, so a value two fields
+    share is copied once and stays one object in the input. A validator that
+    reads both fields sees the same object it would see in the merge.
     """
-    return {name: _isolated(getattr(model, name)) for name in type(model).model_fields}
+    memo: dict[int, Any] = {}
+    return {name: _isolated(getattr(model, name), memo) for name in type(model).model_fields}
 
 
 def _isolated(value: Any, memo: dict[int, Any] | None = None) -> Any:
@@ -127,7 +130,12 @@ def _isolated(value: Any, memo: dict[int, Any] | None = None) -> Any:
 
     ``memo`` maps the identity of every value already copied to its copy, so a
     value reached twice is copied once and a container that holds itself (which
-    an ``Any`` field accepts) terminates.
+    an ``Any`` field accepts) terminates. A tuple is memoized too, and only
+    after its items are copied: an immutable container cannot hold a
+    back-reference to itself, but one can reach it through a container this
+    walk fills in place (a list, say), and the copy that inner call memoized is
+    the one the back-reference names -- so that is the copy to return, and the
+    cycle closes on one object.
     """
     if callable(value) and not isinstance(value, BaseModel):
         return value
@@ -156,7 +164,11 @@ def _isolated(value: Any, memo: dict[int, Any] | None = None) -> Any:
             entries[key] = _isolated(item, memo)
         return entries
     if type(value) in (tuple, set, frozenset):
-        return type(value)(_isolated(item, memo) for item in value)
+        isolated = type(value)(_isolated(item, memo) for item in value)
+        # Copying the items above may have reached this value again, through a
+        # container that was filled in place: that call memoized its own copy of
+        # it, and the back-reference names that one. setdefault keeps it.
+        return memo.setdefault(id(value), isolated)
     return value
 
 
