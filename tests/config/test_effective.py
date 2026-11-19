@@ -310,6 +310,56 @@ def test_the_merge_check_reads_a_field_that_a_path_alias_nests():
         merge_config(high, _PathAliased(enabled=True))
 
 
+class _NestedWrites(BaseModel):
+    """A nested model whose after-validator writes to a list it holds."""
+
+    items: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _add_sentinel(self) -> "_NestedWrites":
+        self.items.append("sentinel")
+        return self
+
+
+class _OuterWrites(BaseModel):
+    nested: _NestedWrites = Field(default_factory=_NestedWrites)
+    size: int = 10
+
+
+def test_the_merge_check_does_not_let_a_nested_validator_write_to_its_inputs():
+    # #580 review: pydantic re-runs a nested model's validators on the very
+    # instance it is handed, and that instance is shared with the base config
+    # (model_copy() copies the top level only), so the check appended to the
+    # base's list as a side effect of reading it.
+    base = _OuterWrites()
+    assert base.nested.items == ["sentinel"]
+    merged = merge_config(base, _OuterWrites(size=20))
+    assert (merged.size, merged.nested.items) == (20, ["sentinel"])
+    assert base.nested.items == ["sentinel"]
+
+
+class _ParentChecks(BaseModel):
+    nested: _NestedWrites = Field(default_factory=_NestedWrites)
+    size: int = 10
+    allow_big: bool = True
+
+    @model_validator(mode="after")
+    def _check(self) -> "_ParentChecks":
+        if self.size > 100 and not self.allow_big:
+            raise ValueError("size cannot exceed 100 unless allow_big")
+        return self
+
+
+def test_a_merge_check_that_raises_leaves_the_base_config_alone():
+    # #580 review: the nested validator runs before the parent rule that raises,
+    # so a check that fails must not have written to the base config either.
+    # Each value is valid alone; only the merge breaks the rule.
+    base = _ParentChecks(allow_big=False)
+    with pytest.raises(ValueError, match="cannot exceed"):
+        merge_config(base, _ParentChecks(size=200))
+    assert base.nested.items == ["sentinel"]
+
+
 async def test_the_state_block_expression_ignores_a_method_level_override():
     # #580 review: the expression read effective(TruncationConfig, self), which
     # returns a running method's override first, so an agent built inside a

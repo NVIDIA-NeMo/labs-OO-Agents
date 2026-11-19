@@ -100,11 +100,35 @@ def _validation_input(model: BaseModel) -> dict[str, Any]:
     instead, and the validating call passes ``by_name=True``, which makes the
     name an accepted key whatever alias the field declares (a plain alias,
     ``AliasChoices`` or an ``AliasPath``, whose value lives at a nested key).
-    Each value is kept as it is (a nested model stays a model), so re-validating
-    runs this model's own validators -- the cross-field rules -- and nothing
-    else.
+
+    Every value is isolated first (:func:`_isolated`), so re-validating runs
+    this model's own validators -- the cross-field rules -- and cannot write to
+    the config it reads.
     """
-    return {name: getattr(model, name) for name in type(model).model_fields}
+    return {name: _isolated(getattr(model, name)) for name in type(model).model_fields}
+
+
+def _isolated(value: Any) -> Any:
+    """``value``, copied far enough that re-validating it cannot write back.
+
+    Pydantic re-runs a nested model's validators on the very instance it is
+    handed, not on a copy of it, and such a validator may write to what the
+    model holds (append to a list, say). That instance is shared with the base
+    config -- ``model_copy()`` copies the top level only -- so the check would
+    otherwise change a config it only meant to read.
+
+    A model is deep-copied and the plain containers that can hold one are
+    rebuilt, so their models are reached. Anything else is passed through: a
+    callable may be bound to an object (an agent, say) that copying would drag
+    along, and pydantic re-validates nothing outside models.
+    """
+    if isinstance(value, BaseModel):
+        return value.model_copy(deep=True)
+    if type(value) in (list, tuple, set, frozenset):
+        return type(value)(_isolated(item) for item in value)
+    if type(value) is dict:
+        return {key: _isolated(item) for key, item in value.items()}
+    return value
 
 
 def default_config[ConfigT: BaseModel](config_type: type[ConfigT]) -> ConfigT:
