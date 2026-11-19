@@ -224,6 +224,10 @@ class EventsApi(Skill):
 
         Replaces tags start_tag..end_tag with one summary tag.
         Original events remain accessible by their individual tags.
+        The current task's input (its Task event and the prefill cell output that
+        shows the caller's message) is never collapsed: it stays verbatim in
+        history up to a size limit, so exact output specs survive; a range of
+        only those events raises ValueError.
         A tag is the number N shown as <sys tag="N"> in the transcript (e.g. "22"),
         or a summary range such as "2..10"; span or call ids are not tags.
         Integers are accepted if they identify existing events (including

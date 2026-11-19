@@ -25,6 +25,7 @@ from nooa.context_blocks.models import Role
 from nooa.events import (
     EventBase,
     Summary,
+    Task,
 )
 from nooa.runtime.context_vars import _current_event_format_var, _get_agent_call_stack
 from nooa.runtime.event_backend import EventBackend, InMemoryBackend
@@ -53,6 +54,11 @@ EventHandler = Callable[[EventBase], None]
 
 # Monotonic counter for stable EventManager identity (middleware re-entry guard).
 _em_id_counter = itertools.count(1)
+
+# collapse() keeps the current task's input events active and verbatim up to this
+# many characters in total (Task prompt plus the inspect-inputs prefill that prints
+# the caller's message). Larger task inputs are compacted with an explicit note.
+TASK_VERBATIM_MAX_CHARS = 32_000
 
 # Cleanup descendants inherit this context, even when a callback uses create_task.
 # Track drain tasks rather than managers so a stale child cannot skip a later drain.
@@ -678,6 +684,12 @@ class EventManager:
         - manager["5"] still returns the original event (stable access)
         - manager["2..40"] returns the new Summary
 
+        The current task's input (its ``Task`` event and the inspect-inputs prefill
+        that shows the caller's message) is never archived: those events stay
+        active and verbatim, so exact output specs survive compaction. Over
+        ``TASK_VERBATIM_MAX_CHARS`` in total, the excess is compacted and the summary
+        names it. A range holding only those events raises ``ValueError``.
+
         Args:
             start_tag: First tag to collapse (inclusive), e.g., "2"
             end_tag: Last tag to collapse (inclusive), e.g., "40"
@@ -701,6 +713,24 @@ class EventManager:
 
         if not tags_to_collapse:
             raise ValueError(f"No active events in range '{start_tag}'..'{end_tag}'")
+
+        # The current task's input stays verbatim in history: summaries paraphrase,
+        # and a paraphrased output spec (file names, formats, schemas) is wrong.
+        kept, cut = self._task_input_tags(tags_to_collapse)
+        if kept:
+            tags_to_collapse = [tag for tag in tags_to_collapse if tag not in kept]
+            if not tags_to_collapse:
+                raise ValueError(
+                    f"Events '{start_tag}'..'{end_tag}' are the current task's input, which "
+                    "collapse keeps verbatim; nothing else is in that range."
+                )
+        if cut:
+            note = (
+                f"[Task input event(s) {', '.join(cut)} exceed the "
+                f"{TASK_VERBATIM_MAX_CHARS:,}-character verbatim limit and were compacted "
+                f'with this range; read the exact text with self.events["{cut[0]}"].]'
+            )
+            summary_text = f"{note}\n\n{summary_text}" if summary_text else note
 
         # Calculate the full range for the new summary (flatten nested summaries)
         actual_start = min(self._parse_tag_start(t) for t in tags_to_collapse)
@@ -784,6 +814,54 @@ class EventManager:
         self._emit(summary)
 
         return summary_tag
+
+    def _task_input_tags(self, tags: list[str]) -> tuple[set[str], list[str]]:
+        """Split the current task's input events in ``tags`` into (kept, cut).
+
+        The current task is the outermost active agent call with a ``Task`` event in
+        this history (else the newest ``Task`` added inside an agent call). Its input
+        events are that ``Task`` and the ``inspect_inputs`` prefill cell that prints
+        the caller's arguments, e.g. Atom's ``notification`` with the user's message. They stay active,
+        oldest first, while their rendered size fits ``TASK_VERBATIM_MAX_CHARS``;
+        the rest are ``cut`` (compacted, and named in the summary). Earlier tasks
+        are compacted normally.
+        """
+        active = [
+            (tag, event)
+            for tag in self._backend.active_tags()
+            if (event := self._backend.get(tag)) is not None
+        ]
+        # Task events added outside an agent call carry no call_id and are not a turn's input.
+        task_calls = [
+            cid
+            for _, event in active
+            if isinstance(event, Task) and (cid := event.metadata.get("call_id")) is not None
+        ]
+        if not task_calls:
+            return set(), []
+        call_id = next(
+            (cid for cid in _get_agent_call_stack() if cid is not None and cid in task_calls),
+            task_calls[-1],
+        )
+        selected = set(tags)
+        inputs = [
+            tag
+            for tag, event in active
+            if tag in selected
+            and event.metadata.get("call_id") == call_id
+            and (isinstance(event, Task) or event.metadata.get("prefill_type") == "inspect_inputs")
+        ]
+        kept: set[str] = set()
+        cut: list[str] = []
+        used = 0
+        for tag in inputs:
+            size = len(pformat(self._backend.get(tag)))
+            if used + size <= TASK_VERBATIM_MAX_CHARS:
+                kept.add(tag)
+                used += size
+            else:
+                cut.append(tag)
+        return kept, cut
 
     # === Introspection (internal) ===
 
