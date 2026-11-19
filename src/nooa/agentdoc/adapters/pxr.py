@@ -31,7 +31,9 @@ subset = UsdGeom.Subset.CreateGeomSubset(
     mesh, subset_name, UsdGeom.Tokens.face, Vt.IntArray(face_indices),
     UsdShade.Tokens.materialBind)  # familyName='materialBind' is required for bindings
 subset.GetPrim().SetDisplayName(display_name)  # displayName metadata, not an attribute
-UsdShade.MaterialBindingAPI.Apply(subset.GetPrim()).Bind(material)"""
+UsdShade.MaterialBindingAPI.Apply(subset.GetPrim()).Bind(material)
+# materialBind needs nonOverlapping: the default 'unrestricted' fails UsdValidation.
+UsdGeom.Subset.SetFamilyType(mesh, UsdShade.Tokens.materialBind, UsdGeom.Tokens.nonOverlapping)"""
 
 # Executable check (tests run it): read the subsets back the way a consumer does.
 VERIFY_SUBSETS_RECIPE = """\
@@ -39,7 +41,10 @@ for s in UsdGeom.Subset.GetGeomSubsets(mesh, UsdGeom.Tokens.face, UsdShade.Token
     prim = s.GetPrim()
     mat_path = UsdShade.MaterialBindingAPI(prim).GetDirectBinding().GetMaterialPath()
     print(prim.GetName(), prim.GetDisplayName(), s.GetFamilyNameAttr().Get(),
-          s.GetElementTypeAttr().Get(), list(s.GetIndicesAttr().Get()), mat_path)"""
+          s.GetElementTypeAttr().Get(), list(s.GetIndicesAttr().Get()), mat_path)
+# Checks elementType, indices range/overlap and family type (ValidateSubsets does not).
+ok, why = UsdGeom.Subset.ValidateFamily(mesh, UsdGeom.Tokens.face, UsdShade.Tokens.materialBind)
+assert ok, why"""
 
 
 def _indent(text: str) -> str:
@@ -363,7 +368,10 @@ _register(
     "A scene node. Falsy when invalid (missing path or expired after RemovePrim).\n"
     "Display name is prim metadata: prim.SetDisplayName('Wheel'); prim.GetDisplayName().\n"
     "Do not create a custom attribute named 'displayName'; there is no CreateDisplayNameAttr.\n"
-    "Wrap with a schema to use typed API: UsdGeom.Mesh(prim), UsdShade.Material(prim).",
+    "Wrap with a schema to use typed API: UsdGeom.Mesh(prim), UsdShade.Material(prim).\n"
+    "A wrapper on the wrong prim type is falsy but its Create*Attr still writes: check\n"
+    "prim.IsA(UsdGeom.Mesh) (or bool(schema)) first. <Schema>.Define over an existing prim of\n"
+    "another type silently re-types it: check stage.GetPrimAtPath(path).GetTypeName() first.",
     methods=[
         _m("IsValid", "(self)", "bool", "False for missing or expired prims (same as bool(prim))."),
         _m("GetPath", "(self)", "Sdf.Path", "Absolute path."),
@@ -462,7 +470,9 @@ _register(
     "Usd.Attribute",
     "Typed value on a prim. attr.Get() returns None if unauthored with no fallback;\n"
     "attr.Set(value) converts lists/tuples (e.g. [0, 1] -> Vt.IntArray, (1, 0, 0) -> Gf.Vec3f).\n"
-    "Invalid attributes (prim.GetAttribute('missing')) are falsy.",
+    "Invalid attributes (prim.GetAttribute('missing')) are falsy.\n"
+    "Token attributes do not enforce allowedTokens on Set (any string is stored): check\n"
+    "value in attr.GetMetadata('allowedTokens') or use the *.Tokens constants.",
     methods=[
         _m("Get", f"(self, time: {_T})", "object", "Value at time (None if no value)."),
         _m(
@@ -497,11 +507,18 @@ _register(
     "    cache = Usd.StageCache()\n"
     "    with Usd.StageCacheContext(cache):\n"
     "        stage = Usd.Stage.Open(path)   # same stage on repeated Open\n"
-    "Plain Open() still reuses already-open layers (see Usd.Stage); use stage.Reload().",
+    "Plain Open() still reuses already-open layers (see Usd.Stage); use stage.Reload().\n"
+    "Erase(stage) (even of a never-inserted stage) leaves that Python stage object dangling:\n"
+    "the next call on it aborts the process. Re-open the stage after Erase; avoid Erase.",
     methods=[
         _m("Insert", "(self, stage: Usd.Stage)", "Usd.StageCache.Id", "Add a stage."),
         _m("Contains", "(self, stage: Usd.Stage)", "bool", "Also Contains(id)."),
-        _m("Erase", "(self, stage: Usd.Stage)", "bool", "Drop a stage (also Erase(id))."),
+        _m(
+            "Erase",
+            "(self, stage: Usd.Stage)",
+            "bool",
+            "Drop a stage (also Erase(id)); then stage use aborts.",
+        ),
         _m("Clear", "(self)", "None", "Drop all stages."),
         _m("Size", "(self)", "int", "Number of cached stages."),
         _m("GetAllStages", "(self)", "list[Usd.Stage]", "Cached stages."),
@@ -530,7 +547,7 @@ _register(
             "Define",
             "(stage: Usd.Stage, path: Sdf.Path | str)",
             "UsdGeom.Mesh",
-            "Define a Mesh prim at path.",
+            "Define a Mesh prim at path. Re-types an existing prim of another type silently.",
         ),
         _s(
             "Get",
@@ -620,8 +637,18 @@ _SUBSET_DOC = (
     f"{_indent(VERIFY_SUBSETS_RECIPE)}\n"
     "Subset.Define(stage, path) authors nothing else: set familyName, indices and display name\n"
     "yourself. Attribute getters: GetFamilyNameAttr, GetElementTypeAttr, GetIndicesAttr.\n"
-    "Not in usd-core: Subset.CreateSubset, CreateFamily, GetGeomSubset(ByName), GetSubset,\n"
-    "Mesh.CreateGeomSubset, UsdGeom.GeomSubset. Family type: Subset.SetFamilyType/GetFamilyType."
+    "- Not in usd-core: Subset.CreateSubset, CreateFamily, GetGeomSubset(ByName), GetSubset,\n"
+    "  Mesh.CreateGeomSubset, UsdGeom.GeomSubset.\n"
+    "Family type (Subset.SetFamilyType/GetFamilyType): materialBind needs nonOverlapping\n"
+    "(or partition if every face is in exactly one subset); 'unrestricted' fails UsdValidation.\n"
+    "Nothing is checked on write: a misspelled elementType/familyName/familyType, swapped\n"
+    "positional args, out-of-range or duplicate indices are all stored silently. Use the Tokens\n"
+    "constants, then ValidateFamily (above); familyName typos pass it too: compare\n"
+    "GetGeomSubsets(mesh, face, materialBind) with GetAllGeomSubsets(mesh) (filters that\n"
+    "match nothing return [] without error).\n"
+    "Process crashes (not exceptions): GetAllGeomSubsets/GetAllGeomSubsetFamilyNames on a\n"
+    "falsy schema (UsdGeom.Mesh(), Mesh.Get on a wrong path): check bool(mesh) first;\n"
+    "ValidateSubsets on a subset without authored indices (e.g. right after Subset.Define)."
 )
 
 _register(
@@ -635,7 +662,7 @@ _register(
             "familyName: str = '', familyType: str = '')",
             "UsdGeom.Subset",
             "Create (or update) geom.GetPath()/subsetName. elementType=UsdGeom.Tokens.face; "
-            "familyName=UsdShade.Tokens.materialBind for materials.",
+            "familyName=UsdShade.Tokens.materialBind for materials. No value is checked.",
         ),
         _s(
             "CreateUniqueGeomSubset",
@@ -654,19 +681,20 @@ _register(
             "GetAllGeomSubsets",
             "(geom: UsdGeom.Imageable)",
             "list[UsdGeom.Subset]",
-            "All child subsets.",
+            "All child subsets. Segfaults on a falsy geom (UsdGeom.Mesh()): check bool(geom).",
         ),
         _s(
             "GetAllGeomSubsetFamilyNames",
             "(geom: UsdGeom.Imageable)",
             "list[str]",
-            "Family names in use.",
+            "Family names in use. Segfaults on a falsy geom: check bool(geom).",
         ),
         _s(
             "SetFamilyType",
             "(geom: UsdGeom.Imageable, familyName: str, familyType: str)",
             "bool",
-            "UsdGeom.Tokens.partition | nonOverlapping | unrestricted (default).",
+            "UsdGeom.Tokens.partition | nonOverlapping | unrestricted (default); materialBind "
+            "families need nonOverlapping. A misspelled type is stored without error.",
         ),
         _s(
             "GetFamilyType",
@@ -678,13 +706,16 @@ _register(
             "ValidateFamily",
             "(geom: UsdGeom.Imageable, elementType: str = '', familyName: str = '')",
             "tuple[bool, str]",
-            "(valid, reason); needs the mesh's faceVertexCounts authored.",
+            "(valid, reason); needs the mesh's faceVertexCounts authored. The check to use: "
+            "ValidateFamily(mesh, UsdGeom.Tokens.face, UsdShade.Tokens.materialBind).",
         ),
         _s(
             "ValidateSubsets",
             "(subsets: list[UsdGeom.Subset], elementCount: int, familyType: str)",
             "tuple[bool, str]",
-            "(valid, reason) for these subsets against elementCount faces and a family type.",
+            "(valid, reason) for these subsets against elementCount faces and a family type. "
+            "Misses a wrong elementType; segfaults on a subset without authored indices. "
+            "Prefer ValidateFamily.",
         ),
         _s(
             "GetUnassignedIndices",
@@ -911,7 +942,9 @@ _register(
     "Shading node. Set the node type with CreateIdAttr('UsdPreviewSurface') (or SetShaderId).\n"
     "Inputs: sh.CreateInput('roughness', Sdf.ValueTypeNames.Float).Set(0.5);\n"
     "outputs: sh.CreateOutput('surface', Sdf.ValueTypeNames.Token). Connect a Material output\n"
-    "with mat.CreateSurfaceOutput().ConnectToSource(sh.ConnectableAPI(), 'surface').",
+    "with mat.CreateSurfaceOutput().ConnectToSource(sh.ConnectableAPI(), 'surface').\n"
+    "Input names are not checked (a typo like 'diffuseColour' is stored and ignored): use the\n"
+    "exact UsdPreviewSurface names (diffuseColor, roughness, metallic, opacity, normal...).",
     methods=[
         _s(
             "Define",
@@ -964,7 +997,10 @@ _register(
     "    UsdShade.MaterialBindingAPI.Apply(prim).Bind(material)\n"
     "    UsdShade.MaterialBindingAPI(prim).ComputeBoundMaterial()   # -> (material, rel)\n"
     "    UsdShade.MaterialBindingAPI(prim).GetDirectBinding().GetMaterialPath()\n"
-    "Face subsets: see doc(UsdGeom.Subset) for the full recipe.",
+    "Face subsets: see doc(UsdGeom.Subset) for the full recipe.\n"
+    "Bind checks nothing: a non-Material prim wrapped as UsdShade.Material, an unknown or\n"
+    "swapped strength/purpose (use UsdShade.Tokens.*) are written; verify\n"
+    "material.GetPrim().IsA(UsdShade.Material) before and ComputeBoundMaterial()[0] after.",
     methods=[
         _s(
             "Apply",
@@ -1604,7 +1640,9 @@ _register_schema(
     "    material.CreateSurfaceOutput().ConnectToSource(shader.ConnectableAPI(), 'surface')\n"
     "The static forms take the shading attribute (Usd.Attribute, UsdShade.Input or Output)\n"
     "first: UsdShade.ConnectableAPI.ConnectToSource(input, source, 'rgb').\n"
-    "The source output must exist (texture.CreateOutput('rgb', Sdf.ValueTypeNames.Float3)).",
+    "The source output must exist (texture.CreateOutput('rgb', Sdf.ValueTypeNames.Float3)).\n"
+    "A misspelled sourceName ('surfac') still connects: check\n"
+    "material.ComputeSurfaceSource()[1] == 'surface'.",
     methods=[
         _m(
             "__init__",

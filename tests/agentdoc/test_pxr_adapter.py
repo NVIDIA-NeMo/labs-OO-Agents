@@ -57,6 +57,15 @@ def _make_mesh_stage(path: str):
     return stage, mesh, materials
 
 
+def _make_mesh_stage_in_memory():
+    stage = Usd.Stage.CreateInMemory()
+    mesh = UsdGeom.Mesh.Define(stage, "/World/Mesh")
+    mesh.CreatePointsAttr(Vt.Vec3fArray([(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0)]))
+    mesh.CreateFaceVertexCountsAttr(Vt.IntArray([3, 3]))
+    mesh.CreateFaceVertexIndicesAttr(Vt.IntArray([0, 1, 2, 0, 2, 3]))
+    return stage, mesh, {}
+
+
 def _namespace(**extra) -> dict:
     return {
         "Usd": Usd,
@@ -119,6 +128,48 @@ class TestSubsetDoc:
             # display name is metadata, not a custom attribute
             assert not s.GetPrim().GetAttribute("displayName")
         assert UsdShade.MaterialBindingAPI(fresh_mesh.GetPrim()).GetMaterialBindSubsets()
+
+    def test_recipe_family_passes_usd_validation(self, adapter, tmp_path):
+        UsdValidation = pytest.importorskip("pxr.UsdValidation")
+        stage, mesh, mats = _make_mesh_stage(str(tmp_path / "scene.usda"))
+        _run(
+            adapter.MATERIAL_SUBSET_RECIPE,
+            _namespace(
+                mesh=mesh,
+                material=mats["Red"],
+                subset_name="wheel",
+                display_name="Wheel",
+                face_indices=[0],
+            ),
+        )
+        assert (
+            UsdGeom.Subset.GetFamilyType(mesh, UsdShade.Tokens.materialBind)
+            == UsdGeom.Tokens.nonOverlapping
+        )
+        # Subset and binding validators only: the shader validators need shaderDefs.usda,
+        # which some usd-core wheels lack.
+        registry = UsdValidation.ValidationRegistry()
+        names = [
+            m.name
+            for m in registry.GetAllValidatorMetadata()
+            if "Subset" in m.name or "MaterialBinding" in m.name
+        ]
+        assert "usdShadeValidators:SubsetsMaterialBindFamily" in names
+        errors = UsdValidation.ValidationContext(
+            registry.GetOrLoadValidatorsByName(names)
+        ).Validate(stage)
+        assert [e.GetIdentifier() for e in errors] == []
+
+    def test_verify_recipe_rejects_swapped_element_type(self, adapter):
+        stage, mesh, _mats = _make_mesh_stage_in_memory()
+        # elementType/familyName swapped: stored silently, ValidateSubsets passes it alone.
+        bad = UsdGeom.Subset.CreateGeomSubset(
+            mesh, "bad", UsdShade.Tokens.materialBind, Vt.IntArray([0]), UsdGeom.Tokens.face
+        )
+        assert UsdGeom.Subset.ValidateSubsets([bad], 2, UsdGeom.Tokens.nonOverlapping)[0]
+        bad.CreateFamilyNameAttr(UsdShade.Tokens.materialBind)
+        with pytest.raises(AssertionError):
+            _run(adapter.VERIFY_SUBSETS_RECIPE, _namespace(mesh=mesh))
 
     def test_subset_without_family_name_is_not_a_material_subset(self):
         # Why the doc insists on familyName: the default '' hides the subset from bindings.
@@ -305,8 +356,11 @@ def test_doc_on_curated_boost_method_shows_signature_and_pitfalls():
     params = ["geom", "subsetName", "elementType", "indices", "familyName", "familyType"]
     positions = [out.index(f"{name}: ") for name in params]
     assert positions == sorted(positions)
-    assert "'materialBind' is never an elementType" in out
+    # The owner's notes are long, so only items naming the method remain; the recipe block
+    # that names it stays whole.
+    assert "    mesh, subset_name, UsdGeom.Tokens.face, Vt.IntArray(face_indices)," in out
     assert "UsdShade.MaterialBindingAPI.Apply(subset.GetPrim()).Bind(material)" in out
+    assert "UsdGeom.Subset.SetFamilyType(mesh, UsdShade.Tokens.materialBind" in out
     assert out.rstrip().endswith('Other members: doc(UsdGeom.Subset)\n    """'.rstrip())
 
 
