@@ -793,7 +793,8 @@ def _import_class(fqn: str) -> type:
     snapshot chose. Even a submodule of a loaded package can resolve to the
     workspace, through a namespace package or a ``pkgutil.extend_path``
     ``__path__``. A class whose module is not loaded yet is refused; import
-    it before restoring.
+    it before restoring. Names are read from each module's or class's own
+    ``__dict__``, so a module-level ``__getattr__`` hook never runs.
 
     Raises:
         DeserializationError: If the module is not loaded or the class is not found.
@@ -813,12 +814,19 @@ def _import_class(fqn: str) -> type:
             if obj is None:
                 not_loaded = True
                 continue
-            try:
-                for attr in parts[i:]:
-                    obj = getattr(obj, attr)
+            # Look names up in each namespace's own ``__dict__``, not with
+            # ``getattr``: a module-level ``__getattr__`` (lazy packages) could
+            # import a submodule the snapshot named.
+            for attr in parts[i:]:
+                namespace = getattr(obj, "__dict__", None)
+                if not isinstance(namespace, dict) and type(namespace).__name__ != "mappingproxy":
+                    obj = None
+                    break
+                obj = namespace.get(attr)
+                if obj is None:
+                    break
+            if obj is not None:
                 return obj  # type: ignore[return-value]
-            except AttributeError:
-                continue
     if not_loaded:
         raise DeserializationError(
             f"Cannot import class {fqn!r}: its module is not imported, and restoring a "

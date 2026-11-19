@@ -251,7 +251,11 @@ class TestNoNewModuleImports:
 
     def test_unloaded_submodule_of_loaded_package_is_refused(self) -> None:
         # Restore never imports, not even a submodule of a loaded package.
-        saved = sys.modules.pop("json.tool", None)
+        import json
+
+        missing = object()
+        saved_module = sys.modules.pop("json.tool", missing)
+        saved_attr = json.__dict__.pop("tool", missing)
         try:
             from nooa.storage.serialization import _import_class
 
@@ -262,8 +266,32 @@ class TestNoNewModuleImports:
 
             assert _import_class("json.tool.main") is json.tool.main
         finally:
-            if saved is not None:
-                sys.modules["json.tool"] = saved
+            sys.modules.pop("json.tool", None)
+            json.__dict__.pop("tool", None)
+            if saved_module is not missing:
+                sys.modules["json.tool"] = saved_module
+            if saved_attr is not missing:
+                json.tool = saved_attr
+
+    def test_module_getattr_hook_is_not_run(self, monkeypatch) -> None:
+        # A lazy package's module-level ``__getattr__`` could import a
+        # submodule the snapshot named; restore must not call it.
+        import types
+
+        calls: list[str] = []
+        lazy = types.ModuleType("nooa_test_lazy_pkg")
+
+        def _hook(name: str):
+            calls.append(name)
+            raise AttributeError(name)
+
+        lazy.__getattr__ = _hook  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, "nooa_test_lazy_pkg", lazy)
+        from nooa.storage.serialization import _import_class
+
+        with pytest.raises(DeserializationError):
+            _import_class("nooa_test_lazy_pkg.Gadget")
+        assert calls == []
 
 
 class _Holder(Agent, llm=FakeLLMClient()):
