@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -243,6 +244,64 @@ def test_a_close_error_warning_written_back_into_the_stream_does_not_deadlock(
         assert any("could not close overflow file" in message for message in records)
         assert stream.snapshot().full is None  # the file was given up
         assert stream.dropped_after_close == len("[warning]")
+
+
+def test_an_exit_cleanup_warning_written_back_into_the_stream_does_not_deadlock(
+    tmp_path, monkeypatch
+) -> None:
+    # #580 review (CodeRabbit): a cleanup the exit could not start runs when the
+    # holder of the folder's lock lets go (``_Folder.locked``), reached from
+    # ``OverflowDir.open`` (and from ``OverflowWriter.finish``) with the stream's
+    # lock held. Its removal failure was logged there, so a logging handler
+    # writing into the same stream re-entered write() and waited on that lock
+    # forever.
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    real_rmtree = shutil.rmtree
+
+    def broken_rmtree(path, **kwargs):
+        if not str(path).startswith(str(tmp_path)):
+            return real_rmtree(path, **kwargs)
+
+        recall = kwargs.get("onexc")  # the folder's own "could not remove" report
+        if recall is not None:
+            recall(os.unlink, path, OSError("busy"))
+        return None
+
+    with OverflowDir() as folder:
+        state = folder._folder
+        stream = SharedTextStream(unit="chars", head=4, tail=4, overflow=folder)
+        records: list[str] = []
+
+        class IntoTheStream(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                message = record.getMessage()
+                records.append(message)
+                if "could not remove" in message:  # the cleanup warning this test is about
+                    stream.write("[warning]")
+
+        logger = logging.getLogger("nooa.overflow._overflow")
+        handler = IntoTheStream()
+        logger.addHandler(handler)
+        monkeypatch.setattr(shutil, "rmtree", broken_rmtree)
+        try:
+            # The exit cleanup runs while a writer holds the folder's lock, so it
+            # asks that holder to remove the folder when it lets go (exit_pending).
+            state.lock.acquire()
+            exit_thread = threading.Thread(target=state.close_at_exit, daemon=True)
+            exit_thread.start()
+            exit_thread.join(timeout=30)
+            state.lock.release()
+            writer = threading.Thread(target=stream.write, args=("x" * 20,), daemon=True)
+            writer.start()
+            writer.join(timeout=5)
+            assert not writer.is_alive()  # was a deadlock
+        finally:
+            monkeypatch.setattr(shutil, "rmtree", real_rmtree)  # not the folder's own cleanup
+            logger.removeHandler(handler)
+        assert state.exit_pending  # the exit left the removal to this thread
+        assert not state.done  # the removal failed: the folder stays registered
+        assert any("could not remove" in message for message in records)
+        assert stream.snapshot().full is None  # the file was given up: memory only
 
 
 def test_many_threads_lose_nothing(tmp_path, monkeypatch) -> None:

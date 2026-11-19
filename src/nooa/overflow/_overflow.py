@@ -212,14 +212,18 @@ class _Folder:
         return os.getpid() == self.pid
 
     @contextlib.contextmanager
-    def locked(self) -> Iterator[None]:
-        """Hold the lock; on leaving, run a cleanup the exit asked for while it was held."""
+    def locked(self, warn: _Warn | None = None) -> Iterator[None]:
+        """Hold the lock; on leaving, run a cleanup the exit asked for while it was held.
+
+        ``warn``: as ``OverflowDir.open`` takes it, for the ``run()`` this may
+        start: a caller that holds a lock a logging handler could re-enter.
+        """
         with self.lock:
             try:
                 yield
             finally:
                 if self.exit_pending and not self.done:
-                    self.run()
+                    self.run(warn=warn)
 
     def remove(self, name: str, warn: _Warn | None = None) -> None:
         """Delete one file by name; when that fails (warned) it stays a closed file, counted and evictable."""
@@ -278,7 +282,7 @@ class _Folder:
         """The writer of ``name`` finished: delete it, or make it the newest closed file."""
         if not self.mine():
             return
-        with self.locked():
+        with self.locked(warn=warn):
             if self.closing or name not in self.files:
                 return  # the folder closed, or evicted it
             if delete:
@@ -287,8 +291,12 @@ class _Folder:
                 del self.files[name]
                 self.files[name] = True  # newest finished: evicted last
 
-    def run(self) -> None:
-        """Remove the whole private folder; on failure (logged) stay registered to retry. Under the lock."""
+    def run(self, warn: _Warn | None = None) -> None:
+        """Remove the whole private folder; on failure stay registered to retry. Under the lock.
+
+        ``warn``: as ``OverflowDir.open`` takes it: a failure warning goes to
+        this callable instead of being logged here.
+        """
         self.closing = True
         if self.done or not self.mine():
             return
@@ -298,9 +306,7 @@ class _Folder:
             nonlocal ok
             if not isinstance(exc, FileNotFoundError):
                 ok = False
-                _log.warning(
-                    "could not remove %r in overflow folder %r", path, self.path, exc_info=exc
-                )
+                _warn(warn, "could not remove %r in overflow folder %r", path, self.path, exc=exc)
 
         shutil.rmtree(self.path, onexc=failed)
         if not ok:
@@ -489,7 +495,7 @@ class OverflowDir:
             )
             return None
         cap = folder.file_bytes if max_bytes is None else min(max_bytes, folder.file_bytes)
-        with folder.locked():
+        with folder.locked(warn=warn):
             return None if folder.closing else folder.new_writer(cap, warn=warn)
 
     def close(self) -> None:
