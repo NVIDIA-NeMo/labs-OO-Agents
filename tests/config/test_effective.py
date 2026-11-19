@@ -9,7 +9,7 @@ import threading
 from typing import Any
 
 import pytest
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from nooa import Agent, CodeActStrategy, strategy
 from nooa.config import CaptureConfig, TruncationConfig, effective, merge_config
@@ -252,6 +252,30 @@ def test_an_invalid_merge_raises_and_a_valid_one_keeps_its_explicit_fields():
     # The result is the model_copy(): it can still be merged as an override.
     assert "capture" in merged.model_fields_set
     assert merge_config(TruncationConfig(), merged).capture.max_stdout == 2_000
+
+
+class _Aliased(BaseModel):
+    """A config with an aliased field, extra="forbid" and a computed field."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    size: int = Field(10, alias="sizeLimit")
+    enabled: bool = True
+
+    @computed_field
+    @property
+    def label(self) -> str:
+        return f"{self.size}:{self.enabled}"
+
+
+def test_the_merge_check_reads_an_aliased_model_the_way_validation_does():
+    # #580 review: the check re-validated model_dump(), which keys fields by
+    # name, so under extra="forbid" an aliased field was an unexpected key (and
+    # a computed field one too). A merge of such a model must stay valid.
+    merged = merge_config(_Aliased(sizeLimit=20), _Aliased(enabled=False))
+    assert (merged.size, merged.enabled) == (20, False)
+    assert merged.model_fields_set == {"size", "enabled"}
+    assert merged.label == "20:False"
 
 
 async def test_the_state_block_expression_ignores_a_method_level_override():

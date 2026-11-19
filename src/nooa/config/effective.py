@@ -84,8 +84,31 @@ def _merge[ConfigT: BaseModel](base: ConfigT, override: ConfigT) -> ConfigT:
     # raises here. The validated copy is only a check; the result stays the
     # model_copy() one, which keeps the explicit-field metadata
     # (model_fields_set) that merge_config() relies on.
-    type(base).model_validate(merged.model_dump())
+    type(base).model_validate(_validation_input(merged))
     return merged
+
+
+def _validation_input(model: BaseModel) -> dict[str, Any]:
+    """``model``'s values keyed the way validation reads them.
+
+    ``model_dump()`` is not valid validation input: it keys every field by its
+    *name*, while validation expects the field's alias unless the model sets
+    ``populate_by_name``, so with ``extra="forbid"`` the name is an unexpected
+    key; it also writes computed fields, which are output only. This walks
+    ``model_fields`` instead and keeps each value as it is (a nested model
+    stays a model), so re-validating runs this model's own validators -- the
+    cross-field rules -- and nothing else.
+    """
+    data: dict[str, Any] = {}
+    for name, field in type(model).model_fields.items():
+        alias = field.validation_alias
+        if not isinstance(alias, str):
+            # An ``AliasChoices`` accepts any of its string choices; an
+            # ``AliasPath`` reads a nested key, which cannot be written back as
+            # one flat input. Both fall back to the field name.
+            alias = next((c for c in getattr(alias, "choices", ()) if isinstance(c, str)), None)
+        data[alias or name] = getattr(model, name)
+    return data
 
 
 def default_config[ConfigT: BaseModel](config_type: type[ConfigT]) -> ConfigT:
