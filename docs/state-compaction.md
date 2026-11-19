@@ -30,7 +30,12 @@ model-visible stored events, bounded to the summary input budget, with the
 parent's effective client, without inheriting its prompt, tools, schema or
 cache key.
 At most one summary runs or waits for application.
-Cached-summary requests pass through agent middleware again; use `summary_fork_active()` to distinguish them, and preserve source history and the prefix when cache reuse is desired.
+The compactor trusts `event_ids`: middleware that removes event content from a
+request must update it, or the cached summary is written without those events
+and they are still archived. Cached-summary requests pass through agent
+middleware again; use `summary_fork_active()` to distinguish them. Middleware
+must not remove the source events from a summary request, and should keep its
+prefix when cache reuse is desired.
 
 A completed summary applies at the next `BeforeTurn` only if the source range's
 tags and event ids still match. Raw events remain accessible in storage.

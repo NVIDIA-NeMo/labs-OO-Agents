@@ -139,7 +139,8 @@ class LLMCallContext(BaseModel):
         context_view: Selected view for this invocation, or None for direct requests.
                       Informational; changing views requires a new assembly.
         event_ids: Ids of the events the view placed in ``messages``. Middleware
-                   that removes event content from ``messages`` updates it.
+                   that removes event content from ``messages`` updates it;
+                   compaction trusts it to decide what a summary covers.
         response: ``None`` on the way *in*; set to the ``LLMResponse`` by the
                   innermost handler on the way *out*.
     """

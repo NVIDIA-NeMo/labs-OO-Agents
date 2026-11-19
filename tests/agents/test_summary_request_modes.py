@@ -105,7 +105,8 @@ async def test_summary_request_mode_preserves_prefix_or_uses_state(mode):
 
     async def dispatch(request):
         if mode == "rewritten":
-            request.messages = [{"role": "user", "content": "filtered"}]
+            # Rewrites keep the source events, as event_ids still claims them.
+            request.messages = [{"role": "user", "content": "facts, rewritten"}]
         request.response = LLMResponse(content="parent", usage=LLMUsage(input_tokens=100))
         return request
 
