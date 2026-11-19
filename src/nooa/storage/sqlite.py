@@ -310,6 +310,8 @@ class SQLiteEventBackend:
             return LLMResponse.model_validate(raw, context={"archive": True})
         if event_type in _RENAMED_EVENT_TYPES:  # rows stored under an older class name
             event_type = raw["event_type"] = _RENAMED_EVENT_TYPES[event_type]
+        if event_type == "Summary":  # stored before summaries recorded provenance: unknown
+            raw.setdefault("source_call_ids", [])
         cls = self._registry.get(event_type)
         if cls is None:
             # Fall back to the global auto-registration registry

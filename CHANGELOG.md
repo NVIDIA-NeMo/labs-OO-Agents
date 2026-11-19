@@ -6,6 +6,10 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Events carry a typed `call_id` (it was `metadata["call_id"]`), and a
+  `Summary` requires `source_call_ids`. Stored sessions are not migrated:
+  older events keep their call id only in `metadata`, and older summaries
+  load with empty `source_call_ids`, so views that filter by call leave them out.
 - `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
   publishes a runtime event when a job finishes (the job's handle state and
   result say it ended).
