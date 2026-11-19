@@ -120,10 +120,10 @@ _LEGACY_TOOL_HINT: Annotated[str, hidden] = (
 _TOOL_HINT: Annotated[str, hidden] = (
     "Run commands with `sh = Shell()`: `r = await sh.run(cmd)` waits for the result; "
     '`self.jobs.launch(sh.run(cmd), name="build")` runs it in the background. Child agents '
-    "also go on `self.jobs`, documented in the python_cell_tools block. python_cell runs in Atom's own Python (your thinking "
-    "environment). The task's code, packages and tests live in the task environment: run them "
-    'through a Shell (e.g. sh.run("python3 script.py")); don\'t install task packages into '
-    "Atom's Python."
+    "also go on `self.jobs`, documented in the python_cell_tools block. python_cell runs in Atom's own Python. "
+    "Task packages that import in a cell are used in the cell, where objects stay live; run the task's "
+    "commands, tests and scripts through a Shell, and Python there only if a package won't import "
+    "in a cell. Don't install task packages into Atom's Python."
 )
 
 # What a cell error names, read from the exception or, on the sandbox path

@@ -25,9 +25,10 @@ UNIFIED = "nooa_atom.agent:AtomAgent"
 TIMEOUT = 60
 # The python_cell tool description reaches every role (root, child, benchmark/gym).
 ENVIRONMENT_LINE = (
-    "python_cell runs in Atom's own Python (your thinking environment). The task's code, "
-    "packages and tests live in the task environment: run them through a Shell (e.g. "
-    "sh.run(\"python3 script.py\")); don't install task packages into Atom's Python."
+    "python_cell runs in Atom's own Python. Task packages that import in a cell are used in "
+    "the cell, where objects stay live; run the task's commands, tests and scripts through a "
+    "Shell, and Python there only if a package won't import in a cell. Don't install task "
+    "packages into Atom's Python."
 )
 LIVE_NAMES_LINE = (
     "The python_cell_state block lists up to 20 of your live Python names and "
