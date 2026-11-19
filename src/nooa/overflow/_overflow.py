@@ -435,6 +435,10 @@ class OverflowDir:
     - ``max_files``: at most this many of its files exist at once.
     - ``file_bytes``: each file holds at most this many bytes, so the
       folder never holds more than ``max_files * file_bytes``.
+    - ``warn``: hand each warning raised while the folder is made -- the
+      removal of a folder created after the exit cleanup began -- to this
+      callable instead of logging it here, once no lock is held; as
+      ``open()`` takes it. ``None``: log here.
 
     ``open(max_bytes=None)`` creates a new file in the folder (exclusively,
     ``O_NOFOLLOW``, 0600) and returns its ``OverflowWriter``. It creates the
@@ -475,7 +479,11 @@ class OverflowDir:
     """
 
     def __init__(
-        self, *, max_files: int = DEFAULT_MAX_FILES, file_bytes: int = DEFAULT_FILE_BYTES
+        self,
+        *,
+        max_files: int = DEFAULT_MAX_FILES,
+        file_bytes: int = DEFAULT_FILE_BYTES,
+        warn: _Warn | None = None,
     ) -> None:
         if max_files < 0 or file_bytes < 0:
             raise ValueError("max_files and file_bytes must be non-negative")
@@ -485,7 +493,7 @@ class OverflowDir:
             if not exiting:
                 _live.add(folder)
         if exiting:  # made after the exit cleanup started: nothing would remove it
-            with folder.locked() as warnings:
+            with folder.locked(warn=warn) as warnings:
                 folder.run(warn=warnings)
         self._folder = folder
 
@@ -583,7 +591,9 @@ class OverflowDir:
                 if exiting:
                     return None
                 try:
-                    _default = cls()
+                    # warn=: the folder may be removed at once (the exit began); that
+                    # warning is emitted with the one below, after _default_lock is gone.
+                    _default = cls(warn=warnings)
                 except OSError:
                     if not _default_failed:
                         _default_failed = True
