@@ -45,6 +45,11 @@ cancels and awaits background work.
 
 Compacting history may not relieve prompt pressure caused by other context
 sources. A custom view also decides whether to include the resulting summary.
+One summary can span several calls; its `related_call_ids` holds all of them,
+so a view that filters with `call.id in event.related_call_ids` keeps it, along
+with what it says about the other calls. A view that needs strict per-call
+isolation leaves such summaries out or uses `MethodSummarizer`, whose summaries
+cover one call and the calls nested in it.
 
 The ordinary tests cover source selection, custom views, provider request bodies and lifecycle behavior. The opt-in
 `tests/integration/test_summarizer_live.py` exercises summary generation,
