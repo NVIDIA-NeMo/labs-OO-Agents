@@ -496,7 +496,7 @@ async def test_call_filtering_view_keeps_the_summary_of_its_history():
     from nooa import CacheBoundary, is_model_visible, replayable
     from nooa.events import Summary
 
-    class CallView:  # the quickstart 16 filter
+    class CallView:  # the quickstart 17 filter
         async def assemble(self, owner, call):
             yield Block(key="api", content="Use execute_python.")
             for event in replayable(

@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Quickstart 17: Decision models — calibrated classification without a chat LLM.
+"""Quickstart 16: Decision models — calibrated classification without a chat LLM.
 
-OPENROUTER_API_KEY=... uv run python examples/quickstart/17_decisions.py
+OPENROUTER_API_KEY=... uv run python examples/quickstart/16_decisions.py
 
 Set DECISION_ENDPOINT to use a System One-compatible decisions API, such as a
 gateway that adds credentials itself, and DECISION_MODEL to use a different model.
@@ -102,7 +102,7 @@ async def main() -> None:
     if not (os.getenv("OPENROUTER_API_KEY") or os.getenv("DECISION_ENDPOINT")):
         raise SystemExit(
             "This example needs a decisions endpoint. Run it as:\n"
-            "  OPENROUTER_API_KEY=... uv run python examples/quickstart/17_decisions.py\n"
+            "  OPENROUTER_API_KEY=... uv run python examples/quickstart/16_decisions.py\n"
             "or set DECISION_ENDPOINT (and DECISION_MODEL) for another "
             "System One-compatible decisions API."
         )

@@ -18,7 +18,7 @@ def example(monkeypatch):
     monkeypatch.delenv("DECISION_ENDPOINT", raising=False)
     monkeypatch.delenv("DECISION_MODEL", raising=False)
     monkeypatch.setattr("nooa.agent._try_auto_enable_tracing", lambda: None)
-    path = Path(__file__).resolve().parents[1] / "examples/quickstart/17_decisions.py"
+    path = Path(__file__).resolve().parents[1] / "examples/quickstart/16_decisions.py"
     spec = importlib.util.spec_from_file_location("quickstart_decisions_test", path)
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, module)
@@ -55,7 +55,7 @@ async def test_endpoint_configuration_and_setup_guidance(example, monkeypatch, e
         with pytest.raises(SystemExit) as raised:
             await example.main()
         message = str(raised.value)
-        assert "OPENROUTER_API_KEY=... uv run python examples/quickstart/17_decisions.py" in message
+        assert "OPENROUTER_API_KEY=... uv run python examples/quickstart/16_decisions.py" in message
         assert "DECISION_ENDPOINT" in message
         assert "DECISION_MODEL" in message
         assert "System One-compatible decisions API" in message

@@ -174,11 +174,11 @@ Calling a non-decision generation method on such an agent, or reading
 `agent.llm`, raises a `RuntimeError` that asks for `llm=...`. Without a decision
 model, an agent still requires a chat LLM.
 
-[`examples/quickstart/17_decisions.py`](../../examples/quickstart/17_decisions.py)
+[`examples/quickstart/16_decisions.py`](../../examples/quickstart/16_decisions.py)
 is a complete, runnable version with thresholded abstention and batching:
 
 ```bash
-OPENROUTER_API_KEY=... uv run python examples/quickstart/17_decisions.py
+OPENROUTER_API_KEY=... uv run python examples/quickstart/16_decisions.py
 ```
 
 ## Accept or abstain with a threshold

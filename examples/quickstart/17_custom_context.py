@@ -1,13 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Quickstart 16: Use an independent context API and assembly policy.
+"""Quickstart 17: Use an independent context API and assembly policy.
 
 Context views decide what an LLM sees on each turn, using NOOA's built-in
 context API or your own data structures. Here, the agent searches a private
 corpus, then its custom view includes the selected documents in the next
 turn so the agent can answer from them.
 
-uv run python examples/quickstart/16_custom_context.py
+uv run python examples/quickstart/17_custom_context.py
 """
 
 import re

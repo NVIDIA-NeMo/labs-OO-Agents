@@ -13,7 +13,7 @@ import nooa.agent as agent_module
 import nooa.runtime.method_wrapper as method_wrapper
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
 
-example = importlib.import_module("examples.quickstart.16_custom_context")
+example = importlib.import_module("examples.quickstart.17_custom_context")
 
 
 def _tool_response(name: str, arguments: dict[str, Any], call_id: str) -> LLMResponse:
