@@ -106,7 +106,7 @@ async def test_summary_request_mode_preserves_prefix_or_uses_state(mode):
     async def dispatch(request):
         if mode == "rewritten":
             # Rewrites keep the source events, as event_ids still claims them.
-            request.messages = [{"role": "user", "content": "facts, rewritten"}]
+            request.messages = [{"role": "user", "content": "fact 0\nfact 1 (rewritten)"}]
         request.response = LLMResponse(content="parent", usage=LLMUsage(input_tokens=100))
         return request
 
@@ -120,6 +120,8 @@ async def test_summary_request_mode_preserves_prefix_or_uses_state(mode):
             assert messages[:-1] == ctx.messages
             assert agent.llm.acall.call_args.kwargs == {**params, "output_model": None}
             assert len(ctx.messages) == (1 if mode == "rewritten" else 2)
+            if mode == "rewritten":
+                assert "fact 0" in str(messages) and "fact 1" in str(messages)
             summarizer.summarize.assert_not_awaited()
         else:
             agent.llm.acall.assert_not_awaited()
