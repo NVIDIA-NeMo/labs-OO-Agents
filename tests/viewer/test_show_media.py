@@ -163,6 +163,7 @@ def test_ui_spans_reference_media_by_hash_without_payload(client):
     assert img.headers["content-type"] == "image/png"
     assert img.headers["x-content-type-options"] == "nosniff"
     assert img.content == PNG
+    assert img.headers["cache-control"] == "no-store"
     pdf = client.get(attrs[f"{p}.1.message_content.media.url"])
     assert pdf.status_code == 200 and pdf.content == PDF
     assert pdf.headers["content-type"] == "application/pdf"
@@ -183,6 +184,7 @@ def test_unsafe_types_download_and_unknown_hash_404(client):
     assert r.headers["content-type"] == "application/octet-stream"
     assert r.headers["content-disposition"] == "attachment"
     assert "sandbox" in r.headers["content-security-policy"]
+    assert r.headers["cache-control"] == "no-store"
     assert client.get(otlp_store.media_ref_url(SID, "sha256:nope")).status_code == 404
     assert client.get(otlp_store.media_ref_url("other-session", hashes[0])).status_code == 404
 
@@ -197,3 +199,18 @@ def test_code_execution_output_lists_media_refs_without_payload():
     assert "base64" not in json.dumps(data["media"])
     no_media = SimpleNamespace(stdout="", stderr="", returned_value=None, images=[])
     assert "media" not in json.loads(OpenInferenceHooks._safe_serialize_execution_result(no_media))
+
+
+def test_code_execution_media_refs_beyond_cap_are_counted():
+    blocks = [
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{i:04d}AAAA"}}
+        for i in range(65)
+    ]
+    result = SimpleNamespace(stdout="", stderr="", returned_value=None, images=blocks)
+    data = json.loads(OpenInferenceHooks._safe_serialize_execution_result(result))
+    assert len(data["media"]) == 64
+    assert data["media"][-1]["hash"] == media_block_hash(blocks[63])
+    assert data["media_omitted"] == 1
+    at_cap = SimpleNamespace(stdout="", stderr="", returned_value=None, images=blocks[:64])
+    data = json.loads(OpenInferenceHooks._safe_serialize_execution_result(at_cap))
+    assert len(data["media"]) == 64 and "media_omitted" not in data

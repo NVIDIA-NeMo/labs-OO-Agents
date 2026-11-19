@@ -452,11 +452,10 @@ export function LLMCallPlugin({
             </summary>
             <div className="p-2">
               {contextMsgs.map((msg, i) => (
-                <MessageBox
-                  key={`ctx-${i}`}
-                  role={msg.role}
-                  content={msg.content!}
-                />
+                <div key={`ctx-${i}`}>
+                  <MessageBox role={msg.role} content={msg.content!} />
+                  {msg.media && <MediaGallery items={msg.media} />}
+                </div>
               ))}
             </div>
           </details>

@@ -18,6 +18,7 @@ interface ParsedResult {
   returnedValue: string | null;
   stdout: string | null;
   mediaRefs: unknown;
+  mediaOmitted: number;
 }
 
 // OI-first code extraction: new traces carry the executed code as
@@ -82,7 +83,14 @@ function parseResult(attrs: Record<string, unknown>): ParsedResult {
     }
   }
 
-  return { definedMethods, returnedValue, stdout, mediaRefs: obj?.media };
+  const omitted = obj?.media_omitted;
+  return {
+    definedMethods,
+    returnedValue,
+    stdout,
+    mediaRefs: obj?.media,
+    mediaOmitted: typeof omitted === "number" && omitted > 0 ? omitted : 0,
+  };
 }
 
 export function CodeExecutionPlugin({
@@ -100,7 +108,7 @@ export function CodeExecutionPlugin({
     ? new Date(event.timestamp).toLocaleTimeString()
     : "";
 
-  const { definedMethods, returnedValue, stdout, mediaRefs } =
+  const { definedMethods, returnedValue, stdout, mediaRefs, mediaOmitted } =
     parseResult(attrs);
   const sessionId = useTraceSessionId();
   const media = mediaFromRefs(mediaRefs, sessionId);
@@ -212,6 +220,12 @@ export function CodeExecutionPlugin({
       )}
 
       <MediaGallery items={media} />
+      {mediaOmitted > 0 && (
+        <div className="text-xs text-gray-500 mb-2">
+          {mediaOmitted} more media {mediaOmitted === 1 ? "item" : "items"} not
+          shown (trace cap)
+        </div>
+      )}
 
       {hasError && (
         <div className="p-3 bg-gray-900 rounded border-l-4 border-red-700 mb-2">

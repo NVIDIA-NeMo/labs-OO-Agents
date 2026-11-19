@@ -126,6 +126,7 @@ _ERROR_MESSAGE_LIMIT = 5_000
 _TRACE_MAX_DEPTH = 16  # prevent stack overflow on deeply nested objects
 _TRACE_MAX_LENGTH = 20  # keep trace attr serialization bounded on large containers
 _TRACE_MAX_STRING = 2_000  # avoid materializing multi-MB strings in trace attrs
+_TRACE_MAX_MEDIA_REFS = 64  # show() media refs per code-execution span; extras are counted
 
 
 def _error_message(exception: BaseException) -> str:
@@ -1102,9 +1103,12 @@ class OpenInferenceHooks:
             # span stays small and the viewer serves them from its store.
             from nooa.tracing._media_parts import media_summary
 
-            refs = [ref for ref in (media_summary(b) for b in images[:64]) if ref is not None]
+            kept = images[:_TRACE_MAX_MEDIA_REFS]
+            refs = [ref for ref in (media_summary(b) for b in kept) if ref is not None]
             if refs:
                 data["media"] = refs
+            if len(images) > len(kept):
+                data["media_omitted"] = len(images) - len(kept)
         return json.dumps(data)
 
     @staticmethod

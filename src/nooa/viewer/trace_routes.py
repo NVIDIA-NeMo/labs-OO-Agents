@@ -421,8 +421,8 @@ def get_trace_media(session_id: str, hash: str) -> Response:
     """Serve one ``show()`` media block of a session as raw bytes.
 
     LLM spans reference media by block hash (``media_ref_url``) rather than
-    inlining data URLs, so ``/api/trace`` stays small. Blocks are content
-    addressed, so responses are immutable and cacheable.
+    inlining data URLs, so ``/api/trace`` stays small. Responses are sent
+    ``Cache-Control: no-store`` because the media may be auth-protected.
     """
     from nooa.tracing._media_parts import describe_media_block, media_bytes
 
@@ -440,7 +440,8 @@ def get_trace_media(session_id: str, hash: str) -> Response:
     mime = desc.get("mime_type") or ""
     headers = {
         "X-Content-Type-Options": "nosniff",
-        "Cache-Control": "private, max-age=31536000, immutable",
+        # Media may be behind viewer auth: never let a browser or proxy keep it.
+        "Cache-Control": "no-store",
     }
     if mime not in _INLINE_MEDIA_TYPES:
         mime = "application/octet-stream"
