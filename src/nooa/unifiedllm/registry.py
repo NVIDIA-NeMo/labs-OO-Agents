@@ -70,6 +70,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 # Aliases already warned about a missing media_inputs setting (warn once each).
 _warned_text_only: set[str] = set()
+_warned_effort: set[str] = set()
 # Aliases already warned that an override dropped their route settings.
 _warned_route_override: set[str] = set()
 
@@ -426,6 +427,35 @@ def get_decision_model(name: str, **overrides) -> UnifiedDecisionModel:
     return cast("UnifiedDecisionModel", client)
 
 
+def _warn_unsupported_effort(
+    name: str, config: Mapping[str, Any], params: Mapping[str, Any]
+) -> None:
+    """Warn once per alias when its raw reasoning effort is not one the entry declares.
+
+    Uses only what the entry already holds (``reasoning_levels``, written by
+    ``nooa connect`` from the endpoint or OpenRouter catalogue metadata); no
+    metadata is fetched here.
+    """
+    if name in _warned_effort or not isinstance(config.get("reasoning_levels"), Mapping):
+        return
+    from nooa.unifiedllm.reasoning import (
+        declared_efforts,
+        requested_effort,
+        unsupported_effort_warning,
+    )
+
+    source = ((config.get("provenance") or {}).get("reasoning_levels") or {}).get("source")
+    warning = unsupported_effort_warning(
+        requested_effort(params),
+        declared_efforts(config["reasoning_levels"]),
+        default=config.get("reasoning_default"),
+        source=f"its reasoning_levels (from the {source})" if source else "its reasoning_levels",
+    )
+    if warning:
+        _warned_effort.add(name)
+        logger.warning("Model %r: %s", name, warning)
+
+
 def client_from_config(
     name: str, config: dict[str, Any], *, client_type: str | None = None, **overrides
 ) -> UnifiedLLM | UnifiedDecisionModel:
@@ -674,6 +704,7 @@ def client_from_config(
         )
 
     params.update(overrides)
+    _warn_unsupported_effort(name, config, params)
     if config and "media_inputs" not in params and name not in _warned_text_only:
         _warned_text_only.add(name)
         logger.warning(

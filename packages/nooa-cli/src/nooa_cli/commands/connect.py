@@ -182,7 +182,8 @@ class ConnectCommand(click.Command):
     default=None,
     help=(
         "Effort/label probed when interfaces are also checked for reasoning. "
-        "Defaults to the first --levels entry, or 'medium'."
+        "Defaults to the first --levels entry, or 'medium'. With --stage model-info, "
+        "the effort you plan to configure: a warning says if the metadata does not list it."
     ),
 )
 @click.option(
@@ -418,7 +419,8 @@ def command(
                         "--provider": provider,
                         "--catalogue-model": catalogue_model and not catalogue_file,
                         "--reasoning-template": reasoning_template and stage != "interfaces",
-                        "--reasoning-level": reasoning_level and stage != "interfaces",
+                        "--reasoning-level": reasoning_level
+                        and stage not in {"interfaces", "model-info"},
                         "--levels": levels,
                         "--show-config": show_config,
                         "--edit-model": edit_model is not None,
