@@ -20,8 +20,11 @@ import os
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 log = logging.getLogger(__name__)
 
@@ -1239,10 +1242,82 @@ def _flatten_msg_to_attrs(msg: dict[str, Any], prefix: str) -> list[dict[str, An
     return attrs
 
 
+def _media_content_attrs(
+    image_hashes: list[Any],
+    blocks: dict[str, str],
+    prefix: str,
+    media_url: Callable[[str], str] | None,
+) -> list[dict[str, Any]]:
+    """Flatten a message's ``show()`` media to OpenInference ``contents`` attrs.
+
+    One ``{prefix}.contents.{k}.message_content.*`` group per block that is a
+    known media block: ``type`` (image/audio/video/file), ``media.hash``,
+    ``media.mime_type``, optional ``media.filename``, and the URL as
+    ``image.image.url`` (images, the OpenInference key) or ``media.url``.
+
+    With *media_url* (the UI path) inline payloads become a reference URL
+    built from the block hash, so span listings stay small and the browser
+    fetches each blob from the media endpoint. Without it (the export path)
+    the original data URL is inlined so a download round-trips.
+    """
+    from nooa.tracing._media_parts import describe_media_block, media_data_url
+
+    def _str(key: str, val: str) -> dict[str, Any]:
+        return {"key": key, "value": {"stringValue": val}}
+
+    out: list[dict[str, Any]] = []
+    k = 0
+    for h in image_hashes:
+        if not isinstance(h, str) or h not in blocks:
+            continue
+        desc = describe_media_block(_resolve_image(blocks[h]))
+        if desc is None:
+            continue
+        if "url" in desc or media_url is None:
+            url = media_data_url(desc)
+        else:
+            url = media_url(h)
+        if not url:
+            continue
+        cp = f"{prefix}.contents.{k}.message_content"
+        out.append(_str(f"{cp}.type", desc["kind"]))
+        out.append(_str(f"{cp}.media.hash", h))
+        out.append(_str(f"{cp}.media.mime_type", desc.get("mime_type", "")))
+        if desc.get("filename"):
+            out.append(_str(f"{cp}.media.filename", desc["filename"]))
+        if desc["kind"] == "image":
+            out.append(_str(f"{cp}.image.image.url", url))
+        else:
+            out.append(_str(f"{cp}.media.url", url))
+        k += 1
+    return out
+
+
+def media_ref_url(session_id: str, block_hash: str) -> str:
+    """Viewer URL that serves one stored media block (see ``/api/trace/media``)."""
+    return "/api/trace/media?" + urlencode({"session_id": session_id, "hash": block_hash})
+
+
+def get_media_block(session_id: str, block_hash: str) -> str | None:
+    """Return one stored journal block, or None if this session has no such block."""
+    db = _get_db()
+    try:
+        row = db.execute(
+            "SELECT content FROM msg_blocks WHERE session_id = ? AND hash = ?",
+            (session_id, block_hash),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc).lower():
+            return None
+        raise
+    return row["content"] if row else None
+
+
 def _augment_span_attrs(
     attrs: list[dict[str, Any]],
     call: dict[str, Any],
     blocks: dict[str, str] | None = None,
+    media_url: Callable[[str], str] | None = None,
 ) -> list[dict[str, Any]]:
     """Augment LLM message attrs with journal-reconstructed content.
 
@@ -1257,6 +1332,10 @@ def _augment_span_attrs(
     the no-sideband fallback path) the original ``llm.input_messages.N.*``
     attrs at indices the journal didn't cover are preserved -- a
     truncated journal must not erase content the span already had.
+
+    ``show()`` media (``image_hashes``) become ``message.contents.*`` attrs;
+    *media_url* maps a block hash to a reference URL (see
+    :func:`_media_content_attrs`).
     """
     blocks = blocks or {}
     call_id = call.get("call_id", "<unknown>")
@@ -1275,7 +1354,11 @@ def _augment_span_attrs(
                 )
                 continue
             resolved = _resolve_message(msg, blocks)
-            out.extend(_flatten_msg_to_attrs(resolved, f"{prefix}.{idx}.message"))
+            msg_prefix = f"{prefix}.{idx}.message"
+            out.extend(_flatten_msg_to_attrs(resolved, msg_prefix))
+            image_hashes = msg.get("image_hashes")
+            if isinstance(image_hashes, list) and image_hashes:
+                out.extend(_media_content_attrs(image_hashes, blocks, msg_prefix, media_url))
             covered.add(idx)
             idx += 1
         return out, covered
@@ -1310,7 +1393,7 @@ def _augment_span_attrs(
     return kept + in_attrs + out_attrs
 
 
-def reconstruct_full_spans(session_id: str) -> list[dict[str, Any]]:
+def reconstruct_full_spans(session_id: str, *, inline_media: bool = True) -> list[dict[str, Any]]:
     """Return OTLP spans for *session_id* with journal-reconstructed messages.
 
     The single read-side helper that resolves the journal sideband
@@ -1322,6 +1405,10 @@ def reconstruct_full_spans(session_id: str) -> list[dict[str, Any]]:
     ``export_session_otlp`` (download path) so they always agree on what
     a session "is" -- the on-the-wire compression of the journal protocol
     is a strictly internal concern.
+
+    ``inline_media=False`` (the UI path) replaces inline ``show()`` media
+    payloads with :func:`media_ref_url` references; the default inlines the
+    original data URLs (export).
     """
     db = _get_db()
     exists = db.execute("SELECT 1 FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
@@ -1354,7 +1441,12 @@ def reconstruct_full_spans(session_id: str) -> list[dict[str, Any]]:
             for a in attrs
         )
         if is_llm:
-            span["attributes"] = _augment_span_attrs(attrs, journal_by_span[span_id], blocks)
+            span["attributes"] = _augment_span_attrs(
+                attrs,
+                journal_by_span[span_id],
+                blocks,
+                media_url=None if inline_media else partial(media_ref_url, session_id),
+            )
 
     return spans
 
@@ -1427,7 +1519,7 @@ def get_session_spans(session_id: str, augment: bool = True) -> list[dict[str, A
             spans.append(span)
         return spans
 
-    return reconstruct_full_spans(session_id)
+    return reconstruct_full_spans(session_id, inline_media=False)
 
 
 def export_session_otlp(session_id: str) -> list[dict[str, Any]]:

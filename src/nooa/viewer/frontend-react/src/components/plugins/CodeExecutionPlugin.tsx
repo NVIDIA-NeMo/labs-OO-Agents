@@ -1,8 +1,13 @@
-import type { PluginProps } from './registry';
-import { CodeBox } from '@/components/shared/CodeBox';
+import type { PluginProps } from "./registry";
+import { CodeBox } from "@/components/shared/CodeBox";
+import {
+  MediaGallery,
+  mediaFromRefs,
+  useTraceSessionId,
+} from "@/components/shared/MediaGallery";
 
 function formatDuration(ns: number): string {
-  if (ns <= 0) return '';
+  if (ns <= 0) return "";
   const ms = ns / 1e6;
   if (ms < 1000) return `${ms.toFixed(0)}ms`;
   return `${(ms / 1000).toFixed(2)}s`;
@@ -12,37 +17,46 @@ interface ParsedResult {
   definedMethods: string[];
   returnedValue: string | null;
   stdout: string | null;
+  mediaRefs: unknown;
+  mediaOmitted: number;
 }
 
 // OI-first code extraction: new traces carry the executed code as
 // input.value = {"code": "..."} (application/json); old traces carry a flat `code`.
 function getExecCode(attrs: Record<string, unknown>): string {
-  const iv = attrs['input.value'];
-  if (typeof iv === 'string') {
+  const iv = attrs["input.value"];
+  if (typeof iv === "string") {
     try {
       const o = JSON.parse(iv) as { code?: unknown };
-      if (typeof o?.code === 'string') return o.code;
+      if (typeof o?.code === "string") return o.code;
     } catch {
       // not JSON
     }
-  } else if (iv && typeof iv === 'object' && typeof (iv as { code?: unknown }).code === 'string') {
+  } else if (
+    iv &&
+    typeof iv === "object" &&
+    typeof (iv as { code?: unknown }).code === "string"
+  ) {
     return (iv as { code: string }).code;
   }
-  return (attrs.code as string) || (attrs['code_execution.code'] as string) || '';
+  return (
+    (attrs.code as string) || (attrs["code_execution.code"] as string) || ""
+  );
 }
 
 function parseResult(attrs: Record<string, unknown>): ParsedResult {
   // OI-first: output.value; fall back to native result attrs.
-  const raw = attrs['output.value'] ?? attrs.result ?? attrs['code_execution.result'];
+  const raw =
+    attrs["output.value"] ?? attrs.result ?? attrs["code_execution.result"];
   let obj: Record<string, unknown> | null = null;
 
-  if (typeof raw === 'string') {
+  if (typeof raw === "string") {
     try {
       obj = JSON.parse(raw);
     } catch {
       // not JSON
     }
-  } else if (typeof raw === 'object' && raw !== null) {
+  } else if (typeof raw === "object" && raw !== null) {
     obj = raw as Record<string, unknown>;
   }
 
@@ -51,39 +65,57 @@ function parseResult(attrs: Record<string, unknown>): ParsedResult {
   let stdout: string | null = null;
 
   if (obj) {
-    if (obj.defined_methods && typeof obj.defined_methods === 'object') {
+    if (obj.defined_methods && typeof obj.defined_methods === "object") {
       definedMethods.push(...Object.keys(obj.defined_methods as object));
     }
     if (
       obj.returned_value !== undefined &&
       obj.returned_value !== null &&
-      obj.returned_value !== ''
+      obj.returned_value !== ""
     ) {
       returnedValue =
-        typeof obj.returned_value === 'string'
+        typeof obj.returned_value === "string"
           ? obj.returned_value
           : JSON.stringify(obj.returned_value, null, 2);
     }
-    if (obj.stdout && typeof obj.stdout === 'string' && obj.stdout.trim()) {
+    if (obj.stdout && typeof obj.stdout === "string" && obj.stdout.trim()) {
       stdout = obj.stdout;
     }
   }
 
-  return { definedMethods, returnedValue, stdout };
+  const omitted = obj?.media_omitted;
+  return {
+    definedMethods,
+    returnedValue,
+    stdout,
+    mediaRefs: obj?.media,
+    mediaOmitted: typeof omitted === "number" && omitted > 0 ? omitted : 0,
+  };
 }
 
-export function CodeExecutionPlugin({ event, viewState, rawJsonOpen, viewControls }: PluginProps) {
+export function CodeExecutionPlugin({
+  event,
+  viewState,
+  rawJsonOpen,
+  viewControls,
+}: PluginProps) {
   const attrs = event.attributes || {};
   const code = getExecCode(attrs);
   const durationNs = (attrs.duration_ns as number) || 0;
-  const statusCode = (attrs.status_code as string) || 'UNSET';
-  const hasError = !!attrs.error || statusCode === 'ERROR';
-  const timestamp = event.timestamp ? new Date(event.timestamp).toLocaleTimeString() : '';
+  const statusCode = (attrs.status_code as string) || "UNSET";
+  const hasError = !!attrs.error || statusCode === "ERROR";
+  const timestamp = event.timestamp
+    ? new Date(event.timestamp).toLocaleTimeString()
+    : "";
 
-  const { definedMethods, returnedValue, stdout } = parseResult(attrs);
-  const methodsList = definedMethods.length > 0 ? definedMethods.join(', ') : 'none';
+  const { definedMethods, returnedValue, stdout, mediaRefs, mediaOmitted } =
+    parseResult(attrs);
+  const sessionId = useTraceSessionId();
+  const media = mediaFromRefs(mediaRefs, sessionId);
+  const methodsList =
+    definedMethods.length > 0 ? definedMethods.join(", ") : "none";
 
-  if (viewState === 'collapsed') {
+  if (viewState === "collapsed") {
     return (
       <div className="flex items-center justify-between text-sm">
         <div className="flex-1 min-w-0 text-gray-300 font-mono truncate">
@@ -92,7 +124,9 @@ export function CodeExecutionPlugin({ event, viewState, rawJsonOpen, viewControl
           </span>
           Defined: {methodsList}
           {durationNs > 0 && (
-            <span className="text-gray-500 ml-2">({formatDuration(durationNs)})</span>
+            <span className="text-gray-500 ml-2">
+              ({formatDuration(durationNs)})
+            </span>
           )}
           {hasError && <span className="text-red-400 ml-1">ERROR</span>}
         </div>
@@ -117,7 +151,7 @@ export function CodeExecutionPlugin({ event, viewState, rawJsonOpen, viewControl
     </div>
   );
 
-  const isExpanded = viewState === 'expanded';
+  const isExpanded = viewState === "expanded";
 
   return (
     <div>
@@ -154,7 +188,7 @@ export function CodeExecutionPlugin({ event, viewState, rawJsonOpen, viewControl
             <CodeBox
               code={code}
               language="python"
-              maxHeight={isExpanded ? 'none' : '300px'}
+              maxHeight={isExpanded ? "none" : "300px"}
             />
           </div>
         </>
@@ -185,11 +219,21 @@ export function CodeExecutionPlugin({ event, viewState, rawJsonOpen, viewControl
         </div>
       )}
 
+      <MediaGallery items={media} />
+      {mediaOmitted > 0 && (
+        <div className="text-xs text-gray-500 mb-2">
+          {mediaOmitted} more media {mediaOmitted === 1 ? "item" : "items"} not
+          shown (trace cap)
+        </div>
+      )}
+
       {hasError && (
         <div className="p-3 bg-gray-900 rounded border-l-4 border-red-700 mb-2">
           <div className="text-xs text-gray-500 mb-1">Error</div>
           <pre className="text-sm text-red-300 whitespace-pre-wrap break-words font-mono">
-            {(attrs.error as string) || (attrs.status_description as string) || 'Unknown error'}
+            {(attrs.error as string) ||
+              (attrs.status_description as string) ||
+              "Unknown error"}
           </pre>
         </div>
       )}

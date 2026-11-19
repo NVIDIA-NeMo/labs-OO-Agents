@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 import yaml
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
 from nooa.unifiedllm.registry import resolve_api_key_from_config
@@ -390,6 +390,66 @@ def get_trace(session_id: str, limit: int | None = None, offset: int = 0) -> dic
         raise  # Mapped to client-safe 409/502 responses by the application handlers.
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error loading session: {str(e)}") from e
+
+
+# MIME types the media endpoint serves inline. Everything else (SVG, HTML,
+# unknown) is served as an octet-stream download so an agent-produced blob can
+# never run script in the viewer's origin.
+_INLINE_MEDIA_TYPES = frozenset(
+    {
+        "image/png",
+        "image/jpeg",
+        "image/gif",
+        "image/webp",
+        "application/pdf",
+        "audio/wav",
+        "audio/x-wav",
+        "audio/mpeg",
+        "audio/mp4",
+        "audio/ogg",
+        "audio/webm",
+        "audio/flac",
+        "video/mp4",
+        "video/webm",
+        "video/ogg",
+    }
+)
+
+
+@router.get("/api/trace/media")
+def get_trace_media(session_id: str, hash: str) -> Response:
+    """Serve one ``show()`` media block of a session as raw bytes.
+
+    LLM spans reference media by block hash (``media_ref_url``) rather than
+    inlining data URLs, so ``/api/trace`` stays small. Responses are sent
+    ``Cache-Control: no-store`` because the media may be auth-protected.
+    """
+    from nooa.tracing._media_parts import describe_media_block, media_bytes
+
+    try:
+        sources.ensure_session(session_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=f"Session not found: {session_id}") from e
+    raw = otlp_store.get_media_block(session_id, hash)
+    if raw is None:
+        raise HTTPException(status_code=404, detail="Media block not found in this session")
+    desc = describe_media_block(otlp_store._resolve_image(raw))
+    data = media_bytes(desc) if desc is not None else None
+    if desc is None or data is None:
+        raise HTTPException(status_code=404, detail="Block is not inline media")
+    mime = desc.get("mime_type") or ""
+    headers = {
+        "X-Content-Type-Options": "nosniff",
+        # Media may be behind viewer auth: never let a browser or proxy keep it.
+        "Cache-Control": "no-store",
+    }
+    if mime not in _INLINE_MEDIA_TYPES:
+        mime = "application/octet-stream"
+        headers["Content-Disposition"] = "attachment"
+    if mime != "application/pdf":
+        # The browser's PDF viewer does not run under a sandbox CSP.
+        headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+    return Response(content=data, media_type=mime, headers=headers)
 
 
 @router.get("/api/trace/export")
