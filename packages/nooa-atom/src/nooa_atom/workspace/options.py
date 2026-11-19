@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from nooa.interactive import DEFAULT_MODEL, SummarizationConfig
+from nooa_atom.skills.reflection import ReflectionConfig
 from nooa_atom.workspace.settings import load_skills_dirs
 
 
@@ -33,6 +34,7 @@ class AtomOptions(BaseModel):
     mcp_file: Path = Path(".mcp.json")
     mcp_servers: dict[str, dict[str, Any]] = Field(default_factory=dict)
     mcp_auto_connect: list[str] = Field(default_factory=list)
+    reflection: ReflectionConfig = Field(default_factory=ReflectionConfig)
 
     @classmethod
     def load(cls, workspace: str | Path, **overrides: Any) -> AtomOptions:

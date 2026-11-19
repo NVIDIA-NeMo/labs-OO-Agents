@@ -47,14 +47,15 @@ def test_agent_instructions_follow_repository_hierarchy(tmp_path):
     )
 
 
-async def test_atom_agent_uses_observed_shell_and_instruction_context(tmp_path):
+async def test_atom_agent_has_no_shell_skill_and_reads_instruction_context(tmp_path):
     (tmp_path / ".git").mkdir()
     (tmp_path / "AGENTS.md").write_text("run the focused tests")
     agent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
     try:
-        assert agent.shell.session is agent._base_shell.session
+        assert agent.repo.session is agent._workspace_shell.session
         assert "run the focused tests" in agent._repository_instructions()
-        assert "nemo.shell" in agent.skills.activated()
+        assert not hasattr(agent, "shell")
+        assert "nemo.shell" not in agent.skills.loaded()
         assert "nemo.repo" in agent.skills.activated()
     finally:
         await agent.aclose()
@@ -99,7 +100,7 @@ async def test_repository_instructions_stay_with_the_startup_folder(tmp_path):
         (folder / "AGENTS.md").write_text(rule)
     agent = AtomAgent(llm=FakeLLMClient(), cwd=start)
     try:
-        await agent.shell.run(f"cd {other}")
+        await agent._workspace_shell.run(f"cd {other}")
         text = agent._repository_instructions()
         assert "start rule" in text and "other rule" not in text
     finally:
@@ -309,7 +310,7 @@ async def test_atom_agent_owns_bounded_application_state_context(tmp_path):
     agent = AtomAgentBase(cwd=tmp_path, llm=FakeLLMClient())
     try:
         agent.vars["token"] = "private-value"
-        agent.shell.cwd = "</workspace_state>\n" + "x" * 500
+        agent._workspace_shell.cwd = "</workspace_state>\n" + "x" * 500
         rendered = agent._workspace_state_context()
         assert "1 persistent vars" in rendered
         assert "print(dict(self.vars))" in rendered
@@ -343,13 +344,13 @@ async def test_a_directly_assigned_protected_attribute_is_still_protected(tmp_pa
         assert agent.skills is registry
 
         # A skill-owned protected attr stays protected too.
-        shell = agent.shell
-        with pytest.raises(ValueError, match="shell"):
-            agent.skills.register("mcp.shell", _Evil())
-        assert agent.shell is shell
+        repo = agent.repo
+        with pytest.raises(ValueError, match="repo"):
+            agent.skills.register("mcp.repo", _Evil())
+        assert agent.repo is repo
 
         # Re-binding the same object under its owning name is still allowed.
-        agent.skills.register("nemo.shell", shell)
+        agent.skills.register("nemo.repo", repo)
     finally:
         await agent.aclose()
 
@@ -451,16 +452,16 @@ def test_the_class_prompt_names_every_input_channel():
     assert "SessionInfo" not in (AtomAgentBase.get_summarization_status.__doc__ or "")
 
 
-async def test_cd_moves_the_repo_tools_with_the_shell(tmp_path):
+async def test_cd_moves_the_repo_tools_with_their_session(tmp_path):
     sub = tmp_path / "sub"
     sub.mkdir()
     (sub / "x.py").write_text("def only_in_sub():\n    pass\n")
     agent = AtomAgentBase(llm=FakeLLMClient(), cwd=tmp_path)
     try:
         # typeshed's functools.wraps result does not bind self on a method.
-        await agent.shell.run("cd sub")  # pyright: ignore[reportCallIssue]
-        assert agent.shell.cwd == sub.resolve()
-        assert agent.repo.cwd == agent.shell.cwd
+        await agent._workspace_shell.run("cd sub")  # pyright: ignore[reportCallIssue]
+        assert agent._workspace_shell.cwd == sub.resolve()
+        assert agent.repo.cwd == agent._workspace_shell.cwd
         assert agent.repo.root == tmp_path.resolve()
         result = await agent.repo.symbols("x.py")
         assert result.diagnostic is None
@@ -480,7 +481,7 @@ async def test_the_state_block_shows_the_shell_directory_and_the_repo_root(tmp_p
     agent = AtomAgentBase(llm=FakeLLMClient(), cwd=repo)
     try:
         # typeshed's functools.wraps result does not bind self on a method.
-        await agent.shell.run("cd pkg")  # pyright: ignore[reportCallIssue]
+        await agent._workspace_shell.run("cd pkg")  # pyright: ignore[reportCallIssue]
         rendered = agent._workspace_state_context()
         assert str((repo / "pkg").resolve()) in rendered
         assert f"Repository root (the boundary for repo searches): {repo.resolve()}" in rendered
@@ -513,7 +514,7 @@ async def test_repo_tools_take_a_cwd_for_one_call(tmp_path):
         assert "sub/x.py" in str(relative)  # still shown relative to the root
         absolute = await agent.repo.symbols("x.py", cwd=str(sub))
         assert "only_in_sub" in str(absolute)
-        assert agent.shell.cwd == tmp_path.resolve()  # the shell did not move
+        assert agent._workspace_shell.cwd == tmp_path.resolve()  # the session did not move
         assert agent.repo.cwd == tmp_path.resolve()
         missing = await agent.repo.symbols("x.py")
         assert missing.diagnostic is not None
@@ -546,15 +547,14 @@ async def test_replace_contract_survives_the_default_concise_tool_context(tmp_pa
     # Construct only: strict exhaustion forbids even an accidental fake model call.
     agent = AtomAgentBase(llm=FakeLLMClient(strict_exhaustion=True), cwd=tmp_path)
     try:
-        tools = doc(RepoTools, ActivityShellTools, TodoManager, JobsApi, concise=True)
+        tools = doc(RepoTools, TodoManager, JobsApi, concise=True)
         assert "async def run(self, cmd: str, *, name: str" in tools
         assert str(agent.context["python_cell_tools"]) == tools
-        for rendered in (tools, doc(ActivityShellTools, concise=True)):
-            assert (
-                "replace(self, target: Any, old_or_new: str = '', new: str | None = None)"
-                in rendered
-            )
-            assert "Anchors are never relocated" not in rendered
+        rendered = doc(ActivityShellTools, concise=True)
+        assert (
+            "replace(self, target: Any, old_or_new: str = '', new: str | None = None)" in rendered
+        )
+        assert "Anchors are never relocated" not in rendered
         # The shell tools keep replace(); replace_match is only the Files API that
         # RepoTools points at.
         assert "replace_match" not in str(doc(ActivityShellTools, concise=True))

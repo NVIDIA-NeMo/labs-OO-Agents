@@ -793,8 +793,9 @@ def test_public_atom_agent_hides_the_base_surface():
     from nooa.agentdoc import doc
 
     base = doc(AtomAgentBase, concise=True)
-    for name in ("shell:", "delegate(", "spawn(", "jobs: JobsApi"):
+    for name in ("delegate(", "spawn(", "jobs: JobsApi"):
         assert name in base, name
+    assert "shell:" not in base
     public = doc(AtomAgent, concise=True)
     for name in ("delegate(", "spawn(", "jobs: JobsApi"):
         assert name not in public, name

@@ -65,12 +65,10 @@ async def test_waiting_on_a_finished_job_with_its_result_buffered_is_accepted(ag
         _check(agent, "quick")
 
 
-async def test_jobs_use_the_agent_shell_directory_and_exports(agent, tmp_path):
-    (tmp_path / "pkg").mkdir()
-    await agent.shell.run("cd pkg; export ATOM_JOBS_VAR=1")
-    await agent.jobs.run('pwd; echo "$ATOM_JOBS_VAR"', name="where")
+async def test_jobs_start_in_the_agent_workspace(agent, tmp_path):
+    await agent.jobs.run("pwd", name="where")
     item = await asyncio.wait_for(agent.queue_manager.get_channel("jobs").get(), TIMEOUT)
-    assert item.stdout.splitlines() == [str(tmp_path / "pkg"), "1"]
+    assert item.stdout.splitlines() == [str(tmp_path.resolve())]
 
 
 async def test_a_resumed_session_reports_jobs_that_did_not_survive(tmp_path, sessions_dir):

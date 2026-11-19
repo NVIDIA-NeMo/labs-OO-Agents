@@ -686,17 +686,44 @@ class EventManager:
         for tag in tags_to_collapse:
             source_call_ids.update(self[tag].related_call_ids)
 
-        # Archive the events and remove from active list
-        for tag in tags_to_collapse:
-            self._backend.set_status(tag, EventStatus.ARCHIVED)
-            self._backend.remove_active_tag(tag)
-
         # Calculate the full range for the new summary (flatten nested summaries)
         actual_start = min(self._parse_tag_start(t) for t in tags_to_collapse)
         actual_end = max(self._parse_tag_end(t) for t in tags_to_collapse)
 
         # Create the summary tag (flattened range)
         summary_tag = f"{actual_start}..{actual_end}"
+
+        # A range that only one existing summary covers flattens to that summary's own tag.
+        # Archiving it and storing a new Summary under the same tag would put two events under one
+        # tag; the SQLite backend rejects the second (IntegrityError on events.tag) after the first
+        # is already archived, so the summary vanished from history. Decide before changing
+        # anything: the summary's exact range rewrites its text in place; a range strictly inside it
+        # is an error that leaves history unchanged.
+        if tags_to_collapse == [summary_tag]:
+            existing = self._backend.get(summary_tag)
+            if (start_num, end_num) != (actual_start, actual_end):
+                raise ValueError(
+                    f"Events '{start_tag}'..'{end_tag}' are already collapsed into "
+                    f"summary '{summary_tag}'. To rewrite its text, "
+                    f"collapse('{actual_start}', '{actual_end}', summary_text=...)."
+                )
+            if (
+                summary_text is not None
+                and isinstance(existing, Summary)
+                and summary_text != existing.summary_text
+            ):
+                self._backend.update(summary_tag, summary_text=summary_text)
+            return summary_tag
+        if self._backend.get(summary_tag) is not None:
+            raise ValueError(
+                f"Cannot collapse '{start_tag}'..'{end_tag}': "
+                f"summary tag '{summary_tag}' already exists"
+            )
+
+        # Archive the events and remove from active list
+        for tag in tags_to_collapse:
+            self._backend.set_status(tag, EventStatus.ARCHIVED)
+            self._backend.remove_active_tag(tag)
 
         # Find insertion point (where first collapsed tag was)
         first_collapsed_start = self._parse_tag_start(tags_to_collapse[0])

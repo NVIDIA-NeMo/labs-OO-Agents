@@ -237,6 +237,19 @@ class TestActivation:
         assert "nemo.b" in registry.activated()
         assert "super.c" not in registry.activated()
 
+    def test_activate_a_mapping_registers_and_activates_exactly_those(self, registry, agent):
+        registry.register("nemo.other", FakeSkill())
+        a, b = FakeSkill(), FakeSkill()
+        registry.activate({"nemo.a": a, "nemo.b": b})
+        assert agent.a is a and agent.b is b
+        assert registry.activated() == ["nemo.a", "nemo.b"]
+        assert "nemo.other" in registry.loaded()
+
+    def test_activate_a_mapping_takes_names_literally(self, registry):
+        registry.register("nemo.ab", FakeSkill())
+        registry.activate({"nemo.[ab]": FakeSkill()})
+        assert registry.activated() == ["nemo.[ab]"]
+
     def test_activate_auto_loads(self, agent):
         ep = MagicMock()
         ep.name = "nemo.auto"

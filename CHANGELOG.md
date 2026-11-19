@@ -38,6 +38,32 @@ to follow semantic versioning.
   `Summary` requires `source_call_ids`. Stored sessions are not migrated:
   older events keep their call id only in `metadata`, and older summaries
   load with empty `source_call_ids`, so views that filter by call leave them out.
+- `SandboxConfig.env_allowlist` keeps only the listed environment variables in
+  the sandbox worker. The worker is a fork, so it inherited every variable of the
+  parent, model API keys included, and a cell could print them. Removing them
+  from `os.environ` alone is not enough: `/proc/self/environ` still shows the
+  block the kernel copied in at `exec`, so the worker also zeroes that block,
+  and fails to start if it is still readable afterwards. Only the environment
+  is cleaned: a key the parent already holds in memory, such as an LLM client's,
+  is still in the forked worker. Zeroing and checking the block is Linux-only;
+  on other hosts (reachable with `require=False`) the worker only clears
+  `os.environ`, so variables set directly through libc may remain readable.
+  The parent's own environment is still at `/proc/<parent-pid>/environ`; with
+  `filesystem=True` (the default) Landlock denies the worker that read, but with
+  `filesystem=False` a cell can still read the parent's variables there.
+  The default (`None`) keeps the current behaviour, inheriting everything.
+- An inline image in a format models do not accept (anything but PNG, JPEG,
+  GIF or WebP, for example SVG from `show(Image.from_file("chart.svg"))`) is now
+  replaced by a note before each request, instead of being sent. Every MIME
+  hint of the image is checked (data URL, `format`, Anthropic `media_type`),
+  also for top-level Responses `input_image` items; accepted aliases are sent
+  in canonical form (`image/jpg` as `image/jpeg`). Before, the NVIDIA
+  Inference Hub refused such an image with HTTP 500 and, because the image
+  stays in history, every later turn of the session failed. A provider's HTTP
+  500 that says "Unsupported image format: ..." now also counts as an explicit
+  rejection: it is not retried unchanged, and the existing retry-with-a-note
+  recovery handles it at once. That recovery no longer blames an image that
+  was already replaced by a note.
 - `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
   publishes a runtime event when a job finishes (the job's handle state and
   result say it ended).

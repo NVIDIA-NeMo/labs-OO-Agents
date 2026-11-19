@@ -16,6 +16,7 @@ from typing import Any, TypeVar
 
 from nooa.unifiedllm.admission import AdmissionError
 from nooa.unifiedllm.errors import EmptyContentError
+from nooa.unifiedllm.media_inputs import unsupported_attachment_format
 from nooa.unifiedllm.retry_config import RetryConfig
 
 logger = logging.getLogger(__name__)
@@ -156,6 +157,13 @@ def _is_retryable_error(error: Exception, config: RetryConfig) -> tuple[bool, bo
     # Check for empty content error (if enabled)
     if isinstance(error, EmptyContentError) and config.retry_on_empty_content:
         return True, False
+
+    # An HTTP 500 that says an attachment's format is unsupported (the NVIDIA
+    # Inference Hub sends "Unsupported image format: svg+xml" as 500) fails the
+    # same way every time: the client's media recovery replaces the attachment
+    # with a note instead.
+    if unsupported_attachment_format(error):
+        return False, False
 
     # Inspect structured status data before falling back to message heuristics.
     # LiteLLM and OpenAI APIStatusError subclasses expose ``.status_code``

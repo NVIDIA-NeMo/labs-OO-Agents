@@ -9,7 +9,7 @@ from collections.abc import Collection, Mapping
 from typing import Any
 
 from nooa.llm_types import CacheBoundary, LLMResponse
-from nooa.media_inputs import MediaInput, attachment_kind
+from nooa.media_inputs import MediaInput, _mime_hints, attachment_kind
 from nooa.media_inputs import MediaInputs as MediaInputs
 from nooa.media_inputs import validate_media_inputs as validate_media_inputs
 from nooa.unifiedllm.errors import ReasoningReplayError
@@ -28,6 +28,97 @@ def removed_media_notice(kind: str) -> str:
         return "[A file was removed here. Only PDF files can be sent to a model.]"
     subject, plural = _NOTICE_SUBJECT[kind]
     return f"[{subject} was removed here because this model is not set up to receive {plural}.]"
+
+
+# Inline image formats the common model APIs accept (OpenAI, Anthropic and
+# Bedrock). This is a common floor, not a per-provider list (there is none
+# yet): Gemini does not take GIF and OpenAI refuses animated GIF. Other types,
+# such as SVG, BMP or TIFF, are refused by some providers; kept in history,
+# such an image would fail every later request.
+SENDABLE_IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
+_IMAGE_TYPE_ALIASES = {"image/jpg": "image/jpeg"}
+
+
+def _canonical_image_type(media_type: str) -> str:
+    """``media_type`` in lower case without parameters, with ``image/jpg`` as ``image/jpeg``."""
+    media_type = media_type.split(";", 1)[0].strip().lower()
+    return _IMAGE_TYPE_ALIASES.get(media_type, media_type)
+
+
+def unsendable_image_type(block: Mapping[str, Any]) -> str | None:
+    """The MIME type of an inline image block models do not accept, else None.
+
+    Every MIME hint of the block is checked (data URL, ``format``,
+    ``media_type``, ``mime_type``; see ``nooa.media_inputs._mime_hints``),
+    after lower-casing and dropping parameters. One hint outside
+    ``SENDABLE_IMAGE_TYPES`` makes the image unsendable; two accepted hints
+    that disagree do not. Only inline images are checked: for a remote URL the
+    provider reads the real type from the server it downloads from, so a
+    ``format`` hint next to it is not trusted to be wrong.
+    """
+    if attachment_kind(block) != "image" or not _is_inline(block):
+        return None
+    refused = sorted(
+        {_canonical_image_type(hint) for hint in _mime_hints(block)} - SENDABLE_IMAGE_TYPES
+    )
+    return refused[0] if refused else None
+
+
+def _is_inline(block: Mapping[str, Any]) -> bool:
+    """True if ``block`` carries its bytes: a ``data:`` URL or a base64 ``source``."""
+    nodes = [
+        block,
+        *(block[key] for key in ("image_url", "source") if isinstance(block.get(key), Mapping)),
+    ]
+    for node in nodes:
+        if node.get("type") == "base64":
+            return True
+        for key in ("url", "image_url"):
+            value = node.get(key)
+            if isinstance(value, str) and value[:5].lower() == "data:":
+                return True
+    return False
+
+
+def _sendable_image_block(block: Mapping[str, Any]) -> Mapping[str, Any]:
+    """``block`` with its accepted MIME hints in canonical form, for the wire.
+
+    ``image/JPG; q=1`` is sent as ``image/jpeg`` and ``DATA:image/PNG;...`` as
+    ``data:image/png;...``. The caller's block is not modified; an unchanged
+    block is returned as is.
+    """
+
+    def canonical(node: Mapping[str, Any]) -> Mapping[str, Any]:
+        changed = {}
+        for key in ("mime_type", "media_type", "format"):
+            value = node.get(key)
+            if isinstance(value, str) and "/" in value and _canonical_image_type(value) != value:
+                changed[key] = _canonical_image_type(value)
+        for key in ("url", "image_url"):
+            value = node.get(key)
+            if isinstance(value, str) and value[:5].lower() == "data:":
+                end = min((i for i in (value.find(";"), value.find(",")) if i >= 0), default=5)
+                url = "data:" + _canonical_image_type(value[5:end]) + value[end:]
+                if url != value:
+                    changed[key] = url
+        return {**node, **changed} if changed else node
+
+    result = canonical(block)
+    for key in ("image_url", "source"):
+        if isinstance(block.get(key), Mapping):
+            node = canonical(block[key])
+            if node is not block[key]:
+                result = {**result, key: node}
+    return result
+
+
+def unsendable_image_notice(media_type: str) -> str:
+    """The text the model sees in place of an image in a format models do not accept."""
+    return (
+        f"[An image was removed here: {media_type} images cannot be sent to a model. "
+        "Only PNG, JPEG, GIF and WebP are accepted; convert it (for example render "
+        "an SVG to PNG) and show it again.]"
+    )
 
 
 def rejected_media_notice(kind: str) -> str:
@@ -80,6 +171,54 @@ def image_limit(exc: BaseException) -> int | None:
     return None
 
 
+_FORMAT_NOUN = {
+    "image": "image",
+    "audio": "audio",
+    "video": "video",
+    "pdf": "(?:pdf|file|document)",
+}
+
+
+def _error_message(exc) -> str:
+    """The provider's error message in lower case: ``body.error.message`` if set, else ``str(exc)``."""
+    body = getattr(exc, "body", None)
+    error = body.get("error", body) if isinstance(body, dict) else None
+    if isinstance(error, dict):
+        return str(error.get("message", str(exc))).lower()
+    return str(exc).lower()
+
+
+def _unsupported_format(exc, kind) -> bool:
+    """True if ``exc`` says the attachment's format is unsupported.
+
+    The NVIDIA Inference Hub (a LiteLLM proxy) returns this as HTTP 500:
+    "Unsupported image format: svg+xml. Supported formats: [...]". The error
+    is about the request, so retrying it unchanged fails every time. The
+    phrase must name a format value (after a colon, ``=`` or a quote) or be
+    followed by the formats that are supported, so "unsupported image format
+    conversion plugin" does not count.
+    """
+    noun = _FORMAT_NOUN.get(kind, "file")
+    return bool(
+        re.search(
+            rf"\bunsupported {noun} (?:format|type)s?"
+            r"(?:\s*[:=]|\s+['\"`]|\b[^.]{0,80}\b(?:supported|allowed|accepted) (?:formats|types)\b)",
+            _error_message(exc),
+        )
+    )
+
+
+def unsupported_attachment_format(exc) -> bool:
+    """True if ``exc`` is an HTTP 500 that says an attachment's format is unsupported.
+
+    Such an error is about the request, not the server: the retry layer must
+    not resend it unchanged, so the client's media recovery can replace the
+    attachment with a note at once.
+    """
+    status = getattr(exc, "_connect_http_status", getattr(exc, "status_code", None))
+    return status == 500 and any(_unsupported_format(exc, kind) for kind in _FORMAT_NOUN)
+
+
 def explicitly_rejected(exc, kind):
     """Return True if ``exc`` is the provider refusing this kind of media.
 
@@ -91,16 +230,14 @@ def explicitly_rejected(exc, kind):
     of one image: the runtime collapses the oldest images instead.
     """
     status = getattr(exc, "_connect_http_status", getattr(exc, "status_code", None))
-    if status not in {400, 415, 422}:
+    if status not in {400, 415, 422} and not (status == 500 and _unsupported_format(exc, kind)):
         return False
     if image_limit(exc) is not None:
         return False
     body = getattr(exc, "body", None)
     error = body.get("error", body) if isinstance(body, dict) else {}
     param = error.get("param") if isinstance(error, dict) else None
-    text = (
-        str(error.get("message", str(exc))).lower() if isinstance(error, dict) else str(exc).lower()
-    )
+    text = _error_message(exc)
     if isinstance(param, str) and param.split(".")[0] in {
         "model",
         "include",
@@ -161,36 +298,61 @@ def explicitly_rejected(exc, kind):
     )
 
 
-def _occurrences(messages):
-    """Yield (message index, slot, block index, kind, key) for public attachment slots.
+def _occurrences(messages, enabled: tuple[MediaInput, ...]):
+    """Yield (message index, block index, kind, key) for each attachment a request sends.
 
-    ``key`` names one attachment occurrence: its kind, its block's content and
-    how many identical blocks came before it in this request.
+    A message that is itself an attachment item has block index None.
+    Attachments the filter replaces anyway (a kind not in ``enabled``, an
+    image in a format models do not accept) are skipped, so a rejection can
+    never be blamed on one of them. ``key`` names one attachment occurrence:
+    its kind, its block's content and how many identical blocks came before it
+    in this request.
     """
     seen: dict[tuple[str, str], int] = {}
+
+    def occurrence(index, position, block):
+        kind = attachment_kind(block)
+        if kind is None or kind not in enabled or unsendable_image_type(block) is not None:
+            return None
+        payload = {k: v for k, v in block.items() if k != "cache_control"}
+        digest = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, default=repr).encode()
+        ).hexdigest()
+        count = seen.get((kind, digest), 0)
+        seen[(kind, digest)] = count + 1
+        return index, position, kind, (kind, digest, count)
+
     for index, message in enumerate(messages):
         if isinstance(message, (LLMResponse, CacheBoundary)) or not isinstance(message, Mapping):
+            continue
+        if attachment_kind(message) is not None:
+            found = occurrence(index, None, message)
+            if found:
+                yield found
             continue
         slot = "output" if message.get("type") == "function_call_output" else "content"
         content = message.get(slot)
         if not isinstance(content, (list, tuple)):
             continue
         for position, block in enumerate(content):
-            kind = attachment_kind(block) if isinstance(block, Mapping) else None
-            if kind is None:
-                continue
-            payload = {k: v for k, v in block.items() if k != "cache_control"}
-            digest = hashlib.sha256(
-                json.dumps(payload, sort_keys=True, default=repr).encode()
-            ).hexdigest()
-            count = seen.get((kind, digest), 0)
-            seen[(kind, digest)] = count + 1
-            yield index, slot, position, kind, (kind, digest, count)
+            found = occurrence(index, position, block) if isinstance(block, Mapping) else None
+            if found:
+                yield found
 
 
 def media_occurrences(messages, enabled: tuple[MediaInput, ...]):
     """The attachment occurrences a request sends, oldest first, as (kind, key)."""
-    return [(kind, key) for *_, kind, key in _occurrences(messages) if kind in enabled]
+    return [(kind, key) for *_, kind, key in _occurrences(messages, enabled)]
+
+
+def _replacement(kind, block, rejected: bool, enabled) -> str | None:
+    """The notice that replaces an attachment block on the wire, or None to send it."""
+    if kind not in enabled:
+        return removed_media_notice(kind)
+    bad_type = unsendable_image_type(block) if kind == "image" else None
+    if bad_type is not None:
+        return unsendable_image_notice(bad_type)
+    return rejected_media_notice(kind) if rejected else None
 
 
 def filter_media_messages(
@@ -204,7 +366,10 @@ def filter_media_messages(
     input allows these at the top level), an assistant ``audio`` field, and the
     blocks of a ``content`` list (``output`` for ``function_call_output`` items).
     ``excluded`` holds keys from ``media_occurrences`` that the current
-    connection rejected; each such block becomes a ``rejected_media_notice``.
+    connection rejected; each such attachment becomes a ``rejected_media_notice``.
+    An enabled inline image in a format models do not accept (such as SVG)
+    becomes an ``unsendable_image_notice``; an accepted one is sent with its
+    MIME type in canonical form (``image/jpg`` as ``image/jpeg``).
     Tool arguments, reasoning and vendor extensions are not inspected.
     ``LLMResponse`` and ``CacheBoundary`` objects are passed through unchanged;
     their native content is checked later by ``check_replayed_native_media``. The input
@@ -212,7 +377,7 @@ def filter_media_messages(
     """
     rejected = {
         (index, position)
-        for index, _, position, _, key in _occurrences(messages)
+        for index, position, _, key in _occurrences(messages, enabled)
         if key in excluded
     }
     result = []
@@ -222,10 +387,17 @@ def filter_media_messages(
             continue
         item = dict(message)
         kind = attachment_kind(item)
-        if kind is not None and kind not in enabled:
+        if kind is not None:
             # The whole message is an attachment item, so there is no content
             # list to filter: replace the item with a user notice.
-            result.append({"role": "user", "content": removed_media_notice(kind)})
+            notice = _replacement(kind, item, (message_index, None) in rejected, enabled)
+            result.append(
+                {"role": "user", "content": notice}
+                if notice is not None
+                else _sendable_image_block(item)
+                if kind == "image"
+                else item
+            )
             continue
         slot = "output" if item.get("type") == "function_call_output" else "content"
         if isinstance(item.get(slot), tuple):
@@ -249,19 +421,16 @@ def filter_media_messages(
             blocks = []
             for position, block in enumerate(content):
                 kind = attachment_kind(block) if isinstance(block, Mapping) else None
-                if kind is not None and (
-                    kind not in enabled or (message_index, position) in rejected
-                ):
-                    blocks.append(
-                        {
-                            "type": "input_text" if slot == "output" else "text",
-                            "text": removed_media_notice(kind)
-                            if kind not in enabled
-                            else rejected_media_notice(kind),
-                        }
-                    )
+                notice = (
+                    None
+                    if kind is None
+                    else _replacement(kind, block, (message_index, position) in rejected, enabled)
+                )
+                if notice is not None:
+                    text_type = "input_text" if slot == "output" else "text"
+                    blocks.append({"type": text_type, "text": notice})
                 else:
-                    blocks.append(block)
+                    blocks.append(_sendable_image_block(block) if kind == "image" else block)
             item[slot] = blocks
         result.append(item)
     return result

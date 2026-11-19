@@ -37,16 +37,16 @@ Helpers defined in cells persist as REPL locals for the rest of the method call 
 
 ## Persistent skills (`SkillWriting` / `self.skill_writing`)
 
-`SkillWriting` (`nooa.tools.library_writing_lib`) is how an agent makes the skills later sessions get, in a managed directory: `<workspace>/.nooa/skills` for Atom (an older `.nooa/libs` is no longer loaded: the skills status says to move its skills to `.nooa/skills`). A skill is either a code skill (a real Python package) or a text skill (a `SKILL.md` with front matter `name`/`description` and instructions). Both load in a later session as `local.<name>` (`self.<name>`, found by `self.skills.search`). Requires the shell skill (`requires = ("nemo.shell",)`) since file I/O goes through `self.shell`.
+`SkillWriting` (`nooa.tools.library_writing_lib`) is how an agent makes the skills later sessions get, in a managed directory: `<workspace>/.nooa/skills` for Atom (an older `.nooa/libs` is no longer loaded: the skills status says to move its skills to `.nooa/skills`). A skill is either a code skill (a real Python package) or a text skill (a `SKILL.md` with front matter `name`/`description` and instructions). Both load in a later session as `local.<name>` (`self.<name>`, found by `self.skills.search`). `run_tests()` runs in the `shell=` passed to the constructor (Atom passes its workspace shell); without one it requires the shell skill (`requires = ("nemo.shell",)`) and uses `self.shell`.
 
-The lifecycle the agent follows (documented to it via `doc(self.skill_writing)`):
+The lifecycle the agent follows (documented to it via `doc(self.skill_writing)`). Atom writes and edits files with `self.files`; an agent with the shell skill uses `self.shell.write_file()` and `self.shell.replace()` instead:
 
 ```python
 await self.skill_writing.create("release", "How to cut a release.", text=steps)  # text skill: SKILL.md, active at once
 await self.skill_writing.create("stats", "Statistical utilities.")      # 1. scaffold package (pyproject + __init__)
-await self.shell.write_file(self.skill_writing.path("stats", "stats.py"), source)  # 2. write code
+await self.files.write_file(self.skill_writing.path("stats", "stats.py"), source)  # 2. write code
 await self.skill_writing.reload("stats")                                # 3. lint + hot-reload → self.stats exists
-await self.shell.replace(self.skill_writing.path("stats", "stats.py"), old, new)  # 4. edit
+await self.files.replace(self.skill_writing.path("stats", "stats.py"), old, new)  # 4. edit
 await self.skill_writing.reload("stats")                                #    ...and reload again
 await self.skill_writing.run_tests("stats")                             # 5. pytest on the skill's tests/
 await self.skill_writing.list(); await self.skill_writing.repo_tree()   # discovery

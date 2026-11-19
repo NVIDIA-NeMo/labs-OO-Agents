@@ -77,6 +77,7 @@ from nooa_atom.session.items import (
 )
 from nooa_atom.session.options import SessionOptions
 from nooa_atom.session.store import SessionHandle
+from nooa_atom.skills.reflection import Reflection
 
 logger = logging.getLogger(__name__)
 
@@ -844,6 +845,16 @@ class Session:
         self._usage_before = self.info.usage.model_copy()
         await self._apply_pending_model()
 
+    def _check_reflection(self, kind: str) -> None:
+        """After a root session's turn: the reflection skill posts a due message."""
+        reflection = getattr(self._agent, "reflection", None)
+        if self.parent_id is None and not self.closing and isinstance(reflection, Reflection):
+            reflection.after_turn(
+                kind,
+                waiting=bool(self._waiting),
+                post=lambda text: self._admit(text, channel="system_messages", source="reflection"),
+            )
+
     def _commit_turn(self, notification: dict[str, list[Any]]) -> None:
         """No await/observers: atomic ledger first, identity ownership second."""
         self._ensure_open()
@@ -1033,6 +1044,7 @@ class Session:
                 usage=usage,
             )
         )
+        self._check_reflection(kind)
 
         self._maintenance_ready = None
         gate = getattr(self._agent, "_reflection_gate", None)
