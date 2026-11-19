@@ -16,6 +16,7 @@ import pytest
 
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig
+from nooa.context_blocks.events import ResultStatus
 from nooa.events import AfterTurn, PythonOutput
 from nooa.runtime.harness_metrics import HarnessMetrics
 from nooa.runtime.sandbox.config import SandboxConfig
@@ -210,7 +211,12 @@ async def test_prefill_uses_the_same_terminal_rule(strategy_type, entry, error_t
             """Cover both the outer exception handler and captured execution results."""
             if entry == "plugin":
                 raise failure
-            return "await self.fail_prefill()"
+            return (
+                "import sys\n"
+                "print('prefill diagnostic')\n"
+                "print('prefill stderr', file=sys.stderr)\n"
+                "await self.fail_prefill()"
+            )
 
     class PolicyAgent(Agent):
         """Let a policy error escape without an application-side catch."""
@@ -236,6 +242,20 @@ async def test_prefill_uses_the_same_terminal_rule(strategy_type, entry, error_t
             assert caught.value is failure
             assert not llm.calls
             assert agent.events.query(type="Error") == []
+        if entry == "execution":
+            outputs = [
+                event
+                for event in agent.events.query(type="PythonOutput")
+                if event.metadata.get("prefill")
+            ]
+            assert len(outputs) == 1
+            output = outputs[0]
+            assert "prefill diagnostic\n" in output.stdout
+            assert "prefill stderr\n" in output.stderr
+            assert output.execution_status is ResultStatus.ERROR
+            assert f"{error_type.__name__}: prefill failure" in output.error
+            assert output.metadata["prefill_type"] == "inspect_inputs"
+            assert output.metadata["execution_error"] is True
     finally:
         await agent.aclose()
 

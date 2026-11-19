@@ -578,9 +578,6 @@ class PurePythonStrategy(CompositeStrategy):
                 f"[PURE_PYTHON] Prefill captured locals: {list(result.captured_locals.keys())}"
             )
 
-        if isinstance(result.error, TERMINAL_LLM_ERRORS):
-            raise result.error
-
         # Emit PythonOutput for the prefill execution result (mirrors normal turn event sequence).
         if result.error:
             await self._send_execution_error(
@@ -593,6 +590,8 @@ class PurePythonStrategy(CompositeStrategy):
                 line_offset=getattr(result, "wrapper_line_offset", 0),
                 metadata={"prefill": True, "prefill_type": "inspect_inputs"},
             )
+            if isinstance(result.error, TERMINAL_LLM_ERRORS):
+                raise result.error
             # Prefill errors are visible to the LLM but remain non-fatal.
             logger.warning(f"[PURE_PYTHON] Prefill execution error: {result.error}")
         else:
