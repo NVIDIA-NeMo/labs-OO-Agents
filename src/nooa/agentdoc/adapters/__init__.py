@@ -18,6 +18,7 @@ Or register all adapters for installed libraries at once:
 Available adapters:
     plotly — plotly, plotly.express, plotly.graph_objects
     pandas — pandas.DataFrame, pandas.Series
+    pxr    — OpenUSD: pxr.Usd, UsdGeom, UsdShade, Sdf, Gf, Vt (stage, mesh, subsets, materials)
 """
 
 
@@ -42,6 +43,13 @@ def register_all():
         import nooa.agentdoc.adapters.pandas as _  # noqa: F401
 
         registered.append("pandas")
+    except ImportError:
+        pass
+
+    try:
+        import nooa.agentdoc.adapters.pxr as _  # noqa: F401
+
+        registered.append("pxr")
     except ImportError:
         pass
 
