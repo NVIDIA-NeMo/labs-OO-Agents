@@ -466,7 +466,12 @@ def enter_call_namespace(
         if namespace is None:
             namespace = default_execution_namespace(call)
     else:
-        namespace = ExecutionNamespace(reserved=RUNTIME_NAMES)
+        # PurePython: the call's own arguments are ordinary globals the cell may
+        # rebind or delete (``show = True``, ``del show``), even when they share a
+        # runtime name; only the engine's names stay reserved.
+        namespace = ExecutionNamespace(
+            reserved=RUNTIME_NAMES - (frozenset(arguments) - ENGINE_NAMES)
+        )
     # Entering first: a namespace another call occupies raises before it changes.
     with namespace.enter({}):
         allowed = namespace.reserved
@@ -714,7 +719,11 @@ class ExecutionNamespace:
             if name != "self" and callable(value):
                 return _in_context(context, value)
             return value
-        values = call.values if call is not None and call.active else self._last_values
+        values = self._last_values
+        if call is not None and call.active:
+            # Between ``enter`` and ``bind_call`` the active call has no values
+            # yet: a retained helper keeps the last bindings until it binds.
+            values = {**self._last_values, **call.values}
         return self._after_call(name, values)
 
     @staticmethod

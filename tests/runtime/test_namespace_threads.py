@@ -252,3 +252,18 @@ def test_session_locals_never_overwrite_the_namespace_internals():
         assert ns.globals["_nooa_ns_delete"] == ns.delete_global
         assert ns.user_names == {"kept"} and ns.globals["kept"] == 1
     assert call.seeded_locals == {"kept": 1}
+
+
+async def test_a_retained_helper_in_a_thread_keeps_self_before_the_next_call_binds():
+    """Between ``enter`` and ``bind_call`` an executor helper resolves the last bindings."""
+    agent, ns = CellAgent(), ExecutionNamespace(reserved=RUNTIME_NAMES)
+    try:
+        with ns.enter({}):
+            result = await run(agent, ns, "def helper():\n    return self\nreturn 1", self=agent)
+        assert result.error is None, result.error
+        helper = ns.globals["helper"]
+        with ns.enter({}):  # the next call, not bound yet
+            got = await asyncio.get_running_loop().run_in_executor(None, helper)
+        assert got is agent
+    finally:
+        await agent.aclose()
