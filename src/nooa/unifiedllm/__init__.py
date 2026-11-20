@@ -43,10 +43,12 @@ from nooa.unifiedllm.registry import (
     get_llm_client,
     get_registry_config,
     load_llm,
+    load_llm_from_config,
     reload_registry,
     resolve_api_key_from_config,
 )
 from nooa.unifiedllm.request import LLMRequest
+from nooa.unifiedllm.requirements import Need, Requirements
 from nooa.unifiedllm.retry import (
     RetryingWrapper,
     sync_retry,
@@ -72,6 +74,9 @@ __all__ = [
     # Model registry
     "get_llm_client",
     "load_llm",
+    "load_llm_from_config",
+    "Need",
+    "Requirements",
     "get_decision_model",
     "get_registry_config",
     "reload_registry",

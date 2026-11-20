@@ -405,21 +405,69 @@ def get_llm_client(name: str, *, client_type: str | None = None, **overrides) ->
 SUPPORTED_ADAPTERS = ("litellm", "openai-chat", "openai-responses", "anthropic-messages")
 
 
-def load_llm(name: str, *, on_unsupported_media="note", **overrides):
+def load_llm(name, *, require=None, on_unsupported_media="note", **overrides):
     """Load a public LLM with immutable settings, without provider I/O.
 
     Sampling, reasoning_level, max_output_tokens and timeout belong here, not
     on LLMRequest. Omitted settings inherit registry defaults; explicit None
     clears them. Explicit same-route loads share leased pools, facts and EMA.
     get_llm_client/client_from_config remain the legacy compatibility factories.
+    A loader-owned built-in LLM can be passed instead of an alias to derive only
+    settings with a new independent lease, preserving pinned route, facts, EMA,
+    retry and media policy. Closed/direct/custom views and identity overrides are
+    rejected; use a fresh alias/config load to select a route. Optional require
+    is checked once here, not on send. This does not migrate any runtime factory.
     """
-    from .adapters._loader import _load_public
+    from .adapters._loader import _derive_loaded
     from .adapters._snapshots import snapshot_options
+    from .llm import LLM
+    from .requirements import _normalize_require
 
+    required = _normalize_require(require)
+    if isinstance(name, LLM):
+        if on_unsupported_media != "note":
+            from .errors import FailureKind, LLMFailure
+
+            raise LLMFailure(FailureKind.CONFIG, "Settings derivation preserves media policy")
+        return _derive_loaded(name, required, overrides)
+    _validate_load_name(name)
     ensure_loaded()
     with _registry_lock:
         config = snapshot_options(MODELS.get(name, {}))
+    return _load_llm_entry(name, config, required, on_unsupported_media, overrides)
+
+
+def _validate_load_name(name):
+    from .errors import FailureKind, LLMFailure
+
+    if type(name) is not str or not name:
+        raise LLMFailure(FailureKind.CONFIG, "LLM load requires an alias or built-in loaded view")
+
+
+def load_llm_from_config(name, config, *, require=None, on_unsupported_media="note", **overrides):
+    """Load a defensive snapshot of a supplied entry, without registry mutation.
+
+    Exactly the alias loader's precedence/selection core; legacy unsaved-client
+    construction remains unchanged. No registry read or reload is performed.
+    """
+    from collections.abc import Mapping
+
+    from .adapters._snapshots import snapshot_options
+    from .errors import FailureKind, LLMFailure
+    from .requirements import _normalize_require
+
+    required = _normalize_require(require)
+    _validate_load_name(name)
+    if not isinstance(config, Mapping):
+        raise LLMFailure(FailureKind.CONFIG, "Supplied model entry must be a mapping")
+    return _load_llm_entry(
+        name, snapshot_options(dict(config)), required, on_unsupported_media, overrides
+    )
+
+
+def _load_llm_entry(name, config, require, on_unsupported_media, overrides):
     from .adapters._binding import _UNSET
+    from .adapters._loader import _load_public
 
     overrides = {key: value for key, value in overrides.items() if value is not _UNSET}
     explicit_adapter = overrides.pop("adapter", None)
@@ -441,7 +489,7 @@ def load_llm(name: str, *, on_unsupported_media="note", **overrides):
             # Keep the original declaration for changed-family fact invalidation,
             # but preserve the genuine public selector in the effective layer.
             overrides["adapter"] = explicit_adapter
-        return _load_native(name, config, adapter, on_unsupported_media, overrides)
+        return _load_native(name, config, adapter, on_unsupported_media, overrides, require)
     params, config, selected = _resolve_client_config(
         name, config, client_type=client_type, **overrides
     )
@@ -457,7 +505,7 @@ def load_llm(name: str, *, on_unsupported_media="note", **overrides):
         params.setdefault("extra_body", {}).update(
             {key: extra[key] for key in REPLY_CAP_KEYS & extra.keys()}
         )
-    return _load_public(name, params, config, selected, on_unsupported_media, supplied)
+    return _load_public(name, params, config, selected, on_unsupported_media, supplied, require)
 
 
 def get_decision_model(name: str, **overrides) -> UnifiedDecisionModel:

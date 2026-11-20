@@ -13,6 +13,7 @@ import asyncio
 import copy
 import hashlib
 import hmac
+import inspect
 import json
 import secrets
 import weakref
@@ -25,8 +26,9 @@ from nooa.unifiedllm.llm import LLM, _snapshot_capabilities
 from nooa.unifiedllm.retry_config import RetryConfig
 from nooa.unifiedllm.route_identity import normalize_endpoint
 
-from ._binding import _bind_adapter, _freeze, _Settings
+from ._binding import _bind_adapter, _freeze, _Settings, _thaw
 from ._calibration import _sdk_identity
+from ._native import _BUILTINS
 from ._snapshots import snapshot_options
 
 _KEY = secrets.token_bytes(32)
@@ -165,7 +167,73 @@ def _consume_disposal(task):
         pass
 
 
-def _load_public(name, params, config, selected, media_policy, supplied):
+class _LegacySettingsFailure(LLMFailure, ValueError):
+    """Private public-load compatibility, never a raw factory error wrapper."""
+
+    def __init__(self, message):
+        super().__init__(FailureKind.CONFIG, message)
+
+
+def _legacy_declaration(levels, default=None):
+    from nooa.unifiedllm.reasoning import ReasoningConfig
+
+    try:
+        return ReasoningConfig(levels=levels, default=default)
+    except (TypeError, ValueError):
+        raise _LegacySettingsFailure(
+            "Invalid reasoning declaration; declare valid settings"
+        ) from None
+
+
+def _validate_legacy_settings(adapter, options, facts):
+    """Pure frozen-settings validation; no transport or capability getter in catches.
+
+    This precedes binding rather than wrapping it: unrelated hooks, properties,
+    constructor errors and control exceptions retain their original identity.
+    Fixed remediation messages never classify or echo exception text.
+    """
+    from nooa.unifiedllm.reasoning import apply_reasoning_level
+
+    from ._binding import _UNSET, _check_settings_identity
+
+    settings = adapter._bound_settings
+    model = adapter._client.model  # Evaluate outside any validation catch.
+    declaration = _legacy_declaration(_thaw(settings.reasoning_levels))
+    options = {key: value for key, value in options.items() if value is not _UNSET}
+    selection = options.get("reasoning_level", settings.reasoning_level)
+    if selection is not None:
+        try:
+            patch = declaration.settings(selection)
+        except (TypeError, ValueError):
+            raise _LegacySettingsFailure(
+                "Invalid or unknown reasoning selection; selection may be not supported"
+            ) from None
+        try:
+            _check_settings_identity(patch)
+        except (TypeError, ValueError):
+            raise _LegacySettingsFailure(
+                "Invalid reasoning declaration; use model settings only"
+            ) from None
+    try:
+        effective = apply_reasoning_level(
+            declaration, model, _thaw(settings.config), options, settings.reasoning_level
+        )
+    except (TypeError, ValueError):
+        raise _LegacySettingsFailure(
+            "Invalid settings; use one reply limit and avoid reasoning that conflicts with explicit settings"
+        ) from None
+    for key in REPLY_CAP_KEYS & effective.keys():
+        cap = effective[key]
+        if cap is not None and (type(cap) is not int or cap <= 0):
+            raise _LegacySettingsFailure("Reply ceiling must be a positive integer or None")
+        if cap is not None and (
+            (facts.max_output_tokens is not None and cap > facts.max_output_tokens)
+            or (facts.context_window is not None and cap >= facts.context_window)
+        ):
+            raise _LegacySettingsFailure("Reply ceiling exceeds this route's known limit")
+
+
+def _load_public(name, params, config, selected, media_policy, supplied, require=None):
     from nooa.unifiedllm.registry import _construct_llm_client
 
     params = snapshot_options(params)
@@ -180,11 +248,15 @@ def _load_public(name, params, config, selected, media_policy, supplied):
             params["extra_body"] = raw_extra
         else:
             params.pop("extra_body")
+    # Pure declarations can fail before allocation; selected-level validation
+    # stays after construction, preserving the existing failed-load lifecycle.
+    _legacy_declaration(params.get("reasoning_levels"), params.get("reasoning_default"))
     retry = params.get("retry_config")
     # Do not let constructor SDK retry settings become public attempts.
     params["max_retries"] = params["num_retries"] = 0
     key = _cache_key(params, config, selected)
     with _lock:
+        _legacy_behavior()  # Capture exact built-ins before any public root exists.
         pool = _pools.get(key) if key is not None else None
         created = pool is None or pool.retired
         if created:
@@ -199,6 +271,9 @@ def _load_public(name, params, config, selected, media_policy, supplied):
                 client._adapter._bound_capabilities = _snapshot_capabilities(
                     client._adapter.capabilities
                 )
+            from nooa.unifiedllm.requirements import _validate_requirements
+
+            _validate_requirements(pool.client._adapter._bound_capabilities, require, label=name)
             # The transport root has no scalar view defaults. Seed a fresh raw
             # view with this load's inherited defaults, then resolve only truly
             # explicit settings as overrides (declared levels replace defaults).
@@ -221,23 +296,25 @@ def _load_public(name, params, config, selected, media_policy, supplied):
             explicit = {key: supplied[key] for key in settings if key in supplied}
             # Native constructor settings still count as explicit conflicts,
             # but route/identity options must never enter a settings binding.
-            selection = settings.get("reasoning_level")
-            if selection is not None:
-                from nooa.unifiedllm.reasoning import apply_reasoning_level
-
-                apply_reasoning_level(
-                    seed._client._reasoning_config,
-                    seed._client.model,
-                    {},
-                    {
-                        key: value
-                        for key, value in supplied.items()
-                        if key
-                        not in {"client", "model", "api_base", "base_url", "custom_llm_provider"}
-                    },
-                    selection,
-                )
+            validation = {
+                key: value
+                for key, value in supplied.items()
+                if key
+                not in {
+                    "client",
+                    "model",
+                    "api_base",
+                    "base_url",
+                    "custom_llm_provider",
+                    "reasoning_levels",
+                    "reasoning_default",
+                }
+            }
+            _validate_legacy_settings(seed, validation, seed._bound_capabilities)
             bound = _bind_adapter(seed, **explicit)
+            from ._view_limits import _adapter_limits
+
+            _adapter_limits(bound, bound.capabilities)
             llm = LLM(bound, on_unsupported_media=media_policy, retry_config=retry or RetryConfig())
             llm._lease = pool
         except BaseException:
@@ -249,3 +326,179 @@ def _load_public(name, params, config, selected, media_policy, supplied):
         if created and key is not None:
             _pools[key] = pool
         return llm
+
+
+def _behavior(cls):
+    """Canonical descriptors only; inherited object machinery/metadata is not reset."""
+    result = {}
+    for owner in reversed(cls.__mro__[:-1]):
+        for name, descriptor in vars(owner).items():
+            if callable(descriptor) or isinstance(
+                descriptor, (property, staticmethod, classmethod)
+            ):
+                result[name] = descriptor
+    return result
+
+
+# Finite built-in identity baselines, not a route/capability registry.
+# Native imports do not import LiteLLM. Legacy baselines are captured only on
+# the legacy load path, before constructing the first root.
+_LLM_BEHAVIOR = _behavior(LLM)
+_NATIVE_BEHAVIOR = {cls: _behavior(cls) for cls in _BUILTINS}
+_LEGACY_BEHAVIOR = None
+
+
+def _legacy_behavior():
+    global _LEGACY_BEHAVIOR
+    if _LEGACY_BEHAVIOR is None:
+        from nooa.unifiedllm.unifiedllm import CompletionClient, ResponsesClient
+
+        from .litellm_chat import LiteLLMChatAdapter
+        from .litellm_responses import LiteLLMResponsesAdapter
+
+        _LEGACY_BEHAVIOR = {
+            cls: _behavior(cls)
+            for cls in (
+                CompletionClient,
+                ResponsesClient,
+                LiteLLMChatAdapter,
+                LiteLLMResponsesAdapter,
+            )
+        }
+    return _LEGACY_BEHAVIOR
+
+
+def _check_behavior(value, expected):
+    # Static access must not execute replaced properties or noncallable hooks.
+    cls = type(value)
+    current = _behavior(cls)
+    if (
+        current.keys() != expected.keys()
+        or any(
+            inspect.getattr_static(cls, name) is not descriptor or name in vars(value)
+            for name, descriptor in expected.items()
+        )
+        or any(callable(item) for item in vars(value).values())
+    ):
+        raise LLMFailure(FailureKind.CONFIG, "Cannot derive a view with overridden behavior")
+    # Also reject foreign class replacements made before the lazy legacy
+    # baseline was initialized. Same-file methods must still name their slot.
+    for name, descriptor in current.items():
+        method = descriptor.fget if isinstance(descriptor, property) else descriptor
+        if isinstance(method, (staticmethod, classmethod)):
+            method = method.__func__
+        method = inspect.unwrap(method)
+        owner = next(owner for owner in cls.__mro__ if name in vars(owner))
+        if (
+            getattr(method, "__module__", None) != owner.__module__
+            or getattr(method, "__qualname__", None) != f"{owner.__qualname__}.{name}"
+        ):
+            raise LLMFailure(FailureKind.CONFIG, "Cannot derive a view with overridden behavior")
+
+
+def _check_shell(source):
+    if type(source) is not LLM:
+        raise LLMFailure(
+            FailureKind.CONFIG, "Settings derivation requires an exact built-in loaded LLM"
+        )
+    _check_behavior(source, _LLM_BEHAVIOR)
+
+
+def _check_derivable(source):
+    """Exact loader-owned built-ins only, under the source view lock.
+
+    Direct adapters, arbitrary subclasses and custom dispatch hooks have no safe
+    ownership/copy contract. Use a fresh alias/config route load for those.
+    Native checks deliberately return before importing any legacy client.
+    """
+    _check_shell(source)
+    if source._closed or type(source._lease) is not _Pool:
+        raise LLMFailure(
+            FailureKind.CONFIG, "Settings derivation requires an open loader-owned view"
+        )
+    from .base import Capabilities
+
+    if type(source._capabilities) is not Capabilities:
+        raise LLMFailure(FailureKind.CONFIG, "Loaded view has invalid capability facts")
+    adapter = source._adapter
+    from ._native import _BUILTINS
+
+    if type(adapter) in _BUILTINS:
+        from ._native_settings import _NativeSettings
+
+        _check_behavior(adapter, _NATIVE_BEHAVIOR[type(adapter)])
+        if type(adapter._settings) is not _NativeSettings:
+            raise LLMFailure(FailureKind.CONFIG, "Loaded view has invalid settings")
+        if adapter._transport is not source._lease.client:
+            raise LLMFailure(
+                FailureKind.CONFIG, "Settings derivation requires proven pool ownership"
+            )
+        return True
+    from nooa.unifiedllm.unifiedllm import CompletionClient, ResponsesClient
+
+    from .litellm_chat import LiteLLMChatAdapter
+    from .litellm_responses import LiteLLMResponsesAdapter
+
+    pairs = {LiteLLMChatAdapter: CompletionClient, LiteLLMResponsesAdapter: ResponsesClient}
+    if type(adapter) not in pairs:
+        raise LLMFailure(
+            FailureKind.CONFIG, "Settings derivation requires a built-in adapter/client"
+        )
+    _check_behavior(adapter, _legacy_behavior()[type(adapter)])
+    if type(adapter._client) is not pairs[type(adapter)]:
+        raise LLMFailure(
+            FailureKind.CONFIG, "Settings derivation requires a built-in adapter/client"
+        )
+    _check_behavior(adapter._client, _legacy_behavior()[type(adapter._client)])
+    if (
+        adapter._legacy_options is not None
+        or type(getattr(adapter, "_bound_settings", None)) is not _Settings
+    ):
+        raise LLMFailure(FailureKind.CONFIG, "Settings derivation requires a loaded settings view")
+    client = adapter._client
+    if client._http is not source._lease.client._http:
+        raise LLMFailure(FailureKind.CONFIG, "Settings derivation requires proven pool ownership")
+    return False
+
+
+def _derive_loaded(source, require, settings):
+    from nooa.unifiedllm.requirements import _validate_requirements
+
+    from ._binding import _UNSET, _check_settings_identity
+    from ._view_limits import _adapter_limits
+
+    settings = {key: value for key, value in settings.items() if value is not _UNSET}
+    try:
+        if {"client_type", "model_name", "on_unsupported_media"} & settings.keys():
+            raise ValueError
+        _check_settings_identity(settings)
+    except (TypeError, ValueError):
+        raise LLMFailure(
+            FailureKind.CONFIG, "Settings cannot change route/identity; load a fresh alias/config"
+        ) from None
+    _check_shell(source)  # Reject changed access behavior before touching its lock.
+    with source._view_lock:
+        native = _check_derivable(source)
+        pool = source._lease
+        # Own a new view lease BEFORE source close/retirement can race. Binding
+        # failures release only this lease; nothing is published or mutated.
+        pool.acquire()
+        try:
+            _validate_requirements(source._capabilities, require)
+            if not native:
+                _validate_legacy_settings(source._adapter, settings, source._capabilities)
+            bound = _bind_adapter(source._adapter, **settings)
+            _adapter_limits(bound, source._capabilities)
+            view = LLM(
+                bound, on_unsupported_media=source._media_policy, retry_config=source._retry_config
+            )
+            view._lease = pool
+            return view
+        except BaseException as exc:
+            try:
+                pool.release()
+            except BaseException:
+                pass
+            if native and isinstance(exc, (ValueError, TypeError)):
+                raise LLMFailure(FailureKind.CONFIG, "Invalid loaded settings") from None
+            raise

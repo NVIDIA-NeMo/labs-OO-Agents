@@ -39,7 +39,8 @@ async def test_actual_loose_schema_and_received_once_calibration(family, mode, m
         return httpx.Response(200, json=paid_payload(family), headers={"x-response-cost": "0"})
 
     sdk, http = borrowed(family, mode, handler)
-    llm = load(family, sdk, retry_config=False, context_window=1)
+    # Cap 100 leaves one known input token; PARTIAL estimates must not clamp it.
+    llm = load(family, sdk, retry_config=False, context_window=101)
     record = llm.adapter._route_calibration_record
     original = record.update
 

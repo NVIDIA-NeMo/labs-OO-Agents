@@ -45,9 +45,21 @@ def context_limits_for(
 ) -> ContextLimits:
     """Use UnifiedLLM's resolver, retaining support for legacy duck-typed clients.
 
+    Exact public loader-owned built-ins use their frozen effective settings and
+    immutable facts. Nonempty params cannot bypass binding: derive a settings
+    view with load_llm first. Direct/custom/closed public views are unsupported.
     Custom clients can implement get_context_limits to expose their defaults;
     without it, only explicit per-call caps and the old window attributes are known.
     """
+    from .llm import LLM
+
+    if isinstance(client, LLM):
+        from .adapters._view_limits import _loaded_limits
+        from .errors import FailureKind, LLMFailure
+
+        if type(client) is not LLM:
+            raise LLMFailure(FailureKind.CONFIG, "Effective limits require an exact loaded LLM")
+        return _loaded_limits(client, params, fallback_reserve)
     if callable(resolve := getattr(client, "get_context_limits", None)):
         return resolve(params, fallback_reserve=fallback_reserve)
     window = getattr(client, "context_window", None) or getattr(client, "context_limit", None)
