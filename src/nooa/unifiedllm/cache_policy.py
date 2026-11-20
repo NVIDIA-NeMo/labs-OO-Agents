@@ -118,6 +118,21 @@ def add_session_affinity_header(api_params: dict[str, Any]) -> None:
     api_params["extra_headers"] = merged
 
 
+def drop_chat_prompt_cache_key(api_params: dict[str, Any]) -> None:
+    """Leave ``prompt_cache_key`` out of a Chat Completions request.
+
+    NOOA sets the key on every call. LiteLLM 1.97 never sent it on Chat
+    Completions. LiteLLM 1.100 sends it to OpenAI-compatible endpoints and
+    raises ``UnsupportedParamsError`` for other providers (Anthropic, Bedrock,
+    Gemini) unless ``drop_params`` is set. Omit it so the request stays as it
+    was; the session-affinity header is derived from it beforehand. An
+    explicit ``allowed_openai_params`` entry keeps it.
+    """
+    if "prompt_cache_key" in (api_params.get("allowed_openai_params") or ()):
+        return
+    api_params.pop("prompt_cache_key", None)
+
+
 def enable_openai_explicit_cache(api_params: dict[str, Any]) -> None:
     extra = api_params.get("extra_body")
     if extra is not None and not isinstance(extra, Mapping):

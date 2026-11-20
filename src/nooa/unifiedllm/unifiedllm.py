@@ -29,6 +29,7 @@ from nooa.llm_types import (
 from nooa.unifiedllm.cache_policy import (
     add_session_affinity_header,
     apply_cache_policy,
+    drop_chat_prompt_cache_key,
     enable_openai_explicit_cache,
     reject_boundary_dict,
     reject_legacy_cache_config,
@@ -2700,6 +2701,7 @@ class CompletionClient(UnifiedLLM):
             api_params.pop("tool_choice")
 
         add_session_affinity_header(api_params)
+        drop_chat_prompt_cache_key(api_params)
         # RetryConfig owns endpoint retries. LiteLLM otherwise has the OpenAI SDK
         # retry each attempt twice more, tripling the configured budget. An
         # explicit max_retries passthrough still opts into SDK retries.
@@ -2822,6 +2824,7 @@ class CompletionClient(UnifiedLLM):
             api_params.pop("tool_choice")
 
         add_session_affinity_header(api_params)
+        drop_chat_prompt_cache_key(api_params)
         # RetryConfig owns endpoint retries. LiteLLM otherwise has the OpenAI SDK
         # retry each attempt twice more, tripling the configured budget. An
         # explicit max_retries passthrough still opts into SDK retries.
