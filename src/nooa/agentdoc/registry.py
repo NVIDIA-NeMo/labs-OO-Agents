@@ -243,6 +243,11 @@ _attribute_hint_registry: dict[str, dict[str, str]] = {}
 
 _MODULE_ATTRIBUTE_ERROR = re.compile(r"^module '([^']+)' has no attribute ")
 
+# Missing-attribute hint providers: owner-key prefix -> provider(obj, name, owner_key),
+# consulted when no static hint matches (generic "did you mean" for a library).
+AttributeHintProvider = Callable[[Any, str, str], str | None]
+_attribute_hint_providers: dict[str, AttributeHintProvider] = {}
+
 
 def _owner_key(owner: Any) -> str:
     if inspect.ismodule(owner):
@@ -286,7 +291,37 @@ def get_attribute_hint(error: BaseException) -> str | None:
             hint = _attribute_hint_registry.get(key, {}).get(name)
             if hint is not None:
                 return hint
+        providers = list(_attribute_hint_providers.items())
+    if not keys or name.startswith("__"):
+        return None
+    owner_key = keys[0]
+    for prefix, provider in providers:
+        if owner_key != prefix and not owner_key.startswith(prefix + "."):
+            continue
+        try:
+            hint = provider(obj, name, owner_key)
+        except Exception:  # noqa: BLE001 - a hint must never break error formatting
+            hint = None
+        if hint:
+            return hint
     return None
+
+
+def register_attribute_hint_provider(prefix: str, provider: AttributeHintProvider) -> None:
+    """Compute hints for missing attributes of owners under ``prefix`` (e.g. ``"pxr"``).
+
+    ``provider(obj, name, owner_key)`` gets the AttributeError's ``obj``, the missing
+    ``name`` and the owner's key (module name or ``"module.qualname"``); it returns a
+    hint or None. Static hints (:func:`register_attribute_hint`) win.
+    """
+    with _registry_lock:
+        _attribute_hint_providers[prefix] = provider
+
+
+def unregister_attribute_hint_provider(prefix: str) -> None:
+    """Remove a hint provider (mainly for tests)."""
+    with _registry_lock:
+        _attribute_hint_providers.pop(prefix, None)
 
 
 def unregister_attribute_hint(owner: Any, name: str) -> None:
@@ -330,6 +365,14 @@ def _is_member_of(owner: Any, name: str, obj: Any) -> bool:
             or inspect.ismodule(bound_self)
             or not isinstance(bound_self, owner)
         ):
+            return False
+        # The bound function must be this attribute (stage.GetUsedLayers is not
+        # Usd.Stage.Open); a bound builtin has no __func__, so match its name.
+        func = getattr(obj, "__func__", None)
+        if func is not None:
+            if func is not attr and getattr(attr, "__func__", None) is not func:
+                return False
+        elif getattr(obj, "__name__", name) != name:
             return False
         try:
             return getattr(type(bound_self), name, None) is attr
@@ -481,4 +524,5 @@ def clear_registry() -> None:
         _extractor_registry.clear()
         _module_extractor_registry.clear()
         _attribute_hint_registry.clear()
+        _attribute_hint_providers.clear()
         _callable_extractor_registry.clear()

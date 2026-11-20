@@ -51,6 +51,7 @@ from nooa.agentdoc.registry import (
     clear_registry,
     get_type_info_extractor,
     register_attribute_hint,
+    register_attribute_hint_provider,
     register_type_info_extractor,
     unregister_type_info_extractor,
 )
@@ -85,6 +86,7 @@ __all__ = [
     "unregister_type_info_extractor",
     "clear_registry",
     "register_attribute_hint",
+    "register_attribute_hint_provider",
     # Helpers
     "has_type_info",
 ]

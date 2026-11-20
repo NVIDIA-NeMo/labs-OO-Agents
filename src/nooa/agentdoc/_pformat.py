@@ -226,8 +226,9 @@ def _pformat(
                 module_info = extractor(_object)
             else:
                 from nooa.agentdoc._structured import extract_module_info
+                from nooa.agentdoc.docindex import enrich_module_info
 
-                module_info = extract_module_info(_object)
+                module_info = enrich_module_info(_object, extract_module_info(_object))
             _stream.write(
                 _format_module_info(
                     module_info,
@@ -249,15 +250,31 @@ def _pformat(
         case _ if (curated := _curated_member(_object)) is not None:
             # A method documented by a registered (curated) class view: show its
             # curated entry and the owner's notes instead of bare introspection.
-            _stream.write(
-                _format_callable_info(
-                    _curated_member_info(curated), concise=concise, indent=_indent
-                )
-            )
+            info = _curated_member_info(curated)
+            import dataclasses
+
+            from nooa.agentdoc.docindex import official_addendum
+
+            addendum = official_addendum(_object, curated.member.docstring)
+            if addendum:
+                # The official (docs index) description, where the curated text lacks it.
+                parts = (info.docstring or "").split("\n\nOther members: ")
+                parts[0] = f"{parts[0]}\n\n{addendum}" if parts[0] else addendum
+                info = dataclasses.replace(info, docstring="\n\nOther members: ".join(parts))
+            _stream.write(_format_callable_info(info, concise=concise, indent=_indent))
         case _ if inspect.isfunction(_object) or inspect.ismethod(_object):
             from nooa.agentdoc._structured import extract_callable_info
 
             callable_info = extract_callable_info(_object)
+            if (
+                inspect.ismethod(_object)
+                and not callable_info.docstring
+                and callable_info.signature == "(...)"
+            ):
+                # A compiled function bound to an instance (stage.GetUsedLayers).
+                from nooa.agentdoc.docindex import indexed_callable_info
+
+                callable_info = indexed_callable_info(_object) or callable_info
             _stream.write(
                 _format_callable_info(
                     callable_info,
@@ -289,7 +306,13 @@ def _pformat(
             callable_info = extract_callable_info(_object)
             note = None
             if not callable_info.docstring and callable_info.signature == "(...)":
-                note = compiled_callable_note(_object)
+                from nooa.agentdoc.docindex import indexed_callable_info
+
+                indexed = indexed_callable_info(_object)
+                if indexed is not None:
+                    callable_info = indexed  # official docs index text (e.g. OpenUSD)
+                else:
+                    note = compiled_callable_note(_object)
             _stream.write(
                 _format_callable_info(
                     callable_info,
