@@ -3,25 +3,9 @@
 # ruff: noqa: F403,F405
 """Quickstart 15: NeMo Relay integration — guardrails, intercepts, and trajectory export.
 
-NeMo Relay is a multi-language agent runtime that adds execution scope
-management, lifecycle events, and a configurable middleware pipeline
-(guardrails/intercepts) to every LLM call and tool execution in NOOA.
-It is wired in through ``event_manager.intercept()``.
-
-This example shows how to:
-  1. Register an LLM request intercept (attach a header to Relay's request view)
-  2. Register a tool conditional-execution guardrail (block dangerous code)
-  3. Subscribe to lifecycle events for console logging
-  4. Export an ATIF trajectory after the run
-  5. Demonstrate nested generation methods (inner LLM+tool calls through NeMo Relay)
-  6. Demonstrate how different return types appear in the NeMo Relay pipeline and ATIF
-
-Run roots and traced methods automatically use independent stacks with parent
-trace links. Global rules apply throughout; scope-local rules stay on their
-registered stack and do not transfer to nested or concurrent child methods.
-Tool telemetry uses bounded ``nooa.snapshot`` inspection, leaving original
-Python results unchanged. ``await export_nemo_relay_atif(exporter)`` flushes
-events and formats only sanitized data into readable ATIF.
+Register request intercepts, block selected Python calls, log events, and
+export agent runs as ATIF trajectories. The examples include nested agent
+calls and structured return values.
 
 Prerequisites:
   Install NOOA with the nemo-relay extra (public PyPI wheels):
@@ -33,11 +17,6 @@ Usage:
 
 Optional local diagnostics and CPU/memory measurements:
   NOOA_RELAY_DIAGNOSTICS=1 uv run python examples/quickstart/15_nemo_relay.py
-
-Relay 0.11 exports ATIF-v1.7 (Harbor also accepts v1.8, which adds audio).
-Host-generated ``prefill_*`` cells can retain the native exporter's attribution
-to an unrelated model step; use event ancestry when investigating their owner.
-Diagnostics can contain private runtime details; keep the local output private.
 """
 
 import json
@@ -66,7 +45,7 @@ _artifact_directory: Path | None = None
 
 @hidden
 def _write_artifact(name: str, value: dict) -> Path:
-    """Create owner-only files in a private, unpredictable temporary directory."""
+    """Save an export in a private temporary directory."""
     global _artifact_directory
     if _artifact_directory is None:
         _artifact_directory = Path(tempfile.mkdtemp(prefix="nooa-relay-"))
@@ -88,12 +67,7 @@ def _write_artifact(name: str, value: dict) -> Path:
 
 
 class ResearchAgent(Agent, llm=llm):
-    """An agent that researches topics and summarises findings.
-
-    Demonstrates nested generation: summarize() calls fact_check() which is
-    itself a generation method.  Both the outer and inner LLM + tool calls
-    flow through the NeMo Relay middleware pipeline, producing a nested ATIF trace.
-    """
+    """Research a topic and check the summary with a nested agent call."""
 
     async def get_current_year(self) -> int:
         """Return the current year (deterministic helper)."""
@@ -127,11 +101,7 @@ class ResearchAgent(Agent, llm=llm):
 
 
 class GuardrailDemoAgent(Agent, llm=llm):
-    """Agent whose method is designed to trigger the code-safety guardrail.
-
-    The prompt explicitly instructs the LLM to use os.system(), which the
-    guardrail will block before execution.
-    """
+    """Request a shell command to demonstrate the guardrail blocking it."""
 
     async def run_shell_command(self) -> str:
         """Execute os.system('echo hello') and return the output.
@@ -157,12 +127,7 @@ class Summary(BaseModel):
 
 
 class ReturnTypeDemoAgent(Agent, llm=llm):
-    """Agent that demonstrates how different return types are serialized by NeMo Relay.
-
-    Tool return values are captured as bounded inspection snapshots. Small JSON
-    values remain readable, structured objects expose visible fields and unknown
-    objects remain opaque. The original Python result still reaches the caller.
-    """
+    """Compare Python return values with their Relay previews."""
 
     async def return_int(self) -> int:
         """Compute 6 * 7. Call return_result() with the integer result."""
@@ -183,7 +148,7 @@ class ReturnTypeDemoAgent(Agent, llm=llm):
 
 
 # ---------------------------------------------------------------------------
-# 1. LLM request intercept — annotate Relay's request view for subscribers
+# 1. Attach a correlation header to Relay events
 # ---------------------------------------------------------------------------
 
 
@@ -199,6 +164,8 @@ def _add_tracing_header(
     return nemo_relay.LLMRequestInterceptOutcome(updated, annotated)
 
 
+# Use global registrations so rules also apply to nested and concurrent calls.
+# Scope-local rules do not transfer to child method scopes.
 nemo_relay.intercepts.register_llm_request(
     "add-tracing-header",
     1,
@@ -219,7 +186,7 @@ def _code_safety_check(tool_name: str, args: nemo_relay.Json) -> str | None:
     for pattern in _BLOCKED_PATTERNS:
         if pattern in str(code):
             return f"Execution of '{pattern}' is not permitted by policy"
-    return None  # Allow
+    return None
 
 
 nemo_relay.guardrails.register_tool_conditional_execution(
@@ -279,7 +246,6 @@ nemo_relay.subscribers.register("tool-output-capture", _capture_tool_output)
 
 @hidden
 async def run_demo():
-    # 4. Native exporter collects sanitized events; the helper formats its output.
     exporter = nemo_relay.AtifExporter(
         session_id="qs-15-session",
         agent_name="research-agent",
@@ -289,10 +255,7 @@ async def run_demo():
 
     print("Running ResearchAgent under NeMo Relay runtime...\n")
 
-    # nemo_relay_scope() installs NeMo Relay middleware (agent_call, llm_call,
-    # execute_python) on the agent's event_manager and wraps everything in a
-    # root Agent scope. Each traced method has an independent stack; the
-    # global registrations above apply to all its LLM calls and Python cells.
+    # Enable Relay for the agent's LLM calls and Python execution.
     agent = ResearchAgent()
     async with nemo_relay_scope(agent, "research-agent"):
         result = await agent.summarize("recent advances in quantum error correction")
@@ -300,10 +263,7 @@ async def run_demo():
     print("\n--- Result ---")
     print(result)
 
-    # Note: steps[] is a flat array, but the scope hierarchy is not lost —
-    # each step carries it in extra.ancestry.parent_name (e.g. the nested
-    # fact_check turns report parent_name="ResearchAgent.fact_check").
-    # The helper flushes events, then formats only sanitized native export data.
+    # Flush pending events and export the trajectory.
     trajectory = await export_nemo_relay_atif(exporter)
     trajectory_path = _write_artifact("research", trajectory)
     print(f"\n--- Research trajectory → {trajectory_path} ---")
@@ -350,7 +310,6 @@ async def run_demo():
 
         traj = await export_nemo_relay_atif(exporter)
 
-        # Tool outputs are captured by _capture_tool_output subscriber
         tool_outputs = [o for o in _captured_tool_outputs if o["tool"] == "execute_python"]
         relay_output = tool_outputs[-1]["output"] if tool_outputs else None
 
@@ -372,25 +331,6 @@ async def run_demo():
     nemo_relay.intercepts.deregister_llm_request("add-tracing-header")
     nemo_relay.guardrails.deregister_tool_conditional_execution("code-safety")
 
-    print("\n" + "=" * 70)
-    print("What happened under the hood:")
-    print("  - nemo_relay_scope() installed middleware on the agent's event_manager")
-    print("  - agent_call middleware pushed a ScopeType.Function scope per traced")
-    print("      async method (sync, unwrapped @no_trace, static, and class methods")
-    print("      are not wrapped)")
-    print("  - Nested generation: summarize() → fact_check() created nested scopes")
-    print("      → Both inner LLM and tool calls flowed through the NeMo Relay pipeline")
-    print("  - Every LLM call went through the NeMo Relay LLM pipeline:")
-    print("      → add-tracing-header annotated Relay's request view with X-NemoOO-Trace")
-    print("  - Every execute_python call went through the NeMo Relay tool pipeline:")
-    print("      → code-safety guardrail rejected any shell-execution code")
-    print("      → returned_value captured with nooa.snapshot:")
-    print("          Small JSON values        → readable JSON")
-    print("          Structured objects       → visible fields within inspection limits")
-    print("          Unknown objects          → opaque; no pickle serialization")
-    print("  - ATIF export formatted sanitized data into private trajectory JSON files")
-    print("=" * 70)
-
 
 @autorun
 async def main():
@@ -398,7 +338,7 @@ async def main():
         await run_demo()
         return
 
-    # One activation belongs to the application, not to individual agents.
+    # Enable optional diagnostics for the whole demo.
     config = nemo_relay.plugin.PluginConfig(
         diagnostics={"enabled": True},
         components=[
