@@ -677,3 +677,18 @@ async def test_large_llm_preview_preserves_usage_and_provider_call_ids():
         assert data["nooa.output.preview.incomplete"] is True
     finally:
         relay.subscribers.deregister("review-large-model-response")
+
+
+@pytest.mark.asyncio
+async def test_tool_snapshot_metadata_handles_invalid_unicode_keys():
+    # The long value makes snapshot metadata contain a path through this key.
+    result = ExecutionResult(returned_value={"key\ud800": "x" * 100000})
+
+    async def execute(ctx):
+        ctx.result = result
+        return ctx
+
+    async with nemo_relay_scope(ReviewAgent(), "unicode-preview-metadata"):
+        ctx = await nemo_relay_tool_middleware(ExecutePythonContext(code="pass"), execute)
+        assert ctx.result is result
+        assert ctx.result.returned_value["key\ud800"] == "x" * 100000

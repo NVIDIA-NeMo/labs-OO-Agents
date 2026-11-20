@@ -19,7 +19,7 @@ def _bridge_json(value: Any) -> Any:
     if isinstance(value, int):
         # snapshot: allow Rust JSON integer range; normalize only the bounded protocol copy.
         return value if -(2**63) <= value < 2**64 else str(value)
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return [_bridge_json(item) for item in value]
     if isinstance(value, dict):
         return {_bridge_json(key): _bridge_json(item) for key, item in value.items()}
@@ -37,14 +37,14 @@ def inspection_snapshot(value: Any) -> tuple[Any, dict[str, Any]]:
     try:
         snapshot = capture(value, limits)
         text, attributes = render_trace(snapshot, direction="output", max_chars=limits.max_chars)
-        return _bridge_json(json.loads(text)), attributes
+        return _bridge_json(json.loads(text)), _bridge_json(attributes)
     except Exception:
         # Telemetry runs after the method has finished; failure to inspect a
         # value must never replace that method's result or original exception.
         text, attributes = render_trace(
             Unavailable("error", "Python value"), direction="output", max_chars=limits.max_chars
         )
-        return json.loads(text), attributes
+        return json.loads(text), _bridge_json(attributes)
 
 
 def inspection_value(value: Any) -> Any:
