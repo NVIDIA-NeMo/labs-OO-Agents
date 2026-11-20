@@ -169,6 +169,8 @@ async def run_task(
     waiting_on: list[str] = []
     limit_reached = asyncio.Event()
 
+    root_session: list[Any] = []
+
     def listen(update: SessionEvent) -> None:
         nonlocal turns
         if isinstance(update, AgentEventUpdate):
@@ -176,12 +178,17 @@ async def run_task(
                 events.append(update.event)
         elif isinstance(update, TurnEndedUpdate):
             turns += 1
+            if update.outcome_kind == "done" and root_session:
+                # The run is over once the root is done: input that is still queued (a job's
+                # late delivery) must not start another turn before the tree closes.
+                root_session[0].pause_dispatch()
             if update.outcome_kind == "waiting" and turns >= max_turns:
                 waiting_on[:] = update.outcome.get("on", [])
                 limit_reached.set()
 
     async with open_tree(options, agent_factory=agent_factory, llm_factory=llm_factory) as tree:
         root = tree.root
+        root_session.append(root)
         root.subscribe(listen)
         prompt = asyncio.ensure_future(root.prompt(task))
         limit = asyncio.ensure_future(limit_reached.wait())
