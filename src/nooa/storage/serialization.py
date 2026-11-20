@@ -27,15 +27,26 @@ A plain dict that itself carries an envelope key (``__type__`` or
 it comes back as the same plain dict instead of being read as an envelope:
 data must not choose what ``deserialize()`` builds. Blobs written before the
 escape existed contain no ``plain_dict`` envelopes and load unchanged.
+
+Restore trusts code, not data. A snapshot can come from an untrusted place (a
+session store shipped in a cloned repository), so ``deserialize()`` builds only
+classes that are of the kind their envelope names (a Pydantic model, a
+dataclass, an ``@snapshotable`` class) and that live in modules the process
+has already loaded. Restoring never imports a module: any import could run a
+file the snapshot chose, since even a submodule of a loaded package can
+resolve to the current directory (through a namespace package or a
+``pkgutil.extend_path`` ``__path__``). The allowlist stored next to a blob can
+only narrow this; it never permits a class.
 """
 
 from __future__ import annotations
 
 import dataclasses
 import enum
-import importlib
 import inspect
 import logging
+import sys
+from collections.abc import Callable
 from typing import Any
 
 from pydantic import BaseModel
@@ -170,9 +181,17 @@ def deserialize(blob: Any, allowlist: set[str]) -> Any:
     Returns:
         The restored Python object.
 
+    The allowlist usually comes from the stored snapshot, so it only narrows
+    what may be built. Whatever it says, an envelope builds a class only if
+    the class is of the envelope's kind and its module is loaded or may be
+    imported under the rule in the module docstring.
+
     Raises:
         DeserializationError: If the blob references a class not in the
-            allowlist, the class cannot be imported, the blob nests deeper
+            allowlist, a class that is not of its envelope's kind (e.g. a
+            ``"dataclass"`` envelope naming ``subprocess.Popen``), a class whose
+            module may not be imported (see ``_import_class``), or the class
+            cannot be found, the blob nests deeper
             than ``MAX_SNAPSHOT_DEPTH`` (``reason`` is ``"depth"``), or
             restoring hits Python's recursion limit.
     """
@@ -642,6 +661,12 @@ def _deserialize_envelope(blob: dict[str, Any], allowlist: set[str], depth: int)
         )
 
     cls = _import_class(fqn)
+    if not _ENVELOPE_KIND_CHECKS[envelope_type](cls):
+        raise DeserializationError(
+            f"Class {fqn!r} is not a {_ENVELOPE_KIND_NAMES[envelope_type]}, so a "
+            f"{envelope_type!r} envelope may not build it. "
+            f"This blob may have been tampered with."
+        )
 
     if envelope_type == _PYDANTIC:
         if restore_snapshot := getattr(cls, "__restore_snapshot__", None):
@@ -676,14 +701,39 @@ def _deserialize_envelope(blob: dict[str, Any], allowlist: set[str], depth: int)
             deserialized_data = _deserialize_fields(data, allowlist, depth)
         accepted = {p.name for p in inspect.signature(cls.__init__).parameters.values()} - {"self"}
         filtered = {k: v for k, v in deserialized_data.items() if k in accepted}
+        extra = {k: v for k, v in deserialized_data.items() if k not in accepted}
+        if dunder := [k for k in extra if k.startswith("__") and k.endswith("__")]:
+            # vars() of a real instance has no dunder names; setting one (e.g.
+            # ``__class__``) would let data change what the object is.
+            raise DeserializationError(
+                f"Refusing to set special attribute(s) {sorted(dunder)} on {fqn!r}. "
+                f"This blob may have been tampered with."
+            )
         obj = cls(**filtered)
         # Set any remaining attrs that aren't __init__ params but were in vars()
-        for k, v in deserialized_data.items():
-            if k not in accepted:
-                setattr(obj, k, v)
+        for k, v in extra.items():
+            setattr(obj, k, v)
         return obj
 
     raise DeserializationError(f"Unknown envelope type: {envelope_type!r}")
+
+
+def _is_class(obj: Any) -> bool:
+    return isinstance(obj, type)
+
+
+# What each envelope kind may build. ``_deserialize`` only routes the kinds in
+# ``_ENVELOPE_TYPES`` here; each must have an entry.
+_ENVELOPE_KIND_CHECKS: dict[str, Callable[[Any], bool]] = {
+    _PYDANTIC: lambda cls: _is_class(cls) and issubclass(cls, BaseModel),
+    _DATACLASS: lambda cls: _is_class(cls) and dataclasses.is_dataclass(cls),
+    _DICT_CLASS: lambda cls: _is_class(cls) and is_snapshotable_class(cls),
+}
+_ENVELOPE_KIND_NAMES = {
+    _PYDANTIC: "Pydantic model",
+    _DATACLASS: "dataclass",
+    _DICT_CLASS: "@snapshotable class",
+}
 
 
 def _deserialize_lenient_dict(
@@ -731,32 +781,54 @@ def _fqn(cls: type) -> str:
     return f"{cls.__module__}.{cls.__qualname__}"
 
 
+_MISSING = object()
+
+
 def _import_class(fqn: str) -> type:
-    """Import a class by its fully qualified name.
+    """Find a class by its fully qualified name in modules already loaded.
 
     Supports nested/inner classes whose ``__qualname__`` contains dots
     (e.g. ``module.Outer.Inner``).  We try progressively shorter module
     paths so that ``getattr`` can traverse the class hierarchy.
 
+    Restoring never imports anything: only modules already in
+    ``sys.modules`` are used. Any import could run code from a file the
+    snapshot chose. Even a submodule of a loaded package can resolve to the
+    workspace, through a namespace package or a ``pkgutil.extend_path``
+    ``__path__``. A class whose module is not loaded yet is refused; import
+    it before restoring. Names are resolved with ``inspect.getattr_static``,
+    so no ``__getattr__``/``__getattribute__`` hook or descriptor runs.
+
     Raises:
-        DeserializationError: If the module or class cannot be found.
+        DeserializationError: If the module is not loaded or the class is not found.
     """
     candidates = [fqn]
     old_prefix, new_prefix = _LEGACY_CORE_PREFIX
     if fqn.startswith(old_prefix):
         candidates.append(new_prefix + fqn.removeprefix(old_prefix))
 
+    not_loaded = False
     for candidate in candidates:
         parts = candidate.split(".")
         if len(parts) < 2:
             raise DeserializationError(f"Invalid fully qualified name: {fqn!r}")
         for i in range(len(parts) - 1, 0, -1):
-            module_path = ".".join(parts[:i])
-            try:
-                obj = importlib.import_module(module_path)
-                for attr in parts[i:]:
-                    obj = getattr(obj, attr)
-                return obj  # type: ignore[return-value]
-            except (ImportError, AttributeError):
+            obj = sys.modules.get(".".join(parts[:i]))
+            if obj is None:
+                not_loaded = True
                 continue
+            # Static lookup (``inspect.getattr_static``), not ``getattr``: a
+            # module-level ``__getattr__``, a custom ``__getattribute__`` or a
+            # descriptor could run code, e.g. import a submodule the snapshot named.
+            for attr in parts[i:]:
+                obj = inspect.getattr_static(obj, attr, _MISSING)
+                if obj is _MISSING:
+                    break
+            if obj is not _MISSING:
+                return obj  # type: ignore[return-value]
+    if not_loaded:
+        raise DeserializationError(
+            f"Cannot import class {fqn!r}: its module is not imported, and restoring a "
+            f"snapshot never imports modules. Import it before restoring."
+        )
     raise DeserializationError(f"Cannot import class {fqn!r}: module or attribute not found")

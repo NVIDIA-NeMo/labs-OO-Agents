@@ -144,8 +144,8 @@ class AgentSnapshot(BaseModel):
         Args:
             agent: A freshly constructed Agent instance to restore into.
 
-        An attribute that fails to deserialize is skipped with a warning; the
-        other attributes are still restored. Last, if the agent has a callable
+        An attribute or static context block that fails to deserialize is
+        skipped with a warning; the others are still restored. Last, if the agent has a callable
         ``after_restore`` (``InteractiveAgent`` and its subclasses), it runs
         once, so every restore path repairs what did not survive the restart;
         hosts do not call it again.
@@ -156,7 +156,6 @@ class AgentSnapshot(BaseModel):
 
         Raises:
             SerializationError: If the snapshot version doesn't match.
-            DeserializationError: If a static context block can't be restored.
         """
         if self.version != SNAPSHOT_VERSION:
             raise SerializationError(
@@ -178,7 +177,19 @@ class AgentSnapshot(BaseModel):
                 else:
                     agent.context_manager.set_dynamic(block.key, block.expr)
             else:
-                value = deserialize(block.value, self.type_allowlist)
+                try:
+                    value = deserialize(block.value, self.type_allowlist)
+                except Exception as exc:
+                    # Like an attribute below: a block whose value cannot be
+                    # restored (e.g. a class from a package not imported yet,
+                    # refused by ``_import_class``) is skipped, not fatal.
+                    logger.warning(
+                        "Snapshot: skipping non-restorable context block %r: %s",
+                        block.key,
+                        exc,
+                        exc_info=True,
+                    )
+                    continue
                 if is_protected:
                     agent.context_manager.set_static_protected(block.key, value)
                 else:
