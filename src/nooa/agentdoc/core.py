@@ -48,8 +48,9 @@ def _is_documentable_collection(obj: list | tuple) -> bool:
 # Curated doc() adapters for third-party libraries (nooa.agentdoc.adapters), loaded
 # lazily: once its library has been imported, the first doc() call registers the
 # adapter. Nothing is imported for a library the process has not loaded.
-_LAZY_ADAPTERS = {
-    "pxr": "nooa.agentdoc.adapters.pxr",
+# A library may list several adapters (pxr: the curated views and the docs index).
+_LAZY_ADAPTERS: dict[str, str | tuple[str, ...]] = {
+    "pxr": ("nooa.agentdoc.adapters.pxr", "nooa.agentdoc.adapters.pxr_index"),
     "pandas": "nooa.agentdoc.adapters.pandas",
     "plotly": "nooa.agentdoc.adapters.plotly",
     "numpy": "nooa.agentdoc.adapters.numpy",
@@ -65,14 +66,17 @@ def _load_adapters_for_imported_libraries() -> None:
     import importlib
     import sys
 
-    for library, adapter in _LAZY_ADAPTERS.items():
-        if adapter in _loaded_adapters or library not in sys.modules:
+    for library, adapters in _LAZY_ADAPTERS.items():
+        if library not in sys.modules:
             continue
-        _loaded_adapters.add(adapter)
-        try:
-            importlib.import_module(adapter)
-        except Exception:  # noqa: BLE001 - an adapter must never break doc()
-            pass
+        for adapter in (adapters,) if isinstance(adapters, str) else adapters:
+            if adapter in _loaded_adapters:
+                continue
+            _loaded_adapters.add(adapter)
+            try:
+                importlib.import_module(adapter)
+            except Exception:  # noqa: BLE001 - an adapter must never break doc()
+                pass
 
 
 def attribute_error_hint(error: BaseException) -> str | None:
@@ -105,6 +109,8 @@ def doc(
     hide the API.
 
     Referenced types are expanded inline and deduplicated across the result.
+    Objects without docstrings (e.g. pxr) show their library's official docs
+    index text when one is registered; ``doc.search("keywords")`` finds names.
 
     Args:
         *objs: Objects to document: ``doc(MyClass)``, ``doc(Class, fn)``, or
@@ -150,6 +156,27 @@ def doc(
 
     # Multiple objects: use multi-type formatting with deduplication
     return _doc_multiple(flat_objs, concise=concise, inline_depth=inline_depth)
+
+
+def _search(
+    query: Annotated[str, "Keywords, e.g. 'create a face subset for material binding'"],
+    limit: Annotated[int, "Maximum number of results"] = 8,
+    packages: Annotated[
+        list[str] | None, "Indexes to search, in rank order (default: all registered)"
+    ] = None,
+) -> str:
+    """Search the registered docs indexes (e.g. pxr/OpenUSD) by keywords.
+
+    Returns compact ``Name(signature) — summary`` lines, best first, ending with a
+    hint to call ``doc(name)`` for the full text.
+    """
+    _load_adapters_for_imported_libraries()
+    from nooa.agentdoc.docindex import search_docs
+
+    return search_docs(query, packages=packages, limit=limit)
+
+
+doc.search = _search  # type: ignore[attr-defined]
 
 
 def _doc_multiple(

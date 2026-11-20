@@ -389,10 +389,23 @@ def test_concise_doc_on_curated_method_shows_only_its_line():
     assert "never an elementType" not in out
 
 
-def test_uncurated_compiled_function_keeps_the_compiled_note():
+def test_uncurated_compiled_function_shows_the_official_docs_index_text():
     out = doc(Sdf.Path.IsAbsolutePath)
+    assert out.startswith("def Sdf.Path.IsAbsolutePath(self):")
+    assert "Returns whether the path is absolute." in out
+    assert "No docstring or signature is available" not in out
+
+
+def test_uncurated_compiled_function_without_index_keeps_the_compiled_note():
+    from nooa.agentdoc.adapters.pxr_index import load_pxr_index
+    from nooa.agentdoc.docindex import register_doc_index, unregister_doc_index
+
+    unregister_doc_index("pxr")
+    try:
+        out = doc(Sdf.Path.IsAbsolutePath)
+    finally:
+        register_doc_index("pxr", load_pxr_index)
     assert "No docstring or signature is available for this compiled function." in out
-    assert "doc(Path)" in out
 
 
 # --------------------------------------------------------------------------- #622 follow-ups

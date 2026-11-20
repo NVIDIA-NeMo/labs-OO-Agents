@@ -280,13 +280,19 @@ def extract_type_info(
     methods = _extract_methods(obj)
     docstring = _extract_docstring(obj)
 
-    return TypeInfo(
+    info = TypeInfo(
         name=name,
         base=base,
         fields=fields,
         methods=methods,
         docstring=docstring,
     )
+    if is_compiled_type(obj):
+        # Compiled classes (pxr) often lack docstrings: use a registered docs index.
+        from nooa.agentdoc.docindex import enrich_type_info
+
+        info = enrich_type_info(obj, info)
+    return info
 
 
 def extract_callable_info(obj: Any) -> CallableInfo:
