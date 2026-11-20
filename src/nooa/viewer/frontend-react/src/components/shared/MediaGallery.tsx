@@ -126,6 +126,7 @@ function MediaTile({ item }: { item: MediaItem }) {
         <iframe
           src={item.url}
           title={`PDF ${label}`}
+          loading="lazy"
           className="w-full h-96 rounded border border-gray-700 bg-white"
         />
         <a
