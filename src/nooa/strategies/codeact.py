@@ -212,7 +212,15 @@ type TextOnlyResponseHandler = Callable[
 
 
 def return_text_as_result(context: TextOnlyResponseContext) -> TextOnlyResponseAction:
-    """Opt-in handler that validates non-empty text (or ``None``) as the result."""
+    """Opt-in handler that validates non-empty text (or ``None``) as the result.
+
+    A reply that finishes text cut off at the output-token limit is only the
+    tail of the answer (the earlier parts are in history, not joined), so it is
+    not accepted: the model is asked to return the whole answer with
+    ``return_result`` instead (CONTINUED_TEXT_NOTE).
+    """
+    if (getattr(context.response, "metadata", None) or {}).get("output_continued"):
+        return TextOnlyResponseAction.retry(_text_only_correction(context))
     value = context.content if context.content.strip() else None
     return TextOnlyResponseAction.return_result(value)
 

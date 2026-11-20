@@ -271,14 +271,19 @@ class TestLengthContinuation:
                 _resp("Part A, ", finish_reason="length"),
                 _resp("part B, ", finish_reason="length"),
                 _resp("part C."),
+                _resp("", tool_calls=[_ret("Part A, part B, part C.")]),
             ]
         )
         agent = _agent_cls(on_text_only=return_text_as_result)(llm=llm)
 
-        # The pieces are not joined: the earlier parts are in history.
-        assert await agent.my_task() == "part C."
+        # The pieces are not joined (they are all in history), and the tail
+        # alone is not accepted as the result: the model returns the whole answer.
+        assert await agent.my_task() == "Part A, part B, part C."
+        corrections = [e.content for e in _events(agent, Error)]
+        assert len(corrections) == 1
+        assert CONTINUED_TEXT_NOTE in corrections[0]
         # Each reply stays in history as generated; nothing is rewritten.
-        assert [e.content for e in _events(agent, LLMResponse)] == [
+        assert [e.content for e in _events(agent, LLMResponse)][:3] == [
             "Part A, ",
             "part B, ",
             "part C.",
@@ -286,7 +291,7 @@ class TestLengthContinuation:
         # The continue prompt is plain feedback, not an Error event.
         assert [e.content for e in _events(agent, Feedback)] == [LENGTH_CONTINUATION_NUDGE] * 2
         assert not any(LENGTH_CONTINUATION_NUDGE in e.content for e in _events(agent, Error))
-        assert _events(agent, LLMResponse)[-1].metadata["output_continued"] is True
+        assert _events(agent, LLMResponse)[2].metadata["output_continued"] is True
         # The model saw its partial reply, then the continue prompt.
         seen = [(m.get("role"), str(m.get("content"))) for m in llm.last_messages]
         first = seen.index(("assistant", "Part A, "))
@@ -296,13 +301,22 @@ class TestLengthContinuation:
         assert seen[first + 2] == ("assistant", "part B, ")
 
     @pytest.mark.asyncio
-    async def test_restarted_continuation_returns_the_last_reply(self):
+    async def test_tail_only_completion_is_not_accepted(self):
+        """Severin's #356 case: the tail of a continued reply is not the result."""
         llm = FakeLLMClient(
             scripted_responses=[
-                _resp("The answer is 4", finish_reason="length"),
-                _resp("The answer is 42."),
+                _resp("The account number is ", finish_reason="length"),
+                _resp("1234."),
+                _resp("", tool_calls=[_ret("The account number is 1234.")]),
             ]
         )
+        agent = _agent_cls(on_text_only=return_text_as_result)(llm=llm)
+        assert await agent.my_task() == "The account number is 1234."
+        assert llm.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_uncontinued_text_is_still_accepted(self):
+        llm = FakeLLMClient(scripted_responses=[_resp("The answer is 42.")])
         agent = _agent_cls(on_text_only=return_text_as_result)(llm=llm)
         assert await agent.my_task() == "The answer is 42."
 
