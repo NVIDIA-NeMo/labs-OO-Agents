@@ -1036,6 +1036,14 @@ class OpenInferenceHooks:
             parent_attributes=getattr(parent_span, "attributes", None) or {},
             **kwargs,
         )
+        # The private invocation receipt survives through this runtime hook
+        # and canonical event delivery. No public response field or ID registry.
+        from nooa.unifiedllm._accounting import _current_receipt
+
+        receipt = _current_receipt.get()
+        if receipt is not None and receipt.snapshot is not None:
+            attrs["nooa.llm.owner"] = "receipt"
+            attrs["nooa.llm.logical_id"] = receipt.snapshot.logical_id
         for key, value in attrs.items():
             with contextlib.suppress(Exception):
                 span.set_attribute(key, value)

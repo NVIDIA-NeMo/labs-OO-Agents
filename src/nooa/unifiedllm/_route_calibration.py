@@ -41,7 +41,7 @@ class _RouteCalibration:
 @dataclass(frozen=True, slots=True)
 class _CalibrationAdapter:
     adapter: Any
-    record: _RouteCalibration
+    record: _RouteCalibration | None
     wire_owner: Any = None
 
     @property
@@ -78,13 +78,14 @@ class _CalibrationAdapter:
         return cap
 
     def _update(self, owner):
+        if self.record is None:
+            return
         observation = owner.writer.record
         estimated = observation.raw_input_estimate
         usage = observation.usage
         actual = usage.input_tokens if usage is not None else None
         if (
-            observation.finished
-            and observation.response_received
+            observation.response_received
             and estimated is not None
             and actual is not None
             and estimated > 0
@@ -93,17 +94,30 @@ class _CalibrationAdapter:
             self.record.update(estimated, actual)
 
     def send_sync(self, request):
-        owner = _ObservationOwner(_AttemptWriter())
+        return self._send_sync_owned(request, _ObservationOwner(_AttemptWriter()))
+
+    def _send_sync_owned(self, request, owner):
         try:
-            return self.adapter._send_sync(request, _owner=owner, _decision=self._decision)
+            return self.adapter._send_sync(
+                request,
+                _owner=owner,
+                _decision=self._decision if self.record is not None else None,
+                _legacy_calibration=self.record is None,
+            )
         finally:
             self._update(owner)
 
     async def send(self, request):
-        owner = _ObservationOwner(_AttemptWriter())
+        return await self._send_owned(request, _ObservationOwner(_AttemptWriter()))
+
+    async def _send_owned(self, request, owner):
         try:
             return await self.adapter._send(
-                request, _owner=owner, _decision=self._decision, _wire_owner=self.wire_owner
+                request,
+                _owner=owner,
+                _decision=self._decision if self.record is not None else None,
+                _wire_owner=self.wire_owner,
+                _legacy_calibration=self.record is None,
             )
         finally:
             self._update(owner)

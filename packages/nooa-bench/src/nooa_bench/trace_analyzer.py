@@ -104,6 +104,9 @@ def _iter_trace_spans(doc: dict[str, Any]):
             for scope_spans in resource_spans.get("scopeSpans", []):
                 for span in scope_spans.get("spans", []):
                     yield {
+                        "trace_id": span.get("traceId", ""),
+                        "span_id": span.get("spanId", ""),
+                        "parent_id": span.get("parentSpanId", ""),
                         "name": span.get("name", ""),
                         "start_ns": _parse_time_ns(span.get("startTimeUnixNano")),
                         "end_ns": _parse_time_ns(span.get("endTimeUnixNano")),
@@ -118,6 +121,9 @@ def _iter_trace_spans(doc: dict[str, Any]):
         attrs = {}
 
     yield {
+        "trace_id": doc.get("trace_id", doc.get("traceId", "")),
+        "span_id": doc.get("span_id", doc.get("spanId", "")),
+        "parent_id": doc.get("parent_id", doc.get("parent_span_id", doc.get("parentSpanId", ""))),
         "name": doc.get("name", ""),
         "start_ns": _parse_time_ns(
             doc.get("start_time_unix_nano", doc.get("startTimeUnixNano", doc.get("start_time")))
@@ -169,70 +175,100 @@ class TraceAnalyzer:
         trace_end_ns: int | None = None
         total_llm_calls = 0
 
+        # Resolve ownership before counting: OTLP/exported spans may be
+        # duplicated or arrive children-first. Unmarked files retain heuristics.
+        docs = []
         with open(path) as f:
             for line in f:
-                line = line.strip()
-                if not line:
-                    continue
                 try:
-                    doc = json.loads(line)
-
-                    for span in _iter_trace_spans(doc):
-                        start_ns = span["start_ns"]
-                        end_ns = span["end_ns"]
-
-                        # Track overall trace timing
-                        if start_ns > 0 and (trace_start_ns is None or start_ns < trace_start_ns):
-                            trace_start_ns = start_ns
-                        if end_ns > 0 and (trace_end_ns is None or end_ns > trace_end_ns):
-                            trace_end_ns = end_ns
-
-                        # Look for LLM spans
-                        attrs = span["attributes"]
-                        span_name = span["name"]
-
-                        # Check if this is an LLM call span
-                        if self._is_llm_span(span_name, attrs):
-                            total_llm_calls += 1
-
-                            # Extract model name
-                            model_name = _first_attr(attrs, _MODEL_ATTRS, "unknown")
-
-                            # Initialize model stats if not seen before
-                            if model_name not in model_stats:
-                                model_stats[model_name] = ModelUsageStats(model_name=model_name)
-
-                            stats = model_stats[model_name]
-
-                            # Extract token counts with validation
-                            prompt_tokens = _first_attr(attrs, _PROMPT_TOKEN_ATTRS, 0)
-                            completion_tokens = _first_attr(attrs, _COMPLETION_TOKEN_ATTRS, 0)
-                            total_tokens = _first_attr(attrs, _TOTAL_TOKEN_ATTRS, None)
-
-                            # Validate and parse token counts
-                            prompt_count = self._parse_token_count(
-                                prompt_tokens, "prompt_tokens", path
-                            )
-                            completion_count = self._parse_token_count(
-                                completion_tokens, "completion_tokens", path
-                            )
-                            total_count = self._parse_token_count(
-                                total_tokens, "total_tokens", path
-                            )
-                            combined_count = prompt_count + completion_count
-
-                            stats.prompt_tokens += prompt_count
-                            stats.completion_tokens += completion_count
-                            stats.total_tokens += combined_count or total_count
-                            stats.call_count += 1
-
-                            # Calculate latency in milliseconds
-                            if start_ns > 0 and end_ns > 0:
-                                latency_ms = (end_ns - start_ns) / 1e6
-                                stats.latencies_ms.append(latency_ms)
-
+                    docs.append(json.loads(line))
                 except json.JSONDecodeError:
                     continue
+        spans = [span for doc in docs for span in _iter_trace_spans(doc)]
+        by_id = {(s["trace_id"], s["span_id"]): s for s in spans if s["span_id"]}
+        owned = {
+            s["attributes"].get("nooa.llm.logical_id")
+            for s in spans
+            if s["attributes"].get("nooa.llm.owner") == "logical"
+        }
+        owned.discard(None)
+        ancestors = set()
+        for s in spans:
+            if s["attributes"].get("nooa.llm.owner") != "logical":
+                continue
+            key = (s["trace_id"], s["parent_id"])
+            while key[1] and key in by_id and key not in ancestors:
+                parent = by_id[key]
+                # Only generation/CHAIN metadata is redundant ancestry. A real
+                # unowned LLM parent remains an independent legacy/direct call.
+                if parent["attributes"].get("openinference.span.kind") == "LLM":
+                    break
+                ancestors.add(key)
+                key = (parent["trace_id"], parent["parent_id"])
+        seen = set()
+        for doc in docs:
+            try:
+                for span in _iter_trace_spans(doc):
+                    key = (span["trace_id"], span["span_id"])
+                    if key[1]:
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                    start_ns = span["start_ns"]
+                    end_ns = span["end_ns"]
+
+                    # Track overall trace timing
+                    if start_ns > 0 and (trace_start_ns is None or start_ns < trace_start_ns):
+                        trace_start_ns = start_ns
+                    if end_ns > 0 and (trace_end_ns is None or end_ns > trace_end_ns):
+                        trace_end_ns = end_ns
+
+                    # Look for LLM spans
+                    attrs = span["attributes"]
+                    span_name = span["name"]
+
+                    # Check if this is an LLM call span
+                    shell = attrs.get("nooa.llm.owner") == "logical"
+                    correlated = attrs.get("nooa.llm.logical_id") in owned
+                    if not shell and (correlated or key in ancestors):
+                        continue
+                    if shell or self._is_llm_span(span_name, attrs):
+                        total_llm_calls += 1
+
+                        # Extract model name
+                        model_name = _first_attr(attrs, _MODEL_ATTRS, "unknown")
+
+                        # Initialize model stats if not seen before
+                        if model_name not in model_stats:
+                            model_stats[model_name] = ModelUsageStats(model_name=model_name)
+
+                        stats = model_stats[model_name]
+
+                        # Extract token counts with validation
+                        prompt_tokens = _first_attr(attrs, _PROMPT_TOKEN_ATTRS, 0)
+                        completion_tokens = _first_attr(attrs, _COMPLETION_TOKEN_ATTRS, 0)
+                        total_tokens = _first_attr(attrs, _TOTAL_TOKEN_ATTRS, None)
+
+                        # Validate and parse token counts
+                        prompt_count = self._parse_token_count(prompt_tokens, "prompt_tokens", path)
+                        completion_count = self._parse_token_count(
+                            completion_tokens, "completion_tokens", path
+                        )
+                        total_count = self._parse_token_count(total_tokens, "total_tokens", path)
+                        combined_count = prompt_count + completion_count
+
+                        stats.prompt_tokens += prompt_count
+                        stats.completion_tokens += completion_count
+                        stats.total_tokens += combined_count or total_count
+                        stats.call_count += 1
+
+                        # Calculate latency in milliseconds
+                        if start_ns > 0 and end_ns > 0:
+                            latency_ms = (end_ns - start_ns) / 1e6
+                            stats.latencies_ms.append(latency_ms)
+
+            except json.JSONDecodeError:
+                continue
 
         # Calculate total runtime
         runtime_seconds = 0.0

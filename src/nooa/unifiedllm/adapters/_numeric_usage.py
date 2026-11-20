@@ -36,10 +36,28 @@ def _numeric_usage(raw_response):
     """
     try:
         hidden = getattr(raw_response, "_hidden_params", None)
+        if _field(hidden, "cache_hit") is True:
+            # Cache evidence is independent of the final response's usage. This
+            # invocation dispatched no paid request; public usage stays intact.
+            return _NumericUsage(0, 0, 0, 0, 0, 0, 0.0, "cache_hit")
         metadata_cost = _number(_field(hidden, "response_cost"))
+        headers = _field(hidden, "additional_headers")
+        if not isinstance(headers, Mapping):
+            headers = _field(hidden, "response_headers")
+        if not isinstance(headers, Mapping):
+            headers = getattr(raw_response, "_response_headers", None)
+        header_cost = None
+        if isinstance(headers, Mapping):
+            for key, raw in headers.items():
+                if str(key).lower().endswith("x-litellm-response-cost"):
+                    try:
+                        header_cost = _number(float(raw)) if not isinstance(raw, bool) else None
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+                    break
         value = getattr(raw_response, "usage", None)
         if value is None:
-            if metadata_cost is None:
+            if metadata_cost is None and header_cost is None:
                 return None
             value = {}
         if hasattr(value, "model_dump"):
@@ -71,6 +89,8 @@ def _numeric_usage(raw_response):
         source = "provider" if cost is not None else "unknown"
         if metadata_cost is not None:
             cost, source = metadata_cost, "response_metadata"
+        if header_cost is not None:
+            cost, source = header_cost, "gateway_header"
         return _NumericUsage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,

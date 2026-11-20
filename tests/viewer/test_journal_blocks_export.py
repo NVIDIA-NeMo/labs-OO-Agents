@@ -245,3 +245,102 @@ class TestExportReconstructsMessages:
             f"export did not resolve output block hash to content. "
             f"got: {attrs.get(out_content_key)!r}"
         )
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_terminal_logical_journal_real_receiver_export(client, monkeypatch, failed):
+    from nooa.tracing import _journal_api
+    from nooa.tracing._context_sideband import (
+        JournalPayload,
+        get_journal_payload,
+        set_journal_payload,
+    )
+    from nooa.unifiedllm._accounting import _LogicalAccount
+    from nooa.unifiedllm._logical_trace import _LogicalJournal
+    from nooa.unifiedllm._observations import _NumericUsage
+
+    session_id = "logical-journal-session"
+    _seed_session(otlp_store._db, session_id)
+    records = []
+
+    class Sink:
+        def _send_new_blocks(self, session, blocks):
+            result = client.post(
+                "/v1/journal/blocks",
+                json=[{"hash": h, "content": c} for h, c in blocks.items()],
+                headers={"X-Session-Id": session_id},
+            )
+            assert result.status_code == 200, result.text
+
+        def _send_call(self, session, record):
+            record = dict(record, session_id=session_id)
+            _seed_stripped_llm_span(
+                otlp_store._db, session_id=session_id, span_id=record["span_id"]
+            )
+            result = client.post("/v1/journal/calls", json=record)
+            assert result.status_code == 200, result.text
+            records.append(record)
+
+    monkeypatch.setattr(_journal_api, "_installed_sinks", lambda: [Sink()])
+    account = _LogicalAccount()
+    journal = _LogicalJournal(account.logical_id, "model", [])
+    index, owner = account.attempt()
+    owner.writer.entering_provider()
+    owner.writer.delivered(
+        _NumericUsage(
+            input_tokens=7,
+            output_tokens=2,
+            total_tokens=9,
+            cost_usd=0.03,
+            cost_source="gateway_header",
+        )
+    )
+    account.fold(index, owner)
+    payload = JournalPayload(
+        [{"role": "user", "parts": [{"block_hash": _hash("original input"), "key": "block-key"}]}],
+        {_hash("original input"): "original input"},
+    )
+    set_journal_payload(payload)
+    from nooa.unifiedllm import LLMResponse
+
+    response = (
+        None
+        if failed
+        else LLMResponse(
+            content="accepted output",
+            reasoning="readable thought",
+            raw_response={"id": "portable-final"},
+        )
+    )
+    try:
+        journal.finish(
+            account.freeze("error" if failed else "success", "parse" if failed else None), response
+        )
+        assert get_journal_payload() is None
+    finally:
+        set_journal_payload(None)
+    [record] = records
+    assert record["call_id"] == account.logical_id
+    assert record["input_skeleton"] == payload.skeleton
+    assert record["tokens"]["prompt"] == 7 and record["tokens"]["completion"] == 2
+    assert record["extra"]["cost_sources"] == ["gateway_header"]
+    assert record["ts_start"] > 1_000_000_000
+    assert record["ts_end"] >= record["ts_start"]
+    if failed:
+        assert record["output_messages"] == []
+    exported = client.get(f"/api/trace/export?session_id={session_id}")
+    assert exported.status_code == 200, exported.text
+    spans = [
+        sp
+        for line in exported.text.splitlines()
+        if line.strip()
+        for rs in json.loads(line).get("resourceSpans", [])
+        for ss in rs.get("scopeSpans", [])
+        for sp in ss.get("spans", [])
+    ]
+    [span] = [sp for sp in spans if sp["spanId"] == record["span_id"]]
+    attrs = _attrs_dict(span)
+    assert attrs["llm.input_messages.0.message.content"] == "original input"
+    if not failed:
+        assert attrs["llm.output_messages.0.message.content"] == "accepted output"
+        assert record["extra"]["response_id"] == "portable-final"

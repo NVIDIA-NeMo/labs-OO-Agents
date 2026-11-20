@@ -57,8 +57,29 @@ def responses_reply():
     )
 
 
+def _without_owned_dispatch_carriers(kwargs):
+    """Compare the wire body, validating only the SDK's two private carriers."""
+    carriers = {"litellm_logging_obj", "litellm_call_id"}
+    present = carriers.intersection(kwargs)
+    if present:
+        from uuid import UUID
+
+        from litellm.litellm_core_utils.litellm_logging import Logging
+
+        assert present == carriers
+        assert isinstance(kwargs["litellm_logging_obj"], Logging)
+        assert UUID(kwargs["litellm_call_id"])
+        assert (
+            kwargs["litellm_logging_obj"].model_call_details.get("_nooa_logical_call_owned") is True
+        )
+    return {key: value for key, value in kwargs.items() if key not in carriers}
+
+
 def _body(kwargs):
-    return json.dumps({k: v for k, v in kwargs.items() if k != "client"}, sort_keys=True)
+    return json.dumps(
+        {k: v for k, v in _without_owned_dispatch_carriers(kwargs).items() if k != "client"},
+        sort_keys=True,
+    )
 
 
 @pytest.fixture
@@ -600,3 +621,23 @@ async def test_public_media_does_not_borrow_legacy_sticky_exclusions(calls, make
         assert messages[0]["content"][0]["type"] == "image_url"
     finally:
         await client.aclose()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"litellm_logging_obj": object()},
+        {"litellm_call_id": "not-a-uuid"},
+        {"litellm_logging_obj": object(), "litellm_call_id": "not-a-uuid"},
+    ],
+)
+def test_wire_carrier_normalization_rejects_invalid_carriers(bad):
+    with pytest.raises(AssertionError):
+        _without_owned_dispatch_carriers(bad)
+
+
+def test_wire_carrier_normalization_keeps_all_other_fields():
+    original = {"metadata": {"user": "caller", "nested": [1, 2]}, "native_param": 9}
+    result = _without_owned_dispatch_carriers(original)
+    assert result == original
+    assert result["metadata"] is original["metadata"]

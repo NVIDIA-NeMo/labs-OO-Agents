@@ -326,7 +326,11 @@ class Session:
         self._closing = False
         self._closed = False
         self._before_close = before_close
-        self._loop_context_hooks: list[Callable[[], object]] = []
+        from nooa.unifiedllm._accounting import _bind_terminal_receiver
+
+        self._loop_context_hooks: list[Callable[[], object]] = [
+            lambda: _bind_terminal_receiver(self._count_terminal_usage)
+        ]
         self._pending_steers: list[tuple[str, str, str]] = []  # (item_id, text, source)
         self._snapshot_digest: str | None = None
         self._checkpoint_task: asyncio.Task[None] | None = None
@@ -1386,13 +1390,27 @@ class Session:
         self.handle.update_usage(totals)
         self._emit(UsageChangedUpdate(session_id=self.id, usage=totals.model_copy()))
 
+    def _count_terminal_usage(self, snapshot) -> None:
+        # Caller-terminal settlement only. Shielded late provider results never
+        # invoke this hook or correct a closed turn.
+        if self._closed:
+            return
+        totals = self.info.usage
+        for name in USAGE_FIELDS:
+            setattr(totals, name, getattr(totals, name) + (snapshot.subtotal(name).known or 0))
+        self.handle.update_usage(totals)
+        self._emit(UsageChangedUpdate(session_id=self.id, usage=totals.model_copy()))
+
     def _count_usage(self, response: LLMResponse) -> None:
         usage = response.usage
         if usage is None:
             return
+        from nooa.unifiedllm._accounting import _owns_delivered_response
+
         totals = self.info.usage
-        for name in USAGE_FIELDS:
-            setattr(totals, name, getattr(totals, name) + (getattr(usage, name, 0) or 0))
+        if not _owns_delivered_response(response):
+            for name in USAGE_FIELDS:
+                setattr(totals, name, getattr(totals, name) + (getattr(usage, name, 0) or 0))
         totals.last_input_tokens = usage.input_tokens or 0
         self.handle.update_usage(totals)
         self._emit(UsageChangedUpdate(session_id=self.id, usage=totals.model_copy()))

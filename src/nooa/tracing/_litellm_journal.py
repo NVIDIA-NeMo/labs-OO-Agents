@@ -35,6 +35,7 @@ from typing import Any
 from litellm.integrations.custom_logger import CustomLogger
 from opentelemetry import trace as otel_trace
 
+from nooa._provider_ownership import _is_owned_provider_details
 from nooa.tracing._journal_builder import _encode_image
 from nooa.tracing._secret_scrubber import scrub_value
 from nooa.tracing._session import get_session
@@ -542,6 +543,10 @@ class MessageJournalCallback(CustomLogger):
         return None
 
     def log_pre_api_call(self, model: str, messages: list, kwargs: dict) -> None:
+        # Before rendered sideband consumption. The shared logical journal owns
+        # this call; the SDK's durable details also guard delayed terminal hooks.
+        if _is_owned_provider_details(kwargs):
+            return
         from nooa.tracing._context_sideband import (
             get_journal_payload,
             set_journal_payload,
@@ -568,6 +573,8 @@ class MessageJournalCallback(CustomLogger):
     def log_success_event(
         self, kwargs: dict, response_obj: Any, start_time: Any, end_time: Any
     ) -> None:
+        if _is_owned_provider_details(kwargs):
+            return
         session_id = self._session()
         call_id = kwargs.get("litellm_call_id", "")
         with self._lock:
@@ -634,6 +641,8 @@ class MessageJournalCallback(CustomLogger):
     def log_failure_event(
         self, kwargs: dict, response_obj: Any, start_time: Any, end_time: Any
     ) -> None:
+        if _is_owned_provider_details(kwargs):
+            return
         del response_obj
         session_id = self._session()
         call_id = kwargs.get("litellm_call_id", "")

@@ -21,6 +21,8 @@ import uuid
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from nooa.unifiedllm import _logical_trace
+
 log = logging.getLogger(__name__)
 
 # Roles that the runtime never sends to a model (mirrors ``build_journal_payload``).
@@ -138,6 +140,8 @@ def _record(
     span_id: str | None,
     extra: Mapping[str, Any] | None,
     use_rendered_context: bool,
+    token_override: Mapping[str, Any] | None = None,
+    override_tokens: bool = False,
 ) -> None:
     from nooa.tracing._context_sideband import get_journal_payload, set_journal_payload
     from nooa.tracing._litellm_journal import _to_ts
@@ -180,7 +184,7 @@ def _record(
         "ts_end": end,
         "input_skeleton": input_skeleton,
         "output_messages": output_messages,
-        "tokens": _tokens(response),
+        "tokens": token_override if override_tokens else _tokens(response),
     }
     span = span_id or _llm_span_id(
         model=record["model"],
@@ -332,3 +336,46 @@ def _tokens(response: Any) -> dict[str, int] | None:
     if usage.cached_input_tokens:
         tokens["cached"] = usage.cached_input_tokens
     return tokens
+
+
+def _response_id(response):
+    # Preserve the existing journal correlation only, never the raw response.
+    raw = getattr(response, "raw_response", None)
+    identity = raw.get("id") if isinstance(raw, Mapping) else getattr(raw, "id", None)
+    return identity if isinstance(identity, str) else None
+
+
+def _render_logical_journal(journal, snapshot, response, extra, journal_tokens, end):
+    """Concrete terminal renderer; never imported by the numeric account/span."""
+    extra["response_id"] = _response_id(response)
+    if journal.effective_messages is not None:
+        effective_blocks = {}
+        effective_skeleton = []
+        for message in journal.effective_messages:
+            entry = _input_message(message)
+            if entry is not None:
+                effective_skeleton.append(_skeleton(entry, effective_blocks))
+        extra["effective_input_skeleton"] = effective_skeleton
+        extra["effective_input_blocks"] = effective_blocks
+    context = journal.span.get_span_context()
+    _record(
+        _installed_sinks(),
+        model=journal.model,
+        messages=journal.messages,
+        response=response if snapshot.outcome == "success" else None,
+        session_id=None,
+        call_id=journal.logical_id,
+        started_at=journal.start,
+        ended_at=end,
+        latency_ms=None,
+        span_id=format(context.span_id, "016x"),
+        extra=extra,
+        use_rendered_context=True,
+        token_override=journal_tokens,
+        override_tokens=True,
+    )
+
+
+# Deterministic module initialization; repeated imports do not add registrations.
+# Reload rebinds future calls only. Existing spans capture their renderer at entry.
+_logical_trace._bind_journal_renderer(_render_logical_journal)

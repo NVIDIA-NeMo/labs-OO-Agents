@@ -13,6 +13,9 @@ from typing import Protocol
 
 from nooa.llm_types import LLMResponse, LLMUsage
 
+from ._accounting import _current_account
+from ._route_calibration import _CalibrationAdapter
+from .adapters._numeric_usage import _numeric_usage
 from .adapters.base import Adapter
 from .admission import AdmissionError
 from .errors import (
@@ -61,8 +64,10 @@ def _check_response(
 def _record_usage(
     response: LLMResponse, record_usage: Callable[[LLMUsage], None] | None
 ) -> LLMResponse:
-    # Keep the legacy success-only metric, after tracking exits. The outer
-    # logical-call accounting policy will be integrated in a later chunk.
+    # Public usage stays the accepted LAST response, never paid subtotals.
+    account = _current_account.get()
+    if account is not None:
+        account.accepted_response = response
     if response.usage and record_usage is not None:
         record_usage(response.usage)
     return response
@@ -103,15 +108,30 @@ def execute_sync(
     """
 
     def attempt() -> LLMResponse:
+        account = _current_account.get()
+        if account is not None:
+            account.describe_request(messages=request.messages)
+        indexed = account.attempt() if account is not None else None
         try:
-            return _check_response(adapter.send_sync(request), retry_config, check_empty)
+            if indexed is not None and isinstance(adapter, _CalibrationAdapter):
+                response = adapter._send_sync_owned(request, indexed[1])
+            else:
+                response = adapter.send_sync(request)
+                if indexed is not None:
+                    indexed[1].writer.delivered(_numeric_usage(response))
+            return _check_response(response, retry_config, check_empty)
         except Exception as error:
+            if indexed is not None:
+                indexed[1].writer.failed(_public_terminal(error))
             if not _public_failures:
                 raise
             normalized = _public_attempt_error(error)
             if normalized is error:
                 raise
             raise normalized from normalized.__cause__
+        finally:
+            if indexed is not None:
+                account.fold(*indexed)
 
     with tracking if tracking is not None else nullcontext():
         try:
@@ -144,15 +164,30 @@ async def execute_async(
     """Async execute_sync; cancellation propagates through retry and tracking."""
 
     async def attempt() -> LLMResponse:
+        account = _current_account.get()
+        if account is not None:
+            account.describe_request(messages=request.messages)
+        indexed = account.attempt() if account is not None else None
         try:
-            return _check_response(await adapter.send(request), retry_config, check_empty)
+            if indexed is not None and isinstance(adapter, _CalibrationAdapter):
+                response = await adapter._send_owned(request, indexed[1])
+            else:
+                response = await adapter.send(request)
+                if indexed is not None:
+                    indexed[1].writer.delivered(_numeric_usage(response))
+            return _check_response(response, retry_config, check_empty)
         except Exception as error:
+            if indexed is not None:
+                indexed[1].writer.failed(_public_terminal(error))
             if not _public_failures:
                 raise
             normalized = _public_attempt_error(error)
             if normalized is error:
                 raise
             raise normalized from normalized.__cause__
+        finally:
+            if indexed is not None:
+                account.fold(*indexed)
 
     with tracking if tracking is not None else nullcontext():
         try:

@@ -182,3 +182,45 @@ def test_missing_trace_returns_empty_stats(tmp_path: Path) -> None:
     assert stats.total_runtime_seconds == 0.0
     assert stats.total_llm_calls == 0
     assert stats.models_used == []
+
+
+def test_owned_shell_out_of_order_mixed_calls_and_export_duplicates(tmp_path):
+    def span(identity, parent="", *, name="llm_call", owner=None, logical=None, prompt=1):
+        attrs = {
+            "llm.model_name": "model",
+            "llm.token_count.prompt": prompt,
+            "llm.token_count.completion": 1,
+        }
+        if owner:
+            attrs["nooa.llm.owner"] = owner
+        if logical:
+            attrs["nooa.llm.logical_id"] = logical
+        return {
+            "trace_id": "trace",
+            "span_id": identity,
+            "parent_id": parent,
+            "name": name,
+            "start_time": 1_000_000_000,
+            "end_time": 2_000_000_000,
+            "attributes": attrs,
+        }
+
+    shell = span("shell", "generation", owner="logical", logical="call-A", prompt=10)
+    records = [
+        span("provider", "shell", logical="call-A", prompt=100),
+        span("receipt", name="llm_chain", logical="call-A", prompt=100),
+        span("generation", "chain", name="llm_chain", prompt=100),
+        span("direct", name="completion", prompt=3),
+        shell,
+        span("chain", name="llm_chain", prompt=100),
+        shell,
+        span("legacy-chain", name="llm_chain", prompt=4),
+    ]
+    trace_path = tmp_path / "mixed.jsonl"
+    _write_jsonl(trace_path, *records)
+    result = TraceAnalyzer().analyze_trace(str(trace_path))
+    assert result.total_llm_calls == 3
+    [model] = result.models_used
+    assert model.prompt_tokens == 17
+    assert model.completion_tokens == 3
+    assert model.call_count == 3

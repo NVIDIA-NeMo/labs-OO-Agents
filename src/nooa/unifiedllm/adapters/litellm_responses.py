@@ -16,11 +16,13 @@ from typing import TYPE_CHECKING, Any, cast
 
 import litellm
 
+from nooa._provider_ownership import _owned_provider_region
 from nooa.llm_types import CacheBoundary, LLMResponse
 from nooa.unifiedllm import replay_state, response_parts
 from nooa.unifiedllm import unifiedllm as _core
 from nooa.unifiedllm._observations import _ObservationOwner, _observe_attempt
 from nooa.unifiedllm.adapters._numeric_usage import _numeric_usage
+from nooa.unifiedllm.adapters._provider_logging import _prepare_owned_litellm_call
 from nooa.unifiedllm.adapters.base import Capabilities
 from nooa.unifiedllm.adapters.litellm_chat import (
     client_capabilities,
@@ -353,7 +355,6 @@ class LiteLLMResponsesAdapter:
         """Exact built-ins only: inherited participation never bypasses send overrides."""
         if (
             type(self) is not LiteLLMResponsesAdapter
-            or self._legacy_options is not None
             or "send" in self.__dict__
             or "send_sync" in self.__dict__
         ):
@@ -362,7 +363,9 @@ class LiteLLMResponsesAdapter:
 
         from ._calibration import _route_calibration
 
-        return _CalibrationAdapter(self, _route_calibration(self))
+        return _CalibrationAdapter(
+            self, _route_calibration(self) if self._legacy_options is None else None
+        )
 
     @property
     def capabilities(self) -> Capabilities:
@@ -451,23 +454,47 @@ class LiteLLMResponsesAdapter:
             native_encrypted_reasoning=native_encrypted_reasoning,
         )
 
-    def transmit_sync(self, prepared: PreparedResponsesCall) -> Any:
+    def transmit_sync(self, prepared: PreparedResponsesCall, *, _attempt_owner=None) -> Any:
         """One sync provider attempt; no retries."""
-        return cast("litellm.ResponsesAPIResponse", litellm.responses(**prepared.api_params))
+        if _attempt_owner is not None:
+            _attempt_owner.writer.entering_provider(
+                hidden_retries=bool(
+                    prepared.api_params.get("num_retries", 0)
+                    or prepared.api_params.get("max_retries", 0)
+                )
+            )
+        with _owned_provider_region(
+            prepared.api_params,
+            owner=_attempt_owner,
+            call_type="responses",
+            prepare=_prepare_owned_litellm_call,
+        ) as params:
+            return cast("litellm.ResponsesAPIResponse", litellm.responses(**params))
 
-    async def transmit(self, prepared: PreparedResponsesCall, *, _wire_owner=None) -> Any:
+    async def transmit(
+        self, prepared: PreparedResponsesCall, *, _wire_owner=None, _attempt_owner=None
+    ) -> Any:
         """One async provider attempt under admission and the request deadline."""
 
         async def call_provider():
             """The LiteLLM call."""
-            return cast(
-                "litellm.ResponsesAPIResponse", await litellm.aresponses(**prepared.api_params)
-            )
+            with _owned_provider_region(
+                prepared.api_params,
+                owner=_attempt_owner,
+                call_type="aresponses",
+                prepare=_prepare_owned_litellm_call,
+            ) as params:
+                return cast("litellm.ResponsesAPIResponse", await litellm.aresponses(**params))
 
         return await _run_async_provider_call(
             call_provider,
             request_timeout=self._client._http_config.request_timeout,
             _wire_owner=_wire_owner,
+            _attempt_owner=_attempt_owner,
+            _hidden_retries=bool(
+                prepared.api_params.get("num_retries", 0)
+                or prepared.api_params.get("max_retries", 0)
+            ),
         )
 
     def parse(self, prepared: PreparedResponsesCall, raw_response: Any, usage: Any) -> LLMResponse:
@@ -526,14 +553,21 @@ class LiteLLMResponsesAdapter:
         return self._send_sync(request)
 
     def _send_sync(
-        self, request: LLMRequest, *, _owner: _ObservationOwner | None = None, _decision=None
+        self,
+        request: LLMRequest,
+        *,
+        _owner: _ObservationOwner | None = None,
+        _decision=None,
+        _legacy_calibration: bool = True,
     ) -> LLMResponse:
         """Explicit shell participation applies only to this exact send."""
         strict = type(self) is LiteLLMResponsesAdapter and self._legacy_options is None
         with _observe_attempt(_owner) as observation:
-            with failure_boundary(strict, "config"):
+            if observation is not None:
+                observation._replace(dispatch_known=True)
+            with failure_boundary(strict, "config", observation=observation):
                 call_config = self._call_config(request)
-            with failure_boundary(strict, "prepare"):
+            with failure_boundary(strict, "prepare", observation=observation):
                 prepared = self.prepare(request, call_config, is_async=False)
                 if observation is not None:
                     if _decision is not None:
@@ -549,7 +583,12 @@ class LiteLLMResponsesAdapter:
                         _apply_decision(
                             prepared.api_params, estimated, quality, _decision, responses=True
                         )
-                    else:
+                    elif not (
+                        _legacy_calibration
+                        and _owner is not None
+                        and _owner.writer.record.logical_id is not None
+                        and _owner.writer._collector is None
+                    ):
                         observation.projected(
                             _core._estimate_raw_input_tokens(
                                 prepared.effective_model,
@@ -559,16 +598,27 @@ class LiteLLMResponsesAdapter:
                             )
                         )
                     observation.transmitting()
-            with failure_boundary(strict, "wire"):
-                raw_response = self.transmit_sync(prepared)
+            with failure_boundary(strict, "wire", observation=observation):
+                if (
+                    _owner is not None
+                    and type(self) is LiteLLMResponsesAdapter
+                    and "transmit_sync" not in self.__dict__
+                ):
+                    raw_response = self.transmit_sync(prepared, _attempt_owner=_owner)
+                else:
+                    if observation is not None:
+                        observation._replace(dispatch_known=False)
+                    raw_response = self.transmit_sync(prepared)
             if observation is not None:
                 observation.delivered(_numeric_usage(raw_response))
-            with failure_boundary(strict, "parse", reply=raw_response):
+            with failure_boundary(strict, "parse", reply=raw_response, observation=observation):
                 return _parse_reply(
                     lambda: self.parse(
                         prepared,
                         raw_response,
-                        self._finish(prepared, raw_response, legacy_calibration=_owner is None),
+                        self._finish(
+                            prepared, raw_response, legacy_calibration=_legacy_calibration
+                        ),
                     )
                 )
 
@@ -583,13 +633,16 @@ class LiteLLMResponsesAdapter:
         _owner: _ObservationOwner | None = None,
         _decision=None,
         _wire_owner=None,
+        _legacy_calibration: bool = True,
     ) -> LLMResponse:
         """Explicit shell participation applies only to this exact send."""
         strict = type(self) is LiteLLMResponsesAdapter and self._legacy_options is None
         with _observe_attempt(_owner) as observation:
-            with failure_boundary(strict, "config"):
+            if observation is not None:
+                observation._replace(dispatch_known=True)
+            with failure_boundary(strict, "config", observation=observation):
                 call_config = self._call_config(request)
-            with failure_boundary(strict, "prepare"):
+            with failure_boundary(strict, "prepare", observation=observation):
                 prepared = self.prepare(request, call_config, is_async=True)
                 if observation is not None:
                     if _decision is not None:
@@ -605,7 +658,12 @@ class LiteLLMResponsesAdapter:
                         _apply_decision(
                             prepared.api_params, estimated, quality, _decision, responses=True
                         )
-                    else:
+                    elif not (
+                        _legacy_calibration
+                        and _owner is not None
+                        and _owner.writer.record.logical_id is not None
+                        and _owner.writer._collector is None
+                    ):
                         observation.projected(
                             _core._estimate_raw_input_tokens(
                                 prepared.effective_model,
@@ -615,19 +673,32 @@ class LiteLLMResponsesAdapter:
                             )
                         )
                     observation.transmitting()
-            with failure_boundary(strict, "wire"):
-                raw_response = await (
-                    self.transmit(prepared)
-                    if _wire_owner is None
-                    else self.transmit(prepared, _wire_owner=_wire_owner)
-                )
+            with failure_boundary(strict, "wire", observation=observation):
+                if (
+                    _owner is not None
+                    and type(self) is LiteLLMResponsesAdapter
+                    and "transmit" not in self.__dict__
+                ):
+                    raw_response = await self.transmit(
+                        prepared, _wire_owner=_wire_owner, _attempt_owner=_owner
+                    )
+                else:
+                    if observation is not None:
+                        observation._replace(dispatch_known=False)
+                    raw_response = await (
+                        self.transmit(prepared)
+                        if _wire_owner is None
+                        else self.transmit(prepared, _wire_owner=_wire_owner)
+                    )
             if observation is not None:
                 observation.delivered(_numeric_usage(raw_response))
-            with failure_boundary(strict, "parse", reply=raw_response):
+            with failure_boundary(strict, "parse", reply=raw_response, observation=observation):
                 return _parse_reply(
                     lambda: self.parse(
                         prepared,
                         raw_response,
-                        self._finish(prepared, raw_response, legacy_calibration=_owner is None),
+                        self._finish(
+                            prepared, raw_response, legacy_calibration=_legacy_calibration
+                        ),
                     )
                 )

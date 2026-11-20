@@ -44,6 +44,18 @@ def accumulate_tokens(input_tokens: int, output_tokens: int) -> None:
         counter["n_output_tokens"] += output_tokens
 
 
+def _terminal_receiver():
+    """Capture the task counter now, not the eventual callback's context."""
+    counter = _task_tokens_var.get()
+
+    def receive(snapshot):
+        if counter is not None:
+            counter["n_input_tokens"] += snapshot.subtotal("input_tokens").known or 0
+            counter["n_output_tokens"] += snapshot.subtotal("output_tokens").known or 0
+
+    return receive
+
+
 def get_task_tokens() -> dict[str, int]:
     """Return a snapshot of accumulated token counts for the current task."""
     counter = _task_tokens_var.get()

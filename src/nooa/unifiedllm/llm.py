@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from nooa.llm_types import CacheBoundary, LLMResponse
 from nooa.media_inputs import attachment_kind
 
+from ._accounting import _logical_account_scope
 from ._route_calibration import _calibration_adapter
 from .adapters.base import Adapter, Capabilities
 from .errors import FailureKind, LLMFailure
@@ -219,46 +220,52 @@ class LLM:
 
     def call(self, request: LLMRequest) -> LLMResponse:
         """Validate a request-local view and run the common logical executor."""
-        lease = self._acquire()
-        try:
-            return logical_sync(
-                lambda: self._prepare(request),
-                lambda prepared: execute_sync(
-                    _calibration_adapter(self.adapter),
-                    prepared,
-                    self._retry_config,
-                    check_empty=check_empty_response,
-                    _public_failures=True,
-                ),
-            )
-        except Exception as error:
-            normalized = _public_terminal(error)
-            if normalized is error:
-                raise
-            raise normalized from normalized.__cause__
-        finally:
-            if lease is not None:
-                lease.release()
+        with _logical_account_scope(
+            messages=request.messages if isinstance(request, LLMRequest) else ()
+        ):
+            lease = self._acquire()
+            try:
+                return logical_sync(
+                    lambda: self._prepare(request),
+                    lambda prepared: execute_sync(
+                        _calibration_adapter(self.adapter),
+                        prepared,
+                        self._retry_config,
+                        check_empty=check_empty_response,
+                        _public_failures=True,
+                    ),
+                )
+            except Exception as error:
+                normalized = _public_terminal(error)
+                if normalized is error:
+                    raise
+                raise normalized from normalized.__cause__
+            finally:
+                if lease is not None:
+                    lease.release()
 
     async def acall(self, request: LLMRequest) -> LLMResponse:
         """Async call, sharing preflight, retry ownership and cancellation semantics."""
-        lease = self._acquire()
-        try:
-            return await logical_async(
-                lambda: self._prepare(request),
-                lambda prepared: execute_async(
-                    _calibration_adapter(self.adapter, lease),
-                    prepared,
-                    self._retry_config,
-                    check_empty=check_empty_response,
-                    _public_failures=True,
-                ),
-            )
-        except Exception as error:
-            normalized = _public_terminal(error)
-            if normalized is error:
-                raise
-            raise normalized from normalized.__cause__
-        finally:
-            if lease is not None:
-                await lease.release_async()
+        with _logical_account_scope(
+            messages=request.messages if isinstance(request, LLMRequest) else ()
+        ):
+            lease = self._acquire()
+            try:
+                return await logical_async(
+                    lambda: self._prepare(request),
+                    lambda prepared: execute_async(
+                        _calibration_adapter(self.adapter, lease),
+                        prepared,
+                        self._retry_config,
+                        check_empty=check_empty_response,
+                        _public_failures=True,
+                    ),
+                )
+            except Exception as error:
+                normalized = _public_terminal(error)
+                if normalized is error:
+                    raise
+                raise normalized from normalized.__cause__
+            finally:
+                if lease is not None:
+                    await lease.release_async()
