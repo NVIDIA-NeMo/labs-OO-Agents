@@ -351,7 +351,7 @@ class TestNemoRelayToolMiddleware:
                 await nm.nemo_relay_tool_middleware(ctx, nxt)
 
     async def test_tool_middleware_result_none(self):
-        """When result is None, codec.to_json(None) is returned."""
+        """When result is None, Relay receives an empty inspection value."""
         with _nemo_relay_patched() as (nm, fake_nemo_relay, _):
             ctx, inner = await self._make_exec_ctx(result=None)
 
@@ -360,11 +360,10 @@ class TestNemoRelayToolMiddleware:
 
             result = await nm.nemo_relay_tool_middleware(ctx, nxt)
             assert result is inner
-            # codec.to_json(None) should have been called
-            fake_nemo_relay.typed.BestEffortAnyCodec.return_value.to_json.assert_called()
+            assert fake_nemo_relay.ToolExecutionResult.call_args.args[0] is None
 
     async def test_tool_middleware_result_with_returned_value(self):
-        """When result.returned_value is set, it is passed to codec."""
+        """The small returned value is retained in Relay inspection JSON."""
         with _nemo_relay_patched() as (nm, fake_nemo_relay, _):
             from nooa.events import ExecutionResult
 
@@ -375,8 +374,7 @@ class TestNemoRelayToolMiddleware:
                 return inner
 
             await nm.nemo_relay_tool_middleware(ctx, nxt)
-            codec = fake_nemo_relay.typed.BestEffortAnyCodec.return_value
-            codec.to_json.assert_called_with(42)
+            assert fake_nemo_relay.ToolExecutionResult.call_args.args[0] == 42
 
     async def test_tool_middleware_result_with_no_return_uses_stdout(self):
         """When result has _NO_RETURN and no signal, stdout is used."""
@@ -392,8 +390,7 @@ class TestNemoRelayToolMiddleware:
                 return inner
 
             await nm.nemo_relay_tool_middleware(ctx, nxt)
-            codec = fake_nemo_relay.typed.BestEffortAnyCodec.return_value
-            codec.to_json.assert_called_with("some output")
+            assert fake_nemo_relay.ToolExecutionResult.call_args.args[0] == "some output"
 
     async def test_tool_middleware_result_signal_with_result_key(self):
         """When result has a signal with 'result' key, that is used."""
@@ -414,8 +411,7 @@ class TestNemoRelayToolMiddleware:
                 return inner
 
             await nm.nemo_relay_tool_middleware(ctx, nxt)
-            codec = fake_nemo_relay.typed.BestEffortAnyCodec.return_value
-            codec.to_json.assert_called_with("signal_value")
+            assert fake_nemo_relay.ToolExecutionResult.call_args.args[0] == "signal_value"
 
     async def test_tool_middleware_code_propagation_from_intercept(self):
         """NeMo Relay intercept can rewrite code; it propagates to ctx."""
@@ -461,8 +457,7 @@ class TestNemoRelayToolMiddleware:
                 return inner
 
             await nm.nemo_relay_tool_middleware(ctx, nxt)
-            codec = fake_nemo_relay.typed.BestEffortAnyCodec.return_value
-            codec.to_json.assert_called_with(None)
+            assert fake_nemo_relay.ToolExecutionResult.call_args.args[0] is None
 
 
 class TestNemoRelayAgentCallMiddleware:

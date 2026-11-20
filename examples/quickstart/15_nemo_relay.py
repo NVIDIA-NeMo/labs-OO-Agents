@@ -16,6 +16,13 @@ This example shows how to:
   5. Demonstrate nested generation methods (inner LLM+tool calls through NeMo Relay)
   6. Demonstrate how different return types appear in the NeMo Relay pipeline and ATIF
 
+Run roots and traced methods automatically use independent stacks with parent
+trace links. Global rules apply throughout; scope-local rules stay on their
+registered stack and do not transfer to nested or concurrent child methods.
+Tool telemetry uses bounded ``nooa.snapshot`` inspection, leaving original
+Python results unchanged. ``await export_nemo_relay_atif(exporter)`` flushes
+events and formats only sanitized data into readable ATIF.
+
 Prerequisites:
   Install NOOA with the nemo-relay extra (public PyPI wheels):
 
@@ -28,6 +35,8 @@ Optional local diagnostics and CPU/memory measurements:
   NOOA_RELAY_DIAGNOSTICS=1 uv run python examples/quickstart/15_nemo_relay.py
 
 Relay 0.11 exports ATIF-v1.7 (Harbor also accepts v1.8, which adds audio).
+Host-generated ``prefill_*`` cells can retain the native exporter's attribution
+to an unrelated model step; use event ancestry when investigating their owner.
 Diagnostics can contain private runtime details; keep the local output private.
 """
 
@@ -49,6 +58,7 @@ from pydantic import BaseModel
 
 from nooa import hidden
 from nooa.nemo_relay_middleware import export_nemo_relay_atif, nemo_relay_scope
+from nooa.snapshot import Limits, capture, render_json, render_python
 from nooa.util.quickstart import *
 
 _artifact_directory: Path | None = None
@@ -149,9 +159,9 @@ class Summary(BaseModel):
 class ReturnTypeDemoAgent(Agent, llm=llm):
     """Agent that demonstrates how different return types are serialized by NeMo Relay.
 
-    BestEffortAnyCodec is applied to the tool's returned_value before handing
-    it to the NeMo Relay pipeline.  Simple / structured types appear as readable JSON
-    in ATIF and guardrails; complex objects fall back to a pickle blob.
+    Tool return values are captured as bounded inspection snapshots. Small JSON
+    values remain readable, structured objects expose visible fields and unknown
+    objects remain opaque. The original Python result still reaches the caller.
     """
 
     async def return_int(self) -> int:
@@ -234,9 +244,7 @@ def _log_event(event: nemo_relay.Event) -> None:
         parts.append(f"scope_category={scope_category}")
     data = getattr(event, "data", None)
     if data is not None:
-        preview = json.dumps(data, default=str)
-        if len(preview) > 120:
-            preview = preview[:117] + "..."
+        preview = render_json(capture(data, Limits(max_chars=120)), max_chars=120)
         parts.append(f"data={preview}")
     print("  NEMO_RELAY " + " | ".join(parts))
 
@@ -283,8 +291,8 @@ async def run_demo():
 
     # nemo_relay_scope() installs NeMo Relay middleware (agent_call, llm_call,
     # execute_python) on the agent's event_manager and wraps everything in a
-    # root Agent scope.  All LLM calls and code executions inside this block
-    # go through the NeMo Relay pipeline.
+    # root Agent scope. Each traced method has an independent stack; the
+    # global registrations above apply to all its LLM calls and Python cells.
     agent = ResearchAgent()
     async with nemo_relay_scope(agent, "research-agent"):
         result = await agent.summarize("recent advances in quantum error correction")
@@ -346,16 +354,11 @@ async def run_demo():
         tool_outputs = [o for o in _captured_tool_outputs if o["tool"] == "execute_python"]
         relay_output = tool_outputs[-1]["output"] if tool_outputs else None
 
-        print(f"\n  {method_name}() → Python value: {value!r}")
+        value_preview = render_python(capture(value, Limits(max_chars=120)))
+        print(f"\n  {method_name}() → Python value: {value_preview}")
         if relay_output is not None:
-            relay_view = json.dumps(relay_output, default=str)
-            if len(relay_view) > 120:
-                relay_view = relay_view[:117] + "..."
-            if isinstance(relay_output, dict) and "__nv_pickle__" in relay_output:
-                tag = "pickle blob (complex type — opaque to guardrails)"
-            else:
-                tag = "readable JSON"
-            print(f"  NeMo Relay sees ({tag}): {relay_view}")
+            relay_view = render_json(capture(relay_output, Limits(max_chars=120)), max_chars=120)
+            print(f"  NeMo Relay sees (bounded JSON inspection): {relay_view}")
         else:
             print("  NeMo Relay sees: (no tool output captured)")
 
@@ -381,10 +384,10 @@ async def run_demo():
     print("      → add-tracing-header annotated Relay's request view with X-NemoOO-Trace")
     print("  - Every execute_python call went through the NeMo Relay tool pipeline:")
     print("      → code-safety guardrail rejected any shell-execution code")
-    print("      → returned_value exposed via BestEffortAnyCodec:")
-    print("          str / int / dict / list  → native JSON (inspectable)")
-    print("          Pydantic model           → __nv_pydantic__ envelope (inspectable)")
-    print("          DataFrame / complex obj  → pickle blob (opaque)")
+    print("      → returned_value captured with nooa.snapshot:")
+    print("          Small JSON values        → readable JSON")
+    print("          Structured objects       → visible fields within inspection limits")
+    print("          Unknown objects          → opaque; no pickle serialization")
     print("  - ATIF export formatted sanitized data into private trajectory JSON files")
     print("=" * 70)
 

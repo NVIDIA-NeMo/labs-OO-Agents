@@ -3,13 +3,15 @@
 """ATIF normalization must use sanitized values and explicit provider IDs."""
 
 import json
+from typing import Any, cast
 
 import pytest
 
 from nooa._relay_atif import _normalize_atif, export_nemo_relay_atif
+from nooa._relay_telemetry import inspection_snapshot, inspection_value
 
 
-def _step(identifier, content="answer"):
+def _step(identifier, content: Any = "answer"):
     return {
         "source": "agent",
         "message": "legacy JSON",
@@ -95,6 +97,134 @@ def test_nontext_content_and_removed_content_do_not_leave_stale_json():
     assert second["message"] == ""
 
 
+def test_optional_null_fields_and_unidentified_calls_are_preserved():
+    step = {
+        "extra": {"llm_response": None, "tool_ancestry": None},
+        "tool_calls": [{"function_name": "first"}, {"function_name": "second"}],
+        "observation": None,
+    }
+    _normalize_atif({"steps": [step]})
+    assert [call["function_name"] for call in step["tool_calls"]] == ["first", "second"]
+    assert "observation" not in step
+    _normalize_atif({"steps": [{"tool_calls": None, "observation": {"results": None}}]})
+
+
+def test_snapshot_inspection_keeps_small_legacy_shapes_and_caller_objects():
+    original = {"message": {"content": "safe", "role": "assistant"}, "usage": {"prompt_tokens": 3}}
+    data, metadata = inspection_snapshot(original)
+    assert data == original
+    assert data is not original and data["message"] is not original["message"]
+    assert metadata["nooa.output.preview.incomplete"] is False
+    data["message"]["content"] = "changed"
+    assert original["message"]["content"] == "safe"
+
+
+def test_snapshot_inspection_bounds_before_encoding_and_never_runs_value_hooks():
+    class Dangerous:
+        def __getattribute__(self, name):
+            raise AssertionError("No attribute hooks")
+
+        def __repr__(self):
+            raise AssertionError("No repr")
+
+        def __str__(self):
+            raise AssertionError("No str")
+
+        def __reduce_ex__(self, protocol):
+            raise AssertionError("No pickle")
+
+    original = {"large": "x" * 5_000_000, "dangerous": Dangerous()}
+    data, metadata = inspection_snapshot(original)
+    assert len(json.dumps(data)) <= 50_000
+    assert metadata["nooa.output.preview.incomplete"] is True
+    assert len(original["large"]) == 5_000_000
+    opaque, _ = inspection_snapshot(Dangerous())
+    assert "opaque" in opaque
+
+
+def test_snapshot_inspection_supports_structured_values_and_native_json_limits():
+    from collections import deque
+    from dataclasses import dataclass, field
+    from datetime import datetime
+
+    @dataclass
+    class Result:
+        values: object
+        secret: str = field(default="DO NOT EXPORT", repr=False)
+
+    original = Result(
+        {
+            "items": deque([1, 2]),
+            "time": datetime(2026, 1, 1),
+            "large": 2**64,
+            "surrogate": "\ud800",
+        }
+    )
+    data = inspection_value(original)
+    assert "DO NOT EXPORT" not in json.dumps(data)
+    assert data["values"]["items"] == [1, 2]
+    assert data["values"]["large"] == str(2**64)
+    assert data["values"]["surrogate"] == "\\ud800"
+    assert data["values"]["time"]["iso"] == "2026-01-01T00:00:00"
+
+
+def test_explicit_null_result_is_empty_and_preview_metadata_reports_cuts():
+    step = {
+        "observation": {
+            "results": [
+                {"extra": {"tool_result": None}},
+                {"extra": {"tool_result": list(range(100_000))}},
+            ]
+        }
+    }
+    _normalize_atif({"steps": [step]})
+    empty, large = step["observation"]["results"]
+    assert empty["content"] == ""
+    assert large["extra"]["nooa.output.preview.incomplete"] is True
+    assert large["extra"]["nooa.output.preview.paths"]
+    data, metadata = inspection_snapshot(10**100_000)
+    assert len(json.dumps(data)) < 50_000
+    assert metadata["nooa.output.preview.incomplete"] is True
+
+
+def test_inspection_failure_does_not_replace_the_caller_result(monkeypatch):
+    import nooa._relay_telemetry as telemetry
+
+    def failed_capture(*args, **kwargs):
+        raise RuntimeError("inspection failed")
+
+    monkeypatch.setattr(telemetry, "capture", failed_capture)
+    data, metadata = telemetry.inspection_snapshot(object())
+    assert data is not None
+    assert metadata["nooa.output.preview.incomplete"] is True
+    assert "error" in metadata["nooa.output.preview.reasons"]
+
+
+def test_export_keeps_original_incomplete_report_when_display_fits():
+    data, metadata = inspection_snapshot(10**100_000)
+    original_metadata = dict(metadata)
+    step = {
+        "observation": {
+            "results": [
+                {
+                    "extra": {
+                        "tool_result": data,
+                        "tool_result_annotation": {"is_error": False, **metadata},
+                    }
+                }
+            ]
+        }
+    }
+    _normalize_atif({"steps": [step]})
+    extra = step["observation"]["results"][0]["extra"]
+    assert extra["nooa.output.preview.incomplete"] is True
+    assert extra["nooa.output.preview.paths"] == original_metadata["nooa.output.preview.paths"]
+    assert extra["nooa.output.preview.reasons"] == original_metadata["nooa.output.preview.reasons"]
+    assert extra["display_preview"]["nooa.output.preview.incomplete"] is False
+    assert extra["tool_result_annotation"]["nooa.output.preview.incomplete"] is True
+    assert extra["is_error"] is False
+
+
 @pytest.mark.asyncio
 async def test_real_relay_export_preserves_late_legacy_redaction():
     relay = pytest.importorskip("nemo_relay")
@@ -134,7 +264,7 @@ async def test_real_relay_export_preserves_late_legacy_redaction():
                 relay.scope_local.register_scope_sanitize_end(
                     root, "late-redactor", 2**31 - 1, redact
                 )
-                ctx.response = LLMResponse(
+                ctx.response = cast(Any, LLMResponse)(
                     content="SECRET",
                     tool_calls=[
                         ToolCall(

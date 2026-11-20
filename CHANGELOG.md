@@ -7,20 +7,18 @@ to follow semantic versioning.
 ## [Unreleased]
 
 - The optional NeMo Relay integration now supports and checks `>=0.11.1,<0.12`,
-  using an explicit reviewed exception to the frozen dependency cutoff. The new
-  `export_nemo_relay_atif()` helper formats already-sanitized ATIF-v1.7 exports
-  with actual answer text, bounded readable observations and unique tool-call
-  ID correlation. Legacy sanitizer/event payload shapes stay intact. Runtime
-  projection callbacks were removed to avoid sanitizer-order bypasses, leaks and
-  shutdown crashes. Callback cleanup completes before cancellation closes scopes;
-  JSON-safe inspection copies preserve original Python results, and callback
-  exception text stays out of native error metadata. Scopes preserve enclosing
-  local policies by default and reject
-  unsafe concurrent sharing. Explicit `isolate=True` enables independent stacks
-  but **does not inherit enclosing scope-local policies or subscribers**, including
-  in concurrent method branches. The example offers opt-in diagnostics and
-  CPU/memory measurements in private temporary files. See the
-  [migration guide](docs/nemo-relay.md) for usage and upstream ATIF limits.
+  using a reviewed exception to the frozen dependency cutoff. Roots and traced
+  methods automatically use independent stacks, preserving parent trace links
+  during nested and concurrent calls. Global rules apply throughout; scope-local
+  rules do not transfer to child methods. Tool telemetry uses bounded
+  `nooa.snapshot` inspection instead of full codec/pickle serialization, leaving
+  original caller results unchanged. The new `export_nemo_relay_atif()` helper
+  formats sanitized ATIF-v1.7 exports with readable observations and unique
+  tool-call ID correlation. Callback exception text stays out of native error
+  metadata; cancellation allows one second for cleanup before returning, with a
+  warning if the callback outlives it. The example offers optional diagnostics and
+  CPU/memory measurements in private files. See the
+  [quickstart](examples/quickstart/15_nemo_relay.py) for usage.
 - `SandboxConfig.env_allowlist` keeps only the listed environment variables in
   the sandbox worker. The worker is a fork, so it inherited every variable of the
   parent, model API keys included, and a cell could print them. Removing them

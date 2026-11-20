@@ -7,6 +7,30 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from nooa.snapshot import Limits, Text, Unavailable, capture, render_output, render_trace
+
+
+def _objects(value: Any) -> list[dict[str, Any]]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _tool_preview(value: Any) -> tuple[str, dict[str, Any]]:
+    limits = Limits(max_chars=4096)
+    snapshot = (
+        Unavailable("opaque", "Python value")
+        if isinstance(value, dict) and "__nv_pickle__" in value
+        else capture(value, limits)
+    )
+    text, attributes = render_trace(snapshot, direction="output", max_chars=limits.max_chars)
+    if value is None:
+        return "", attributes
+    return (render_output(snapshot) if isinstance(snapshot, Text) else text), attributes
+
+
+def _tool_display(value: Any) -> str:
+    """Render a sanitized value through the standard bounded snapshot model."""
+    return _tool_preview(value)[0]
+
 
 def _reject_json_constant(value: str) -> Any:
     raise ValueError(f"Non-JSON number: {value}")
@@ -42,9 +66,7 @@ def _provider_calls(message: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _normalize_atif(trajectory: dict[str, Any]) -> dict[str, Any]:
-    from nooa.nemo_relay_middleware import _tool_display
-
-    steps = trajectory.get("steps", [])
+    steps = _objects(trajectory.get("steps"))
     issuers: dict[str, list[int]] = {}
     provider_calls: dict[int, list[dict[str, Any]]] = {}
     for index, step in enumerate(steps):
@@ -77,31 +99,61 @@ def _normalize_atif(trajectory: dict[str, Any]) -> dict[str, Any]:
     for index, step in enumerate(steps):
         emitted = provider_calls.get(index, [])
         calls_by_step[index].extend(emitted)
-        for call in step.get("tool_calls", []):
+        for call in _objects(step.get("tool_calls")):
             identifier = call.get("tool_call_id")
             if identifier not in unique:
-                if not any(
-                    existing.get("tool_call_id") == identifier for existing in calls_by_step[index]
+                if (
+                    not isinstance(identifier, str)
+                    or not identifier
+                    or not any(
+                        existing.get("tool_call_id") == identifier
+                        for existing in calls_by_step[index]
+                    )
                 ):
                     calls_by_step[index].append(call)
-        for observation in step.get("observation", {}).get("results", []):
+        native_observation = step.get("observation")
+        results = (
+            native_observation.get("results") if isinstance(native_observation, dict) else None
+        )
+        for observation in _objects(results):
             extra = observation.get("extra")
             if not isinstance(extra, dict):
                 extra = {}
+                observation["extra"] = extra
             annotation = extra.get("tool_result_annotation")
             if isinstance(annotation, dict) and isinstance(annotation.get("is_error"), bool):
                 extra["is_error"] = annotation["is_error"]
-            if "content" not in observation and "tool_result" in extra:
-                observation["content"] = _tool_display(extra["tool_result"])
+            if observation.get("content") is None and "tool_result" in extra:
+                observation["content"], attributes = _tool_preview(extra["tool_result"])
+                extra.update(attributes)
             elif isinstance(observation.get("content"), str):
-                observation["content"] = _tool_display(observation["content"])
+                observation["content"], attributes = _tool_preview(observation["content"])
+                extra.update(attributes)
+            if (
+                isinstance(annotation, dict)
+                and annotation.get("nooa.output.preview.incomplete") is True
+            ):
+                # Re-capturing an already-cut value can be complete. Keep the
+                # original standard snapshot report canonical in that case;
+                # the display report describes only the second capture.
+                preview_keys = tuple(
+                    f"nooa.output.preview.{name}"
+                    for name in ("version", "incomplete", "paths", "reasons", "full_output")
+                )
+                display_metadata = {key: extra.pop(key) for key in preview_keys if key in extra}
+                extra.update({key: annotation[key] for key in preview_keys if key in annotation})
+                if display_metadata:
+                    extra["display_preview"] = display_metadata
             # The display is bounded; retaining its raw duplicate defeats that
             # bound and can include opaque pickle payloads.
             if "content" in observation:
                 extra.pop("tool_result", None)
-            target = unique.get(observation.get("source_call_id"), index)
-            if observation.get("source_call_id") in unique and isinstance(
-                extra.get("event_uuid"), str
+            source_call_id = observation.get("source_call_id")
+            target = unique.get(source_call_id, index) if isinstance(source_call_id, str) else index
+            if (
+                isinstance(source_call_id, str)
+                and source_call_id in unique
+                and isinstance(extra.get("event_uuid"), str)
             ):
                 event_owners[extra["event_uuid"]] = target
             observations_by_step[target].append(observation)
@@ -117,8 +169,10 @@ def _normalize_atif(trajectory: dict[str, Any]) -> dict[str, Any]:
             extra = step.get("extra")
             if not isinstance(extra, dict):
                 continue
-            for item in extra.pop(field, []) or []:
-                routed[owners.get(item.get(identifier), index)].append(item)
+            for item in _objects(extra.pop(field, None)):
+                item_id = item.get(identifier)
+                target = owners.get(item_id, index) if isinstance(item_id, str) else index
+                routed[target].append(item)
         for index, items in enumerate(routed):
             if items:
                 steps[index].setdefault("extra", {})[field] = items

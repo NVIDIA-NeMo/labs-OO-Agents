@@ -760,7 +760,7 @@ class TestATIFExport:
             if error is None:
                 assert json.loads(observation["content"]) == value
             else:
-                assert observation["content"] == "ValueError: bad input"
+                assert "bad input" in observation["content"]
                 assert observation["extra"]["is_error"] is True
             assert "private-state" not in json.dumps(trajectory)
         finally:
@@ -1283,8 +1283,8 @@ class TestConcurrentAgentCallScopes:
     ``asyncio.gather(self.a(), self.b())`` in generated code) used to interleave
     their pushes on that shared stack; whichever finished first could not pop,
     leaving the stack permanently desynchronised and raising out of
-    ``nemo_relay_scope``. With explicit isolation enabled, middleware gives a
-    concurrently dispatched call its own stack. Default scopes reject fanout.
+    ``nemo_relay_scope``. Middleware gives every
+    call its own stack automatically, preserving parent trace relationships.
     """
 
     @pytest.mark.asyncio
@@ -1296,7 +1296,7 @@ class TestConcurrentAgentCallScopes:
         nemo_relay.subscribers.register("cancel-scope-spy", events.append)
         agent = _make_real_agent()
         try:
-            async with nemo_relay_scope(agent, "cancel-parent", isolate=True) as root:
+            async with nemo_relay_scope(agent, "cancel-parent") as root:
                 original_stack = nemo_relay.get_scope_stack()
 
                 async def body(c):
@@ -1339,8 +1339,7 @@ class TestConcurrentAgentCallScopes:
         with nemo_relay.scope.scope("concurrent-root", nemo_relay.ScopeType.Agent) as root:
             import nooa.nemo_relay_middleware as nm
 
-            token = nm._current_relay_scope.set((root, asyncio.current_task()))
-            isolation_token = nm._ALLOW_ISOLATION.set(True)
+            token = nm._current_relay_scope.set(root)
             try:
                 # "first" finishes before "second", so a shared stack would pop
                 # out of order and raise.
@@ -1350,7 +1349,6 @@ class TestConcurrentAgentCallScopes:
                 assert nemo_relay.scope.get_handle().uuid == root.uuid
             finally:
                 nm._current_relay_scope.reset(token)
-                nm._ALLOW_ISOLATION.reset(isolation_token)
 
     @pytest.mark.asyncio
     async def test_overlapping_siblings_share_the_same_parent(self):
@@ -1365,7 +1363,7 @@ class TestConcurrentAgentCallScopes:
             async def body(c):
                 import nooa.nemo_relay_middleware as nm
 
-                handles.append(nm._current_relay_scope.get()[0])
+                handles.append(nm._current_relay_scope.get())
                 await asyncio.sleep(delay)
                 c.result = method_name
                 return c
@@ -1375,13 +1373,11 @@ class TestConcurrentAgentCallScopes:
         with nemo_relay.scope.scope("parent-root", nemo_relay.ScopeType.Agent) as root:
             import nooa.nemo_relay_middleware as nm
 
-            token = nm._current_relay_scope.set((root, asyncio.current_task()))
-            isolation_token = nm._ALLOW_ISOLATION.set(True)
+            token = nm._current_relay_scope.set(root)
             try:
                 await asyncio.gather(one("left", 0.01), one("right", 0.03))
             finally:
                 nm._current_relay_scope.reset(token)
-                nm._ALLOW_ISOLATION.reset(isolation_token)
 
         assert len(handles) == 2
         # Both siblings parent off the shared root, not off each other.

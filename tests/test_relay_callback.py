@@ -164,6 +164,120 @@ async def test_cancelled_native_call_cannot_start_a_late_callback():
         await wrapped_callback()
 
 
+@pytest.mark.timeout(5)
+async def test_repeated_cancellation_cannot_extend_cleanup_deadline(monkeypatch, caplog):
+    import nooa._relay_callback as bridge
+
+    grace = 0.04
+    monkeypatch.setattr(bridge, "_CANCELLATION_GRACE_SECONDS", grace)
+    entered, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    callback_task = None
+    wrapped_callback = None
+    existing_tasks = asyncio.all_tasks()
+
+    async def callback():
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    continue
+
+    async def execute(wrapped):
+        nonlocal callback_task, wrapped_callback
+        wrapped_callback = wrapped
+        callback_task = asyncio.create_task(wrapped())
+        try:
+            return await asyncio.shield(callback_task)
+        except asyncio.CancelledError:
+            callback_task.cancel()
+            raise
+
+    async def cancel_repeatedly(call):
+        await cleaning.wait()
+        while not call.done():
+            await asyncio.sleep(0.005)
+            call.cancel("later cancellation")
+
+    call = asyncio.create_task(execute_callback(execute, callback))
+    repeater = asyncio.create_task(cancel_repeatedly(call))
+    try:
+        await entered.wait()
+        start = asyncio.get_running_loop().time()
+        call.cancel("original cancellation")
+        with pytest.raises(asyncio.CancelledError) as caught:
+            await call
+        elapsed = asyncio.get_running_loop().time() - start
+        assert str(caught.value) == "original cancellation"
+        assert grace * 0.7 <= elapsed < 0.5
+        await repeater
+        assert callback_task is not None and not callback_task.done()
+        assert asyncio.all_tasks() - existing_tasks <= {callback_task}
+        assert "exceeded cancellation cleanup grace" in caplog.text
+        assert wrapped_callback is not None
+        with pytest.raises(asyncio.CancelledError):
+            await wrapped_callback()
+    finally:
+        release.set()
+        await asyncio.gather(call, repeater, return_exceptions=True)
+        if callback_task is not None:
+            await asyncio.gather(callback_task, return_exceptions=True)
+
+
+@pytest.mark.timeout(5)
+async def test_real_relay_wait_for_returns_when_callback_ignores_cleanup_cancellation(monkeypatch):
+    relay = pytest.importorskip("nemo_relay")
+    import nooa._relay_callback as bridge
+
+    monkeypatch.setattr(bridge, "_CANCELLATION_GRACE_SECONDS", 0.04)
+    entered, release = asyncio.Event(), asyncio.Event()
+    callback_task = None
+    existing_tasks = asyncio.all_tasks()
+
+    async def callback(args):
+        nonlocal callback_task
+        callback_task = asyncio.current_task()
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    continue
+
+    with (
+        relay.use_scope_stack(relay.create_scope_stack()),
+        relay.scope.scope("bounded-cancellation-test", relay.ScopeType.Agent),
+    ):
+        call = asyncio.create_task(
+            execute_callback(
+                lambda wrapped: relay.tools.execute("hung-cleanup-tool", {}, wrapped), callback
+            )
+        )
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=10)
+            start = asyncio.get_running_loop().time()
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(call, timeout=0.01)
+            assert asyncio.get_running_loop().time() - start < 0.5
+            assert callback_task is not None and not callback_task.done()
+            assert asyncio.all_tasks() - existing_tasks <= {callback_task}
+        finally:
+            release.set()
+            if not call.done():
+                call.cancel()
+            await asyncio.gather(call, return_exceptions=True)
+            if callback_task is not None:
+                await asyncio.gather(callback_task, return_exceptions=True)
+            await relay.subscribers.flush_async()
+
+
 async def test_real_relay_nested_callback_scopes_end_after_repeated_cancellation():
     relay = pytest.importorskip("nemo_relay")
     from uuid import uuid4

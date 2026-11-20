@@ -108,7 +108,7 @@ async def test_live_relay_nested_concurrent_atif(tmp_path):
     relay.subscribers.register("nooa-live-events", events.append)
     try:
         agent = LiveRelayAgent()
-        async with nemo_relay_scope(agent, "nooa-live", isolate=True) as root:
+        async with nemo_relay_scope(agent, "nooa-live") as root:
             results = await asyncio.gather(agent.workflow(21), agent.workflow(7))
             assert results == [42, 14]
             assert relay.scope.get_handle().uuid == root.uuid
