@@ -10,6 +10,12 @@ Usage:
     trace = await TraceExplorer.from_file("path/to/trace.jsonl")
     print(await trace.help())
     print(await trace.get_overview())
+
+    # Completed-call accounting, without parsing a session tree:
+    from nooa.trace_explorer import load_usage_report
+
+    report = load_usage_report("path/to/trace.jsonl", until_seconds=7200)
+    print(report.to_dict())
 """
 
 from nooa.trace_explorer.client import TraceExplorerClient
@@ -37,6 +43,7 @@ from nooa.trace_explorer.explorer import (
     main,
     set_quiet_mode,
 )
+from nooa.trace_explorer.usage import UsagePoint, UsageReport, UsageTotals, load_usage_report
 
 __all__ = [
     "TraceExplorerClient",
@@ -62,4 +69,8 @@ __all__ = [
     "main",
     "set_quiet_mode",
     "get_quiet_mode",
+    "UsagePoint",
+    "UsageReport",
+    "UsageTotals",
+    "load_usage_report",
 ]
