@@ -95,10 +95,10 @@ def test_unknown_adapter_is_rejected(tmp_path):
         models:
           odd:
             model_name: openai/x
-            adapter: anthropic-messages
+            adapter: unsupported-family
         """,
     )
-    with pytest.raises(ValueError, match="unsupported adapter 'anthropic-messages'.*litellm"):
+    with pytest.raises(ValueError, match="unsupported adapter 'unsupported-family'.*litellm"):
         load_llm("odd")
 
 

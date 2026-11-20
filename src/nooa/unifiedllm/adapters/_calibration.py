@@ -164,6 +164,11 @@ def _route_calibration(adapter):
     never update/reset it. Work is local numeric/config inspection with no I/O;
     only the fallback projector enforces depth/item/value-string bounds.
     """
+    from ._native import _BUILTINS
+
+    if type(adapter) in _BUILTINS:
+        return adapter._route_calibration_record
+
     from nooa.unifiedllm.unifiedllm import _token_calibration
 
     record = adapter._route_calibration_record

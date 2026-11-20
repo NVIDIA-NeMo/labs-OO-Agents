@@ -27,7 +27,7 @@ from nooa.unifiedllm.route_identity import normalize_endpoint
 
 from ._binding import _bind_adapter, _freeze, _Settings
 from ._calibration import _sdk_identity
-from .legacy import snapshot_options
+from ._snapshots import snapshot_options
 
 _KEY = secrets.token_bytes(32)
 _pools = weakref.WeakValueDictionary()
@@ -83,7 +83,12 @@ def _cache_key(params, config, selected):
         route.pop(alias, None)
     route["endpoint"] = endpoint
     sdk = route.pop("client", None)
-    sdk_identity = _sdk_identity(sdk)
+    if type(sdk) is dict and sdk and not (sdk.keys() - {"sync", "async"}):
+        sdk_identity = {mode: _sdk_identity(value) for mode, value in sdk.items()}
+        if any(identity is False for identity in sdk_identity.values()):
+            return None
+    else:
+        sdk_identity = _sdk_identity(sdk)
     if sdk_identity is False:
         return None
     route["sdk_identity"] = sdk_identity

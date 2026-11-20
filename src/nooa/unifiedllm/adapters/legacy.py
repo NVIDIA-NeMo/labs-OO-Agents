@@ -3,19 +3,8 @@
 """Private compatibility configuration, never part of the Adapter protocol."""
 
 import copy
-from collections.abc import Mapping
-from typing import Any
 
-
-def snapshot_options(value: Any) -> Any:
-    """Detach settings containers, preserving opaque SDK clients and transports."""
-    if isinstance(value, Mapping):
-        return {key: snapshot_options(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [snapshot_options(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(snapshot_options(item) for item in value)
-    return value
+from ._snapshots import snapshot_options as snapshot_options
 
 
 def configure_legacy_adapter(adapter, options):

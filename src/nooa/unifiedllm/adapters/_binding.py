@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any
 
-from .legacy import snapshot_options
+from ._snapshots import snapshot_options
 
 _UNSET = object()
 # These select routing, transport, identity or declarations, not model settings.
@@ -194,6 +194,26 @@ def _bind_adapter(
     output. Native blocks replace whole blocks, using existing precedence/conflict
     checks. No arbitrary adapter/client subclass can be derived safely here.
     """
+    from ._native import _BUILTINS
+
+    if type(adapter) in _BUILTINS:
+        if "send" in adapter.__dict__ or "send_sync" in adapter.__dict__:
+            raise TypeError("Cannot derive native settings with overridden sends")
+        from ._native_settings import _derive_native
+
+        options = dict(native)
+        for key, value in (
+            ("temperature", temperature),
+            ("top_p", top_p),
+            ("reasoning_level", reasoning_level),
+            ("max_output_tokens", max_output_tokens),
+        ):
+            if value is not _UNSET:
+                options[key] = value
+        view = copy.copy(adapter)
+        view._settings = _derive_native(adapter._settings, options)
+        return view
+
     from nooa.unifiedllm.unifiedllm import CompletionClient, ResponsesClient
 
     from .litellm_chat import LiteLLMChatAdapter
