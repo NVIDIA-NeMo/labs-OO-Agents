@@ -57,3 +57,16 @@ async def test_a_job_delivered_after_done_leaves_the_done_and_json_events(tmp_pa
     # What the OV Gym runner (atom_main.py) writes to events.jsonl:
     for event in run.events:
         event.model_dump(mode="json")
+
+
+async def test_no_turn_starts_after_the_root_is_done(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    llm = CellLLM([cell(POLL_THEN_DONE), cell(LATE_DONE)], strict_exhaustion=False)
+    options = SessionOptions(workspace=workspace, agent_spec=PUBLIC_ATOM_SPEC, llm=llm)
+
+    run = await asyncio.wait_for(run_task(options, "Review and finish"), TIMEOUT)
+
+    assert run.done is not None and run.done.explanation == "solved"
+    assert run.turns == 1  # the job's queued delivery did not start a late turn
+    assert not any(type(event).__name__ == "TurnCancelled" for event in run.events)
