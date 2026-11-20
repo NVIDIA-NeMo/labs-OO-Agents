@@ -5,16 +5,21 @@
 import json
 from types import SimpleNamespace
 from typing import Literal
+from unittest.mock import MagicMock
 
 import pytest
 
 from nooa import Agent, return_text_as_result, strategy
 from nooa.config import CodeActConfig
 from nooa.errors import GenerationError
-from nooa.events import DebugTrace, Error
+from nooa.events import DebugTrace, Error, Feedback, PythonOutput
+from nooa.strategies import codeact as codeact_module
 from nooa.strategies.codeact import (
+    CONTINUED_TEXT_NOTE,
+    LENGTH_CONTINUATION_NUDGE,
     MAX_LENGTH_RECOVERIES,
     OUTPUT_LIMIT_NUDGE,
+    OUTPUT_TOKENS_EXHAUSTED_MESSAGE,
     CodeActStrategy,
 )
 from nooa.unifiedllm import FakeLLMClient, LLMResponse, ToolCall
@@ -80,7 +85,12 @@ class TestMaxTokensExhaustedError:
         assert [event.content for event in all_events if isinstance(event, LLMResponse)] == [""] * (
             MAX_LENGTH_RECOVERIES + 1
         )
-        nudges = [e for e in error_events if e.content == OUTPUT_LIMIT_NUDGE]
+        # Reasoning cut off with no tool call: the model is asked to continue.
+        nudges = [
+            e
+            for e in all_events
+            if isinstance(e, Feedback) and e.content == LENGTH_CONTINUATION_NUDGE
+        ]
         assert len(nudges) == MAX_LENGTH_RECOVERIES
 
     @pytest.mark.asyncio
@@ -203,10 +213,10 @@ class TestMaxTokensExhaustedError:
         nudges = [
             e
             for e in agent_instance.event_manager.values()
-            if isinstance(e, Error) and e.content == OUTPUT_LIMIT_NUDGE
+            if isinstance(e, Feedback) and e.content == LENGTH_CONTINUATION_NUDGE
         ]
         assert len(nudges) == 1
-        assert "cut off at the output-token limit" in OUTPUT_LIMIT_NUDGE
+        assert "cut off at the output-token limit" in LENGTH_CONTINUATION_NUDGE
 
     @pytest.mark.asyncio
     async def test_cut_off_nudges_respect_max_retries(self):
@@ -223,3 +233,167 @@ class TestMaxTokensExhaustedError:
         )
         with pytest.raises(GenerationError, match="max_tokens"):
             await agent_instance.my_task()
+
+
+def _call(name: str, arguments: str, cid: str = "c1") -> ToolCall:
+    return ToolCall(id=cid, name=name, arguments=arguments)
+
+
+def _ret(value: str, cid: str = "r1") -> ToolCall:
+    return _call("return_result", json.dumps({"result": value}), cid)
+
+
+def _agent_cls(**strategy_kwargs):
+    class TestAgent(Agent, llm=_TEST_LLM):
+        @strategy(
+            CodeActStrategy(
+                config=CodeActConfig(max_retries=3, max_iterations=10), **strategy_kwargs
+            )
+        )
+        async def my_task(self) -> str:
+            """A task."""
+            ...
+
+    return TestAgent
+
+
+def _events(agent, kind):
+    return [e for e in agent.event_manager.values() if isinstance(e, kind)]
+
+
+class TestLengthContinuation:
+    """Cut-off text is continued; a cut-off tool call is never run."""
+
+    @pytest.mark.asyncio
+    async def test_cut_off_text_is_continued_not_joined(self):
+        llm = FakeLLMClient(
+            scripted_responses=[
+                _resp("Part A, ", finish_reason="length"),
+                _resp("part B, ", finish_reason="length"),
+                _resp("part C."),
+            ]
+        )
+        agent = _agent_cls(on_text_only=return_text_as_result)(llm=llm)
+
+        # The pieces are not joined: the earlier parts are in history.
+        assert await agent.my_task() == "part C."
+        # Each reply stays in history as generated; nothing is rewritten.
+        assert [e.content for e in _events(agent, LLMResponse)] == [
+            "Part A, ",
+            "part B, ",
+            "part C.",
+        ]
+        # The continue prompt is plain feedback, not an Error event.
+        assert [e.content for e in _events(agent, Feedback)] == [LENGTH_CONTINUATION_NUDGE] * 2
+        assert not any(LENGTH_CONTINUATION_NUDGE in e.content for e in _events(agent, Error))
+        assert _events(agent, LLMResponse)[-1].metadata["output_continued"] is True
+        # The model saw its partial reply, then the continue prompt.
+        seen = [(m.get("role"), str(m.get("content"))) for m in llm.last_messages]
+        first = seen.index(("assistant", "Part A, "))
+        assert seen[first + 1][0] == "user"
+        assert "Continue exactly where you left off" in seen[first + 1][1]
+        assert "Error(" not in seen[first + 1][1]
+        assert seen[first + 2] == ("assistant", "part B, ")
+
+    @pytest.mark.asyncio
+    async def test_restarted_continuation_returns_the_last_reply(self):
+        llm = FakeLLMClient(
+            scripted_responses=[
+                _resp("The answer is 4", finish_reason="length"),
+                _resp("The answer is 42."),
+            ]
+        )
+        agent = _agent_cls(on_text_only=return_text_as_result)(llm=llm)
+        assert await agent.my_task() == "The answer is 42."
+
+    @pytest.mark.asyncio
+    async def test_cut_off_code_cell_is_not_executed(self):
+        cut_code = '{"code": "rows = []\\nfor i in range(1000):\\n    rows.append(i*'
+        llm = FakeLLMClient(
+            scripted_responses=[
+                _resp("", tool_calls=[_call("execute_python", cut_code)], finish_reason="length"),
+                _resp("", tool_calls=[_ret("done")]),
+            ]
+        )
+        agent = _agent_cls()(llm=llm)
+        assert await agent.my_task() == "done"
+        assert _events(agent, PythonOutput) == []
+        assert [e.content for e in _events(agent, Feedback)] == [OUTPUT_LIMIT_NUDGE]
+        assert "smaller steps" in OUTPUT_LIMIT_NUDGE
+        # The cut-off call stays visible in history.
+        assert _events(agent, LLMResponse)[0].tool_calls[0].name == "execute_python"
+
+    @pytest.mark.asyncio
+    async def test_cut_off_return_result_is_not_continued(self):
+        cut = '{"result": "Section 1 ... Section 2 ... Sect'
+        llm = FakeLLMClient(
+            scripted_responses=[
+                _resp("", tool_calls=[_call("return_result", cut)], finish_reason="length"),
+                _resp("brief answer"),
+            ]
+        )
+        agent = _agent_cls(on_text_only=return_text_as_result)(llm=llm)
+        # The partial return_result is neither accepted nor joined with the next reply.
+        assert await agent.my_task() == "brief answer"
+        assert [e.content for e in _events(agent, Feedback)] == [OUTPUT_LIMIT_NUDGE]
+
+    @pytest.mark.asyncio
+    async def test_bound_then_exhausted_message(self):
+        llm = FakeLLMClient(scripted_responses=[_resp("seg ", finish_reason="length")] * 8)
+        agent = _agent_cls(on_text_only=return_text_as_result)(llm=llm)
+        with pytest.raises(GenerationError) as exc_info:
+            await agent.my_task()
+        # Hosts map this exact message to stop_reason="max_tokens".
+        assert str(exc_info.value) == OUTPUT_TOKENS_EXHAUSTED_MESSAGE
+        assert llm.call_count == MAX_LENGTH_RECOVERIES + 1
+
+    @pytest.mark.asyncio
+    async def test_default_handler_keeps_continued_text(self):
+        """The default correction does not ask for the continued text again in one call."""
+        llm = FakeLLMClient(
+            scripted_responses=[
+                _resp("long prose ", finish_reason="length"),
+                _resp("end."),
+                _resp("", tool_calls=[_ret("ok")]),
+            ]
+        )
+        agent = _agent_cls()(llm=llm)
+        assert await agent.my_task() == "ok"
+        reply = next(e for e in agent.event_manager.values() if e.event_type == "TextOnlyReply")
+        assert reply.content == "end."
+        corrections = [e.content for e in _events(agent, Error)]
+        assert len(corrections) == 1
+        assert CONTINUED_TEXT_NOTE in corrections[0]
+        assert "Re-issue your response" not in corrections[0]
+
+    @pytest.mark.asyncio
+    async def test_tool_call_after_cut_off_text_clears_the_mark(self):
+        llm = FakeLLMClient(
+            scripted_responses=[
+                _resp("thinking about it ", finish_reason="length"),
+                _resp("", tool_calls=[_call("execute_python", json.dumps({"code": "x = 1"}))]),
+                _resp("final text"),
+            ]
+        )
+        agent = _agent_cls(on_text_only=return_text_as_result)(llm=llm)
+        assert await agent.my_task() == "final text"
+
+    @pytest.mark.asyncio
+    async def test_every_cut_off_is_counted_with_model(self, monkeypatch):
+        metrics = MagicMock()
+        monkeypatch.setattr(codeact_module, "get_harness_metrics", lambda: metrics)
+        llm = FakeLLMClient(
+            scripted_responses=[
+                _resp("a ", finish_reason="length"),
+                _resp(
+                    "", tool_calls=[_call("return_result", '{"result": "x')], finish_reason="length"
+                ),
+                _resp("b"),
+            ]
+        )
+        agent = _agent_cls(on_text_only=return_text_as_result)(llm=llm)
+        await agent.my_task()
+        calls = metrics.length_continuation.call_args_list
+        assert len(calls) == 2
+        # FakeLLMClient stamps its model name on every response.
+        assert [c.args for c in calls] == [("fake-model",), ("fake-model",)]
