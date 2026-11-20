@@ -6,6 +6,19 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- The optional NeMo Relay integration now supports and checks `>=0.11.1,<0.12`,
+  within the project dependency cutoff. Roots and traced methods automatically
+  use independent stacks, preserving parent trace links
+  during nested and concurrent calls. Global rules apply throughout; scope-local
+  rules do not transfer to child methods. Tool telemetry uses bounded
+  `nooa.snapshot` inspection instead of full codec/pickle serialization, leaving
+  original caller results unchanged. The new `export_nemo_relay_atif()` helper
+  formats sanitized ATIF-v1.7 exports with readable observations and unique
+  tool-call ID correlation. Callback exception text stays out of native error
+  metadata; cancellation allows one second for cleanup before returning, with a
+  warning if the callback outlives it. The example offers optional diagnostics and
+  CPU/memory measurements in private files. See the
+  [quickstart](examples/quickstart/15_nemo_relay.py) for usage.
 - Dependency security update. LiteLLM is now locked at 1.100.5
   (CVE-2026-114612); the `litellm` requirement starts at 1.100.4 and excludes
   the unfixed 1.101-1.103 releases. LiteLLM now requires boto3. Chat
