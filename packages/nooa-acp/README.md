@@ -53,7 +53,7 @@ Zed launches ACP agents as "external agents". Add NOOA to `settings.json`
       "command": "uvx",
       "args": ["nooa-acp"],
       "env": {
-        "NOOA_MODEL": "nvidia_nim/nvidia/nemotron-3-super-120b-a12b",
+        "NOOA_MODEL": "nvidia_nim/nvidia/nemotron-3.5-super-vl-120b-a12b",
         "NVIDIA_API_KEY": "nvapi-..."
       }
     }
@@ -97,7 +97,7 @@ connection and its credentials rather than borrowing Zed's.
 ## Launching the server yourself
 
 ```bash
-nooa-acp --model nvidia_nim/nvidia/nemotron-3-super-120b-a12b
+nooa-acp --model nvidia_nim/nvidia/nemotron-3.5-super-vl-120b-a12b
 ```
 
 This is a JSON-RPC server, not an interactive program: it speaks ACP on
