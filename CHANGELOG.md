@@ -7,8 +7,8 @@ to follow semantic versioning.
 ## [Unreleased]
 
 - The optional NeMo Relay integration now supports and checks `>=0.11.1,<0.12`,
-  using a reviewed exception to the frozen dependency cutoff. Roots and traced
-  methods automatically use independent stacks, preserving parent trace links
+  within the project dependency cutoff. Roots and traced methods automatically
+  use independent stacks, preserving parent trace links
   during nested and concurrent calls. Global rules apply throughout; scope-local
   rules do not transfer to child methods. Tool telemetry uses bounded
   `nooa.snapshot` inspection instead of full codec/pickle serialization, leaving
@@ -19,6 +19,19 @@ to follow semantic versioning.
   warning if the callback outlives it. The example offers optional diagnostics and
   CPU/memory measurements in private files. See the
   [quickstart](examples/quickstart/15_nemo_relay.py) for usage.
+- Dependency security update. LiteLLM is now locked at 1.100.5
+  (CVE-2026-114612); the `litellm` requirement starts at 1.100.4 and excludes
+  the unfixed 1.101-1.103 releases. LiteLLM now requires boto3. Chat
+  Completions requests still leave out `prompt_cache_key`, as LiteLLM 1.97
+  did: LiteLLM 1.100 would send it to OpenAI-compatible endpoints and reject it
+  for Anthropic, Bedrock, and Gemini unless `drop_params` is set. List it in
+  `allowed_openai_params` to send it. The session-affinity header is still
+  sent. OpenTelemetry is locked at 1.45.2 (CVE-2026-126360), and the nooa-atom
+  `benchmark` profile pins Soup Sieve 4.1 (CVE-2026-126190 to
+  CVE-2026-126193), whose 4.0 release no longer matches inside `template`
+  contents. The viewer frontend uses React 19.3.1. The `exclude-newer` cutoff
+  moves to 2026-11-11 for the root project and the cybergym example, which is
+  also locked at LiteLLM 1.100.5.
 - `SandboxConfig.env_allowlist` keeps only the listed environment variables in
   the sandbox worker. The worker is a fork, so it inherited every variable of the
   parent, model API keys included, and a cell could print them. Removing them
