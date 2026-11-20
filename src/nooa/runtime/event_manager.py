@@ -58,6 +58,54 @@ _em_id_counter = itertools.count(1)
 # Track drain tasks rather than managers so a stale child cannot skip a later drain.
 _close_drains: ContextVar[tuple[asyncio.Task, ...]] = ContextVar("nooa_close_drains", default=())
 
+# Bounded, inherited close dependencies; never a process-wide owner graph.
+_active_close_dependencies: ContextVar[tuple[Any, ...]] = ContextVar(
+    "nooa_active_close_dependencies", default=()
+)
+
+
+class _CloseDependency:
+    __nosnapshot__ = True
+
+    def __init__(self):
+        self.active = True
+        self.logical = True
+        self.native = 0
+        self.managers = set()
+        self.on_settled = None
+
+    def attach(self, manager):
+        if manager is not None and self.active:
+            self.managers.add(manager)
+            manager._close_dependencies.add(self)
+
+    def native_started(self):
+        self.native += 1
+
+    def native_finished(self):
+        self.native -= 1
+        if not self.logical:
+            self.finish()
+
+    def finish(self):
+        self.logical = False
+        if self.native:
+            return
+        self.active = False
+        for manager in self.managers:
+            manager._close_dependencies.discard(self)
+        self.managers.clear()
+        if self.on_settled is not None:
+            callback, self.on_settled = self.on_settled, None
+            callback()
+
+    def enter(self):
+        return _active_close_dependencies.set((*_active_close_dependencies.get(), self))
+
+    def reset(self, token):
+        _active_close_dependencies.reset(token)
+
+
 # Old rows are migrated at the persistence boundary, but subscriptions are
 # executable application code and should be updated instead of silently going
 # dead after an event rename.
@@ -133,7 +181,8 @@ class EventManager:
         self._backend: EventBackend = backend if backend is not None else InMemoryBackend()
         self._handlers: dict[str, list[EventHandler]] = defaultdict(list)
         self._close_callbacks: list[Callable[[], Awaitable[None]]] = []
-        self._close_task: asyncio.Task[None] | None = None
+        self._close_task: asyncio.Task[BaseException | None] | None = None
+        self._close_dependencies: set[_CloseDependency] = set()
 
         # Runtime event query override (set via set_event_query())
         self._event_query: EventQuery | None = None
@@ -287,49 +336,63 @@ class EventManager:
 
         return unsubscribe
 
-    async def aclose(self) -> None:
-        """Drain background cleanup before propagating caller cancellation.
+    def _check_close_dependencies(self) -> None:
+        """Reject a copied active dependency before any owner-close mutation."""
+        if any(
+            dependency.active and dependency in self._close_dependencies
+            for dependency in _active_close_dependencies.get()
+        ):
+            raise RuntimeError("active model invocation cannot close its dependent owner")
 
-        Concurrent callers share the drain. Shielding prevents cancellation of an
-        owner from interrupting a component while it still uses shared resources.
-        This does not close storage.
-        """
+    async def aclose(self) -> None:
+        """Drain every finite reverse batch; caller cancellation waits for settlement."""
+        self._check_close_dependencies()
         if self._close_task is not None and self._close_task in _close_drains.get():
-            return  # A cleanup callback (or its child) may close its owner recursively.
+            return
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._drain_close_callbacks())
         task = self._close_task
-        cancelled = False
+        cancelled = None
         try:
             while not task.done():
                 try:
                     await asyncio.shield(task)
-                except asyncio.CancelledError:
-                    cancelled = True
-            task.result()
+                except asyncio.CancelledError as error:
+                    if cancelled is None:
+                        cancelled = error
+            control = task.result()
         finally:
             if task.done() and self._close_task is task:
                 self._close_task = None
-        if cancelled:
-            raise asyncio.CancelledError
+        if cancelled is not None:
+            raise cancelled
+        if control is not None:
+            raise control
 
-    async def _drain_close_callbacks(self) -> None:
-        """Own callbacks until their reverse-order cleanup has finished."""
+    async def _drain_close_callbacks(self) -> BaseException | None:
+        """Keep custom controls as DATA until all extracted and late callbacks finish."""
         task = asyncio.current_task()
         assert task is not None
         token = _close_drains.set((*_close_drains.get(), task))
+        control = None
         try:
-            callbacks, self._close_callbacks = self._close_callbacks, []
-            for callback in reversed(callbacks):
-                try:
-                    await callback()
-                except asyncio.CancelledError:
-                    # Component cancellation is not cancellation of its owners.
-                    logger.warning("Background component cleanup was cancelled")
-                except Exception:
-                    logger.warning("Background component cleanup failed", exc_info=True)
+            while self._close_callbacks:
+                callbacks, self._close_callbacks = self._close_callbacks, []
+                for callback in reversed(callbacks):
+                    try:
+                        await callback()
+                    except BaseException as error:
+                        if isinstance(error, asyncio.CancelledError):
+                            logger.warning("Background component cleanup was cancelled")
+                        elif isinstance(error, Exception):
+                            logger.warning("Background component cleanup failed", exc_info=True)
+                        else:
+                            if control is None:
+                                control = error
+                            logger.warning("Background component cleanup control", exc_info=True)
         finally:
             _close_drains.reset(token)
+        return control
 
     def set_backend(self, backend: EventBackend) -> None:
         """Swap the persistence backend; handlers and middleware are preserved."""

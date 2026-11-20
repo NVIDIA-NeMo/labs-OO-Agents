@@ -55,6 +55,7 @@ from nooa_cli.coding import (
     CodingSlashCommandRegistry,
     load_coding_skills_dirs,
 )
+from nooa_cli.coding.agent import _coding_constructed
 from nooa_cli.sessions import (
     InvalidSessionIdError,
     SessionHandle,
@@ -64,6 +65,7 @@ from nooa_cli.sessions import (
 
 from nooa.errors import GenerationError
 from nooa.mcp import MCPManager, MCPTool
+from nooa.runtime.model_binding import ModelBinding
 from nooa.slash_dispatch import CoercionError
 from nooa.storage.json_snapshot import snapshot_to_json
 from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUSTED_MESSAGE
@@ -73,6 +75,10 @@ from nooa_acp._runtime import (
     SessionRuntime,
     SessionRuntimeClosedError,
     SessionRuntimePool,
+    _acp_capture,
+    _acp_join,
+    _acp_task,
+    _ACPOutcome,
 )
 from nooa_acp.dispatcher import InteractiveSessionDispatcher
 from nooa_acp.event_bridge import ACPEventBridge
@@ -89,6 +95,140 @@ def _snapshot_blob(agent: CodingAgent) -> tuple[str, str]:
     return blob, hashlib.sha256(blob.encode()).hexdigest()
 
 
+@dataclass(eq=False, slots=True)
+class _ACPModelOwner:
+    # Register the raw factory product before even binding validation can fail.
+    raw: Any
+    binding: ModelBinding | None = None
+    completed: bool = False
+
+    async def close(self) -> None:
+        if not self.completed:
+            if self.binding is None:
+                await self.raw.aclose()
+            else:
+                await self.binding.aclose()
+            self.completed = True
+
+
+@dataclass(eq=False, slots=True)
+class _ACPConstruction:
+    """Strong ownership from factory return through runtime retirement."""
+
+    handle: SessionHandle | None = None
+    models: list[_ACPModelOwner] = field(default_factory=list)
+    agents: list[CodingAgent] = field(default_factory=list)
+    tools: dict[str, MCPTool] = field(default_factory=dict)
+    dispatcher: InteractiveSessionDispatcher | None = None
+    bridge: ACPEventBridge | None = None
+    commands: CodingSlashCommandRegistry | None = None
+    completed: set[tuple[str, int]] = field(default_factory=set)
+    close_task: asyncio.Task[_ACPOutcome] | None = None
+    failures: list[_ACPOutcome] = field(default_factory=list)
+    release_started: bool = False
+    release_completed: bool = False
+    primary_failure: _ACPOutcome | None = None
+    release_failure: _ACPOutcome | None = None
+
+    def remember(self, outcome: _ACPOutcome) -> None:
+        if outcome.failure is not None and all(
+            retained.failure is not outcome.failure for retained in self.failures
+        ):
+            self.failures.append(outcome)
+
+    @property
+    def retryable(self) -> bool:
+        resources = [
+            ("bridge", self.bridge),
+            ("commands", self.commands),
+            ("dispatch", self.dispatcher),
+        ]
+        resources += [("agent", value) for value in self.agents]
+        resources += [("model", value) for value in self.models]
+        resources += [("mcp", value) for value in self.tools.values()]
+        return any(
+            value is not None and (label, id(value)) not in self.completed
+            for label, value in resources
+        ) or (self.handle is not None and not self.release_started)
+
+    async def close(self) -> None:
+        if self.close_task is None or (self.close_task.done() and self.retryable):
+            try:
+                self.close_task = _acp_task(
+                    self._close_resources(), name="nooa-acp-construction-close"
+                )
+            except BaseException as error:
+                self.remember(_ACPOutcome(failure=error, traceback=error.__traceback__))
+                raise
+        (await _acp_join(self.close_task)).unwrap()
+
+    async def failed(self, error: BaseException) -> _ACPOutcome:
+        """One cleanup attempt per failed operation, not per nested catch."""
+        if self.primary_failure is None:
+            self.primary_failure = _ACPOutcome(failure=error, traceback=error.__traceback__)
+        if self.close_task is None:
+            outcome = await _acp_capture(self.close())
+        else:
+            outcome = await _acp_join(self.close_task)
+        self.remember(outcome)
+        return outcome
+
+    async def retire(self, label: str, resource: Any, method: str) -> None:
+        if resource is None or (label, id(resource)) in self.completed:
+            return
+
+        async def invoke() -> None:
+            result = getattr(resource, method)()
+            if hasattr(result, "__await__"):
+                await result
+
+        outcome = await _acp_capture(invoke())
+        if outcome.failure is None:
+            self.completed.add((label, id(resource)))
+        self.remember(outcome)
+
+    async def _close_resources(self) -> None:
+        await self.retire("bridge", self.bridge, "close")
+        await self.retire("commands", self.commands, "close")
+        await self.retire("dispatch", self.dispatcher, "cancel")
+        for agent in self.agents:
+            await self.retire("agent", agent, "close")
+        for tool in self.tools.values():
+            try:
+                method = "aclose" if callable(getattr(tool, "aclose", None)) else "close"
+                if callable(getattr(tool, method, None)):
+                    await self.retire("mcp", tool, method)
+                else:
+                    self.completed.add(("mcp", id(tool)))
+            except BaseException as error:
+                self.remember(_ACPOutcome(failure=error, traceback=error.__traceback__))
+        for owner in self.models:
+            await self.retire("model", owner, "close")
+        if self.handle is not None and not self.release_started:
+            await self._release_handle()
+        if self.release_failure is not None:
+            self.remember(self.release_failure)
+        if self.failures:
+            self.failures[0].unwrap()
+
+    async def _release_handle(self) -> None:
+        # A setup/getter failure is retryable. Only the actual delegate call
+        # crosses the protected storage protocol's terminal boundary.
+        try:
+            assert self.handle is not None
+            close = self.handle.close
+        except BaseException as error:
+            self.remember(_ACPOutcome(failure=error, traceback=error.__traceback__))
+            return
+        self.release_started = True
+        try:
+            close()
+        except BaseException as error:
+            self.release_failure = _ACPOutcome(failure=error, traceback=error.__traceback__)
+        else:
+            self.release_completed = True
+
+
 @dataclass(slots=True)
 class _ACPSession:
     """Live resources owned by one ACP session runtime."""
@@ -98,10 +238,14 @@ class _ACPSession:
     dispatcher: InteractiveSessionDispatcher
     bridge: ACPEventBridge
     commands: CodingSlashCommandRegistry
+    construction: _ACPConstruction
     startup_warnings: tuple[str, ...] = ()
     cancel_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     cancel_complete: asyncio.Event = field(default_factory=asyncio.Event)
-    notification_tasks: set[asyncio.Task[None]] = field(default_factory=set)
+    notification_tasks: set[asyncio.Task[_ACPOutcome]] = field(default_factory=set)
+    notification_failure: _ACPOutcome | None = None
+    notification_owner: asyncio.Task[_ACPOutcome] | None = None
+    close_task: asyncio.Task[_ACPOutcome] | None = None
     commands_sent_on_prompt: bool = False
     snapshot_digest: str | None = None
 
@@ -144,25 +288,55 @@ class _ACPSession:
                 self.checkpoint()
 
     async def close(self) -> None:
-        for task in self.notification_tasks:
-            task.cancel()
-        if self.notification_tasks:
-            await asyncio.gather(*self.notification_tasks, return_exceptions=True)
-        self.notification_tasks.clear()
-        try:
-            await self.bridge.close()
-        finally:
+        if self.close_task is None or (self.close_task.done() and self.construction.retryable):
+            self.close_task = _acp_task(self._close_resources(), name="nooa-acp-session-close")
+        (await _acp_join(self.close_task)).unwrap()
+
+    @property
+    def _close_retryable(self) -> bool:
+        return self.construction.retryable
+
+    @property
+    def _close_retained(self) -> bool:
+        # The actual typed stage ledger, not repeated no-op close, establishes
+        # settlement. Delegated release failure is terminal and still fenced.
+        return self.construction.retryable or self.construction.release_failure is not None
+
+    async def _close_resources(self) -> None:
+        first = self.notification_failure
+        tasks = set(self.notification_tasks)
+        if self.notification_owner is not None:
+            tasks.add(self.notification_owner)
+        for task in tuple(tasks):
             try:
-                self.commands.close()
-            finally:
-                try:
-                    await self.dispatcher.close()
-                finally:
-                    self.handle.close()
+                task.cancel()
+            except BaseException as exc:
+                if first is None:
+                    first = _ACPOutcome(failure=exc, traceback=exc.__traceback__)
+        for task in tuple(tasks):
+            outcome = await _acp_join(task)
+            if outcome.failure is None and isinstance(outcome.value, _ACPOutcome):
+                outcome = outcome.value
+            if outcome.failure is not None and not isinstance(
+                outcome.failure, asyncio.CancelledError
+            ):
+                if first is None:
+                    first = outcome
+        self.notification_tasks.clear()
+        self.notification_owner = None
+        outcome = await _acp_capture(self.construction.close())
+        if first is None:
+            first = outcome
+        if first is not None:
+            first.unwrap()
 
 
 class CodingACPAdapter:
-    def __init__(self, llm_factory: Callable[[], UnifiedLLM]) -> None:
+    def __init__(self, llm_factory: Callable[[], UnifiedLLM], *, model_alias: str) -> None:
+        if not isinstance(model_alias, str) or not model_alias:
+            raise ValueError("ACP model_alias must be a nonempty configured alias")
+        self._model_alias = model_alias
+        self._construction: set[_ACPConstruction] = set()
         self._llm_factory = llm_factory
         self._client: Client | None = None
         self._sessions: SessionRuntimePool[_ACPSession] = SessionRuntimePool()
@@ -215,25 +389,44 @@ class CodingACPAdapter:
     ) -> NewSessionResponse:
         del kwargs
         root = self._validate_workspace(cwd, additional_directories)
-        llm = self._llm_factory()
+        construction = _ACPConstruction()
+        self._construction.add(construction)
+        handle: SessionHandle | None = None
+        runtime: SessionRuntime[_ACPSession] | None = None
         try:
+            llm = self._new_model(construction)
             handle = self._store(root).create(
-                model=llm.model,
+                model=self._model_alias,
                 agent="CodingAgent",
                 working_directory=str(root),
                 origin="acp",
                 check_same_thread=False,
             )
-        except BaseException:
-            await llm.aclose()
+            construction.handle = handle
+            runtime = await self._create_runtime(
+                handle, root, mcp_servers, llm=llm, _construction=construction
+            )
+            self._defer_bootstrap_updates(runtime.value)
+        except BaseException as error:
+            if construction.primary_failure is None:
+                construction.primary_failure = _ACPOutcome(
+                    failure=error, traceback=error.__traceback__
+                )
+            if runtime is not None:
+                cleanup = await _acp_capture(
+                    self._sessions.remove(runtime.session_id, include_unavailable=True)
+                )
+                construction.remember(cleanup)
+            else:
+                cleanup = await construction.failed(error)
+            if cleanup.failure is None:
+                self._construction.discard(construction)
+                if handle is not None:
+                    deletion = await _acp_capture(self._delete_failed_session(root, handle.id))
+                    if deletion.failure is not None:
+                        construction.remember(deletion)
+                        self._construction.add(construction)
             raise
-        try:
-            runtime = await self._create_runtime(handle, root, mcp_servers, llm=llm)
-        except BaseException:
-            handle.close()
-            self._store(root).delete(handle.id)
-            raise
-        self._defer_bootstrap_updates(runtime.value)
         return NewSessionResponse(session_id=handle.id)
 
     async def load_session(
@@ -246,13 +439,34 @@ class CodingACPAdapter:
     ) -> LoadSessionResponse:
         del kwargs
         root = self._validate_workspace(cwd, additional_directories)
+        # Check the actual owner ledgers before allocating a second writer.
+        # Opening and registration below contain no intervening await.
+        path = self._store(root).path_for(session_id).resolve()
+        if await self._sessions.owns(session_id) or any(
+            owner.handle is not None and owner.handle.path.resolve() == path
+            for owner in self._construction
+        ):
+            raise RequestError.invalid_request(
+                {"sessionId": session_id, "reason": "Session is already owned"}
+            )
         try:
             handle = self._store(root).open(session_id, check_same_thread=False)
         except (InvalidSessionIdError, SessionNotFoundError):
             raise RequestError.resource_not_found(session_id) from None
+        construction = _ACPConstruction(handle=handle)
+        self._construction.add(construction)
         runtime: SessionRuntime[_ACPSession] | None = None
         try:
-            runtime = await self._create_runtime(handle, root, mcp_servers, available=False)
+            if handle.info.model and handle.info.model != self._model_alias:
+                raise RequestError.invalid_request(
+                    {
+                        "sessionId": session_id,
+                        "reason": "Saved model alias differs from configured ACP model_alias",
+                    }
+                )
+            runtime = await self._create_runtime(
+                handle, root, mcp_servers, available=False, _construction=construction
+            )
             # After the replay, never during it: replay writes straight to the
             # client while the bridge pump drains bootstrap updates, so every
             # await here would otherwise let a commands update or an MCP warning
@@ -260,12 +474,20 @@ class CodingACPAdapter:
             await self._replay_session(handle)
             await self._sessions.publish(session_id)
             self._defer_bootstrap_updates(runtime.value)
-        except BaseException:
+        except BaseException as error:
+            if construction.primary_failure is None:
+                construction.primary_failure = _ACPOutcome(
+                    failure=error, traceback=error.__traceback__
+                )
             if runtime is not None:
-                with suppress(KeyError):
-                    await self._sessions.remove(session_id, include_unavailable=True)
+                cleanup = await _acp_capture(
+                    self._sessions.remove(session_id, include_unavailable=True)
+                )
+                construction.remember(cleanup)
             else:
-                handle.close()
+                cleanup = await construction.failed(error)
+                if cleanup.failure is None:
+                    self._construction.discard(construction)
             raise
         return LoadSessionResponse()
 
@@ -434,20 +656,18 @@ class CodingACPAdapter:
         *,
         llm: UnifiedLLM | None = None,
         available: bool = True,
+        _construction: _ACPConstruction | None = None,
     ) -> SessionRuntime[_ACPSession]:
-        llm = llm or self._llm_factory()
-        if self._client is None:
-            await llm.aclose()
-            raise RequestError.internal_error({"reason": "ACP client is not connected"})
-        agent: CodingAgent | None = None
-        commands: CodingSlashCommandRegistry | None = None
-        value: _ACPSession | None = None
+        construction = _construction or _ACPConstruction(handle=handle)
+        self._construction.add(construction)
         try:
-            mcp, mcp_warnings = await self._create_mcp_tools(mcp_servers)
-            # Restored before MCP tools are registered, so a restored skill
-            # list cannot drop them. A new session has nothing to restore.
+            if self._client is None:
+                raise RequestError.internal_error({"reason": "ACP client is not connected"})
+            if llm is None:
+                llm = self._new_model(construction)
+            mcp, mcp_warnings = await self._create_mcp_tools(mcp_servers, _tools=construction.tools)
             agent, restored = await self._restore_agent(
-                self._build_agent(llm, root, handle), root, handle
+                self._construct_agent(llm, root, handle, construction), root, handle, construction
             )
             registration_warnings: list[str] = []
             for name, tool in mcp.items():
@@ -462,15 +682,22 @@ class CodingACPAdapter:
                     # connect path already offers for an unreachable server —
                     # instead of failing session/new with an opaque error.
                     registration_warnings.append(f"MCP server {name!r} was not registered: {exc}")
-            dispatcher = InteractiveSessionDispatcher(agent)
-            bridge = ACPEventBridge(agent, self._client, handle.id)
-            commands = CodingSlashCommandRegistry(agent)
+            dispatcher = InteractiveSessionDispatcher.__new__(InteractiveSessionDispatcher)
+            construction.dispatcher = dispatcher
+            dispatcher.__init__(agent)
+            bridge = ACPEventBridge.__new__(ACPEventBridge)
+            construction.bridge = bridge
+            bridge.__init__(agent, self._client, handle.id)
+            commands = CodingSlashCommandRegistry.__new__(CodingSlashCommandRegistry)
+            construction.commands = commands
+            commands.__init__(agent)
             value = _ACPSession(
                 handle,
                 agent,
                 dispatcher,
                 bridge,
                 commands,
+                construction,
                 startup_warnings=(*mcp_warnings, *registration_warnings),
             )
             if restored:
@@ -484,21 +711,44 @@ class CodingACPAdapter:
             )
             try:
                 runtime = await self._sessions.add(handle.id, value, available=available)
+                self._construction.discard(construction)
                 return runtime
-            except ValueError:
-                raise RequestError.invalid_request(
-                    {"sessionId": handle.id, "reason": "Session is already loaded"}
-                ) from None
-        except BaseException:
-            if value is not None:
-                await value.close()
-            elif agent is not None:
-                if commands is not None:
-                    commands.close()
-                await agent.close()
-            else:
-                await llm.aclose()
+            except BaseException as error:
+                # A post-registration failure still belongs to this construction.
+                # Retire its exact value atomically; never remove another writer.
+                cleanup = await _acp_capture(self._sessions._remove_if_owned(handle.id, value))
+                construction.remember(cleanup)
+                if isinstance(error, ValueError):
+                    raise RequestError.invalid_request(
+                        {"sessionId": handle.id, "reason": "Session is already loaded"}
+                    ) from None
+                raise
+        except BaseException as error:
+            cleanup = await construction.failed(error)
+            if cleanup.failure is None:
+                self._construction.discard(construction)
             raise
+
+    def _new_model(self, construction: _ACPConstruction) -> ModelBinding:
+        owner = _ACPModelOwner(self._llm_factory())
+        construction.models.append(owner)
+        owner.binding = ModelBinding(owner.raw, owned=True)
+        return owner.binding
+
+    def _construct_agent(
+        self, llm: Any, root: Path, handle: SessionHandle, construction: _ACPConstruction
+    ) -> CodingAgent:
+        token = _coding_constructed.set(construction.agents.append)
+        try:
+            agent = self._build_agent(llm, root, handle)
+            if not any(item is agent for item in construction.agents):
+                construction.agents.append(agent)
+            return agent
+        finally:
+            _coding_constructed.reset(token)
+
+    async def _delete_failed_session(self, root: Path, session_id: str) -> None:
+        self._store(root).delete(session_id)
 
     @staticmethod
     def _build_agent(llm: UnifiedLLM, root: Path, handle: SessionHandle) -> CodingAgent:
@@ -514,7 +764,11 @@ class CodingACPAdapter:
         )
 
     async def _restore_agent(
-        self, agent: CodingAgent, root: Path, handle: SessionHandle
+        self,
+        agent: CodingAgent,
+        root: Path,
+        handle: SessionHandle,
+        construction: _ACPConstruction,
     ) -> tuple[CodingAgent, bool]:
         """Restore the latest snapshot; return the agent to use and whether one was restored.
 
@@ -525,14 +779,24 @@ class CodingACPAdapter:
         try:
             restored = handle.storage.restore_latest_snapshot(agent)
         except Exception:
-            logger.warning(
-                "Session %s: could not restore its saved state; starting a fresh agent",
-                handle.id,
-                exc_info=True,
-            )
-            # close() also closes the agent's LLM client, so the new agent gets its own.
-            await agent.close()
-            return self._build_agent(self._llm_factory(), root, handle), False
+            # Register the replacement before retiring any previous resource.
+            # A diagnostic must never interrupt the independent cleanup stages.
+            try:
+                logger.warning(
+                    "Session %s: could not restore its saved state; starting a fresh agent",
+                    handle.id,
+                    exc_info=True,
+                )
+            except BaseException as error:
+                construction.remember(_ACPOutcome(failure=error, traceback=error.__traceback__))
+            replacement = self._new_model(construction)
+            rebuilt = self._construct_agent(replacement, root, handle, construction)
+            await construction.retire("agent", agent, "close")
+            for owner in construction.models[:-1]:
+                await construction.retire("model", owner, "close")
+            if construction.failures:
+                construction.failures[0].unwrap()
+            return rebuilt, False
         # The restore ran the agent's after_restore() (AgentSnapshot.restore),
         # which repairs what did not survive the restart.
         return agent, restored
@@ -540,10 +804,12 @@ class CodingACPAdapter:
     async def _create_mcp_tools(
         self,
         mcp_servers: list[Any] | None,
+        *,
+        _tools: dict[str, MCPTool] | None = None,
     ) -> tuple[dict[str, MCPTool], tuple[str, ...]]:
         servers = list(mcp_servers or [])
         supported_types = (McpServerStdio, HttpMcpServer, SseMcpServer)
-        tools: dict[str, MCPTool] = {}
+        tools: dict[str, MCPTool] = {} if _tools is None else _tools
         warnings: list[str] = []
         seen_names: set[str] = set()
         for server in servers:
@@ -610,13 +876,21 @@ class CodingACPAdapter:
                 )
             await session.bridge.flush()
 
-        task = asyncio.create_task(_publish(), name="nooa-acp-bootstrap")
+        task = _acp_task(_publish(), name="nooa-acp-bootstrap")
+        # A registration/callback failure cannot orphan a live worker.
+        session.notification_owner = task
         session.notification_tasks.add(task)
 
-        def _finished(done: asyncio.Task[None]) -> None:
+        def _finished(done: asyncio.Task[_ACPOutcome]) -> None:
+            # Successful work has no history; a failure remains on its session.
+            if done.cancelled():
+                return
+            outcome = done.result()
+            if outcome.failure is not None and session.notification_failure is None:
+                session.notification_failure = outcome
             session.notification_tasks.discard(done)
-            if not done.cancelled():
-                done.exception()
+            if session.notification_owner is done:
+                session.notification_owner = None
 
         task.add_done_callback(_finished)
 
@@ -688,20 +962,34 @@ class CodingACPAdapter:
         return name, parts[1] if len(parts) == 2 else ""
 
     async def close(self) -> None:
-        await self._sessions.close()
+        first = await _acp_capture(self._sessions.close())
+        for construction in tuple(self._construction):
+            outcome = await _acp_capture(construction.close())
+            if outcome.failure is None:
+                self._construction.discard(construction)
+            elif first.failure is None:
+                first = outcome
+        first.unwrap()
 
 
-async def serve(llm_factory: Callable[[], UnifiedLLM]) -> None:
-    adapter = CodingACPAdapter(llm_factory)
+async def serve(llm_factory: Callable[[], UnifiedLLM], *, model_alias: str) -> None:
+    adapter = CodingACPAdapter(llm_factory, model_alias=model_alias)
+    primary: _ACPOutcome | None = None
     try:
         # session/close is registered by the router as unstable. initialize()
         # advertises the close capability, so without this flag the agent
         # promises a method that answers "method not found", and a client can
         # never release a session. session/list is stable and unaffected.
         await run_agent(cast(Agent, adapter), use_unstable_protocol=True)
-    finally:
-        with suppress(Exception):
-            await adapter.close()
+    except BaseException as error:
+        primary = _ACPOutcome(failure=error, traceback=error.__traceback__)
+    cleanup = await _acp_capture(adapter.close())
+    if primary is not None:
+        primary.unwrap()
+    # Retain the established best-effort policy for ordinary cleanup errors,
+    # while public control failures propagate only after the close joins.
+    if cleanup.failure is not None and not isinstance(cleanup.failure, Exception):
+        cleanup.unwrap()
 
 
 def _available_commands_update(commands: tuple[CodingSlashCommand, ...]):

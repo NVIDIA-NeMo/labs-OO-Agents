@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Durable metadata for interactive agent sessions."""
 
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from pydantic import Field
 
 from nooa.context_blocks import EventBase, Metadata
 from nooa.context_blocks.roles import Role
-from nooa_atom.session.items import TurnCancelled, Usage
+from nooa_atom.session.items import MaintenanceUsage, TurnCancelled, Usage
 
 
 class SessionStarted(Metadata):
@@ -207,6 +207,29 @@ class UsageAttributed(Metadata):
     usage: Usage = Field(default_factory=Usage)
 
 
+class MaintenanceUsageRecorded(Metadata):
+    """One caller-terminal maintenance call with frozen ancestor targets."""
+
+    _role: ClassVar[Role] = Role.METADATA
+    source_session_id: str
+    logical_call_id: str
+    ancestor_ids: tuple[str, ...] = ()
+    outcome: Literal["success", "error", "cancelled"]
+    failure_kind: str | None = None
+    attempt_count: int
+    dropped_attempts: int = 0
+    usage: MaintenanceUsage
+
+
+class MaintenanceUsageAttributed(Metadata):
+    """One ancestor's idempotent maintenance correlation."""
+
+    _role: ClassVar[Role] = Role.METADATA
+    source_session_id: str
+    logical_call_id: str
+    usage: MaintenanceUsage
+
+
 class SnapshotRestoreFailed(Metadata):
     """The saved agent state could not be restored when the session was loaded."""
 
@@ -258,6 +281,8 @@ SESSION_EVENT_TYPES: tuple[type[EventBase], ...] = (
     SnapshotRestoreFailed,
     UsageAttributed,
     SessionRecovered,
+    MaintenanceUsageRecorded,
+    MaintenanceUsageAttributed,
 )
 """Event types registered on every session's storage backend.
 

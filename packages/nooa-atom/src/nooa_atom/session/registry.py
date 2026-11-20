@@ -26,6 +26,8 @@ from nooa_atom.session.events import (
     ChildClosed,
     ChildDeleted,
     ChildNamed,
+    MaintenanceUsageAttributed,
+    MaintenanceUsageRecorded,
     SnapshotRestoreFailed,
 )
 from nooa_atom.session.items import (
@@ -57,6 +59,8 @@ from nooa_atom.session.store import (
     SessionHandle,
     SessionNotFoundError,
     SessionStore,
+    _maintenance_owners,
+    _record_maintenance_usage,
 )
 from nooa_atom.session.tracing import trace_in_tree, trace_under_caller
 
@@ -156,6 +160,7 @@ class SessionRegistry:
         self._closed_children: dict[str, set[str]] = {}
         self._queued: dict[tuple[str, str], list[tuple[Receipt, ChildOutcome]]] = {}
         self._background: set[asyncio.Task[None]] = set()
+        self._failed_model_bindings = []
         # Ancestors further up watching a session's next outcome (a deeper
         # ``ChildRef.wait()``), by the watched session's id. They get a copy;
         # the outcome still goes to the session's parent.
@@ -226,20 +231,43 @@ class SessionRegistry:
                 session_id=session_id,
                 todo_id=options.todo_id,
             )
-            session = await self._build(options, handle)
+            shared_parent = None
+            if (
+                parent is not None
+                and options.model == parent.info.model
+                and options.model_binding is parent._selected_binding()
+                and options.llm is options.model_binding.client
+            ):
+                from nooa.runtime.model_binding import public_base
+
+                if public_base(options.llm) is not None:
+                    shared_parent = parent
+            session = await self._build(options, handle, shared_parent=shared_parent)
             if parent is not None:
                 trace_under_caller(session)
                 await self._inherit_tools(session, parent)
             if prepare is not None:
                 await prepare(session)
+            if shared_parent is not None and (
+                shared_parent.closing
+                or shared_parent.info.model != options.model
+                or shared_parent._selected_binding() is not session.options.model_binding
+                or shared_parent._selected_binding().client is not session.options.llm
+                or shared_parent.info.reasoning != session.info.reasoning
+                or shared_parent.info.reasoning_selected != session.info.reasoning_selected
+            ):
+                raise RuntimeError("Live parent selection changed during child adoption")
             for channel, item in initial_items:
                 session.admit(item, channel=channel, source=initial_source)
             session.start()
         except BaseException:
             try:
-                await self._close_half_built(session)
+                await self._close_half_built(session, active_unwind=True)
             finally:
-                self._discard(session_id, handle, reservation)
+                try:
+                    self._discard(session_id, handle, reservation)
+                except BaseException:
+                    logger.exception("Discarding failed session %s failed", session_id)
             raise
         self._publish(session, reservation)
         if parent is not None:
@@ -265,68 +293,172 @@ class SessionRegistry:
         self._reserved[session_id] = reservation
         return reservation
 
-    async def _close_half_built(self, session: Session | None) -> None:
+    async def _close_half_built(
+        self, session: Session | None, *, active_unwind: bool = False
+    ) -> None:
         """Close a session that was built but never published (agent, client, handle)."""
         if session is None:
             return
         # Shielding alone leaves an orphan when this caller is cancelled: the
         # unpublished session is absent from close_all(). Keep a strong join and
         # defer single/repeated caller cancellation until owned teardown ends.
-        closing = asyncio.create_task(session.close())
+        from nooa.runtime.model_binding import _cleanup_result, _join_cleanup_tasks
+
+        closing = asyncio.create_task(_cleanup_result(session.close))
         cancelled = None
-        while not closing.done():
-            try:
-                await asyncio.shield(closing)
-            except asyncio.CancelledError as exc:
-                cancelled = exc
-            except Exception:
-                break  # retrieve/log the actual close failure below
         try:
-            closing.result()
-        except Exception:
-            logger.exception("Closing the half-built session %s failed", session.id)
-        if cancelled is not None:
+            await _join_cleanup_tasks((closing,))
+        except asyncio.CancelledError as exc:
+            cancelled = exc
+        except BaseException:
+            pass  # inspect the joined DATA result, preserving the public policy
+        failure = closing.result()
+        if isinstance(failure, BaseException):
+            logger.error(
+                "Closing the half-built session %s failed",
+                session.id,
+                exc_info=(type(failure), failure, failure.__traceback__),
+            )
+            if not active_unwind and not isinstance(failure, Exception):
+                raise failure
+        if cancelled is not None and not active_unwind:
             raise cancelled
 
     async def _build(
-        self, options: SessionOptions, handle: SessionHandle, *, restore: bool = False
+        self,
+        options: SessionOptions,
+        handle: SessionHandle,
+        *,
+        restore: bool = False,
+        shared_parent: Session | None = None,
     ) -> Session:
         # Build the agent outside the caller's context: a child is created
         # from inside its parent's cell, and the agent must not inherit the
         # parent's call stack or LLM inheritance.
-        owned_llm = None
+        from nooa.runtime.model_binding import ModelBinding
+
+        owned_binding = None
+        binding = options.model_binding
         build_options = options
-        if options.llm is None and self.llm_factory is not None:
-            # A None model asks the factory for its default; the session owns
-            # the client either way and closes it.
-            owned_llm = self.llm_factory(options.model, options.workspace)
-            build_options = options.model_copy(update={"llm": owned_llm})
+        if binding is None and options.llm is None and self.llm_factory is not None:
+            client = self.llm_factory(options.model, options.workspace)
+            # None lets the agent factory supply its own model. A real client
+            # must be owned before validation, agent construction or restore.
+            if client is not None:
+                owned_binding = ModelBinding(client, owned=True, lazy=True)
+                self._failed_model_bindings.append(owned_binding)
+                binding = owned_binding
+        elif binding is None and options.llm is not None:
+            binding = ModelBinding(options.llm, lazy=True)
+            owned_binding = binding  # owns the holder, never the injected SDK root
+            self._failed_model_bindings.append(binding)
+        agent = None
+        constructed = []
+
+        def own(candidate):
+            if all(candidate is not item for item in constructed):
+                constructed.append(candidate)
+
+        from nooa_atom.agent.factory import _construct_with_owner, _constructed_agent
+
+        factory_context = contextvars.Context()
+        factory_context.run(_constructed_agent.set, own)
         try:
-            agent = contextvars.Context().run(self._agent_factory, build_options, handle.storage)
+            if binding is not None:
+                build_options = options.model_copy(
+                    update={"llm": binding.client, "model_binding": binding}
+                )
+            agent = factory_context.run(
+                _construct_with_owner, self._agent_factory, build_options, handle.storage, own
+            )
+            if not handle.info.model:
+                from nooa.runtime.llm_call import model_label
+
+                selected = binding.client if binding is not None else agent.llm
+                from nooa.runtime.model_binding import public_base
+
+                label = (
+                    model_label(selected)
+                    if public_base(selected) is not None
+                    else (getattr(selected, "alias", None) or model_label(selected))
+                )
+                if label:
+                    handle.set_model(label)
+            if binding is not None and agent.llms["main"] is not binding:
+                agent.set_llm(binding)
             if restore:
-                agent = await self._restore(agent, build_options, handle)
+                token = _constructed_agent.set(own)
+                try:
+                    agent = await self._restore(agent, build_options, handle)
+                finally:
+                    _constructed_agent.reset(token)
+                if binding is not None and agent.llms["main"] is not binding:
+                    agent.set_llm(binding)
+            if shared_parent is not None:
+                # Restore may await. Sample the live source again, then persist
+                # only the child's honest adoption record without a callback or
+                # await between the sample and Session publication.
+                if (
+                    shared_parent.closing
+                    or shared_parent.info.model != options.model
+                    or shared_parent._selected_binding() is not options.model_binding
+                ):
+                    raise RuntimeError("Live parent selection changed during child adoption")
+                binding = shared_parent._selected_binding()
+                if agent.llms["main"] is not binding:
+                    agent.set_llm(binding)
+                build_options = options.model_copy(
+                    update={"llm": binding.client, "model_binding": binding}
+                )
+                source = shared_parent.info
+                if source.reasoning_selected or source.reasoning is not None:
+                    if (
+                        not handle.info.reasoning_selected
+                        or handle.info.reasoning != source.reasoning
+                    ):
+                        handle.set_reasoning(source.reasoning)
+                elif handle.info.reasoning_selected or handle.info.reasoning is not None:
+                    handle.set_model(options.model)
+            session = Session(
+                options=build_options,
+                agent=agent,
+                handle=handle,
+                owned_llm=owned_binding,
+                llm_factory=self.llm_factory,
+                before_close=lambda: self._close_children(handle.id),
+                _replay_reasoning=shared_parent is None,
+            )
+            install_port(agent, session, self)
         except BaseException:
-            if owned_llm is not None and hasattr(owned_llm, "aclose"):
-                await asyncio.shield(owned_llm.aclose())
+            # Retained holders and the Agent's shielded close task survive
+            # repeated cancellation. Cleanup cannot replace the original error.
+            from nooa.runtime.model_binding import _cleanup_result, _join_cleanup_tasks
+
+            closing = tuple(
+                asyncio.create_task(_cleanup_result(item.aclose)) for item in constructed
+            )
+            try:
+                await _join_cleanup_tasks(closing)
+            except BaseException:
+                pass
+            for task in closing:
+                failure = task.result()
+                if isinstance(failure, BaseException):
+                    logger.error(
+                        "Closing a constructed agent failed",
+                        exc_info=(type(failure), failure, failure.__traceback__),
+                    )
+            if owned_binding is not None:
+                try:
+                    await owned_binding.aclose()
+                except BaseException as failure:
+                    logger.error(
+                        "Closing a failed model binding failed",
+                        exc_info=(type(failure), failure, failure.__traceback__),
+                    )
             raise
-        # The Session keeps the options with the client, so a same-model
-        # child (options.inherit) shares it instead of building another.
-        session = Session(
-            options=build_options,
-            agent=agent,
-            handle=handle,
-            owned_llm=owned_llm,
-            llm_factory=self.llm_factory,
-            before_close=lambda: self._close_children(handle.id),
-            llm_in_use=lambda llm: any(
-                other.id != handle.id and other.options.llm is llm
-                for other in self.sessions.values()
-            ),
-        )
-        resolved = getattr(owned_llm, "alias", None)
-        if isinstance(resolved, str) and resolved:
-            session.info.model = resolved
-        install_port(agent, session, self)
+        if owned_binding is not None:
+            self._failed_model_bindings.remove(owned_binding)
         return session
 
     async def _restore(self, agent: Any, options: SessionOptions, handle: SessionHandle) -> Any:
@@ -369,7 +501,15 @@ class SessionRegistry:
                 continue
             await agent.queue_manager.shutdown()
             await agent.aclose()
-            agent = contextvars.Context().run(self._agent_factory, options, handle.storage)
+            from nooa_atom.agent.factory import _construct_with_owner, _constructed_agent
+
+            agent = contextvars.Context().run(
+                _construct_with_owner,
+                self._agent_factory,
+                options,
+                handle.storage,
+                _constructed_agent.get() or (lambda candidate: None),
+            )
             try:
                 handle.storage.restore_snapshot(snapshot_id, agent)
             except Exception:
@@ -384,7 +524,15 @@ class SessionRegistry:
             return agent, True, f"{failed}; restored the older snapshot {snapshot_id} instead"
         await agent.queue_manager.shutdown()
         await agent.aclose()
-        agent = contextvars.Context().run(self._agent_factory, options, handle.storage)
+        from nooa_atom.agent.factory import _construct_with_owner, _constructed_agent
+
+        agent = contextvars.Context().run(
+            _construct_with_owner,
+            self._agent_factory,
+            options,
+            handle.storage,
+            _constructed_agent.get() or (lambda candidate: None),
+        )
         return agent, False, failed
 
     def _discard(
@@ -392,19 +540,36 @@ class SessionRegistry:
         session_id: str,
         handle: SessionHandle | None,
         reservation: asyncio.Future[Session | None],
+        *,
+        delete_record: bool = True,
     ) -> None:
+        failure = None
         self._reserved.pop(session_id, None)
-        if not reservation.done():
-            reservation.set_result(None)
-        if handle is None:
-            return
-        handle.close()
         try:
-            self.store.delete(session_id)
-        except Exception:
-            logger.warning("Could not delete the file of failed session %s", session_id)
+            if not reservation.done():
+                reservation.set_result(None)
+        except BaseException as exc:
+            failure = exc
+        if handle is not None:
+            try:
+                handle.close()
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+            if delete_record:
+                try:
+                    self.store.delete(session_id)
+                except BaseException as exc:
+                    logger.warning("Could not delete the file of failed session %s", session_id)
+                    if failure is None:
+                        failure = exc
+        if failure is not None:
+            raise failure
 
     def _publish(self, session: Session, reservation: asyncio.Future[Session | None]) -> None:
+        session._maintenance_ancestors = lambda: self._maintenance_ancestry(session)
+        session._maintenance_live = self.sessions.get
+        self._reconcile_maintenance(session)
         self.sessions[session.id] = session
         session.subscribe(lambda update: self._on_update(session, update))
         if session.parent_id is not None:
@@ -412,6 +577,63 @@ class SessionRegistry:
         self._reserved.pop(session.id, None)
         if not reservation.done():
             reservation.set_result(session)
+
+    def _maintenance_ancestry(self, session: Session) -> tuple[str, ...]:
+        """Freeze every recorded ancestor before an admitted maintenance call."""
+        ancestors = []
+        seen = {session.id}
+        parent_id = session.parent_id
+        while parent_id is not None:
+            if parent_id in seen:
+                raise RuntimeError("cycle in maintenance ancestry")
+            seen.add(parent_id)
+            ancestors.append(parent_id)
+            live = self.sessions.get(parent_id)
+            info = live.info if live is not None else self.store.get(parent_id)
+            parent_id = info.parent_id
+        return tuple(ancestors)
+
+    def _reconcile_maintenance(self, session: Session) -> None:
+        """Read descendants, but append only through the newly owned writer.
+
+        Frozen OWN rows remember an ancestor that was offline. Loading that
+        ancestor is the explicit retry point; neither a second writer nor an
+        ordinary TurnEnded delivery is involved.
+        """
+        changes = []
+        for info in self.store.list(roots_only=False):
+            if info.id == session.id:
+                continue
+            for _, raw in self.store.load_rows(info.id, frozenset({"MaintenanceUsageRecorded"})):
+                record = MaintenanceUsageRecorded.model_validate(raw)
+                if session.id in record.ancestor_ids:
+                    changes.append(
+                        (
+                            session.handle,
+                            MaintenanceUsageAttributed(
+                                source_session_id=record.source_session_id,
+                                logical_call_id=record.logical_call_id,
+                                usage=record.usage,
+                            ),
+                        )
+                    )
+        usage = session.info.usage.model_copy(deep=True)
+
+        def prepare(publications):
+            nonlocal usage
+            if publications:
+                usage = publications[-1][1].usage.model_copy(deep=True)
+
+        _record_maintenance_usage(tuple(changes), prepare_publications=prepare)
+        session.info.usage = usage
+
+    def _retained_maintenance(self, session_id: str | None = None):
+        return tuple(
+            owner
+            for owner in _maintenance_owners.values()
+            if owner.handle.path.parent.resolve() == self.store.root.resolve()
+            and (session_id is None or owner.session.id == session_id)
+        )
 
     def _on_update(self, session: Session, update: SessionEvent) -> None:
         if update.kind != "closed":
@@ -946,10 +1168,24 @@ class SessionRegistry:
             raise ChildFailedError(
                 f"Child {name or child_id!r} is closed; spawn a new child for more work"
             )
-        info = self.store.get(child_id)
-        # The record gives the child's own options; the parent passes on
-        # what it does not record (the depth cap) and a client it shares.
-        shared_llm = parent.options.llm if (info.model or None) == parent.options.model else None
+
+        # Preserve historical borrowed-client treatment for nonpublic cached
+        # injections. Public clients use load's actual (possibly pending) binding.
+        overrides = {}
+        cached = parent.options.llm
+        if cached is not None and self.store.get(child_id).model == parent.options.model:
+            from nooa.runtime.model_binding import public_base
+            from nooa.unifiedllm import LLM
+            from nooa.unifiedllm.controlled import AdmissionControl
+
+            if public_base(cached) is None:
+                try:
+                    facade_base = vars(cached).get("base_llm")
+                except TypeError:
+                    facade_base = None
+                if isinstance(cached, (LLM, AdmissionControl)) or isinstance(facade_base, LLM):
+                    raise TypeError("Child adoption requires an unchanged public client")
+                overrides["llm"] = cached
 
         async def trace(child: Session) -> None:
             trace_under_caller(child)
@@ -958,7 +1194,7 @@ class SessionRegistry:
             child_id,
             prepare=trace,
             max_depth=parent.options.max_depth,
-            llm=shared_llm,
+            **overrides,
         )
 
     def info(self, session_id: str) -> SessionInfo:
@@ -1025,7 +1261,34 @@ class SessionRegistry:
             if info.parent_id is not None and not is_valid_name(info.name):
                 # An older record, named by its description: it gets child_<n>.
                 info.name = self.child_name(info)
-            session = await self._build(self._stored_options(info, overrides), handle, restore=True)
+            options = self._stored_options(info, overrides)
+            parent = self.sessions.get(info.parent_id) if info.parent_id else None
+            shared_parent = None
+            if (
+                parent is not None
+                and not parent.closing
+                and overrides.get("llm") is None
+                and overrides.get("model_binding") is None
+                and options.model == (info.model or None) == parent.info.model
+            ):
+                binding = parent._selected_binding()
+                from nooa.runtime.model_binding import public_base
+
+                client = binding.client
+                if public_base(client) is None:
+                    from nooa.unifiedllm import LLM
+                    from nooa.unifiedllm.controlled import AdmissionControl
+
+                    try:
+                        facade_base = vars(client).get("base_llm")
+                    except TypeError:  # Genuine slot-based legacy injections remain supported.
+                        facade_base = None
+                    if isinstance(client, (LLM, AdmissionControl)) or isinstance(facade_base, LLM):
+                        raise TypeError("Child adoption requires an unchanged public client")
+                else:
+                    options = options.model_copy(update={"llm": client, "model_binding": binding})
+                    shared_parent = parent
+            session = await self._build(options, handle, restore=True, shared_parent=shared_parent)
             session.name = session.info.name = info.name
             live_parent = self.sessions.get(session.parent_id) if session.parent_id else None
             if live_parent is not None:
@@ -1047,14 +1310,11 @@ class SessionRegistry:
             self._requeue(session)
             session.start()
         except BaseException:
+            await self._close_half_built(session, active_unwind=True)
             try:
-                await self._close_half_built(session)
-            finally:
-                self._reserved.pop(session_id, None)
-                if not reservation.done():
-                    reservation.set_result(None)
-                if handle is not None:
-                    handle.close()
+                self._discard(session_id, handle, reservation, delete_record=False)
+            except BaseException:
+                logger.exception("Closing failed open handle %s failed", session_id)
             raise
         self._publish(session, reservation)
         return session
@@ -1244,6 +1504,9 @@ class SessionRegistry:
         session = self.sessions.get(session_id)
         if session is not None:
             await session.close()
+        else:
+            for owner in self._retained_maintenance(session_id):
+                await owner.finish(release=True)
 
     async def close_child(self, parent: Session, child_id: str) -> None:
         """Close ``parent``'s child for good; ``ChildFailedError`` if it is not ``parent``'s."""
@@ -1252,16 +1515,90 @@ class SessionRegistry:
         await self.close(child_id)
 
     async def _close_children(self, parent_id: str) -> None:
-        for child in [s for s in self.sessions.values() if s.parent_id == parent_id]:
-            await self.close(child.id)
+        # Strongly capture all published descendants before the first await.
+        descendants = {parent_id}
+        sessions = []
+        for session in sorted(self.sessions.values(), key=lambda s: s.depth):
+            if session.parent_id in descendants:
+                descendants.add(session.id)
+                sessions.append(session)
+        retained = tuple(
+            owner
+            for owner in self._retained_maintenance()
+            if owner.session.id != parent_id
+            and (owner.session.id in descendants or parent_id in owner.ancestor_ids)
+        )
+        failure = None
+        try:
+            await self._close_snapshot(tuple(reversed(sessions)))
+        except BaseException as error:
+            failure = error
+        for owner in retained:
+            if owner.session not in sessions:
+                try:
+                    await owner.finish(release=True)
+                except BaseException as error:
+                    if failure is None:
+                        failure = error
+        if failure is not None:
+            raise failure
 
     async def close_all(self) -> None:
-        """Close every live session, deepest first."""
-        for session in sorted(self.sessions.values(), key=lambda s: s.depth, reverse=True):
+        """Close a captured snapshot deepest first; later creations remain reusable."""
+        sessions = tuple(sorted(self.sessions.values(), key=lambda s: s.depth, reverse=True))
+        retained = self._retained_maintenance()
+        failure = None
+        try:
+            await self._close_snapshot(sessions)
+        except BaseException as error:
+            failure = error
+        for owner in retained:
+            if owner.session not in sessions:
+                try:
+                    await owner.finish(release=True)
+                except BaseException as error:
+                    if failure is None:
+                        failure = error
+        if failure is not None:
+            raise failure
+
+    async def _close_snapshot(self, sessions) -> None:
+        from nooa.runtime.model_binding import _join_cleanup_tasks
+
+        # A genuine inherited dependency rejects BEFORE fencing ANY sibling.
+        for session in sessions:
+            session._agent.event_manager._check_close_dependencies()
+            if session._agent.turns.in_turn:
+                raise RuntimeError("an executing turn cannot close its own session")
+        failure = None
+        for session in sessions:
             try:
-                await session.close()
-            except Exception:
-                logger.exception("Closing session %s failed", session.id)
+                session.pause_dispatch()
+            except BaseException as error:
+                try:
+                    logger.warning("Pausing session %s failed", session.id, exc_info=True)
+                except BaseException as diagnostic:
+                    if failure is None:
+                        failure = diagnostic
+                if not isinstance(error, Exception) and failure is None:
+                    failure = error
+
+        async def close_snapshot():
+            control = failure
+            for session in sessions:
+                try:
+                    await session.close()
+                except BaseException as error:
+                    try:
+                        logger.warning("Closing session %s failed", session.id, exc_info=True)
+                    except BaseException as diagnostic:
+                        if control is None:
+                            control = diagnostic
+                    if not isinstance(error, Exception) and control is None:
+                        control = error
+            return control
+
+        await _join_cleanup_tasks((asyncio.create_task(close_snapshot()),))
 
 
 def _admit_delegate(parent: Session, item: Any, source: str) -> Receipt:

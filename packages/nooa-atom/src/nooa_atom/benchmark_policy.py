@@ -188,6 +188,7 @@ class BenchmarkPolicyGuard:
         entry.update(
             registered=True,
             session=session,
+            model_binding=session._agent.llms["main"],
             cleanup_owner=getattr(session, "_cleanup_errors", None),
             initial=self.identity(session),
             registered_options=_config(session.options),
@@ -294,7 +295,14 @@ class BenchmarkPolicyGuard:
                 raise ValueError("runtime drift")
         except Exception:
             self.refuse("policy_runtime_drift", session_id=sid)
-        if session._agent.llm is not self._client or session.options.llm is not self._client:
+        # Final coverage runs after teardown, when binding.client is no longer
+        # readable. Retain the selected holder's identity without reopening it.
+        if (
+            session._agent.llms["main"] is not entry["model_binding"]
+            or session.options.llm is not self._client
+            or not session._closed
+            and session._agent.llm is not self._client
+        ):
             self.refuse("policy_client_drift", session_id=sid)
         if any(
             callback not in manager._handlers.get(kind, [])
@@ -441,6 +449,7 @@ class BenchmarkPolicyGuard:
                     if k
                     not in {
                         "session",
+                        "model_binding",
                         "cleanup_owner",
                         "agent_middleware",
                         "llm_middleware",

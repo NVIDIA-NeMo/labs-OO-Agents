@@ -16,7 +16,8 @@ def stubbed_serve(monkeypatch):
     """Capture the llm_factory the command builds instead of serving."""
     captured = {}
 
-    def fake_serve(llm_factory):
+    def fake_serve(llm_factory, *, model_alias):
+        captured["model_alias"] = model_alias
         captured["llm_factory"] = llm_factory
         return "coroutine-placeholder"
 
@@ -40,7 +41,7 @@ def test_model_is_read_from_the_environment(monkeypatch, stubbed_serve):
     monkeypatch.setenv("NOOA_MODEL", "openai/gpt-4o-mini")
     requested = {}
     monkeypatch.setattr(
-        "nooa.unifiedllm.get_llm_client",
+        "nooa.unifiedllm.load_llm",
         lambda name, **kwargs: requested.setdefault("name", name),
     )
 
@@ -49,13 +50,14 @@ def test_model_is_read_from_the_environment(monkeypatch, stubbed_serve):
     assert result.exit_code == 0, result.output
     stubbed_serve["llm_factory"]()
     assert requested["name"] == "openai/gpt-4o-mini"
+    assert stubbed_serve["model_alias"] == "openai/gpt-4o-mini"
 
 
 def test_explicit_flag_overrides_the_environment(monkeypatch, stubbed_serve):
     monkeypatch.setenv("NOOA_MODEL", "openai/gpt-4o-mini")
     requested = {}
     monkeypatch.setattr(
-        "nooa.unifiedllm.get_llm_client",
+        "nooa.unifiedllm.load_llm",
         lambda name, **kwargs: requested.setdefault("name", name),
     )
 
@@ -64,6 +66,7 @@ def test_explicit_flag_overrides_the_environment(monkeypatch, stubbed_serve):
     assert result.exit_code == 0, result.output
     stubbed_serve["llm_factory"]()
     assert requested["name"] == "anthropic/claude-sonnet-4-5"
+    assert stubbed_serve["model_alias"] == "anthropic/claude-sonnet-4-5"
 
 
 def test_the_command_warns_that_nooa_acp_is_deprecated_and_still_runs(monkeypatch, stubbed_serve):

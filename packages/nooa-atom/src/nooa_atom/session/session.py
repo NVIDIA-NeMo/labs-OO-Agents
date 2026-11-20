@@ -18,7 +18,9 @@ import time
 from collections import OrderedDict, deque
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
+from types import TracebackType
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -34,8 +36,10 @@ from nooa.interactive import (
     apply_model_limits,
 )
 from nooa.llm_types import LLMResponse
+from nooa.runtime.model_binding import ModelBinding, _cleanup_result, public_base
 from nooa.runtime.turn_loop import TurnLoopEnded, TurnSettled
 from nooa.storage.json_snapshot import snapshot_to_json
+from nooa.unifiedllm.adapters._view_limits import _loaded_runtime_metadata
 from nooa_atom.agent.reflection_gate import _ReflectionGate
 from nooa_atom.benchmark_policy import POLICY, BenchmarkPolicyViolation
 from nooa_atom.session.events import (
@@ -44,6 +48,8 @@ from nooa_atom.session.events import (
     ItemDiscarded,
     ItemRequeued,
     ItemWithdrawn,
+    MaintenanceUsageAttributed,
+    MaintenanceUsageRecorded,
     TurnEnded,
     TurnStarted,
     UsageAttributed,
@@ -58,6 +64,8 @@ from nooa_atom.session.items import (
     CommandsChangedUpdate,
     ItemAdmittedUpdate,
     ItemConsumedUpdate,
+    MaintenanceUsage,
+    MaintenanceUsageUpdate,
     ModeChangedUpdate,
     ModelChangedUpdate,
     ModelInfo,
@@ -76,7 +84,13 @@ from nooa_atom.session.items import (
     question_id,
 )
 from nooa_atom.session.options import SessionOptions
-from nooa_atom.session.store import SessionHandle
+from nooa_atom.session.store import (
+    SessionHandle,
+    _maintenance_key,
+    _maintenance_owners,
+    _record_maintenance_usage,
+    _record_model_changes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +102,310 @@ _FINISHED_KEPT = 256
 
 OutcomeKind = Literal["done", "need_input", "waiting", "cancelled", "error"]
 _MODES = ("auto", "ask")
+
+
+@dataclass(slots=True)
+class _MaintenanceFailure:
+    error: BaseException
+    traceback: TracebackType | None
+
+    def raise_error(self) -> None:
+        raise self.error.with_traceback(self.traceback)
+
+
+@dataclass(slots=True)
+class _MaintenancePass:
+    ancestor_ids: tuple[str, ...]
+    snapshots: tuple[Any, ...]
+    records: tuple[MaintenanceUsageRecorded, ...]
+    charged: frozenset[str] = frozenset()
+    response: LLMResponse | None = None
+    capture_failure: _MaintenanceFailure | None = None
+    # Pass-only strong response identity and supplied values, never native receipts.
+    legacy_responses: tuple[tuple[LLMResponse, tuple[tuple[str, Any], ...]], ...] = ()
+
+
+class _MaintenanceOwner:
+    """One actual writer and its active/failed maintenance obligations.
+
+    Strong outside registry publication, but pruned after successful live
+    persistence. An escaping delegated release remains terminal, not a retry
+    of the inherited closed-flag/no-op storage protocol.
+    """
+
+    def __init__(self, session: "Session") -> None:
+        self.session = session
+        self.handle = session.handle
+        self.passes: list[_MaintenancePass] = []
+        self.ancestor_ids: frozenset[str] = frozenset()
+        self.active: _MaintenancePass | None = None
+        self.task: asyncio.Task[_MaintenanceFailure | None] | None = None
+        self.failure: _MaintenanceFailure | None = None
+        self.release_failure: _MaintenanceFailure | None = None
+        self.release_started = False
+        self.released = False
+        self.seen = False
+        self.prepared_publications: tuple = ()
+
+    def retain(self) -> None:
+        key = _maintenance_key(self.handle)
+        existing = _maintenance_owners.get(key)
+        if existing is not None and existing is not self:
+            raise RuntimeError(f"Session {self.session.id!r} already has a maintenance writer")
+        _maintenance_owners[key] = self
+
+    def begin(self, ancestor_ids: tuple[str, ...]) -> _MaintenancePass:
+        pending = _MaintenancePass(ancestor_ids, (), ())
+        retained_ancestors = self.ancestor_ids | frozenset(ancestor_ids)
+        self.retain()
+        self.ancestor_ids = retained_ancestors
+        self.passes.append(pending)
+        self.active = pending
+        return pending
+
+    def capture(self, snapshot) -> None:
+        # Receipt delivery is nonthrowing DATA. Retain raw canonical data before
+        # validation, allocation of summaries or any observer/storage work.
+        pending = self.active
+        if pending is None:
+            return
+        try:
+            pending.snapshots = (*pending.snapshots, snapshot)
+            self.seen = True
+            self._materialize(pending)
+        except BaseException as error:
+            if pending.capture_failure is None:
+                pending.capture_failure = _MaintenanceFailure(error, error.__traceback__)
+
+    def capture_legacy(self, response: LLMResponse) -> None:
+        """Legacy LIVE compatibility only; never manufacture canonical receipt data."""
+        pending = self.active
+        if pending is None:
+            return
+        if any(previous is response for previous, _ in pending.legacy_responses):
+            return
+        try:
+            supplied = response.usage.model_copy(deep=True) if response.usage is not None else None
+            values = tuple(
+                (name, getattr(supplied, name))
+                for name in USAGE_FIELDS
+                if supplied is not None
+                and name in supplied.model_fields_set
+                and getattr(supplied, name) is not None
+            )
+            totals = self.session.info.usage.model_copy(deep=True)
+            for name, value in values:
+                setattr(totals, name, getattr(totals, name) + value)
+            if (
+                supplied is not None
+                and "input_tokens" in supplied.model_fields_set
+                and supplied.input_tokens is not None
+            ):
+                totals.last_input_tokens = supplied.input_tokens
+            update = UsageChangedUpdate(session_id=self.session.id, usage=totals.model_copy())
+            retained = (*pending.legacy_responses, (response, values))
+            publications = (
+                lambda: self.handle.update_usage(totals),
+                *(
+                    lambda listener=listener: listener(update)
+                    for listener in tuple(self.session._listeners)
+                ),
+            )
+            # Allocation and validation precede assignment-only once charge.
+            pending.legacy_responses = retained
+            self.session.info.usage = totals
+        except BaseException as error:
+            self.failure = self.failure or _MaintenanceFailure(error, error.__traceback__)
+            return
+        # Independent existing live publication boundaries; no durable OWN row.
+        for publish in publications:
+            try:
+                publish()
+            except BaseException as error:
+                self.failure = self.failure or _MaintenanceFailure(error, error.__traceback__)
+
+    def _materialize(self, pending: _MaintenancePass) -> None:
+        """Retry summary preparation, not prediction or already charged receipts."""
+        for snapshot in pending.snapshots:
+            if snapshot.logical_id in pending.charged:
+                continue
+            values = {name: snapshot.subtotal(name).known for name in USAGE_FIELDS}
+            usage = MaintenanceUsage(
+                **values,
+                complete_fields=tuple(
+                    name for name in USAGE_FIELDS if snapshot.subtotal(name).complete
+                ),
+            )
+            event = MaintenanceUsageRecorded(
+                source_session_id=self.session.id,
+                logical_call_id=snapshot.logical_id,
+                ancestor_ids=pending.ancestor_ids,
+                outcome=snapshot.outcome,
+                failure_kind=snapshot.failure_kind,
+                attempt_count=snapshot.attempt_count,
+                dropped_attempts=snapshot.dropped_attempts,
+                usage=usage,
+            )
+            totals = self.session.info.usage.model_copy(deep=True)
+            for name in USAGE_FIELDS:
+                setattr(totals, name, getattr(totals, name) + (values[name] or 0))
+            info = self.handle._info.model_copy(update={"usage": totals.model_copy()}, deep=True)
+            records = (*pending.records, event)
+            charged = pending.charged | {snapshot.logical_id}
+            # All possibly fallible allocation precedes assignment-only charge.
+            pending.records = records
+            pending.charged = charged
+            self.session.info.usage = totals
+            self.handle._info = info
+        pending.capture_failure = None
+
+    def end(self, pending: _MaintenancePass) -> None:
+        if self.active is pending:
+            self.active = None
+        # Only the final canonical delivered response may replace last input.
+        response = pending.response
+        if response is not None and response.usage is not None:
+            value = response.usage.input_tokens
+            if value is not None:
+                self.session.info.usage.last_input_tokens = value
+                self.handle._info.usage.last_input_tokens = value
+
+    def prune(self) -> None:
+        if not self.passes and self.active is None and self.release_failure is None:
+            key = _maintenance_key(self.handle)
+            if _maintenance_owners.get(key) is self:
+                del _maintenance_owners[key]
+
+    def prepare_publications(self, publications) -> None:
+        # Invoked inside the existing transaction seam BEFORE durable append.
+        prepared = []
+        for handle, info, event, inserted in publications:
+            if not inserted:
+                continue
+            target = (
+                self.session if handle is self.handle else self.session._maintenance_live(handle.id)
+            )
+            if target is None:
+                continue
+            usage = info.usage.model_copy(deep=True)
+            update = MaintenanceUsageUpdate(
+                session_id=target.id,
+                source_session_id=event.source_session_id,
+                logical_call_id=event.logical_call_id,
+                maintenance_usage=event.usage,
+                attributed=isinstance(event, MaintenanceUsageAttributed),
+                usage=usage.model_copy(deep=True),
+            )
+            prepared.append((target, usage, update, tuple(target._listeners)))
+        self.prepared_publications = tuple(prepared)
+
+    def publish(self) -> _MaintenanceFailure | None:
+        # Assignment-only publication after commit, before independent callbacks.
+        prepared, self.prepared_publications = self.prepared_publications, ()
+        for target, usage, _, _ in prepared:
+            target.info.usage = usage
+        failure = None
+        for _, _, update, listeners in prepared:
+            for listener in listeners:
+                try:
+                    listener(update)
+                except BaseException as error:
+                    if failure is None:
+                        failure = _MaintenanceFailure(error, error.__traceback__)
+                    self.failure = self.failure or failure
+        return failure
+
+    async def _finish(self, release: bool) -> _MaintenanceFailure | None:
+        try:
+            for pending in tuple(self.passes):
+                if pending is self.active:
+                    raise RuntimeError("maintenance prediction has not joined")
+                self._materialize(pending)
+                changes = []
+                for record in pending.records:
+                    changes.append((self.handle, record))
+                    for ancestor_id in record.ancestor_ids:
+                        ancestor = self.session._maintenance_live(ancestor_id)
+                        if ancestor is not None and not ancestor.handle.closed:
+                            changes.append(
+                                (
+                                    ancestor.handle,
+                                    MaintenanceUsageAttributed(
+                                        source_session_id=record.source_session_id,
+                                        logical_call_id=record.logical_call_id,
+                                        usage=record.usage,
+                                    ),
+                                )
+                            )
+                _record_maintenance_usage(
+                    tuple(changes), prepare_publications=self.prepare_publications
+                )
+                # Commit receipt before any callback. Retrying never predicts,
+                # never charges OWN again, and never repeats a committed row.
+                self.passes.remove(pending)
+                self.publish()
+            if release and not self.released:
+                self.retain()
+                if self.release_failure is not None:
+                    return self.release_failure
+                # Lookup/setup are still retryable; invocation is the boundary.
+                close = self.handle.close
+                self.release_started = True
+                try:
+                    close()
+                except BaseException as error:
+                    self.release_failure = _MaintenanceFailure(error, error.__traceback__)
+                    return self.release_failure
+                self.released = True
+            self.prune()
+            return self.failure
+        except BaseException as error:
+            return _MaintenanceFailure(error, error.__traceback__)
+
+    async def finish(self, *, release: bool = False) -> None:
+        # A failed persistence/setup task is retryable; a delegated release is
+        # terminal and must never be invoked again. Always join outstanding work.
+        if self.task is None or self.task.done():
+            if self.task is not None:
+                previous = self.task.result()
+                if previous is None and not self.passes and (not release or self.released):
+                    if self.failure is not None:
+                        self.failure.raise_error()
+                    return
+            if self.release_failure is not None:
+                self.release_failure.raise_error()
+            operation = self._finish(release)
+
+            async def capture() -> _MaintenanceFailure | None:
+                try:
+                    return await operation
+                except BaseException as error:
+                    return _MaintenanceFailure(error, error.__traceback__)
+
+            worker = capture()
+            try:
+                self.task = asyncio.create_task(worker)
+            except BaseException as error:
+                worker.close()
+                operation.close()
+                self.failure = self.failure or _MaintenanceFailure(error, error.__traceback__)
+                raise
+        interrupted = None
+        while True:
+            try:
+                failure = await asyncio.shield(self.task)
+                break
+            except asyncio.CancelledError as error:
+                # A caller may cancel repeatedly. The DATA worker retains the
+                # writer until the actual operation exits, not until its waiter
+                # first receives cancellation.
+                if interrupted is None:
+                    interrupted = _MaintenanceFailure(error, error.__traceback__)
+        if failure is None:
+            failure = interrupted
+        if failure is not None:
+            self.failure = self.failure or failure
+            failure.raise_error()
 
 
 class TurnFailedError(RuntimeError):
@@ -173,6 +491,10 @@ class _CleanupErrors:
     OPERATIONS = frozenset(
         {
             "closing its children",
+            "pausing the turn loop",
+            "stopping new turns",
+            "resolving pending outcomes",
+            "emitting the closed update",
             "stopping the turn loop",
             "closing the pending model client",
             "waiting for the checkpoint",
@@ -247,6 +569,14 @@ class _CleanupErrors:
         }
 
 
+@dataclass(eq=False, slots=True)
+class _RetiredLLM:
+    """Strong ownership until the single DATA worker settles successfully."""
+
+    owner: Any
+    task: asyncio.Task[BaseException | None] | None = None
+
+
 class Session:
     """One agent, its turn loop and its durable record.
 
@@ -267,6 +597,7 @@ class Session:
         llm_factory: Callable[[str | None, Path], Any] | None = None,
         before_close: Callable[[], Awaitable[None]] | None = None,
         llm_in_use: Callable[[Any], bool] | None = None,
+        _replay_reasoning: bool = True,
     ) -> None:
         info = handle.info
         self.id: str = info.id
@@ -279,22 +610,28 @@ class Session:
         self._benchmark_guard = None  # installed by the artifact's HookedRegistry, not model code
         self._foreground_method: str | None = None
         self._maintenance_ready: tuple[TurnSettled, int, _ReflectionGate] | None = None
+        self._cancelling_maintenance = False
         gate = getattr(agent, "_reflection_gate", None)
         if isinstance(gate, _ReflectionGate):
             gate.start_session()  # creation/load anchor, not time spent constructing the agent
         self.handle = handle
+        self._maintenance = _MaintenanceOwner(self)
+        self._maintenance_ancestors: Callable[[], tuple[str, ...]] = lambda: ()
+        self._maintenance_live: Callable[[str], Session | None] = lambda _id: None
         # A deep copy: the Session owns its usage totals and pushes them to
         # the handle, whose metadata other threads read under its lock.
         self.info: SessionInfo = info.model_copy(
             update={"status": "idle", "mode": options.permission_mode}, deep=True
         )
         self._owned_llm = owned_llm
+        self._model_binding = options.model_binding or agent.llms["main"]
+        self._model_binding._sessions.add(self)
         # When the current (or last) turn was claimed (time.monotonic()); None
         # before the first. The parent's status block shows a running child's age.
         self.turn_started_at: float | None = None
         # Clients this session built and swapped out while another live
         # session (a child) still used them; closed when this one closes.
-        self._retired_llms: list[Any] = []
+        self._retired_llms: list[_RetiredLLM] = []
         # Whether another live session uses a client; the registry sets it.
         self.llm_in_use: Callable[[Any], bool] = llm_in_use or (lambda _llm: False)
         self._llm_factory = llm_factory
@@ -321,7 +658,8 @@ class Session:
         self._replied: bool = False
         # How the last turn ended ("waiting" shows a child as "working").
         self.last_outcome_kind: str | None = None
-        self._close_task: asyncio.Task[None] | None = None
+        self._close_task: asyncio.Task[BaseException | None] | None = None
+        self._close_control: BaseException | None = None
         self._cleanup_errors = _CleanupErrors()
         self._closing = False
         self._closed = False
@@ -351,7 +689,7 @@ class Session:
             events.on("TurnSettled", self._on_turn_settled),
             events.on("TurnLoopEnded", self._on_loop_ended),
         )
-        if self.info.reasoning:
+        if _replay_reasoning and (self.info.reasoning_selected or self.info.reasoning is not None):
             self._restore_reasoning(self.info.reasoning)
         # The one listener of the agent's command registry: hosts see
         # changes as CommandsChangedUpdate.
@@ -404,6 +742,16 @@ class Session:
         )
 
     async def _after_turn_settled(self, event: TurnSettled) -> None:
+        # The TurnLoop hook is an internal worker, not a public raise boundary.
+        # Keep controls as DATA on the typed owner; foreground delivery is done.
+        try:
+            await self._run_maintenance(event)
+        except BaseException as error:
+            self._maintenance.failure = self._maintenance.failure or _MaintenanceFailure(
+                error, error.__traceback__
+            )
+
+    async def _run_maintenance(self, event: TurnSettled) -> None:
         # _settle set this only after successful delivery and durable settlement.
         # Clear before awaiting; failure/timeout cannot recursively retry cleanup.
         pending = self._maintenance_ready
@@ -416,14 +764,48 @@ class Session:
             return
         # Admission consumed the window synchronously, before any prediction
         # await. Failure/timeout/no-op/close cannot turn this into a hot retry.
+        from nooa.unifiedllm._accounting import _receiver, _session_receiver
+
+        owner = self._maintenance
+        pending = owner.begin(self._maintenance_ancestors())
+        primary = fallback = None
+        original = None
         try:
+            primary = _receiver.set(owner.capture)
+            fallback = _session_receiver.set(owner.capture)
             await hook(event.result)
+        except BaseException as error:
+            # Closing/cancelling our reflection pass is a normal outcome. Keep
+            # captured usage and still report any independent cleanup failure.
+            if not (
+                isinstance(error, asyncio.CancelledError)
+                and (self.closing or self._cancelling_maintenance)
+            ):
+                original = _MaintenanceFailure(error, error.__traceback__)
         finally:
-            # Reflection LLMResponse events go through ordinary usage accounting;
-            # their distinct method identifies this maintenance cost. Context
-            # edits need a new checkpoint; the namespace remains nosnapshot.
+            for reset in (
+                lambda: _session_receiver.reset(fallback) if fallback is not None else None,
+                lambda: _receiver.reset(primary) if primary is not None else None,
+                lambda: owner.end(pending),
+            ):
+                try:
+                    reset()
+                except BaseException as error:
+                    if original is None:
+                        original = _MaintenanceFailure(error, error.__traceback__)
+            try:
+                await owner.finish()
+            except BaseException as error:
+                if original is None:
+                    original = _MaintenanceFailure(error, error.__traceback__)
             if not self.closing:
-                self._checkpoint()
+                try:
+                    self._checkpoint()
+                except BaseException as error:
+                    if original is None:
+                        original = _MaintenanceFailure(error, error.__traceback__)
+        if original is not None:
+            original.raise_error()
 
     @property
     def closing(self) -> bool:
@@ -438,26 +820,76 @@ class Session:
         agent, close a model client the session created, close the store
         handle.
         """
+        self._agent.event_manager._check_close_dependencies()
         if self.id in _closing_sessions.get():
             return
         if self._agent.turns.in_turn:
             raise RuntimeError("an executing turn cannot close its own session")
-        if self._closed:
-            return
         if self._close_task is None:
+            if self._closed:
+                return
             self._closing = True
-            self._agent.turns.pause()
-            self._close_task = asyncio.ensure_future(self._close())
-        await asyncio.shield(self._close_task)
+            try:
+                self._agent.turns.pause()
+            except BaseException as error:
+                self._record_close_failure("pausing the turn loop", error)
+            operation = (
+                self._close_maintenance_capture()
+                if self._maintenance.seen
+                or self._maintenance.active is not None
+                or self._maintenance.failure is not None
+                else self._close()
+            )
+            try:
+                self._close_task = asyncio.ensure_future(operation)
+            except BaseException:
+                operation.close()
+                raise
+        repeated = self._close_task.done()
+        interrupted = None
+        if (
+            self._maintenance.seen
+            or self._maintenance.active is not None
+            or self._maintenance.failure is not None
+        ):
+            while True:
+                try:
+                    control = await asyncio.shield(self._close_task)
+                    break
+                except asyncio.CancelledError as error:
+                    if self._close_task.cancelled():
+                        raise
+                    if interrupted is None:
+                        interrupted = _MaintenanceFailure(error, error.__traceback__)
+        else:
+            control = await asyncio.shield(self._close_task)
+        if self._maintenance.seen or self._maintenance.failure is not None:
+            if repeated:
+                await self._maintenance.finish(release=True)
+            elif self._maintenance.task is not None:
+                failure = await asyncio.shield(self._maintenance.task)
+                if failure is not None:
+                    failure.raise_error()
+        if control is not None:
+            raise control
+        if interrupted is not None:
+            interrupted.raise_error()
 
-    async def _close(self) -> None:
+    async def _close_maintenance_capture(self) -> BaseException | None:
+        # Only maintenance-bound close owns this DATA worker/join policy.
+        try:
+            return await self._close()
+        except BaseException as error:
+            return error
+
+    async def _close(self) -> BaseException | None:
         token = _closing_sessions.set((*_closing_sessions.get(), self.id))
         try:
-            await self._close_body()
+            return await self._close_body()
         finally:
             _closing_sessions.reset(token)
 
-    async def _close_body(self) -> None:
+    async def _close_body(self) -> BaseException | None:
         # Every step has its own guard: a failure (or a CancelledError out
         # of a step) is logged and the close goes on, so the model client is
         # closed, the file lock released and ClosedUpdate emitted whatever
@@ -466,13 +898,18 @@ class Session:
         # No new turn from here on (a running one goes on while children
         # close): an item a doomed turn took would be recorded as consumed
         # and never come back on load.
-        self._agent.turns.stop_starting()
+        await self._close_step("stopping new turns", self._agent.turns.stop_starting)
         await self._close_step("closing its children", self._before_close)
         await self._close_step("stopping the turn loop", self._agent.turns.stop)
-        self._resolve_all(TurnCancelledOutcome(by="host"))
+        await self._close_step(
+            "resolving pending outcomes", lambda: self._resolve_all(TurnCancelledOutcome(by="host"))
+        )
         pending, self._pending_model = self._pending_model, None
         if pending is not None:
-            await self._close_step("closing the pending model client", lambda: _aclose(pending[1]))
+            retirement = self._retain_retirement(pending[1])
+            await self._close_step(
+                "closing the pending model client", lambda: self._join_retirement(retirement)
+            )
         await self._close_step("waiting for the checkpoint", self.wait_for_checkpoint)
         await self._close_step("unsubscribing from agent events", self._unsubscribe_agent)
         await self._close_step("unsubscribing the steer flush", self._unsubscribe_steers)
@@ -481,10 +918,39 @@ class Session:
         for unsubscribe in self._unsubscribe_items:
             await self._close_step("unsubscribing from its queues", unsubscribe)
         await self._close_step("closing its model client", self._close_owned_llm)
-        await self._close_step("closing its record", self.handle.close)
+        if self._maintenance.seen or self._maintenance.failure is not None:
+            # Pending OWN keeps the actual writer, but cannot skip other cleanup.
+            await self._close_step(
+                "finalizing maintenance and its record",
+                lambda: self._maintenance.finish(release=True),
+            )
+        else:
+            await self._close_step("closing its record", self.handle.close)
         self._closed = True
         self.info.status = "closed"
-        self._emit(ClosedUpdate(session_id=self.id))
+        await self._close_step(
+            "emitting the closed update", lambda: self._emit(ClosedUpdate(session_id=self.id))
+        )
+        return self._close_control
+
+    def _record_close_failure(self, what: str, error: BaseException) -> None:
+        if (
+            not isinstance(error, (Exception, asyncio.CancelledError))
+            and self._close_control is None
+        ):
+            self._close_control = error
+        evidence = getattr(self, "_cleanup_errors", None)
+        if type(evidence) is _CleanupErrors:
+            try:
+                evidence.record(what, error)
+            except BaseException as diagnostic:
+                if self._close_control is None:
+                    self._close_control = diagnostic
+        try:
+            logger.exception("Session %s: %s failed", self.id, what)
+        except BaseException as diagnostic:
+            if self._close_control is None:
+                self._close_control = diagnostic
 
     async def _close_step(self, what: str, step: Callable[[], object] | None) -> None:
         """Run one close step (sync or async); log a failure instead of raising it."""
@@ -494,11 +960,8 @@ class Session:
             result = step()
             if inspect.isawaitable(result):
                 await result
-        except (Exception, asyncio.CancelledError) as error:
-            evidence = getattr(self, "_cleanup_errors", None)
-            if type(evidence) is _CleanupErrors:
-                evidence.record(what, error)
-            logger.exception("Session %s: %s failed", self.id, what)
+        except BaseException as error:
+            self._record_close_failure(what, error)
 
     async def cancel(self, *, by: str = "user") -> bool:
         """Stop the running turn; return whether one was running.
@@ -510,8 +973,12 @@ class Session:
         prompts left open by a ``Waiting`` are closed with
         ``TurnCancelledOutcome`` and no event is written.
         """
-        if await self._agent.turns.cancel(by=by):
-            return True
+        self._cancelling_maintenance = True
+        try:
+            if await self._agent.turns.cancel(by=by):
+                return True
+        finally:
+            self._cancelling_maintenance = False
         waiting, self._waiting = self._waiting, []
         for item_id in waiting:
             self._resolve(item_id, TurnCancelledOutcome(by=by))
@@ -519,9 +986,14 @@ class Session:
 
     async def _close_owned_llm(self) -> None:
         llm, self._owned_llm = self._owned_llm, None
-        retired, self._retired_llms = self._retired_llms, []
-        for client in (*retired, llm):
-            await self._close_step("closing a model client", lambda c=client: _aclose(c))
+        if llm is not None:
+            self._retain_retirement(llm)
+        for retirement in tuple(self._retired_llms):
+            if not isinstance(retirement, _RetiredLLM):
+                retirement = self._retain_retirement(retirement)
+            await self._close_step(
+                "closing a model client", lambda r=retirement: self._join_retirement(r)
+            )
 
     def _ensure_open(self) -> None:
         if self._closed or self._closing:
@@ -845,6 +1317,8 @@ class Session:
     # ---- turns: the agent's TurnLoop runs them, the Session records them ----
 
     async def _prepare_turn(self) -> None:
+        if self._maintenance.passes:
+            await self._maintenance.finish()
         self._usage_before = self.info.usage.model_copy()
         await self._apply_pending_model()
 
@@ -916,11 +1390,16 @@ class Session:
     def _on_loop_ended(self, event: TurnLoopEnded) -> None:
         """The loop cannot wait for input: fail every open outcome and close the session."""
         error = TurnFailedError(f"The session's turn loop stopped: {event.message}", event.error)
-        self._resolve_all(error)
-        if self._close_task is None:
-            self._close_task = asyncio.get_running_loop().create_task(
-                self._close(), name=f"session-close:{self.id}"
-            )
+        try:
+            self._resolve_all(error)
+        except BaseException as failure:
+            self._record_close_failure("resolving pending outcomes", failure)
+        finally:
+            if self._close_task is None:
+                self._closing = True
+                self._close_task = asyncio.get_running_loop().create_task(
+                    self._close(), name=f"session-close:{self.id}"
+                )
 
     def _fail_turn(self, exc: BaseException) -> None:
         """Settle a turn whose own settling failed: its prompts get ``TurnFailedError``."""
@@ -1239,122 +1718,323 @@ class Session:
         self.info.title_is_user_set = self.info.title_is_user_set or user_set
         self._emit(TitleChangedUpdate(session_id=self.id, title=title, user_set=user_set))
 
-    async def set_model(self, alias: str) -> None:
-        """Switch the model from the next turn on.
+    def _retain_retirement(self, owner) -> _RetiredLLM:
+        for index, retirement in enumerate(self._retired_llms):
+            if retirement is owner:
+                retirement = _RetiredLLM(owner)
+                self._retired_llms[index] = retirement
+                return retirement
+            if isinstance(retirement, _RetiredLLM) and retirement.owner is owner:
+                return retirement
+        retirement = _RetiredLLM(owner)
+        self._retired_llms.append(retirement)
+        return retirement
 
-        The client is built now with the registry's ``llm_factory``, so a
-        bad alias fails here. The loop swaps it in right before the next
-        turn and closes the old client if this session created it; a
-        running turn keeps its model. A second call before that turn
-        replaces (and closes) the first pending client. The alias is
-        recorded at once (``info.model``, and the store, so a load resumes
-        on it) and a ``ModelChangedUpdate`` is emitted.
-        """
+    @staticmethod
+    def _start_retirement(retirement: _RetiredLLM) -> None:
+        if retirement.task is not None:
+            return
+        coroutine = _cleanup_result(lambda: _aclose(retirement.owner))
+        try:
+            retirement.task = asyncio.ensure_future(coroutine)
+        except BaseException:
+            # Scheduling did not transfer ownership. Keep the owner and empty
+            # slot for close to retry, without masking the scheduling control.
+            try:
+                coroutine.close()
+            except BaseException:
+                pass
+            raise
+
+    async def _join_retirement(self, retirement: _RetiredLLM) -> None:
+        self._start_retirement(retirement)
+        error = await asyncio.shield(retirement.task)
+        if error is not None:
+            raise error
+        # Identity-only removal; failures and unfinished workers remain owned.
+        if retirement in self._retired_llms:
+            self._retired_llms.remove(retirement)
+
+    async def _dispose_rejected(self, owner) -> None:
+        retirement = self._retain_retirement(owner)
+        try:
+            await self._join_retirement(retirement)
+        except BaseException:
+            # Retain the DATA worker/owner; cleanup cannot replace the original
+            # operation error or reinterpret a successful durable selection.
+            return
+
+    async def set_model(self, alias: str) -> None:
+        """Prepare, atomically record, then publish the next selected binding."""
         if self._llm_factory is None:
-            raise RuntimeError("set_model() needs the registry's llm_factory to build clients")
+            raise RuntimeError("set_model() needs the registry's llm_factory")
         self._ensure_open()
         client = self._llm_factory(alias, self.options.workspace)
-        # Own immediately: a metadata write failure must not orphan this client.
-        self._retired_llms.append(client)
-        # Recorded now: a load before the next turn resumes on this model.
-        # The new client starts from its own reasoning default.
-        self.handle.set_model(alias)
-        self.info.model = alias
-        self.info.reasoning = None
-        previous, self._pending_model = self._pending_model, (alias, client)
-        self._retired_llms.remove(client)
-        if previous is not None:
-            self._retired_llms.append(previous[1])
-            await _aclose(previous[1])
-            self._retired_llms.remove(previous[1])
-        self._emit(ModelChangedUpdate(session_id=self.id, model=alias))
-
-    async def _apply_pending_model(self) -> None:
-        pending, self._pending_model = self._pending_model, None
-        if pending is None:
+        if (
+            not callable(getattr(client, "acall", None))
+            and public_base(client) is None
+            and public_base(getattr(client, "base_llm", None)) is None
+            and not isinstance(client, ModelBinding)
+        ):
+            # Legacy factories may supply a raw pending owner, validated only
+            # at activation. Own it before the historical metadata-write hook;
+            # a failed write leaves both it and the prior selection untouched.
+            self._retired_llms.append(client)
+            self.handle.set_model(alias)
+            self.info.model = alias
+            self.info.reasoning = None
+            self.info.reasoning_selected = False
+            previous, self._pending_model = self._pending_model, (alias, client)
+            self._retired_llms.remove(client)
+            if previous is not None:
+                self._retired_llms.append(previous[1])
+                await _aclose(previous[1])
+                self._retired_llms.remove(previous[1])
+            self._emit(ModelChangedUpdate(session_id=self.id, model=alias))
             return
-        alias, client = pending
-        old_agent_llm = self._agent.llm
+        candidate = ModelBinding(
+            client, owned=True, lazy=True, require=self._agent._llm_requirements["main"]
+        )
+        try:
+            client = candidate.client
+            from nooa.interactive import _prepare_model_limits
+            from nooa.runtime.llm_call import context_limits
+
+            context_limits(client, fallback_reserve=self._agent._truncation.response_reserve_tokens)
+            _prepare_model_limits(self._agent, client)
+            self._metadata(candidate)
+            info = self.info.model_copy(
+                update={
+                    "model": alias,
+                    "reasoning": None,
+                    "reasoning_selected": False,
+                },
+                deep=True,
+            )
+            options = self.options.model_copy(
+                update={
+                    "model": alias,
+                    "llm": client,
+                    "model_binding": candidate,
+                }
+            )
+            pending = (alias, candidate)
+            # Preallocate listener payload as well as all publication values.
+            update = ModelChangedUpdate(session_id=self.id, model=alias)
+            candidate._sessions.add(self)
+            previous = self._pending_model
+            retirement = None
+            retired = self._retired_llms
+            if previous is not None:
+                retirement = next((r for r in retired if r.owner is previous[1]), None)
+                if retirement is None:
+                    retirement = _RetiredLLM(previous[1])
+                    retired = [*retired, retirement]
+            _record_model_changes(((self.handle, "model", alias),))
+        except BaseException:
+            await self._dispose_rejected(candidate)
+            raise
+        self._retired_llms = retired
+        self._pending_model = pending
+        self.info = info
+        self.options = options
+        # B is coherent before scheduling or callbacks. A is already owned even
+        # if either fails; neither can retroactively roll back durable success.
+        if retirement is not None:
+            self._start_retirement(retirement)
+        self._emit(update)
+        if previous is not None:
+            await self._dispose_rejected(previous[1])
+
+    async def _apply_pending_client(self, alias: str, client: Any) -> None:
+        """Attempt legacy raw-client selections once, retaining cancelled cleanup."""
+        self._pending_model = None
+        previous = self._agent.llms["main"].retain()
         try:
             self._agent.set_llm(client)
             apply_model_limits(self._agent)
         except BaseException:
-            # Attempt once. Failed clients remain owned for later cleanup.
             self._retired_llms.append(client)
-            self._agent.set_llm(old_agent_llm)
+            self._agent.set_llm(previous)
             raise
+        finally:
+            previous._drop_reference()
         old, self._owned_llm = self._owned_llm, client
-        # New same-model children share the new client.
-        self.options = self.options.model_copy(update={"model": alias, "llm": client})
+        self._model_binding = self._agent.llms["main"]
+        self._model_binding._sessions.add(self)
+        self.options = self.options.model_copy(
+            update={"model": alias, "llm": client, "model_binding": self._model_binding}
+        )
         self.info.model = alias
         if old is not None:
-            self._retired_llms.append(old)  # retain ownership across cancelled/hung disposal
+            self._retired_llms.append(old)
             if not self.llm_in_use(old):
                 await _aclose(old)
                 self._retired_llms.remove(old)
 
+    async def _apply_pending_model(self) -> None:
+        pending = self._pending_model
+        if pending is None:
+            return
+        alias, binding = pending
+        if not isinstance(binding, ModelBinding):
+            await self._apply_pending_client(alias, binding)
+            return
+        from nooa.interactive import _prepare_model_limits
+        from nooa.unifiedllm.requirements import _validate_requirements
+
+        client = binding.client
+        base = public_base(client)
+        _validate_requirements(
+            base.capabilities if base else getattr(client, "capabilities", None),
+            self._agent._llm_requirements["main"],
+        )
+        summaries = _prepare_model_limits(self._agent, client)
+        # set_llm is a synchronous validated publication. Keep the valid pending
+        # selection until it succeeds, and do not mutate budgets beforehand.
+        previous = self._agent.llms["main"].retain()
+        try:
+            self._agent.set_llm(binding)
+        except BaseException:
+            # Framework rollback bypasses a failing user override, retains the
+            # original exception/control object, and leaves pending untouched.
+            from nooa.agent import Agent
+
+            Agent.set_llm(self._agent, previous)
+            previous._drop_reference()
+            await self._dispose_rejected(previous)
+            raise
+        previous._drop_reference()
+        for summarizer, config in summaries:
+            summarizer.config = config
+        old = self._owned_llm
+        self._owned_llm = binding
+        self._model_binding = binding
+        self._pending_model = None
+        # Cleanup follows the assignment-only publication, never splitting it.
+        try:
+            await previous._join_cleanup()
+        except BaseException:
+            self._retain_retirement(previous)
+        if old is not None:
+            await self._dispose_rejected(old)
+
     def channels(self) -> list[str]:
-        """Names of the agent's queue channels: where ``submit`` can put an item."""
+        """Names of the agent's queue channels."""
         return list(self._agent.queue_manager.channels())
 
+    def _selected_binding(self) -> ModelBinding:
+        return self._pending_model[1] if self._pending_model is not None else self._model_binding
+
     def _next_llm(self) -> Any:
-        """The client the next model call uses: one a ``set_model`` left pending, else the agent's."""
-        if self._pending_model is not None:
-            return self._pending_model[1]
-        return getattr(self._agent, "llm", None)
+        return self._selected_binding().client
+
+    @staticmethod
+    def _metadata(binding):
+        client = binding.client
+        base = public_base(client)
+        if base is not None and base._lease is not None:
+            return _loaded_runtime_metadata(base)
+        return {
+            "context_window": getattr(client, "context_window", None),
+            "reasoning_level": getattr(client, "reasoning_level", None),
+            "reasoning_levels": tuple(getattr(client, "reasoning_levels", None) or ()),
+            "reasoning_default": getattr(client, "reasoning_default", None),
+        }
 
     def model_info(self) -> ModelInfo:
-        """The model the next call uses, as data: alias, context window, reasoning levels.
-
-        After a ``set_model`` whose client is not swapped in yet, this
-        describes that client: it is the one the next turn uses.
-        """
-        client = self._next_llm()
+        metadata = self._metadata(self._selected_binding())
         return ModelInfo(
             alias=self.info.model,
-            context_window=getattr(client, "context_window", None),
-            reasoning_level=getattr(client, "reasoning_level", None),
-            reasoning_levels=list(getattr(client, "reasoning_levels", None) or ()),
-            reasoning_default=getattr(client, "reasoning_default", None),
+            **{
+                name: metadata[name]
+                for name in (
+                    "context_window",
+                    "reasoning_level",
+                    "reasoning_levels",
+                    "reasoning_default",
+                )
+            },
         )
 
     async def set_reasoning(self, level: str | None) -> None:
-        """Choose a reasoning level the client declares; it applies from the next model call.
-
-        The level is set on the client the next call uses (see
-        ``model_info``), recorded (``info.reasoning``, and the store, so a
-        load restores it) and announced with a ``ReasoningChangedUpdate``.
-        A later ``set_model`` resets it: the new client starts from its own
-        default. A same-model child shares its parent's client, so a level
-        set on either applies to both.
-
-        Raises:
-            ValueError: If the client does not declare ``level``.
-        """
+        """Atomically persist attached sharers, then publish one immutable view."""
         self._ensure_open()
-        client = self._next_llm()
-        levels = tuple(getattr(client, "reasoning_levels", None) or ())
-        if level is not None and level not in levels:
-            allowed = ", ".join(levels) if levels else "none for this model"
-            raise ValueError(f"Unknown reasoning level {level!r}; allowed: {allowed}")
-        # None clears the choice: the model's own default applies again.
-        client.reasoning_level = level
-        self.handle.set_reasoning(level)
-        self.info.reasoning = level
-        self._emit(ReasoningChangedUpdate(session_id=self.id, level=level))
+        binding = self._selected_binding()
+        metadata = self._metadata(binding)
+        if level is not None and level not in metadata["reasoning_levels"]:
+            if public_base(binding.client) is None:
+                offered = ", ".join(metadata["reasoning_levels"]) or "none for this model"
+                raise ValueError(f"Unknown reasoning level; allowed: {offered}")
+            raise ValueError("Unknown reasoning level")
+        if public_base(binding.client) is None:
+            # Explicit legacy injected fake seam, not proof of public adoption.
+            self.handle.set_reasoning(level)
+            binding.client.reasoning_level = level
+            self.info.reasoning = level
+            self.info.reasoning_selected = True
+            self._emit(ReasoningChangedUpdate(session_id=self.id, level=level))
+            return
+        candidate = binding.prepare(reasoning_level=level)
+        owner = ModelBinding(candidate, owned=True, lazy=True)
+        try:
+            from nooa.runtime.llm_call import context_limits
 
-    def _restore_reasoning(self, level: str) -> None:
-        """Apply a recorded level on load, if the client still declares it."""
-        client = getattr(self._agent, "llm", None)
-        if level in tuple(getattr(client, "reasoning_levels", None) or ()):
-            client.reasoning_level = level
-        else:
-            logger.info(
-                "Session %s: the recorded reasoning level %r is not offered by the model; "
-                "using its default",
-                self.id,
-                level,
+            context_limits(
+                candidate, fallback_reserve=self._agent._truncation.response_reserve_tokens
             )
+            publication = binding._prepare_publication(candidate)
+            sessions = tuple(
+                sorted(
+                    (
+                        session
+                        for session in binding._sessions
+                        if not session._closed and session._selected_binding() is binding
+                    ),
+                    key=lambda session: str(session.handle.storage._canonical_path),
+                )
+            )
+            prepared = tuple(
+                (
+                    session,
+                    session.info.model_copy(
+                        update={"reasoning": level, "reasoning_selected": True}, deep=True
+                    ),
+                    session.options.model_copy(update={"llm": candidate, "model_binding": binding}),
+                    ReasoningChangedUpdate(session_id=session.id, level=level),
+                )
+                for session in sessions
+            )
+            changes = tuple((session.handle, "reasoning", level) for session in sessions)
+            _record_model_changes(changes)
+        except BaseException:
+            await self._dispose_rejected(owner)
+            raise
+        # Transfer ownership from the temporary holder without closing the view.
+        owner._owned = {}
+        binding._publish_prepared(publication)
+        for session, info, options, _ in prepared:
+            session.info, session.options = info, options
+        for session, _, _, update in prepared:
+            session._emit(update)
+        # Disposal is a distinct post-commit lifecycle stage, not part of the
+        # assignment-only publication. Retain close tasks on the binding.
+        with binding._lock:
+            binding._collect()
+
+    def _restore_reasoning(self, level: str | None) -> None:
+        binding = self._model_binding
+        metadata = self._metadata(binding)
+        if level is not None and level not in metadata["reasoning_levels"]:
+            logger.info("Recorded reasoning selection is unavailable; using model default")
+            return
+        if public_base(binding.client) is not None:
+            view = binding.prepare(reasoning_level=level)
+            options = self.options.model_copy(update={"llm": view, "model_binding": binding})
+            binding.publish(view)
+            self.options = options
+        else:
+            binding.client.reasoning_level = level
 
     async def set_mode(self, mode: str) -> None:
         """Record the permission mode (``auto`` or ``ask``); nothing enforces it yet.
@@ -1402,6 +2082,15 @@ class Session:
         self._emit(UsageChangedUpdate(session_id=self.id, usage=totals.model_copy()))
 
     def _count_usage(self, response: LLMResponse) -> None:
+        owner = getattr(self, "_maintenance", None)
+        if owner is not None and owner.active is not None:
+            from nooa.unifiedllm._accounting import _owns_delivered_response
+
+            if _owns_delivered_response(response):
+                owner.active.response = response
+            else:
+                owner.capture_legacy(response)
+            return
         usage = response.usage
         if usage is None:
             return
@@ -1435,6 +2124,18 @@ class Session:
                 logger.warning("Session listener %r raised", listener, exc_info=True)
 
     def _on_agent_event(self, event: Any) -> None:
+        pending = self._maintenance.active
+        if pending is not None:
+            # Capture canonical delivery before fallible presentation observers.
+            if isinstance(event, LLMResponse):
+                self._count_usage(event)
+            if self._listeners:
+                try:
+                    self._emit(AgentEventUpdate(session_id=self.id, event=event))
+                except BaseException as error:
+                    if self._maintenance.failure is None:
+                        self._maintenance.failure = _MaintenanceFailure(error, error.__traceback__)
+            return
         # First, so listeners see the event before anything it causes here
         # (the usage update of a model response).
         if self._listeners:

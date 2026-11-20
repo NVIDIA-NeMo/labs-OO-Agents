@@ -239,7 +239,7 @@ def command(
         overrides = (
             {"api_key": nvidia_api_key} if nvidia_api_key and name.startswith("nvidia_nim/") else {}
         )
-        return models.workspace_llm_client(name, workspace, client_type=client_type, **overrides)
+        return models.workspace_llm(name, workspace, client_type=client_type, **overrides)
 
     # A test script can run this command with its own model factory.
     obj = ctx.obj if isinstance(ctx.obj, dict) else {}

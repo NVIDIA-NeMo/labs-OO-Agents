@@ -14,9 +14,12 @@ from typing import TYPE_CHECKING, Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     SerializeAsAny,
     SerializerFunctionWrapHandler,
+    StrictFloat,
+    StrictInt,
     ValidationError,
     field_validator,
     model_serializer,
@@ -355,6 +358,35 @@ The names match ``nooa.llm_types.LLMUsage``, which a model response carries.
 """
 
 
+class MaintenanceUsage(BaseModel):
+    """Frozen known subtotals, not estimates; None and measured zero differ.
+
+    Completeness describes the underlying attempts, independently of whether
+    any numeric subtotal is known. Numeric Session usage shows known portions.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    input_tokens: StrictInt | None = None
+    output_tokens: StrictInt | None = None
+    cached_input_tokens: StrictInt | None = None
+    cache_write_input_tokens: StrictInt | None = None
+    reasoning_tokens: StrictInt | None = None
+    total_tokens: StrictInt | None = None
+    cost_usd: StrictFloat | StrictInt | None = None
+    complete_fields: tuple[
+        Literal[
+            "input_tokens",
+            "output_tokens",
+            "cached_input_tokens",
+            "cache_write_input_tokens",
+            "reasoning_tokens",
+            "total_tokens",
+            "cost_usd",
+        ],
+        ...,
+    ] = ()
+
+
 class Usage(BaseModel):
     """Token and cost totals: the session's own and those attributed from its children.
 
@@ -417,7 +449,9 @@ class SessionInfo(BaseModel):
     agent: str = ""
     model: str = ""
     reasoning: str | None = None
-    """The reasoning level chosen with ``set_reasoning``; ``None`` for the model's default."""
+    """The explicitly chosen level; ``None`` can also be an explicit clear."""
+    reasoning_selected: bool = False
+    """Distinguish an explicit None clear from an inherited model default."""
     mode: str = "auto"
     status: SessionStatus = "on_disk"
     retained: bool = False
@@ -616,6 +650,17 @@ class UsageChangedUpdate(_Update):
     usage: Usage
 
 
+class MaintenanceUsageUpdate(_Update):
+    """Committed maintenance correlation, never a foreground turn outcome."""
+
+    kind: Literal["maintenance_usage"] = "maintenance_usage"
+    source_session_id: str
+    logical_call_id: str
+    maintenance_usage: MaintenanceUsage
+    attributed: bool = False
+    usage: Usage
+
+
 class AgentEventUpdate(_Update):
     """One event from the session's agent: tool calls, cell output, messages, model responses.
 
@@ -650,6 +695,7 @@ SessionEvent = Annotated[
     | CommandsChangedUpdate
     | ChildCreatedUpdate
     | UsageChangedUpdate
+    | MaintenanceUsageUpdate
     | AgentEventUpdate
     | ClosedUpdate,
     Field(discriminator="kind"),

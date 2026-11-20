@@ -8,6 +8,7 @@ from typing import Any
 
 from nooa.unifiedllm.admission import (
     AdmissionControlConfig,
+    AdmissionController,
     _admission_controller_scope,
 )
 from nooa.unifiedllm.unifiedllm import UnifiedLLM
@@ -29,8 +30,27 @@ class AdmissionControl(UnifiedLLM):
             raise TypeError("config must be an AdmissionControlConfig")
         self.base_llm = llm
         self.admission_config = config
-        self.controller = config._controller_for(llm)
+        from nooa.unifiedllm.llm import LLM
+
+        api_base = None
+        try:
+            facade_base = vars(llm).get("base_llm")
+        except TypeError:
+            facade_base = None
+        public = isinstance(llm, LLM) or isinstance(facade_base, LLM)
+        if public:
+            _validate_public_bridge(self, installed=False)
+            if config.controller is None:
+                from nooa.unifiedllm.adapters._view_limits import _loaded_endpoint
+
+                api_base = _loaded_endpoint(llm)
+        self.controller = config._controller_for(llm, api_base=api_base)
+        if public:
+            _validate_public_bridge(self)
         self.model = getattr(llm, "model", "")
+        # Public injected roots are borrowed; private bridges own their views.
+        # Preserve legacy caller-explicit close delegation, not runtime ownership.
+        self._owns_base = not public
 
     @property
     def context_window(self) -> int | None:
@@ -58,7 +78,14 @@ class AdmissionControl(UnifiedLLM):
 
     async def acall(self, *args: Any, **kwargs: Any) -> Any:
         """Delegate one logical async call under this wrapper's controller."""
-        with _admission_controller_scope(self.controller):
+        from nooa.unifiedllm.llm import LLM
+
+        base = vars(self).get("base_llm")
+        if isinstance(base, LLM):
+            controller = _validate_public_bridge(self)
+        else:
+            controller = self.controller  # Preserve genuine legacy delegation.
+        with _admission_controller_scope(controller):
             return await self.base_llm.acall(*args, **kwargs)
 
     # A delegating wrapper: call/acall forward whole calls (the wrapped
@@ -86,17 +113,92 @@ class AdmissionControl(UnifiedLLM):
         """Delegate model metadata lookup to the wrapped client."""
         return self.base_llm.get_model_info()
 
+    def _with_public_view(self, view):
+        """Exact private bridge: preserve the SAME attempt controller."""
+        from nooa.unifiedllm.llm import LLM
+
+        _validate_public_bridge(self)
+        if type(view) is not LLM:
+            raise TypeError("Unsupported public admission bridge")
+        wrapped = AdmissionControl(view, AdmissionControlConfig(controller=self.controller))
+        wrapped._owns_base = True
+        return wrapped
+
     def close(self) -> None:
-        """Close resources owned by the wrapped client."""
-        self.base_llm.close()
+        """Close a legacy base or bridge-created view, never a public injected root."""
+        if self._owns_base:
+            self.base_llm.close()
 
     async def aclose(self) -> None:
-        """Asynchronously close resources owned by the wrapped client."""
-        await self.base_llm.aclose()
+        """Join legacy/owned-view disposal; public injected roots remain borrowed."""
+        if self._owns_base:
+            await self.base_llm.aclose()
 
     def __getattr__(self, name: str) -> Any:
         """Delegate remaining attributes and methods to the wrapped client."""
         return getattr(self.base_llm, name)
+
+
+# Capture static descriptors at module definition time. Even a replacement
+# before runtime import must fail the same-file/slot proof, not become canonical.
+def _bridge_behavior():
+    result = {}
+    for owner in reversed(AdmissionControl.__mro__[:-1]):
+        for name, descriptor in vars(owner).items():
+            if callable(descriptor) or isinstance(
+                descriptor, (property, staticmethod, classmethod)
+            ):
+                result[name] = descriptor
+    return result
+
+
+_BRIDGE_MRO = AdmissionControl.__mro__
+_BRIDGE_BEHAVIOR = _bridge_behavior()
+
+
+def _validate_public_bridge(client, *, installed=True):
+    import inspect
+
+    from nooa.unifiedllm.adapters._loader import _check_derivable
+    from nooa.unifiedllm.llm import LLM
+
+    if type(client) is not AdmissionControl or AdmissionControl.__mro__ != _BRIDGE_MRO:
+        raise TypeError("Unsupported public admission bridge")
+    current = _bridge_behavior()
+    if current.keys() != _BRIDGE_BEHAVIOR.keys() or any(
+        inspect.getattr_static(AdmissionControl, name) is not descriptor or name in vars(client)
+        for name, descriptor in _BRIDGE_BEHAVIOR.items()
+    ):
+        raise TypeError("Admission bridge requires unchanged behavior")
+    for name, descriptor in current.items():
+        method = descriptor.fget if isinstance(descriptor, property) else descriptor
+        if isinstance(method, (staticmethod, classmethod)):
+            method = method.__func__
+        method = inspect.unwrap(method)
+        owner = next(owner for owner in AdmissionControl.__mro__ if name in vars(owner))
+        slot = {"_acall_once": "acall", "_call_once": "call"}.get(name, name)
+        if (
+            getattr(method, "__module__", None) != owner.__module__
+            or getattr(method, "__qualname__", None) != f"{owner.__qualname__}.{slot}"
+        ):
+            raise TypeError("Admission bridge requires canonical behavior")
+    base = vars(client).get("base_llm")
+    if type(base) is not LLM:
+        raise TypeError("Admission bridge requires an exact loaded base")
+    try:
+        _check_derivable(base)
+    except Exception as exc:
+        raise TypeError("Admission bridge requires unchanged loaded base") from exc
+    if installed:
+        controller = vars(client).get("controller")
+        if (
+            controller is None
+            or not isinstance(controller, AdmissionController)
+            or not callable(getattr(controller, "acquire", None))
+        ):
+            raise TypeError("Admission bridge requires a compatible installed controller")
+        return controller
+    return None
 
 
 __all__ = ["AdmissionControl"]

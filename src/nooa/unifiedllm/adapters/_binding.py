@@ -171,6 +171,8 @@ def _thaw(value):
 
 @dataclass(frozen=True)
 class _Settings:
+    model: str
+    reasoning_default: str | None
     config: Mapping[str, Any]
     reasoning_levels: Any
     reasoning_level: str | None
@@ -276,7 +278,12 @@ def _bind_adapter(
         ReasoningConfig(), client.model, client.config, raw_options, None
     )
     settings = _Settings(
-        _freeze(raw_config), _freeze(client._reasoning_config.levels), selection, mode
+        client.model,
+        client._reasoning_config.default,
+        _freeze(raw_config),
+        _freeze(client._reasoning_config.levels),
+        selection,
+        mode,
     )
     client.config = _thaw(settings.config)
     client.reasoning_level = settings.reasoning_level
@@ -298,9 +305,13 @@ def _settings_client(adapter):
     client = copy.copy(adapter._client)
     if hasattr(adapter, "_bound_settings"):
         settings = adapter._bound_settings
+        client.model = settings.model
         client.config = _thaw(settings.config)
         client._reasoning_config = client._reasoning_config.model_copy(
-            update={"levels": _thaw(settings.reasoning_levels)}
+            update={
+                "levels": _thaw(settings.reasoning_levels),
+                "default": settings.reasoning_default,
+            }
         )
         client.reasoning_level = settings.reasoning_level
         client.structured_output_mode = settings.structured_output_mode
@@ -313,7 +324,14 @@ def _bound_call_config(adapter, request, options):
     selection = options.get("reasoning_level", client.reasoning_level)
     if selection is not None:
         _check_settings_identity(client._reasoning_config.settings(selection))
+    from nooa.unifiedllm._call_identity import current_call_identity
+
+    # Preserve LiteLLM's configured key (including explicit None suppression)
+    # and its existing case-insensitive affinity-header precedence.
     config = snapshot_options(client._prepare_call_config(options))
+    identity = current_call_identity()
+    if identity is not None:
+        config.setdefault("prompt_cache_key", identity)
     for layer in (config, config.get("extra_body")):
         if not isinstance(layer, dict):
             continue

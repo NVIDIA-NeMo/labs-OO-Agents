@@ -662,15 +662,17 @@ class AdmissionControlConfig:
         if self.concurrency_group is not None:
             _named_group_identity(self.concurrency_group)
 
-    def _controller_for(self, llm: Any) -> AdmissionController:
+    def _controller_for(self, llm: Any, *, api_base: str | None = None) -> AdmissionController:
         """Build or return the controller applied to one wrapped LLM."""
         if self.controller is not None:
             return self.controller
 
-        client_config = getattr(llm, "config", None)
-        api_base = None
-        if isinstance(client_config, dict):
-            api_base = client_config.get("api_base") or client_config.get("base_url")
+        # Route resolution belongs to the concrete wrapper, not this neutral
+        # attempt controller. Legacy clients retain their existing config seam.
+        if api_base is None:
+            client_config = getattr(llm, "config", None)
+            if isinstance(client_config, dict):
+                api_base = client_config.get("api_base") or client_config.get("base_url")
         assert self.max_in_flight is not None
         return AdmissionPolicy(
             max_in_flight=self.max_in_flight,

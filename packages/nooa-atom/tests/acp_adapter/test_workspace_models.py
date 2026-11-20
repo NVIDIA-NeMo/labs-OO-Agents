@@ -60,8 +60,10 @@ async def test_one_process_keeps_the_aliases_of_each_workspace_apart(make_adapte
     await adapter.set_config_option("model", first.session_id, "a_only")
     await adapter.set_config_option("model", second.session_id, "a_only")
     # Built from A's entry in A; in B the name is not an alias and goes to litellm as is.
-    assert adapter.session(first.session_id)._next_llm().model == "openai/a-model"
-    assert adapter.session(second.session_id)._next_llm().model == "a_only"
+    from nooa.runtime.llm_call import model_label
+
+    assert model_label(adapter.session(first.session_id)._next_llm()) == "openai/a-model"
+    assert model_label(adapter.session(second.session_id)._next_llm()) == "a_only"
 
 
 async def test_the_first_session_in_a_workspace_logs_its_configuration(

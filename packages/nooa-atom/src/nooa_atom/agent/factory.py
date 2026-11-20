@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+from contextvars import ContextVar
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -19,7 +20,7 @@ from nooa.interactive import InteractiveAgent
 from nooa_atom.agent.slash_commands import SlashCommand
 from nooa_atom.session.loader import load_agent_class
 from nooa_atom.workspace.controls import behavior_commands
-from nooa_atom.workspace.models import workspace_llm_client
+from nooa_atom.workspace.models import workspace_load_llm
 from nooa_atom.workspace.options import AtomOptions, configure_session_skills
 
 if TYPE_CHECKING:
@@ -31,6 +32,17 @@ logger = logging.getLogger(__name__)
 
 # Atom agents (AtomAgentBase subclasses) already warned about parameters they do not accept.
 _warned_classes: set[type] = set()
+_constructed_agent = ContextVar("constructed_session_agent", default=None)
+
+
+def _construct_with_owner(factory, options, storage, own):
+    token = _constructed_agent.set(own)
+    try:
+        agent = factory(options, storage)
+        own(agent)
+        return agent
+    finally:
+        _constructed_agent.reset(token)
 
 
 def create_session_agent(options: SessionOptions, storage: StorageManager) -> InteractiveAgent:
@@ -69,7 +81,9 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
     atom_options = AtomOptions.load(options.workspace) if is_atom else None
 
     kwargs: dict[str, Any] = {"storage": storage}
-    if options.llm is not None:
+    if options.model_binding is not None:
+        kwargs["llm"] = options.model_binding
+    elif options.llm is not None:
         kwargs["llm"] = options.llm
     if atom_options is not None:
         parameters = inspect.signature(agent_class).parameters
@@ -107,30 +121,45 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
                 "them" if len(missing) > 1 else "it",
             )
     agent = agent_class(**kwargs)
-
-    if atom_options is not None and isinstance(agent, AtomAgentBase):
-        for warning in configure_session_skills(agent, atom_options):
-            logger.warning("Session in %s: %s", options.workspace, warning)
-        # The /skills and /mcp controls belong to the agent, not to one host:
-        # MCPApprovalRequired tells the user to run /mcp approve. set_controls()
-        # also refreshes the skill commands.
-        controls = behavior_commands(
-            agent,
-            atom_options,
-            workspace=Path(atom_options.working_dir),
-            command_registry=agent.slash_commands,
-        )
-        agent.slash_commands.set_controls(
-            [SlashCommand.for_control(control) for control in controls]
-        )
+    own = _constructed_agent.get()
+    if own is not None:
+        own(agent)
+    try:
+        if atom_options is not None and isinstance(agent, AtomAgentBase):
+            for warning in configure_session_skills(agent, atom_options):
+                logger.warning("Session in %s: %s", options.workspace, warning)
+            # The /skills and /mcp controls belong to the agent, not to one host:
+            # MCPApprovalRequired tells the user to run /mcp approve. set_controls()
+            # also refreshes the skill commands.
+            controls = behavior_commands(
+                agent,
+                atom_options,
+                workspace=Path(atom_options.working_dir),
+                command_registry=agent.slash_commands,
+            )
+            agent.slash_commands.set_controls(
+                [SlashCommand.for_control(control) for control in controls]
+            )
+    except BaseException:
+        # Synchronous direct callers cannot await components. Release model
+        # references deterministically; a scoped registry owner joins teardown.
+        finalizer = getattr(agent, "_model_finalizer", None)
+        if finalizer is not None:
+            finalizer()
+        raise
     return agent
+
+
+def workspace_llm_client(name: str, workspace: Path, **settings: Any) -> Any:
+    """Compatibility factory hook; normal construction uses the public loader."""
+    return workspace_load_llm(name, workspace, **settings)
 
 
 def default_llm_factory(*, workspace_default: str | None = None) -> LLMFactory:
     """A model factory for ``SessionRegistry(llm_factory=...)``.
 
     The registry calls it as ``factory(alias, workspace)`` for a session
-    without a client. A named alias is built with ``workspace_llm_client``,
+    without a client. A named alias is built with ``workspace_load_llm``,
     against the model configuration of that workspace. No alias means the
     default model: ``workspace_default`` when given, else the workspace's ``AtomOptions.default_model`` (its settings files, then
     ``nooa.interactive.DEFAULT_MODEL``).

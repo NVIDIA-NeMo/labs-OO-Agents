@@ -489,6 +489,13 @@ def _tools(request, family):
 def _project_request(request, settings):
     family = settings.family
     params = _thaw(settings.selected)
+    # Runtime identity is not a request/setting/route carrier. Only these SDK
+    # families declare a representable top-level cache key; configured wins.
+    from nooa.unifiedllm._call_identity import current_call_identity
+
+    identity = current_call_identity()
+    if identity is not None and family in {"openai-chat", "openai-responses"}:
+        params.setdefault("prompt_cache_key", identity)
     params["model"] = settings.model
     params.update(_tools(request, family))
     if (

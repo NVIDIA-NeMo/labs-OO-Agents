@@ -98,6 +98,7 @@ from nooa.token_counter import char_approximate_token_counter  # noqa: E402
 if _typing.TYPE_CHECKING:  # the same names, for type checkers and IDEs
     from nooa.llm_config import llm_config_chain
     from nooa.llm_types import LLMResponse
+    from nooa.runtime.model_binding import ModelBinding
     from nooa.strategies import (
         CodeActStrategy,
         CodeActV2,
@@ -115,6 +116,7 @@ if _typing.TYPE_CHECKING:  # the same names, for type checkers and IDEs
     )
 
 _LAZY = {
+    "ModelBinding": "nooa.runtime.model_binding",
     "CodeActStrategy": "nooa.strategies",
     "CodeActV2": "nooa.strategies",
     "DecideStrategy": "nooa.strategies",
@@ -198,6 +200,7 @@ __all__ = [
     "File",
     # Agent and decorators
     "Agent",
+    "ModelBinding",
     "Skill",
     "TextSkill",
     "slash_command",

@@ -6,7 +6,6 @@ import asyncio
 import logging
 import re
 from collections.abc import Callable
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -34,6 +33,7 @@ from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput
 from nooa.interactive import AgentMessage
+from nooa_acp._runtime import _acp_capture, _acp_join, _acp_task, _ACPOutcome
 
 # ACP owns stdout for JSON-RPC; diagnostics belong on stderr, which is where
 # the logging default sends them.
@@ -68,6 +68,10 @@ def _python_content(code: str, output: str | None = None) -> list[ContentToolCal
 
 class ACPEventBridge:
     def __init__(self, agent: CodingAgent, client: Client, session_id: str) -> None:
+        self._unsubscribers: list[Callable[[], None]] = []
+        self._close_failure: _ACPOutcome | None = None
+        self._pump_task: asyncio.Task[_ACPOutcome] | None = None
+        self._close_task: asyncio.Task[_ACPOutcome] | None = None
         self.agent = agent
         self.client = client
         self.session_id = session_id
@@ -84,17 +88,18 @@ class ACPEventBridge:
         # fail_open_tools closes it.
         self._cancelled_output: dict[str, str] = {}
         self._cost_usd = 0.0
-        self._unsubscribers: list[Callable[[], None]] = [
-            agent.event_manager.on("AgentMessage", self._on_agent_message),
-            agent.event_manager.on("ToolCallEvent", self._on_tool_call),
-            agent.event_manager.on("PythonOutput", self._on_python_output),
-            agent.event_manager.on("LLMResponse", self._on_llm_response),
-            agent.event_manager.on("FileEdit", self._on_file_edit),
-            agent.event_manager.on("TerminalCommandStarted", self._on_terminal_started),
-            agent.event_manager.on("TerminalCommandOutput", self._on_terminal_output),
-            agent.event_manager.on("TerminalCommandFinished", self._on_terminal_finished),
-        ]
-        self._pump_task = asyncio.create_task(self._pump(), name="nooa-acp-events")
+        for name, callback in (
+            ("AgentMessage", self._on_agent_message),
+            ("ToolCallEvent", self._on_tool_call),
+            ("PythonOutput", self._on_python_output),
+            ("LLMResponse", self._on_llm_response),
+            ("FileEdit", self._on_file_edit),
+            ("TerminalCommandStarted", self._on_terminal_started),
+            ("TerminalCommandOutput", self._on_terminal_output),
+            ("TerminalCommandFinished", self._on_terminal_finished),
+        ):
+            self._unsubscribers.append(agent.event_manager.on(name, callback))
+        self._pump_task = _acp_task(self._pump(), name="nooa-acp-events")
 
     def _enqueue(self, update: Any) -> None:
         if not self._closed:
@@ -311,7 +316,10 @@ class ACPEventBridge:
             # a marker only the pump resolves, so every later flush — and close(),
             # which flushes first — blocked forever.
             self._pump_failure = exc
-            self._fail_pending_flushes(exc)
+            try:
+                self._fail_pending_flushes(exc)
+            except BaseException:
+                pass
             raise
 
     async def _pump_loop(self) -> None:
@@ -361,6 +369,8 @@ class ACPEventBridge:
             return
         if self._pump_failure is not None:
             raise self._stopped_error(self._pump_failure)
+        if self._pump_task is None:
+            raise self._stopped_error(RuntimeError("pump was not initialized"))
         future = asyncio.get_running_loop().create_future()
         self._queue.put_nowait(future)
         # Race the pump: if it dies without draining this marker, waiting on the
@@ -405,19 +415,60 @@ class ACPEventBridge:
         self._cancelled_output.clear()
 
     async def close(self) -> None:
-        if self._closed:
-            return
-        for unsubscribe in self._unsubscribers:
-            unsubscribe()
-        # A turn that ended before its PythonOutput — an exception escaping the
-        # strategy, say — leaves cards in_progress and their source retained.
-        # fail_open_tools is otherwise only reached from session/cancel, so this
-        # is the sole purge on an ordinary close.
-        with suppress(Exception):
-            await self.fail_open_tools("Session closed before this finished.", title="Unfinished")
-        with suppress(Exception):
-            await self.flush()
+        if self._close_task is None or (self._close_task.done() and self._unsubscribers):
+            self._close_task = _acp_task(self._close_resources(), name="nooa-acp-bridge-close")
+        (await _acp_join(self._close_task)).unwrap()
+
+    async def _close_resources(self) -> None:
+        first = self._close_failure
+        for unsubscribe in tuple(self._unsubscribers):
+            try:
+                unsubscribe()
+                self._unsubscribers.remove(unsubscribe)
+            except BaseException as exc:
+                if first is None:
+                    first = _ACPOutcome(failure=exc, traceback=exc.__traceback__)
+        for label in ("tools", "flush"):
+
+            async def operation(stage: str = label) -> None:
+                if stage == "tools":
+                    await self.fail_open_tools(
+                        "Session closed before this finished.", title="Unfinished"
+                    )
+                else:
+                    await self.flush()
+
+            result = await _acp_capture(operation())
+            # Ordinary transport errors retain the established best-effort close
+            # policy; control failures must remain inspectable on the close receipt.
+            if result.failure is not None and not isinstance(result.failure, Exception):
+                if first is None:
+                    first = result
         self._closed = True
-        self._queue.put_nowait(_STOP)
-        with suppress(BaseException):
-            await self._pump_task
+        try:
+            self._queue.put_nowait(_STOP)
+        except BaseException as error:
+            if first is None:
+                first = _ACPOutcome(failure=error, traceback=error.__traceback__)
+            # A failed STOP enqueue must not strand the owned pump join.
+            if self._pump_task is not None:
+                try:
+                    self._pump_task.cancel()
+                except BaseException as cancellation_error:
+                    if first is None:
+                        first = _ACPOutcome(
+                            failure=cancellation_error, traceback=cancellation_error.__traceback__
+                        )
+        if self._pump_task is not None:
+            result = await _acp_join(self._pump_task)
+            # A recorded transport disconnect already explains failed flushes;
+            # joining that dead pump is best-effort cleanup, not a new close failure.
+            disconnected = (
+                isinstance(result.failure, asyncio.CancelledError)
+                and result.failure is self._pump_failure
+            )
+            if result.failure is not None and not disconnected and first is None:
+                first = result
+        if first is not None:
+            self._close_failure = first
+            first.unwrap()

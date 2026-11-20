@@ -54,6 +54,7 @@ from nooa_atom.skills.manager import SkillManager
 from nooa_atom.tools.repo_tools import RepoTools
 
 with hidden:
+    from nooa.agent import INHERIT, _InheritSentinel
     from nooa.agents import TokenBudgetSummarizer
     from nooa.runtime.channels import Channel, ChannelReader
     from nooa_atom.agent.conditions import (
@@ -200,7 +201,7 @@ class AtomAgentBase(InteractiveAgent):
 
     def __init__(
         self,
-        llm: UnifiedLLM | None = None,
+        llm: UnifiedLLM | _InheritSentinel = INHERIT,
         *,
         cwd: str | Path = ".",
         summarization: SummarizationConfig | None = None,
@@ -855,7 +856,7 @@ class AtomAgentBase(InteractiveAgent):
         passed in belongs to whoever passed it.
         """
         # Closing the skills unregisters them, and with them self.shell.
-        shell = self.shell
+        shell = getattr(self, "shell", None)
         self.slash_commands.close()
         try:
             await super().aclose()
@@ -863,7 +864,8 @@ class AtomAgentBase(InteractiveAgent):
             try:
                 await self.skills.aclose()
             finally:
-                await shell.close()
+                if shell is not None:
+                    await shell.close()
 
 
 # A ClassVar's Annotated metadata is not read by agentdoc; hide it explicitly.

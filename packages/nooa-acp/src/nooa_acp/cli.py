@@ -55,7 +55,7 @@ def command(model: str, client_type: str | None) -> None:
     """
     _warn_deprecated()  # `nooa acp`; the `nooa-acp` script has warned already
     from nooa.secrets import load_secrets_into_env
-    from nooa.unifiedllm import get_llm_client
+    from nooa.unifiedllm import load_llm
     from nooa_acp.server import serve
 
     load_secrets_into_env()
@@ -63,9 +63,9 @@ def command(model: str, client_type: str | None) -> None:
 
     def llm_factory() -> "UnifiedLLM":
         overrides = {"api_key": nvidia_api_key} if nvidia_api_key else {}
-        return get_llm_client(model, client_type=client_type, **overrides)
+        return load_llm(model, client_type=client_type, **overrides)
 
-    asyncio.run(serve(llm_factory))
+    asyncio.run(serve(llm_factory, model_alias=model))
 
 
 def main() -> None:

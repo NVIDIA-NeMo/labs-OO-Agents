@@ -129,3 +129,20 @@ def workspace_llm_client(
 
     config = workspace_models(workspace).get(name, {})
     return client_from_config(name, dict(config), client_type=client_type, **overrides)
+
+
+def workspace_load_llm(name: str, workspace: Path, *, require=None, **settings: Any) -> Any:
+    """Load a required public pinned view from this workspace's whole entry."""
+    from nooa.unifiedllm import load_llm_from_config
+
+    config = dict(workspace_models(workspace).get(name, {}))
+    return load_llm_from_config(name, config, require=require, **settings)
+
+
+def workspace_llm(
+    name: str, workspace: Path, *, client_type: str | None = None, **settings: Any
+) -> Any:
+    """Compatibility spelling for the workspace's strict public loader."""
+    if client_type is not None:
+        settings["client_type"] = client_type
+    return workspace_load_llm(name, workspace, **settings)

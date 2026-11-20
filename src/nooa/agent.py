@@ -4,6 +4,8 @@
 
 import inspect
 import logging
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Annotated, Any, cast
 from uuid import uuid4
 
@@ -31,6 +33,48 @@ if TYPE_CHECKING:
     from nooa.unifiedllm import UnifiedLLM
 
 logger = logging.getLogger(__name__)
+
+_failed_model_cleanups: Annotated[set, hidden] = set()
+
+
+@hidden
+async def _join_failed_model_cleanups():
+    """Join strongly retained failed-constructor disposal without owning cancellation."""
+    from nooa.runtime.model_binding import _join_cleanup_tasks
+
+    await _join_cleanup_tasks(tuple(_failed_model_cleanups))
+
+
+@hidden
+def _retain_failed_model_cleanup(holders):
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return  # Synchronous holder drops have already completed disposal.
+    from nooa.runtime.model_binding import _cleanup_result, _join_cleanup_tasks
+
+    async def join():
+        await _join_cleanup_tasks(
+            tuple(loop.create_task(_cleanup_result(holder._join_cleanup)) for holder in holders)
+        )
+
+    task = loop.create_task(_cleanup_result(join))
+    _failed_model_cleanups.add(task)
+
+    def finished(task):
+        _failed_model_cleanups.discard(task)
+        result = task.result()
+        if result is not None:
+            logger.warning(
+                "Failed constructor model disposal failed: %r",
+                result,
+                exc_info=(type(result), result, result.__traceback__),
+            )
+
+    task.add_done_callback(finished)
+
 
 _auto_tracing_attempted = False
 
@@ -122,6 +166,12 @@ class Agent(metaclass=AgentMeta):
     _enable_tracing: Annotated[bool, hidden]
     _execution_config: Annotated["ExecutionConfig", hidden]
     _agent_llm: Annotated["UnifiedLLM | _InheritSentinel", hidden]
+    _llm_requirements: Annotated[Mapping, hidden] = MappingProxyType({})
+    _model_bindings: Annotated[dict, hidden, nosnapshot]
+    _binding_releases: Annotated[list, hidden, nosnapshot]
+    _retired_bindings: Annotated[list, hidden, nosnapshot]
+    _model_finalizer: Annotated[Any, hidden, nosnapshot]
+    _models_close_task: Annotated[Any, hidden, nosnapshot]
     _agent_decision_model: Annotated[
         "UnifiedDecisionModel | str | None | _InheritSentinel", hidden
     ] = INHERIT
@@ -144,6 +194,7 @@ class Agent(metaclass=AgentMeta):
     def __init_subclass__(
         cls,
         llm: "UnifiedLLM | _InheritSentinel" = INHERIT,
+        llms: Mapping | None = None,
         decision_model: "UnifiedDecisionModel | str | None | _InheritSentinel" = INHERIT,
         truncation: "TruncationConfig | None" = None,
         execution: "ExecutionConfig | None" = None,
@@ -170,6 +221,30 @@ class Agent(metaclass=AgentMeta):
         """
         _validate_llm_param(llm, cls.__name__)
 
+        if "requires" in kwargs or "requires" in cls.__dict__:
+            raise TypeError("Declare model requirements with llms, not requires")
+        declared = cls.__dict__.get("llms")
+        if declared is not None:
+            if llms is not None:
+                raise TypeError("Duplicate llms declaration")
+            llms = declared
+            delattr(cls, "llms")
+        from nooa.unifiedllm.requirements import _normalize_require
+
+        requirements = {}
+        for base in reversed(cls.__mro__[1:]):
+            requirements.update(getattr(base, "_llm_requirements", {}))
+        if llms is not None:
+            if not isinstance(llms, Mapping):
+                raise TypeError("llms declarations must be a mapping")
+            for name, require in llms.items():
+                if not isinstance(name, str) or not name.isidentifier() or len(name) > 64:
+                    raise TypeError("Invalid model slot name")
+                if require is None:
+                    raise TypeError("Slot declaration requires Requirements or Need")
+                requirements[name] = _normalize_require(require)
+        requirements.setdefault("main", _normalize_require(None))
+        cls._llm_requirements = MappingProxyType(requirements)
         super().__init_subclass__(**kwargs)
 
         if llm is not INHERIT:
@@ -191,6 +266,7 @@ class Agent(metaclass=AgentMeta):
         self,
         llm: "UnifiedLLM | _InheritSentinel" = INHERIT,
         *,
+        llms: Mapping | None = None,
         decision_model: "UnifiedDecisionModel | str | None | _InheritSentinel" = INHERIT,
         truncation: "TruncationConfig | None" = None,
         render_config: "RenderConfig | None" = None,
@@ -247,56 +323,148 @@ class Agent(metaclass=AgentMeta):
         # Resolve LLM client with cascading resolution
         # A resolved decision model makes the chat LLM optional, so an agent
         # whose generated methods all use DecideStrategy needs no chat client.
-        instance_llm = None if llm is INHERIT else llm
+        from nooa.runtime.model_binding import ModelBinding
+        from nooa.unifiedllm.requirements import _normalize_require
+
+        if llms is not None and not isinstance(llms, Mapping):
+            raise TypeError("llms injections must be a mapping")
+        supplied = dict(llms or {})
+        if llm is not INHERIT and "main" in supplied:
+            raise TypeError("Explicit llm and llms main collide")
+        for name in supplied:
+            if not isinstance(name, str) or not name.isidentifier() or len(name) > 64:
+                raise TypeError("Invalid model slot name")
+        if llm is not INHERIT:
+            supplied["main"] = llm
+        parent = _parent_agent_var.get()
         self._decision_model = self._resolve_decision_model(decision_model)
-        self._llm = self._resolve_llm(instance_llm, allow_missing=self._decision_model is not None)
+        self._model_bindings = {}
+        self._binding_releases = []
+        self._retired_bindings = []
+        self._models_close_task = None
+        from weakref import finalize
 
-        # Resolve and store truncation config (with merge semantics)
-        self._truncation = self._resolve_truncation(truncation)
+        releases = self._binding_releases
 
-        # Resolve render config (instance overrides class default)
-        from nooa.context_blocks.render_config import RenderConfig as _RC
+        def drop_models():
+            pending = tuple(releases)
+            releases.clear()  # Exactly once, including a failed drop or held traceback.
+            failure = None
+            for release in pending:
+                try:
+                    release.__self__._drop_reference(owner=release.__name__ == "aclose")
+                except BaseException as exc:
+                    if failure is None:
+                        failure = exc
+            if failure is not None:
+                raise failure
 
-        self.render_config = render_config or _RC()
+        self._model_finalizer = finalize(self, drop_models)
+        requirements = dict(self._llm_requirements)
+        requirements.setdefault("main", _normalize_require(None))
+        try:
+            for name in sorted(
+                requirements.keys() | supplied.keys(), key=lambda key: (key != "main", key)
+            ):
+                require = requirements.get(name, _normalize_require(None))
+                source = supplied.get(name)
+                if name not in supplied:
+                    if name == "main" and getattr(type(self), "_agent_llm", None) is not None:
+                        source = type(self)._agent_llm
+                    elif parent is not None:
+                        source = getattr(parent, "llms", {}).get(name)
+                if source is None and name == "main":
+                    if self._decision_model is None:
+                        self._resolve_llm(
+                            None
+                        )  # Preserve the established missing-client diagnostic.
+                    continue
+                if isinstance(source, ModelBinding) and source.requirements != require:
+                    binding = ModelBinding(source, require=require, lazy=name != "main")
+                    release = binding.aclose
+                elif isinstance(source, ModelBinding):
+                    binding = source
+                    if name == "main":
+                        binding._validate(binding.client)
+                        from nooa.runtime.model_binding import public_base
+                        from nooa.unifiedllm.requirements import _validate_requirements
 
-        # Resolve and store event query (instance overrides class-level)
-        self.event_query = self._resolve_event_query(event_query)
+                        base = public_base(binding.client)
+                        _validate_requirements(
+                            base.capabilities
+                            if base
+                            else getattr(binding.client, "capabilities", None),
+                            require,
+                        )
+                    binding = source.retain()
+                    release = binding._release
+                else:
+                    binding = ModelBinding(source, require=require, lazy=name != "main")
+                    release = binding.aclose
+                self._model_bindings[name] = binding
+                self._binding_releases.append(release)
+                if name == "main":
+                    _ = binding.client
+            self._llm = (
+                self._model_bindings["main"].client if "main" in self._model_bindings else None
+            )
+            # Resolve and store truncation config (with merge semantics)
+            self._truncation = self._resolve_truncation(truncation)
 
-        # Initialize context state (always present, hidden)
-        self.context_manager = ContextManager()
+            # Resolve render config (instance overrides class default)
+            from nooa.context_blocks.render_config import RenderConfig as _RC
 
-        # Register framework blocks as protected (re-evaluated each LLM turn).
-        # ``system_prompt`` and ``self`` are stable across turns — cacheable prefix.
-        # ``state`` is the instance's current field values — re-evaluated each
-        # turn since skills can attach at runtime and field values change.
-        cm = self.context_manager
-        cm.set_static_protected("system_prompt", expr="self._resolve_system_prompt()")
-        cm.set_static_protected("self", expr="doc(type(self))")
-        cm.set_static_protected("events_api", expr="self._events_api_prompt()")
-        cm.set_dynamic_protected(
-            "state",
-            "pformat(self, max_length=50, max_string=500, max_depth=4)",
-        )
+            self.render_config = render_config or _RC()
 
-        # Apply class-level context blocks (from __init_subclass__)
-        class_context = getattr(self.__class__, "_agent_context_blocks", None)
-        if class_context:
-            self._apply_context_dict(class_context)
+            # Resolve and store event query (instance overrides class-level)
+            self.event_query = self._resolve_event_query(event_query)
 
-        # Apply instance-level context blocks (overrides class-level)
-        if context:
-            self._apply_context_dict(context)
+            # Initialize context state (always present, hidden)
+            self.context_manager = ContextManager()
 
-        # Create ContextApi and EventsApi wrappers (always present, hidden from LLM by default).
-        # Subclasses opt in per-instance: spec(self, "context", hidden=False) in __init__.
-        from nooa.runtime.context import ContextApi
-        from nooa.runtime.events import EventsApi
+            # Register framework blocks as protected (re-evaluated each LLM turn).
+            # ``system_prompt`` and ``self`` are stable across turns — cacheable prefix.
+            # ``state`` is the instance's current field values — re-evaluated each
+            # turn since skills can attach at runtime and field values change.
+            cm = self.context_manager
+            cm.set_static_protected("system_prompt", expr="self._resolve_system_prompt()")
+            cm.set_static_protected("self", expr="doc(type(self))")
+            cm.set_static_protected("events_api", expr="self._events_api_prompt()")
+            cm.set_dynamic_protected(
+                "state",
+                "pformat(self, max_length=50, max_string=500, max_depth=4)",
+            )
 
-        self.context = ContextApi(self)
-        self.events = EventsApi(self)
+            # Apply class-level context blocks (from __init_subclass__)
+            class_context = getattr(self.__class__, "_agent_context_blocks", None)
+            if class_context:
+                self._apply_context_dict(class_context)
 
-        # Create runtime (manages execution, caching, signals)
-        self.runtime = ActorRuntime(self)
+            # Apply instance-level context blocks (overrides class-level)
+            if context:
+                self._apply_context_dict(context)
+
+            # Create ContextApi and EventsApi wrappers (always present, hidden from LLM by default).
+            # Subclasses opt in per-instance: spec(self, "context", hidden=False) in __init__.
+            from nooa.runtime.context import ContextApi
+            from nooa.runtime.events import EventsApi
+
+            self.context = ContextApi(self)
+            self.events = EventsApi(self)
+
+            # Create runtime (manages execution, caching, signals)
+            self.runtime = ActorRuntime(self)
+        except BaseException:
+            holders = tuple(release.__self__ for release in releases)
+            try:
+                self._model_finalizer()
+            except BaseException:
+                logger.exception("Failed constructor model release failed")
+            try:
+                _retain_failed_model_cleanup(holders)
+            except BaseException:
+                logger.exception("Scheduling failed constructor disposal failed")
+            raise
 
     @no_trace
     @hidden
@@ -306,7 +474,48 @@ class Agent(metaclass=AgentMeta):
         The agent does not own its LLM client or storage; callers close those
         after this method returns. Components register with event_manager.on_close.
         """
-        await self.event_manager.aclose()
+        self.event_manager._check_close_dependencies()
+        import asyncio
+
+        async def join_models():
+            from nooa.runtime.model_binding import _cleanup_result, _join_cleanup_tasks
+
+            if self._models_close_task is None:
+
+                async def release_models():
+                    holders = tuple(release.__self__ for release in self._binding_releases)
+                    failure = None
+                    try:
+                        self._model_finalizer()
+                    except BaseException as error:
+                        failure = error
+                    for binding in (*holders, *self._retired_bindings):
+                        try:
+                            await binding._join_cleanup()
+                        except BaseException as error:
+                            if failure is None:
+                                failure = error
+                        try:
+                            await binding._join_owner_cleanup(self)
+                        except BaseException as error:
+                            if failure is None:
+                                failure = error
+                    if failure is not None:
+                        raise failure
+
+                self._models_close_task = asyncio.create_task(_cleanup_result(release_models))
+            await _join_cleanup_tasks((self._models_close_task,))
+
+        try:
+            await self.event_manager.aclose()
+        except BaseException:
+            try:
+                await join_models()
+            except BaseException:
+                pass
+            raise
+        else:
+            await join_models()
 
     @no_trace
     @hidden
@@ -515,7 +724,13 @@ class Agent(metaclass=AgentMeta):
                 f"{type(self).__name__} has a decision model but no chat LLM. "
                 "Pass llm=... to use chat generation."
             )
-        return self._llm
+        return self._model_bindings["main"].client
+
+    @property
+    @hidden
+    def llms(self) -> Mapping:
+        """Read-only named model bindings; selecting a lazy slot loads its view."""
+        return MappingProxyType(self._model_bindings)
 
     @no_trace
     @hidden
@@ -527,7 +742,31 @@ class Agent(metaclass=AgentMeta):
         (summarizer budgets, context-window limits) must refresh it after
         calling this — see ``apply_model_limits``.
         """
-        self._llm = llm
+        from nooa.runtime.model_binding import ModelBinding, public_base
+        from nooa.unifiedllm.requirements import _normalize_require, _validate_requirements
+
+        require = self._llm_requirements.get("main", _normalize_require(None))
+        if isinstance(llm, ModelBinding):
+            client = llm.client
+            base = public_base(client)
+            _validate_requirements(
+                base.capabilities if base else getattr(client, "capabilities", None), require
+            )
+            binding = llm.retain()
+            release = binding._release
+        else:
+            binding = ModelBinding(llm, require=require)
+            client = binding.client
+            release = binding.aclose
+        old = self._model_bindings.get("main")
+        old_release = next((item for item in self._binding_releases if item.__self__ is old), None)
+        self._model_bindings["main"] = binding
+        self._binding_releases.append(release)
+        self._llm = client
+        if old_release is not None:
+            self._binding_releases.remove(old_release)
+            self._retired_bindings.append(old)
+            old._drop_reference(owner=old_release.__name__ == "aclose")
 
     @property
     @hidden

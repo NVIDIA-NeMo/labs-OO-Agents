@@ -62,12 +62,16 @@ class _FakeSession:
     def __init__(self, agent: Any, session_id: str = "session-1") -> None:
         self.id = session_id
         self._agent = agent
+        self._model_binding = agent.llms["main"]
         self.info = SessionInfo(id=session_id)
         self.listeners: list[Any] = []
         self.handle = SimpleNamespace(update_usage=lambda usage: None)
         self._emit = self.emit
         self._pending_model = None
         agent.event_manager.on("*", self._on_agent_event)
+
+    _selected_binding = Session._selected_binding
+    _metadata = staticmethod(Session._metadata)
 
     def _on_agent_event(self, event: Any) -> None:
         self.emit(AgentEventUpdate(session_id=self.id, event=event))
