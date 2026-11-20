@@ -6,6 +6,8 @@ Malformed replay state is terminal: retrying must not silently drop it.
 EmptyContentError participates in the existing empty-output retry policy.
 """
 
+from nooa.unifiedllm.admission import AdmissionError
+
 
 class ReasoningReplayError(RuntimeError):
     """A provider response or replay input violates the assistant-turn contract."""
@@ -19,3 +21,7 @@ class EmptyContentError(Exception):
         super().__init__(
             f"Empty content with reasoning: {reasoning[:100]}..." if reasoning else "Empty content"
         )
+
+
+# Errors a strategy must never retry; recovery belongs to the application.
+TERMINAL_LLM_ERRORS = (ReasoningReplayError, AdmissionError)

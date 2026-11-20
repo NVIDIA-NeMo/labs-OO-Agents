@@ -27,7 +27,7 @@ from nooa.unifiedllm.broker_admission import (
     BrokerAdmissionSnapshot,
 )
 from nooa.unifiedllm.controlled import AdmissionControl
-from nooa.unifiedllm.errors import EmptyContentError, ReasoningReplayError
+from nooa.unifiedllm.errors import TERMINAL_LLM_ERRORS, EmptyContentError, ReasoningReplayError
 from nooa.unifiedllm.fake import (
     FakeLLMCall,
     FakeLLMClient,
@@ -86,6 +86,7 @@ __all__ = [
     "AssistantText",
     "AssistantReasoning",
     "ReasoningReplayError",
+    "TERMINAL_LLM_ERRORS",
     # Admission control
     "AdmissionBroker",
     "AdmissionCallCapError",
