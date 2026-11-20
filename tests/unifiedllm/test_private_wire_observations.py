@@ -4,6 +4,7 @@
 
 import asyncio
 import copy
+import json
 from dataclasses import FrozenInstanceError, asdict
 from types import SimpleNamespace
 
@@ -17,7 +18,7 @@ from nooa.unifiedllm import unifiedllm as core
 from nooa.unifiedllm._observations import _collect_observations, _current_collector
 from nooa.unifiedllm.adapters import Capabilities
 from nooa.unifiedllm.adapters._numeric_usage import _numeric_usage
-from nooa.unifiedllm.errors import _ReplyParseError
+from nooa.unifiedllm.errors import FailureKind, LLMFailure
 from nooa.unifiedllm.llm import LLM
 from nooa.unifiedllm.retry_config import RetryConfig
 
@@ -132,8 +133,10 @@ async def test_delivered_usage_before_parse_and_single_calibration(
 
         monkeypatch.setattr(client._adapter, "parse", checked_parse)
         if outcome == "malformed":
-            with pytest.raises(_ReplyParseError):
+            with pytest.raises(LLMFailure) as caught:
                 await send(client, request, is_async)
+            assert caught.value.kind == FailureKind.BAD_REQUEST
+            assert isinstance(caught.value.__cause__, json.JSONDecodeError)
         else:
             result = await send(client, request, is_async)
             assert result.content == ("" if outcome == "empty" else "ok")
@@ -279,9 +282,10 @@ async def test_no_scope_no_sideband_and_original_provider_error(monkeypatch, fam
 
     stub_provider(monkeypatch, family, failing)
     with _collect_observations() as collector:
-        with pytest.raises(RuntimeError) as caught:
+        with pytest.raises(LLMFailure) as caught:
             await send(client, LLMRequest(messages=MESSAGES), is_async)
-        assert caught.value is error
+        assert caught.value.kind == FailureKind.CONFIG
+        assert caught.value.__cause__ is error
         (record,) = collector.records
         assert record.finished and record.transmission_started and not record.response_received
         assert record.usage is None
@@ -475,9 +479,10 @@ async def test_preparation_failure_resets_scope_without_transmission(monkeypatch
         raise error
 
     monkeypatch.setattr(client._adapter, "prepare", prepare)
-    with pytest.raises(ValueError) as caught, _collect_observations() as collector:
+    with pytest.raises(LLMFailure) as caught, _collect_observations() as collector:
         await send(client, LLMRequest(messages=MESSAGES), is_async)
-    assert caught.value is error and _current_collector.get() is None
+    assert caught.value.kind == FailureKind.BAD_REQUEST
+    assert caught.value.__cause__ is error and _current_collector.get() is None
     (record,) = collector.records
     assert record.finished and not record.transmission_started
     assert record.raw_input_estimate is None and record.usage is None

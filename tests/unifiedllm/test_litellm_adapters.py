@@ -15,6 +15,7 @@ from nooa.unifiedllm.adapters import Adapter, Capabilities
 from nooa.unifiedllm.adapters.legacy import configure_legacy_adapter
 from nooa.unifiedllm.adapters.litellm_chat import LiteLLMChatAdapter
 from nooa.unifiedllm.adapters.litellm_responses import LiteLLMResponsesAdapter
+from nooa.unifiedllm.errors import FailureKind, LLMFailure
 from nooa.unifiedllm.retry_config import RetryConfig
 
 
@@ -157,10 +158,15 @@ async def test_send_makes_one_attempt(monkeypatch, make):
         retry_config=RetryConfig(max_retries=2, base_delay=0, max_delay=0, jitter_factor=0)
     )
     request = LLMRequest(messages=MESSAGES)
-    with pytest.raises(litellm.InternalServerError):
+    # Direct request-only sends now expose typed failures but still never retry.
+    with pytest.raises(LLMFailure) as caught:
         client._adapter.send_sync(request)
-    with pytest.raises(litellm.InternalServerError):
+    assert caught.value.kind == FailureKind.TRANSIENT
+    assert isinstance(caught.value.__cause__, litellm.InternalServerError)
+    with pytest.raises(LLMFailure) as caught:
         await client._adapter.send(request)
+    assert caught.value.kind == FailureKind.TRANSIENT
+    assert isinstance(caught.value.__cause__, litellm.InternalServerError)
     assert len(attempts) == 2
     await client.aclose()
 
@@ -361,10 +367,14 @@ async def test_named_tool_choice_uses_the_wire_form(calls, make, wire):
 async def test_named_tool_choice_must_name_a_request_tool(calls, make, tools):
     client = make()
     request = LLMRequest(messages=MESSAGES, tools=tools, tool_choice="search")
-    with pytest.raises(ValueError, match="tool_choice 'search' names no tool"):
+    with pytest.raises(LLMFailure, match="tool_choice 'search' names no tool") as caught:
         client._adapter.send_sync(request)
-    with pytest.raises(ValueError, match="tool_choice 'search' names no tool"):
+    assert caught.value.kind == FailureKind.BAD_REQUEST
+    assert isinstance(caught.value.__cause__, ValueError)
+    with pytest.raises(LLMFailure, match="tool_choice 'search' names no tool") as caught:
         await client._adapter.send(request)
+    assert caught.value.kind == FailureKind.BAD_REQUEST
+    assert isinstance(caught.value.__cause__, ValueError)
     assert calls == []
     await client.aclose()
 

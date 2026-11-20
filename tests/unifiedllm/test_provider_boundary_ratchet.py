@@ -29,7 +29,7 @@ PATTERNS = {
 }
 
 # Lower this when provider code moves into an adapter (see module docstring).
-BASELINE = 117
+BASELINE = 116
 
 
 def count_references() -> tuple[int, dict[str, int], dict[str, int]]:
@@ -82,6 +82,8 @@ def test_neutral_shell_transitive_dependencies_have_no_concrete_imports():
             "llm",
             "logical",
             "execution",
+            "retry",
+            "adapters._legacy_error_text",
             "_route_calibration",
             "_observations",
         )
@@ -133,3 +135,16 @@ def test_neutral_shell_transitive_dependencies_have_no_concrete_imports():
     assert "nooa.unifiedllm._route_calibration" in visited
     assert "nooa.media_interfaces" in visited
     assert not forbidden, f"Concrete imports reachable from neutral shell: {forbidden}"
+
+
+def test_actor_and_pure_compat_helper_have_no_sdk_imports():
+    for relative in ("runtime/actor.py", "unifiedllm/adapters/_legacy_error_text.py"):
+        for node in ast.walk(ast.parse((SRC / relative).read_text())):
+            modules = []
+            if isinstance(node, ast.Import):
+                modules = [alias.name for alias in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                modules = [node.module or ""]
+            assert not any(
+                name.split(".")[0] in {"litellm", "openai", "anthropic"} for name in modules
+            )

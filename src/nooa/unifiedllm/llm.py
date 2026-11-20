@@ -3,8 +3,8 @@
 """Public, provider-neutral request facade.
 
 This incremental shell owns portable request preflight and calls the shared
-logical/attempt executors. Provider failure normalization, logical accounting,
-tracing and loader migration are separate migration steps. Wire validation and
+logical/attempt executors. Built-ins normalize provider failures; the shell types unknown terminal errors.
+Logical accounting and tracing remain separate migration steps. Wire validation and
 opaque native replay belong to adapters. Third-party adapters must make one
 wire attempt per send; the shell cannot discover hidden SDK retries.
 """
@@ -22,7 +22,7 @@ from nooa.media_inputs import attachment_kind
 from ._route_calibration import _calibration_adapter
 from .adapters.base import Adapter, Capabilities
 from .errors import FailureKind, LLMFailure
-from .execution import check_empty_response, execute_async, execute_sync
+from .execution import _public_terminal, check_empty_response, execute_async, execute_sync
 from .logical import logical_async, logical_sync
 from .media_inputs import filter_media_messages
 from .request import LLMRequest
@@ -113,6 +113,8 @@ class LLM:
         self._adapter = adapter
         try:
             facts = adapter.capabilities
+        except LLMFailure:
+            raise
         except Exception as exc:
             raise LLMFailure(
                 FailureKind.CONFIG, "Cannot read adapter capabilities", cause=exc
@@ -226,8 +228,14 @@ class LLM:
                     prepared,
                     self._retry_config,
                     check_empty=check_empty_response,
+                    _public_failures=True,
                 ),
             )
+        except Exception as error:
+            normalized = _public_terminal(error)
+            if normalized is error:
+                raise
+            raise normalized from normalized.__cause__
         finally:
             if lease is not None:
                 lease.release()
@@ -243,8 +251,14 @@ class LLM:
                     prepared,
                     self._retry_config,
                     check_empty=check_empty_response,
+                    _public_failures=True,
                 ),
             )
+        except Exception as error:
+            normalized = _public_terminal(error)
+            if normalized is error:
+                raise
+            raise normalized from normalized.__cause__
         finally:
             if lease is not None:
                 await lease.release_async()

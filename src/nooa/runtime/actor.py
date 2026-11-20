@@ -273,80 +273,32 @@ def _collapse_oldest(
 _MIN_RECOVERY_OUTPUT_TOKENS = 1024
 
 
-_PROMPT_TOKENS_RE = _re.compile(
-    r"(?:prompt|request)[^0-9]*"
-    # "contains/has N tokens" (OpenAI/NVIDIA) OR
-    # "is too long: N tokens" (Anthropic / Azure-Anthropic gateway)
-    r"(?:contains?|has|is\s+too\s+long\s*:?)\s+(?:at\s+least\s+)?(\d[\d,]*)\s*(?:input\s+)?tokens",
-    _re.IGNORECASE,
-)
-
-_CONTEXT_WINDOW_TOKENS_RE = _re.compile(
-    r"maximum\s+context\s+length\s+is\s+(\d[\d,]*)\s+tokens"
-    r"|context\s+window\s+of\s+(?:this\s+model\s+is\s+)?(\d[\d,]*)\s+tokens"
-    r"|(\d[\d,]*)\s+tokens\s*>\s*(\d[\d,]*)\s+maximum",
-    _re.IGNORECASE,
-)
-
-
 def _is_context_window_error(exc: BaseException) -> bool:
-    """Recognize context-window errors using typed and provider-normalized signals."""
-    try:
-        from litellm.exceptions import ContextWindowExceededError
-    except Exception:  # pragma: no cover - litellm is optional at import time
-        ContextWindowExceededError = None  # type: ignore[assignment]
+    """Typed kind first; raw duck-client fallback is deliberately temporary."""
+    from nooa.unifiedllm.adapters import _legacy_error_text
+    from nooa.unifiedllm.errors import FailureKind, LLMFailure
 
-    seen: set[int] = set()
-    cur: BaseException | None = exc
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        if ContextWindowExceededError is not None and isinstance(cur, ContextWindowExceededError):
-            return True
-
-        name = type(cur).__name__.lower()
-        msg = str(cur).lower()
-        if (
-            "contextwindowexceeded" in name
-            or "context length" in msg
-            or "context_length_exceeded" in msg
-            or "context window" in msg
-            # Anthropic / Azure-Anthropic gateway phrasing, surfaced as a
-            # BadRequestError rather than a typed ContextWindowExceededError:
-            #   "prompt is too long: 1017198 tokens > 1000000 maximum"
-            or "prompt is too long" in msg
-        ):
-            return True
-        cur = cur.__cause__ or cur.__context__
-    return False
+    if isinstance(exc, LLMFailure):
+        return exc.kind == FailureKind.CONTEXT_WINDOW
+    return _legacy_error_text._is_context_window_error(exc)
 
 
 def _parse_prompt_tokens(exc: BaseException) -> int | None:
-    """Extract prompt token count from a ContextWindowExceededError chain."""
-    seen: set[int] = set()
-    cur: BaseException | None = exc
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        m = _PROMPT_TOKENS_RE.search(str(cur))
-        if m:
-            return int(m.group(1).replace(",", ""))
-        cur = cur.__cause__ or cur.__context__
-    return None
+    from nooa.unifiedllm.adapters import _legacy_error_text
+    from nooa.unifiedllm.errors import FailureKind, LLMFailure
+
+    if isinstance(exc, LLMFailure):
+        return exc.prompt_tokens if exc.kind == FailureKind.CONTEXT_WINDOW else None
+    return _legacy_error_text._parse_prompt_tokens(exc)
 
 
 def _parse_context_window_tokens(exc: BaseException) -> int | None:
-    """Extract model context-window size from a ContextWindowExceededError chain."""
-    seen: set[int] = set()
-    cur: BaseException | None = exc
-    while cur is not None and id(cur) not in seen:
-        seen.add(id(cur))
-        m = _CONTEXT_WINDOW_TOKENS_RE.search(str(cur))
-        if m:
-            # Alternatives capture either the window directly or "input > maximum".
-            for group in reversed(m.groups()):
-                if group:
-                    return int(group.replace(",", ""))
-        cur = cur.__cause__ or cur.__context__
-    return None
+    from nooa.unifiedllm.adapters import _legacy_error_text
+    from nooa.unifiedllm.errors import FailureKind, LLMFailure
+
+    if isinstance(exc, LLMFailure):
+        return exc.context_window if exc.kind == FailureKind.CONTEXT_WINDOW else None
+    return _legacy_error_text._parse_context_window_tokens(exc)
 
 
 def _context_window_for_error(
@@ -373,7 +325,7 @@ def _compute_reduced_max_tokens(
     Returns the reduced value, or None if recovery is not possible.
     """
     prompt_tok = _parse_prompt_tokens(exc)
-    if ctx_window and prompt_tok:
+    if ctx_window is not None and prompt_tok is not None:
         margin = max(int(ctx_window * 0.02), 256)
         reduced = ctx_window - prompt_tok - margin
     elif ctx_window and original_max_tokens:
