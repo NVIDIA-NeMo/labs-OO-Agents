@@ -14,18 +14,19 @@ from nooa import (
     Criteria,
     DecideStrategy,
     DecisionModelRequiredError,
-    EventQuery,
     PredictStrategy,
     Threshold,
     strategy,
 )
 from nooa.context_blocks import ScopedContext
+from nooa.context_view import Block, is_model_visible
 from nooa.decisions.client import (
     BooleanAnswer,
     BooleanQuestion,
     DecisionRequest,
     DecisionResponse,
 )
+from nooa.decisions.context_view import DecisionContextView
 from nooa.decisions.provenance import question_digest
 from nooa.events import DebugTrace, DecisionRecord, Error, EventBase, Message
 from nooa.runtime.middleware import DecisionCallContext
@@ -89,6 +90,14 @@ async def test_decide_strategy_agent_method_end_to_end() -> None:
 async def test_decide_strategy_adds_opted_in_context_and_events_to_state() -> None:
     client = FakeDecisionClient()
 
+    class RecentContext(DecisionContextView):
+        async def assemble(self, owner, call):
+            async for item in super().assemble(owner, call):
+                yield item
+            for event in owner.event_manager.values()[-3:]:
+                if is_model_visible(event):
+                    yield event
+
     class TriageAgent(
         Agent,
         llm=FakeLLMClient(),
@@ -103,8 +112,8 @@ async def test_decide_strategy_adds_opted_in_context_and_events_to_state() -> No
                     "support_policy": Context(expr="self.policy"),
                     "customer_tier": "enterprise",
                 },
-                events=EventQuery.last_n(3),
             ),
+            context_view=RecentContext(),
         )
         async def urgent(self, message: str) -> bool:
             """Does the message require immediate action?"""
@@ -135,6 +144,104 @@ async def test_decide_strategy_adds_opted_in_context_and_events_to_state() -> No
             },
         ],
     }
+
+
+@pytest.mark.asyncio
+async def test_decision_view_preserves_structured_context_and_excludes_implicit_state() -> None:
+    client = FakeDecisionClient()
+
+    class TriageAgent(Agent, llm=FakeLLMClient(), decision_model=client):
+        account = {"balance": 900, "eligible": True}
+
+        @strategy(DecideStrategy(), context={"account": Context(expr="self.account")})
+        async def urgent(self, message: str) -> bool:
+            """Is this urgent?"""
+            ...
+
+    agent = TriageAgent()
+    agent.context["unselected"] = "must not appear"
+    agent.event_manager.add(Message(content="unselected history"))
+    assert await agent.urgent("refund") is True
+    assert client.requests[0].state == {
+        "inputs": {"message": "refund"},
+        "context": {"account": {"balance": 900, "eligible": True}},
+    }
+
+
+@pytest.mark.asyncio
+async def test_call_strategy_override_selects_decision_default_view() -> None:
+    client = FakeDecisionClient()
+
+    class TriageAgent(Agent, llm=FakeLLMClient(), decision_model=client):
+        @strategy(PredictStrategy(), context={"policy": {"limit": 500}})
+        async def urgent(self, amount: int) -> bool:
+            """Does the amount exceed the policy limit?"""
+            ...
+
+    agent = TriageAgent()
+    agent.context["persistent"] = "not selected by decision default"
+    agent.event_manager.add(Message(content="not selected either"))
+    assert await agent.urgent(900, _strategy=DecideStrategy()) is True
+    assert client.requests[0].state == {
+        "inputs": {"amount": 900},
+        "context": {"policy": {"limit": 500}},
+    }
+
+
+@pytest.mark.asyncio
+async def test_decision_view_skips_disabled_expressions_before_evaluation() -> None:
+    client = FakeDecisionClient()
+
+    class TriageAgent(Agent, llm=FakeLLMClient(), decision_model=client):
+        def forbidden(self):
+            raise AssertionError("disabled expression must not run")
+
+        @strategy(
+            DecideStrategy(),
+            context={
+                "disabled": Context(expr="self.forbidden()"),
+                "omitted": None,
+                "null_value": Context(expr="None"),
+            },
+        )
+        async def urgent(self) -> bool:
+            """Is this urgent?"""
+            ...
+
+    agent = TriageAgent()
+    agent.context_manager.disable("disabled")
+    assert await agent.urgent() is True
+    assert client.requests[0].state == {"inputs": {}, "context": {"null_value": None}}
+
+
+@pytest.mark.asyncio
+async def test_decision_method_and_call_views_replace_default_context() -> None:
+    client = FakeDecisionClient()
+
+    class NamedView:
+        def __init__(self, name):
+            self.name = name
+
+        async def assemble(self, owner, call):
+            yield Block(key="selected", content={"view": self.name, "model": call.model})
+
+    class TriageAgent(Agent, llm=FakeLLMClient(), decision_model=client):
+        @strategy(
+            DecideStrategy(),
+            context={"ignored": "default context"},
+            context_view=NamedView("method"),
+        )
+        async def urgent(self, message: str) -> bool:
+            """Is this urgent?"""
+            ...
+
+    agent = TriageAgent()
+    assert await agent.urgent("first") is True
+    assert await agent.urgent("second", context_view=NamedView("call")) is True
+    assert [request.state["context"] for request in client.requests] == [
+        {"selected": {"view": "method", "model": "fake-decisions"}},
+        {"selected": {"view": "call", "model": "fake-decisions"}},
+    ]
 
 
 @pytest.mark.asyncio

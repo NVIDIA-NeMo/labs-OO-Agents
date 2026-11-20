@@ -5,7 +5,7 @@
 import hashlib
 import json
 import re
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import Any
 
 from nooa.llm_types import CacheBoundary, LLMResponse
@@ -355,7 +355,9 @@ def _replacement(kind, block, rejected: bool, enabled) -> str | None:
     return rejected_media_notice(kind) if rejected else None
 
 
-def filter_media_messages(messages, enabled: tuple[MediaInput, ...], excluded=frozenset()):
+def filter_media_messages(
+    messages, enabled: tuple[MediaInput, ...], excluded: Collection[Any] = frozenset()
+):
     """Return a copy of ``messages`` with media that is not ``enabled`` replaced.
 
     Each disabled attachment is replaced by a short text notice (see
@@ -456,7 +458,7 @@ def check_replayed_native_media(
     if enabled is None:
         return
     content = native.get("content")
-    kinds = ["audio"] if native.get("audio") is not None else []
+    kinds: list[str | None] = ["audio"] if native.get("audio") is not None else []
     if isinstance(content, (list, tuple)):
         kinds.extend(attachment_kind(block) for block in content if isinstance(block, Mapping))
     if any(kind is not None and kind not in enabled for kind in kinds):

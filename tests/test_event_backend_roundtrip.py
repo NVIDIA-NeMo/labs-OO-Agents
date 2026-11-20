@@ -138,6 +138,7 @@ _ALL_EVENTS = [
     (
         "11",
         Summary(
+            source_call_ids=[],
             summary_tag="2..10",
             replaced_range=(2, 10),
             summary_text="Agent explored the filesystem.",

@@ -6,6 +6,38 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Breaking: context views decide what the model sees. A `ContextView` yields
+  the `Block`s, events and `CacheBoundary` of one request; a method or call
+  selects one with `context_view=`, otherwise the strategy's default
+  (`CodeActView`, `PredictView`, `DecisionContextView`) applies. See
+  `docs/context.md`.
+  - Views own their blocks (system prompt, `self`, events API, state, strategy
+    instructions). `self.context` only adds blocks: a `None` value suppresses
+    user, skill and decorator/scoped blocks, never a view's own.
+    `remove_protected()`, `set_static_protected()`, `set_dynamic_protected()`,
+    `ProtectedBlockError` and `DynamicNotResolvedError` are removed.
+  - View options are constructor arguments, such as `CodeActView(state=False)`;
+    anything else, including a custom system prompt, is a custom view.
+    `Agent._resolve_system_prompt()` and `_events_api_prompt()` are removed.
+  - `EventQuery`, agent `event_query=`, `ScopedContext(events=...)` and manager
+    query overrides are removed: event selection is view code
+    (`history()`), and `self.events.query()` remains for inspection.
+  - Caching is explicit: a view places at most one `CacheBoundary`, and without
+    one NOOA adds no `cache_control` marker. `CachedBlockFormatter` is removed
+    and `cache_control_injection_points` raises `ValueError`.
+  - The renderer no longer evicts: `render_context()` takes no context limit,
+    and `BlockMetadata.truncated` is renamed `evicted` (the view marks it).
+  - A new bare decorator or scoped value is rendered in the volatile suffix;
+    use `Context(..., prefix=True)` to place it in the cached prefix.
+  - `Skill.context_block` is `(key, Context(...))`, evaluated with `self`
+    bound to the skill; the `(key, "expression")` form raises `TypeError`.
+  - Errors that escape a view's `assemble()` raise `ContextAssemblyError`
+    and are not retried. `RequestRecovery.before_request()` is replaced by
+    `before_send()`, called after the messages are built.
+- Events carry a typed `call_id` (it was `metadata["call_id"]`), and a
+  `Summary` requires `source_call_ids`. Stored sessions are not migrated:
+  older events keep their call id only in `metadata`, and older summaries
+  load with empty `source_call_ids`, so views that filter by call leave them out.
 - Dependency security update. LiteLLM is now locked at 1.100.5
   (CVE-2026-114612); the `litellm` requirement starts at 1.100.4 and excludes
   the unfixed 1.101-1.103 releases. LiteLLM now requires boto3. Chat

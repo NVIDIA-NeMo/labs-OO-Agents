@@ -10,13 +10,17 @@ a database-like interface for querying past interactions.
 """
 
 import re
-from typing import TYPE_CHECKING
+from collections.abc import Collection
+from typing import TYPE_CHECKING, Protocol
 
 from nooa.events import EventBase
 from nooa.skill import Skill
 
 if TYPE_CHECKING:
-    from nooa.agent import Agent
+    from nooa.runtime.event_manager import EventManager
+
+    class _EventOwner(Protocol):
+        event_manager: "EventManager"
 
 
 _TAG_RE = re.compile(r"\d+(?:\.\.\d+)?")
@@ -90,7 +94,7 @@ class EventsApi(Skill):
         doc(self.events)
     """
 
-    def __init__(self, agent: "Agent"):
+    def __init__(self, agent: "_EventOwner"):
         self._manager = agent.event_manager
 
     def query(
@@ -98,6 +102,7 @@ class EventsApi(Skill):
         *,
         type: str | None = None,
         call_id: str | None = None,
+        related_call_ids: Collection[str] | None = None,
         execution_status: str | None = None,
         query: str | None = None,
         regex: bool = False,
@@ -110,7 +115,9 @@ class EventsApi(Skill):
 
         Args:
             type: Event type filter (e.g., "Task", "PythonOutput", "ToolCallEvent")
-            call_id: Call ID filter (matches metadata.call_id)
+            call_id: Exact originating call ID.
+            related_call_ids: Match any represented call ID, including mixed-call summaries.
+                None disables this filter; an empty collection matches nothing.
             execution_status: PythonOutput status filter (e.g. "error" or "complete")
             query: Text search (case-insensitive substring, or regex if regex=True)
             regex: If True, treat query as regex pattern
@@ -131,6 +138,7 @@ class EventsApi(Skill):
         return self._manager.filter(
             type=type,
             call_id=call_id,
+            related_call_ids=related_call_ids,
             execution_status=execution_status,
             query=query,
             regex=regex,

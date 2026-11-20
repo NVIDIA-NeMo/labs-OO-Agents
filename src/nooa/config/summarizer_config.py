@@ -10,7 +10,7 @@ class TokenBudgetConfig(BaseModel):
 
     Set via: TokenBudgetSummarizer.install(agent, config=TokenBudgetConfig(...))
 
-    The summarizer always forks the parent's completed request.
+    Request usage triggers compaction of a bounded stored-history prefix.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")

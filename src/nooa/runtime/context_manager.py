@@ -3,26 +3,24 @@
 """Dict-like context manager for agent context blocks.
 
 Provides a simple dict-like API for LLM-generated code to manage
-what information appears in the system prompt.
+what information appears in the model's context.
 
 Usage:
-    self.context["notes"] = "Here are my notes..."              # static
-    self.context.set_dynamic("status", "self.format_status()")  # dynamic
+    self.context["notes"] = "Here are my notes..."              # fixed, volatile suffix
+    self.context["rules"] = Context("...", prefix=True)          # fixed, cacheable prefix
+    self.context["status"] = Context(expr="self.format_status()")  # expression
     value = self.context["notes"]                                # read
     del self.context["notes"]                                    # remove
     "notes" in self.context                                      # check
 
-Cache lifecycle for DynamicContext blocks:
-    set_dynamic("key", "expr")  → stores DynamicContext in _blocks, invalidates cache
-    _prepare_context() runs     → evaluates expr, calls _update_resolved({"key": value})
-    self.context["key"]         → returns cached value from _dynamic_cache
+Reads return what was stored: a literal value, or ``Context(expr=...)`` for an
+expression block. Context views evaluate expressions; the manager never does.
 """
 
-from collections.abc import ItemsView, Iterator, KeysView
+from collections.abc import Iterator, KeysView
 from typing import Any
 
 from nooa.context_blocks import Context, DynamicContext
-from nooa.context_blocks.exceptions import DynamicNotResolvedError, ProtectedBlockError
 
 _SENTINEL = object()
 
@@ -33,21 +31,16 @@ class ContextManager:
     Stores context blocks as key -> value mappings. Values are either static
     values (any type) or DynamicContext markers (for expressions re-evaluated each turn).
 
-    Single source of truth:
-    - Static blocks: value lives in _blocks only. __getitem__ reads from _blocks.
-    - DynamicContext blocks: DynamicContext marker in _blocks, resolved value in _dynamic_cache.
-      Cache is populated by _update_resolved() after each _prepare_context() run,
-      and invalidated on set_dynamic() or __setitem__().
+    Declarations live in _blocks. Reading an expression block returns its
+    declaration as ``Context(expr=...)``, not a value.
 
-    Protected blocks (system_prompt, self, state) are registered via
-    set_protected() / set_dynamic_protected() and cannot be overwritten
-    by the LLM-facing API (set / set_dynamic / __setitem__ / __delitem__).
+    Every key is an ordinary user block. Blocks a context view builds itself,
+    such as the system prompt, are not stored here and cannot be changed here;
+    a stored block with the same name is just another block.
     """
 
     def __init__(self) -> None:
         self._blocks: dict[str, Any | DynamicContext] = {}
-        self.protected_keys: set[str] = set()
-        self._dynamic_cache: dict[str, Any] = {}
         self._static: dict[str, bool] = {}
         self.disabled_keys: set[str] = set()
 
@@ -63,45 +56,25 @@ class ContextManager:
         Args:
             key: Block key (unique identifier).
             value: Block value (str, Context, DynamicContext, None, or any pformat-able object).
-
-        Raises:
-            ProtectedBlockError: If key is protected and value is not None/Context.
         """
         if value is None:
             self.disable(key)
-            if key in self._blocks and key not in self.protected_keys:
-                del self._blocks[key]
-                self._static.pop(key, None)
+            self._blocks.pop(key, None)
+            self._static.pop(key, None)
             return
         if isinstance(value, Context):
             if value.is_dynamic:
                 if value.prefix:
-                    if key in self.protected_keys:
-                        self.set_static_protected(key, expr=value.expr)
-                    else:
-                        self.set_static(key, expr=value.expr)
+                    self.set_static(key, expr=value.expr)
                 else:
-                    if key in self.protected_keys:
-                        self.set_dynamic_protected(key, value.expr)
-                    else:
-                        self.set_dynamic(key, value.expr)
+                    self.set_dynamic(key, value.expr)
+            elif value.prefix:
+                self.set_static(key, value.value)
             else:
-                if value.prefix:
-                    if key in self.protected_keys:
-                        self.set_static_protected(key, value.value)
-                    else:
-                        self.set_static(key, value.value)
-                else:
-                    if key in self.protected_keys:
-                        self.set_dynamic_protected(key, value=value.value)
-                    else:
-                        self.set_dynamic(key, value=value.value)
+                self.set_dynamic(key, value=value.value)
             return
         if isinstance(value, DynamicContext):
-            if key in self.protected_keys:
-                self.set_dynamic_protected(key, value.expr)
-            else:
-                self.set_dynamic(key, value.expr)
+            self.set_dynamic(key, value.expr)
             return
         self.set_dynamic(key, value=value)
 
@@ -140,7 +113,7 @@ class ContextManager:
         block can hold a plain value OR a re-evaluated expression. Pass
         ``value`` for a plain, unchanging value. Pass ``expr`` to register a
         block that is re-evaluated every turn yet still rendered in the cacheable
-        prefix (the same shape framework blocks like ``<self>`` use).
+        prefix.
 
         Args:
             key: Block key (unique identifier).
@@ -149,13 +122,9 @@ class ContextManager:
                 mutually exclusive with ``value``).
 
         Raises:
-            ProtectedBlockError: If key is protected.
             TypeError: If both ``value`` and ``expr`` are given, neither is
                 given, or ``value`` is a DynamicContext (use ``expr=`` instead).
         """
-        if key in self.protected_keys:
-            raise ProtectedBlockError(key, "modify")
-
         if expr is not None and _SENTINEL is not value:
             raise TypeError("Cannot specify both value and expr=")
 
@@ -173,7 +142,6 @@ class ContextManager:
 
         self._static[key] = True
         self.disabled_keys.discard(key)
-        self._invalidate(key)
 
     def set_dynamic(self, key: str, expr: str | None = None, *, value: Any = _SENTINEL) -> None:
         """Set a dynamic context block (placed in the volatile suffix).
@@ -187,12 +155,8 @@ class ContextManager:
             value: Plain value to store in the dynamic partition (keyword-only).
 
         Raises:
-            ProtectedBlockError: If key is protected.
             TypeError: If both expr and value= are provided.
         """
-        if key in self.protected_keys:
-            raise ProtectedBlockError(key, "modify")
-
         if expr is not None and _SENTINEL is not value:
             raise TypeError("Cannot specify both expr and value=")
 
@@ -204,52 +168,37 @@ class ContextManager:
             raise TypeError("set_dynamic() requires either expr or value=")
         self._static[key] = False
         self.disabled_keys.discard(key)
-        self._invalidate(key)
 
     def is_static(self, key: str) -> bool:
         """Return True if the block is in the static (cacheable) partition."""
         return self._static.get(key, False)
 
     def __getitem__(self, key: str) -> Any:
-        """Get the value of a context block.
+        """Return a block's declaration: its literal value, or ``Context(expr=...)``.
 
-        Static blocks: Returns the original value directly from _blocks.
-        DynamicContext blocks: Returns the last resolved value from _dynamic_cache.
+        Expressions are not evaluated; call the expression's code for its current value.
 
         Raises:
             KeyError: If key not found.
-            DynamicNotResolvedError: If accessing a DynamicContext block before the
-                first LLM turn (expression hasn't been evaluated yet).
         """
-        if key not in self._blocks:
-            raise KeyError(key)
+        return self._declared(key, self._blocks[key])
 
-        value = self._blocks[key]
-
-        # Static block: return directly (single source of truth)
-        if not isinstance(value, DynamicContext):
-            return value
-
-        # DynamicContext block: return from cache, or raise if not yet resolved
-        if key not in self._dynamic_cache:
-            raise DynamicNotResolvedError(key, value.expr)
-        return self._dynamic_cache[key]
+    def _declared(self, key: str, value: Any) -> Any:
+        if isinstance(value, DynamicContext):
+            return Context(expr=value.expr, prefix=self.is_static(key))
+        return value
 
     def __delitem__(self, key: str) -> None:
         """Remove a context block.
 
         Raises:
             KeyError: If key not found.
-            ProtectedBlockError: If key is protected.
         """
         if key not in self._blocks:
             raise KeyError(key)
-        if key in self.protected_keys:
-            raise ProtectedBlockError(key, "remove")
         del self._blocks[key]
         self._static.pop(key, None)
         self.disabled_keys.discard(key)
-        self._invalidate(key)
 
     def __contains__(self, key: object) -> bool:
         """Check if a context block exists."""
@@ -268,15 +217,11 @@ class ContextManager:
     def disable(self, *keys: str) -> None:
         """Suppress named blocks from prompt construction without deleting them.
 
-        Disabled keys are omitted no matter which source would provide them:
-        framework defaults (``system_prompt``, ``self``, ``state``), strategy
-        blocks (``strategy_prompt``, ``execution_context``), user blocks,
-        decorator/scoped context, or skill-registered blocks. Disabling is
-        reversible with :meth:`enable` and is allowed for protected blocks.
+        Disabled keys are omitted from user blocks, decorator/scoped context,
+        and skill blocks. Blocks a view builds itself are not affected; views
+        document their own options. Disabling is reversible with :meth:`enable`.
         """
         self.disabled_keys.update(keys)
-        for key in keys:
-            self._invalidate(key)
 
     def enable(self, *keys: str) -> None:
         """Re-enable named blocks previously suppressed with :meth:`disable`."""
@@ -295,13 +240,14 @@ class ContextManager:
         """Return a copy of currently suppressed block keys."""
         return set(self.disabled_keys)
 
-    def _raw_items(self) -> ItemsView[str, Any]:
-        """Return raw key-value pairs including DynamicContext markers.
+    def declarations(self) -> tuple[tuple[str, Any], ...]:
+        """Return an immutable snapshot of raw block declarations.
 
-        Internal method for context_builder — not part of the LLM-facing API.
-        Use keys() + __getitem__ for resolved access.
+        Dynamic declarations remain :class:`DynamicContext` objects. Context
+        views use this method to materialize manager state without depending on
+        the manager's private storage.
         """
-        return self._blocks.items()
+        return tuple(self._blocks.items())
 
     def get(self, key: str, default: Any = None) -> Any:
         """Get a block value, returning default if not found.
@@ -322,141 +268,9 @@ class ContextManager:
             if args:
                 return args[0]
             raise KeyError(key)
-        if key in self.protected_keys:
-            raise ProtectedBlockError(key, "remove")
 
-        # Get value before removal
-        raw = self._blocks[key]
-        if isinstance(raw, DynamicContext):
-            value = self._dynamic_cache.get(key, raw)
-        else:
-            value = raw
-
+        value = self._declared(key, self._blocks[key])
         del self._blocks[key]
         self._static.pop(key, None)
         self.disabled_keys.discard(key)
-        self._invalidate(key)
         return value
-
-    def _invalidate(self, key: str) -> None:
-        """Invalidate cached resolved value for a dynamic block.
-
-        Called on set, set_dynamic, delete, and pop to ensure
-        stale cache entries are cleared.
-        """
-        self._dynamic_cache.pop(key, None)
-
-    def apply_override(self, key: str, value: "Any | DynamicContext | None") -> None:
-        """Apply a single context block override, routing through the correct API.
-
-        Handles both protected and unprotected keys. Used by Agent._apply_context_dict
-        to apply class-level and instance-level context overrides at init time.
-
-        Overrides preserve the static/dynamic partition of the block they replace.
-        If the key doesn't exist yet, DynamicContext overrides go to dynamic,
-        plain values go to dynamic (matching __setitem__ behavior).
-        """
-        is_protected = key in self.protected_keys
-        is_static_block = self._static.get(key, False)
-
-        if value is None:
-            self.disable(key)
-            if not is_protected and key in self._blocks:
-                # Remove block definition without clearing disabled_keys
-                # (pop() would discard from disabled_keys, undoing the disable)
-                del self._blocks[key]
-                self._static.pop(key, None)
-        elif isinstance(value, Context):
-            # Route through __setitem__ which handles all Context cases
-            self[key] = value
-        elif isinstance(value, DynamicContext):
-            if is_protected:
-                if is_static_block:
-                    self.set_static_protected(key, expr=value.expr)
-                else:
-                    self.set_dynamic_protected(key, value.expr)
-            else:
-                self.set_dynamic(key, value.expr)
-        else:
-            if is_protected:
-                if is_static_block:
-                    self.set_static_protected(key, value)
-                else:
-                    self.set_dynamic_protected(key, value=value)
-            else:
-                self[key] = value
-
-    def _update_resolved(self, resolved: dict[str, Any]) -> None:
-        """Cache resolved DynamicContext block values.
-
-        Called by _prepare_context() after evaluating all DynamicContext expressions.
-        Only DynamicContext block values should be cached — static blocks are read
-        directly from _blocks.
-        """
-        self._dynamic_cache.update(resolved)
-
-    # ------------------------------------------------------------------
-    # Internal protected-block API (used by Agent.__init__, not by LLMs)
-    # ------------------------------------------------------------------
-
-    def set_static_protected(self, key: str, value: Any = None, *, expr: str | None = None) -> None:
-        """Register a protected block in the static (cacheable) partition.
-
-        Protected blocks cannot be modified by the LLM-facing API.
-
-        Args:
-            key: Block key.
-            value: Plain value to store.
-            expr: Python expression to evaluate each turn (keyword-only).
-        """
-        if expr is not None:
-            self._blocks[key] = DynamicContext(expr)
-        elif isinstance(value, DynamicContext):
-            self._blocks[key] = value
-        else:
-            self._blocks[key] = value
-        self.protected_keys.add(key)
-        self._static[key] = True
-        self.disabled_keys.discard(key)
-        self._invalidate(key)
-
-    def set_dynamic_protected(
-        self, key: str, expr: str | None = None, *, value: Any = _SENTINEL
-    ) -> None:
-        """Register a protected block in the dynamic (volatile) partition.
-
-        Protected blocks cannot be modified by the LLM-facing API.
-        Expressions are re-evaluated each LLM turn.
-
-        Args:
-            key: Block key.
-            expr: Python expression to evaluate each turn.
-            value: Plain value to store (keyword-only).
-        """
-        if expr is not None:
-            self._blocks[key] = DynamicContext(expr)
-        elif _SENTINEL is not value:
-            self._blocks[key] = value
-        else:
-            raise TypeError("set_dynamic_protected() requires either expr or value=")
-        self.protected_keys.add(key)
-        self._static[key] = False
-        self.disabled_keys.discard(key)
-        self._invalidate(key)
-
-    def remove_protected(self, key: str) -> None:
-        """Remove a protected block (used by _apply_context_dict with value=None).
-
-        Args:
-            key: Block key to remove.
-
-        Raises:
-            KeyError: If key not found.
-        """
-        if key not in self._blocks:
-            raise KeyError(key)
-        del self._blocks[key]
-        self.protected_keys.discard(key)
-        self._static.pop(key, None)
-        self.disabled_keys.discard(key)
-        self._invalidate(key)

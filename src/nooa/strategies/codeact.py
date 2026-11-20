@@ -42,9 +42,9 @@ from pydantic import BaseModel, create_model
 from pydantic import ValidationError as PydanticValidationError
 
 from nooa.agentdoc._structured import format_type as _format_type
-from nooa.context_blocks import DynamicContext, EventBase, ResultStatus, ToolCallEvent, ToolResult
+from nooa.context_blocks import EventBase, ResultStatus, ToolCallEvent, ToolResult
 from nooa.context_blocks.events import CODEACT_INLINE_RETURN
-from nooa.context_blocks.exceptions import BlockSyntaxError
+from nooa.context_blocks.exceptions import ContextAssemblyError
 from nooa.decorators import strategy
 from nooa.errors import (
     GenerationError,
@@ -662,30 +662,11 @@ class CodeActStrategy(CompositeStrategy):
         """Get the active runtime config, including method-level overrides."""
         return runtime.truncation_config
 
-    def get_block_overrides(self) -> dict[str, "str | DynamicContext | None"]:
-        overrides: dict[str, str | DynamicContext | None] = {
-            "strategy_prompt": DynamicContext("strategy.strategy_instructions(runtime)"),
-            "execution_context": DynamicContext("strategy.execution_context(runtime)"),
-        }
-        # Tell the agent about the active sandbox guardrails (only when enabled).
-        if self.config.execution_backend == "sandbox" and self.config.sandbox.context_block:
-            overrides["sandbox"] = DynamicContext("strategy.sandbox_context(runtime)")
-        return overrides
+    @property
+    def default_context_view(self):
+        from nooa.default_context_view import CodeActView
 
-    def get_static_block_keys(self) -> set[str]:
-        """Block keys from get_block_overrides() that should be in the static partition."""
-        # The sandbox constraints are fixed for the session -> static (cacheable) prefix.
-        return {"execution_context", "strategy_prompt", "sandbox"}
-
-    def get_block_order(self) -> list[str] | None:
-        """Place doc(self) after execution_context so the LLM sees instructions first."""
-        return [
-            "system_prompt",
-            "strategy_prompt",
-            "sandbox",
-            "execution_context",
-            "self",
-        ]
+        return CodeActView()
 
     async def sandbox_context(self, runtime: RuntimeServices) -> str:
         """Render the active sandbox constraints as an agent-facing context block."""
@@ -1260,11 +1241,10 @@ Standard Python builtins and agent instance (`self`) are available."""
                 except ReasoningReplayError:
                     turn_state.is_final = True
                     raise
-                except BlockSyntaxError as e:
-                    # Raised while building the prompt, before any LLM request,
-                    # so it neither counts as nor clears an API error.
-                    self._handle_block_syntax_error(e, session, runtime)
-                    continue
+                except ContextAssemblyError:
+                    # Assembly is deterministic local code; retrying repeats the failure.
+                    turn_state.is_final = True
+                    raise
 
                 except Exception as e:
                     # LLM API errors (rate limits, connection errors, timeouts, etc.)
@@ -2148,48 +2128,6 @@ Standard Python builtins and agent instance (`self`) are available."""
                 return _ToolCallsResult()
 
         return None
-
-    @staticmethod
-    def _handle_block_syntax_error(
-        e: BlockSyntaxError,
-        session: "CodeActSession",
-        runtime: RuntimeServices,
-    ) -> None:
-        """Handle a BlockSyntaxError raised during generate().
-
-        The LLM created a context block with invalid Python syntax.
-        This is recoverable — remove the bad block, add error feedback
-        so the LLM can fix it, and record an iteration (not an error
-        retry, since retrying with the bad block would just fail again).
-        """
-        get_harness_metrics().block_syntax_error(f"block '{e.key}': {e.original_error}")
-        logger.warning(f"[CODEACT] Block syntax error in block '{e.key}': {e.original_error}")
-
-        # Remove the bad block so subsequent attempts can proceed
-        try:
-            _ctx = getattr(runtime, "context", None)
-            if _ctx is not None:
-                _ctx.remove(e.key)
-                logger.debug(f"[CODEACT] Removed bad block '{e.key}' from context")
-        except Exception as remove_err:
-            logger.debug(f"[CODEACT] Could not remove block '{e.key}': {remove_err}")
-
-        # Add helpful error feedback for the LLM
-        _field = getattr(e, "field", "expr")
-        error_msg = (
-            f"Error: Block '{e.key}' has invalid Python syntax.\n"
-            f"The {_field} parameter must be a valid Python expression.\n"
-            f"  Invalid {_field}: {e.expr[:100]}{'...' if len(e.expr) > 100 else ''}\n"
-            f"  Error: {e.original_error}\n\n"
-            f"To fix this, use context.set() with value= for static content:\n"
-            f'  context.set("{e.key}", value="your content here")\n'
-            f"Or use a valid Python expression:\n"
-            f'  context.set("{e.key}", expr="self.my_variable")'
-        )
-        runtime.event_manager.add(Error(content=error_msg))
-
-        # Record as an iteration (not error) since this is fixable feedback
-        session.record_iteration()
 
     async def _handle_execute_python(
         self,

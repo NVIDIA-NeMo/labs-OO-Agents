@@ -15,9 +15,9 @@ class SetupAgent(Agent):
     instruction: str = "expanded-runtime-instruction"
 
     async def run(self, value: int, stack: dict) -> dict:
-        parent_id = self.runtime._agent_call_id
         result = await self.answer(value, _session_locals=stack)
-        assert result["parent_id"] == parent_id
+        # parent_id names the enclosing generation call; run() is deterministic.
+        assert result["parent_id"] is None
         return result
 
     @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
@@ -61,7 +61,7 @@ async def test_runtime_builder_preserves_setup_identity_parent_docs_and_caller_l
         assert result["docstring"] == "Use expanded-runtime-instruction."
         assert stack["setup_value"] == 5 and stack["caller_after"] == 15
         task = next(event for event in agent.events.query(type="Task"))
-        assert task.metadata["call_id"] == result["id"]
+        assert task.call_id == result["id"]
     finally:
         await agent.aclose()
 
@@ -101,6 +101,6 @@ async def test_top_level_call_uses_wrapper_call_id_and_expanded_docstring():
         assert result["parent_id"] is None
         assert result["id"] == result["runtime_id"]
         task = next(event for event in agent.events.query(type="Task"))
-        assert task.metadata["call_id"] == result["id"]
+        assert task.call_id == result["id"]
     finally:
         await agent.aclose()

@@ -62,9 +62,9 @@ class TestEventTypes:
     def test_event_has_metadata(self):
         """Events can have metadata set after construction."""
         event = Task(prompt="test")
-        event.metadata["call_id"] = "abc123"
+        event.call_id = "abc123"
         event.metadata["parent_id"] = "xyz789"
-        assert event.metadata["call_id"] == "abc123"
+        assert event.call_id == "abc123"
         assert event.metadata["parent_id"] == "xyz789"
 
     def test_event_has_timestamp(self):
@@ -170,15 +170,15 @@ class TestEventManagerEventAPI:
 
         assert len(em) == 0
 
-    def test_add_with_metadata_call_id(self):
+    def test_add_with_explicit_call_id(self):
         """Event metadata can be set after construction."""
         em = EventManager()
         event = Task(prompt="test")
-        event.metadata["call_id"] = "abc123"
+        event.call_id = "abc123"
 
         em.add(event)
 
-        assert em.values()[0].metadata.get("call_id") == "abc123"
+        assert em.values()[0].call_id == "abc123"
 
 
 class TestExecutionResult:

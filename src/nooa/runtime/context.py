@@ -27,7 +27,8 @@ class ContextApi(Skill):
 
     Use self.context to add, update, or remove named blocks in your prompt.
     Static blocks are set once; dynamic blocks are re-evaluated each LLM turn.
-    Framework blocks (system_prompt, self) are protected and cannot be changed.
+    Blocks your strategy builds itself (system_prompt, self, ...) are not stored
+    here; a block you store under the same name is shown as an extra block.
 
     Static blocks (set once):
         self.context["notes"] = "Remember: user prefers JSON output"
@@ -127,26 +128,24 @@ class ContextApi(Skill):
             raise TypeError("set_static() requires either value or expr=")
 
     def __getitem__(self, key: str) -> Any:
-        # Protected keys are hidden from iteration (__contains__/keys()/len)
-        # but readable by name — the LLM already sees their rendered content
-        # in the prompt; mutations are guarded by ProtectedBlockError.
+        # Returns the declaration, not an evaluated value.
         return self._context[key]
 
     def __delitem__(self, key: str) -> None:
         del self._context[key]
 
     def __contains__(self, key: object) -> bool:
-        return key in self._context and key not in self._context.protected_keys
+        return key in self._context
 
     def __len__(self) -> int:
-        return sum(1 for k in self._context if k not in self._context.protected_keys)
+        return len(self._context)
 
     def __iter__(self) -> Iterator[str]:
-        return (k for k in self._context if k not in self._context.protected_keys)
+        return iter(self._context)
 
     def keys(self) -> Set[str]:
-        """Return user (non-protected) block keys."""
-        return self._context.keys() - self._context.protected_keys
+        """Return the stored block keys."""
+        return self._context.keys()
 
     def disable(self, *keys: str) -> None:
         """Suppress named blocks from future prompts without deleting them.
@@ -220,21 +219,6 @@ class ContextApi(Skill):
                 self._context[key] = Context(value, prefix=True)
             else:
                 self._context[key] = value
-
-    def all_keys(self) -> "set[str]":
-        """Return all block keys including protected framework and well-known strategy keys.
-
-        Useful for discovering what keys can be suppressed via ``self.context["key"] = None``.
-
-        Well-known keys:
-            - ``system_prompt`` — agent class docstring
-            - ``self`` — doc(type(self)) introspection
-            - ``state`` — current instance field values
-            - ``strategy_prompt`` — strategy instructions
-            - ``execution_context`` — available imports/types (CodeAct only)
-        """
-        known_strategy_keys = {"strategy_prompt", "execution_context"}
-        return set(self._context.keys()) | known_strategy_keys
 
     def get(self, key: str, default: Any = None) -> Any:
         """Get a block value, returning default if not found."""

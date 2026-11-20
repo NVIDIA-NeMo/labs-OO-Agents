@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Annotated, Any, TypedDict, get_type_hints
 from uuid import uuid4
 
+from nooa.config.truncation_config import FormatConfig
 from nooa.ellipsis_detection import get_pre_ellipsis_code
 from nooa.runtime.execution_namespace import ExecutionNamespace
 
@@ -161,14 +162,14 @@ class CurrentCall:
     did not provide ``session_locals``. Strategies without a REPL may leave it unset.
 
     Attributes:
-        id: Unique identifier for this call (for correlation/tracing).
+        id: Generation-method call ID; events recorded during the call carry it as ``call_id``.
         method_name: Name of the method being called.
         decorator: Type of decorator ('plan', 'agent').
         signature: Method signature string (optional).
         docstring: Method docstring (optional).
         args: Positional arguments passed to the method.
         kwargs: Keyword arguments passed to the method.
-        parent_id: ID of parent call for nested invocations (optional).
+        parent_id: ID of the enclosing generation call, if any.
         is_async: Whether the method is async (for proper def/async def in prompts).
         return_type: Return type annotation (optional, for prefill/error hints).
         pre_ellipsis_code: Setup code before `...` marker (optional, for prefill).
@@ -178,6 +179,11 @@ class CurrentCall:
             from the live signature (optional).
         var_keyword_param_name: Variadic keyword parameter name captured from
             the live signature (optional).
+        agent: Active owner for component context views.
+        strategy: Resolved strategy for this generation.
+        model: Resolved model name, without client configuration or credentials.
+        context_window: Resolved model input window.
+        context_budget: Context-block budget for this model call.
 
     Example:
         call = CurrentCall(
@@ -224,16 +230,31 @@ class CurrentCall:
     task_tag: str | None = None
     # Fixed positional parameter names and the optional *args name from the live
     # signature. Together they let bound_parameters() preserve Python binding
-    # semantics without parsing the stringified signature. Append new fields
-    # after existing ones to preserve positional constructor compatibility.
+    # semantics without parsing the stringified signature.
     positional_param_names: list[str] | None = None
     var_positional_param_name: str | None = None
     var_keyword_param_name: str | None = None
     # The owned namespace this call's cells run in (CodeAct in-process: from the
     # agent's ``execution_namespace_for`` hook; None for the sandbox backend and
-    # strategies without one); never copied into snapshot/user state. Last so main's
-    # positional constructor order above stays unchanged.
+    # strategies without one); never copied into snapshot/user state.
     execution_namespace: ExecutionNamespace | None = None
+    # Per-request facts for views, filled in by the runtime for each model
+    # request; never client/provider configuration. Runtime owners are
+    # excluded from repr and comparison, which use the call id.
+    agent: Any | None = field(default=None, repr=False, compare=False)
+    strategy: Any | None = field(default=None, repr=False, compare=False)
+    model: str | None = None
+    context_window: int | None = None
+    context_budget: int | None = None
+    # Assembly support captured by the runtime. These fields carry no client
+    # object or credentials and are excluded from the public representation.
+    _context_format: "FormatConfig | None" = field(default=None, repr=False, compare=False)
+    _context_token_counter: Callable[[str], int] | None = field(
+        default=None, repr=False, compare=False
+    )
+    _method: Any | None = field(default=None, repr=False, compare=False)
+    _decorator_context: dict[str, Any] | None = field(default=None, repr=False, compare=False)
+    _scoped_context: dict[str, Any] | None = field(default=None, repr=False, compare=False)
 
     def __hash__(self) -> int:
         """Hash by id for use in sets/dicts."""
@@ -244,6 +265,31 @@ class CurrentCall:
         if not isinstance(other, CurrentCall):
             return NotImplemented
         return self.id == other.id
+
+    @property
+    def context_format(self) -> "FormatConfig | None":
+        """Structural formatting limits for materialized context values."""
+        return self._context_format
+
+    @property
+    def context_token_counter(self) -> Callable[[str], int] | None:
+        """Token counter selected for this invocation, when available."""
+        return self._context_token_counter
+
+    @property
+    def method(self) -> Any | None:
+        """Method being generated."""
+        return self._method
+
+    @property
+    def decorator_context(self) -> dict[str, Any] | None:
+        """Merged inherited and method-level context overrides."""
+        return self._decorator_context
+
+    @property
+    def scoped_context(self) -> dict[str, Any] | None:
+        """Overrides active through ``ScopedContext`` for this invocation."""
+        return self._scoped_context
 
     def bound_parameters(self) -> dict[str, Any]:
         """Return effective parameter name → value, each input represented exactly once.
