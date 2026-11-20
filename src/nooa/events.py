@@ -778,6 +778,16 @@ class ExecutionResult(BaseModel):
         """True if code produced a return value (explicit or implicit)."""
         return self.returned_value is not _NO_RETURN
 
+    @field_serializer("returned_value", when_used="json")
+    def _serialize_returned_value(self, value: Any) -> Any:
+        # The no-return sentinel is a bare object(): dump it as None so a
+        # result without a return value serializes (a job's JobEvent.output).
+        return None if value is _NO_RETURN else value
+
+    @field_serializer("error", when_used="json")
+    def _serialize_error(self, value: Exception | None) -> str | None:
+        return None if value is None else f"{type(value).__name__}: {value}"
+
     def has_method(self, name: str) -> bool:
         """Check if a specific method was defined."""
         return name in self.defined_methods
