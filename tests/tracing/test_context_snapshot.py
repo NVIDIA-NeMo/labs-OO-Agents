@@ -15,6 +15,7 @@ from otlp_test_helpers import read_all_otlp_jsonl_spans
 
 from nooa.tracing._hooks_impl import OpenInferenceHooks
 from nooa.tracing._otlp_file_exporter import OtlpJsonFileExporter
+from tests.runtime.public_llm_fixtures import native_models as native_models
 
 
 class TestOnMessagesBuiltProtocol:
@@ -322,11 +323,34 @@ class TestContextSnapshotSpan:
 class TestActorHookCallSite:
     """Test that actor.generate() calls on_messages_built."""
 
-    def test_on_messages_built_is_called(self):
-        """Verify call_before_hook('on_messages_built', ...) appears in actor.generate()."""
-        import inspect
+    async def test_on_messages_built_is_called(self, native_models, monkeypatch):
+        """Real hook observes final middleware input before strict native HTTP."""
+        import copy
 
-        from nooa.runtime.actor import ActorRuntime
+        from nooa import Agent
+        from tests.runtime.test_public_llm_factory_calls import generate
 
-        source = inspect.getsource(ActorRuntime.generate)
-        assert "on_messages_built" in source, "actor.generate() must call on_messages_built hook"
+        agent = Agent(llm=native_models.make())
+        observed = []
+
+        async def edit(ctx, nxt):
+            ctx.messages.append({"role": "user", "content": "final middleware payload"})
+            return await nxt(ctx)
+
+        def hook(name, **kwargs):
+            if name == "on_messages_built":
+                assert native_models.seen == []
+                observed.append(copy.deepcopy(kwargs["messages"]))
+                # User hooks cannot mutate the already frozen wire request.
+                kwargs["messages"][-1]["content"] = "hook mutation"
+
+        agent.event_manager.intercept("llm_call", edit)
+        monkeypatch.setattr("nooa.runtime.actor.call_before_hook", hook)
+        try:
+            await generate(agent)
+            assert len(observed) == len(native_models.seen) == 1
+            expected = [message for message in observed[0] if isinstance(message, dict)]
+            assert native_models.seen[0][1]["messages"] == expected
+            assert expected[-1]["content"] == "final middleware payload"
+        finally:
+            await agent.aclose()

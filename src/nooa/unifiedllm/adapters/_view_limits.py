@@ -23,7 +23,7 @@ def _effective_config(adapter):
         settings = adapter._bound_settings
         return apply_reasoning_level(
             ReasoningConfig(levels=_thaw(settings.reasoning_levels)),
-            adapter._client.model,
+            settings.model,
             _thaw(settings.config),
             {},
             settings.reasoning_level,
@@ -67,3 +67,65 @@ def _loaded_limits(llm, params, fallback_reserve):
     with llm._view_lock:
         _check_derivable(llm)
         return _adapter_limits(llm._adapter, llm._capabilities, fallback_reserve)
+
+
+def _loaded_runtime_metadata(llm):
+    """Private pinned facts/selection; never consult mutable registry/client config.
+
+    Endpoint is deliberately separate below and is not display metadata.
+    """
+    from ._loader import _check_derivable
+    from ._native import _BUILTINS
+
+    with llm._view_lock:
+        _check_derivable(llm)
+        adapter = llm._adapter
+        if type(adapter) in _BUILTINS:
+            settings = adapter._settings
+            model, default, level = (
+                settings.model,
+                settings.declaration.default,
+                settings.selection,
+            )
+        else:
+            settings = adapter._bound_settings
+            model = settings.model
+            default = settings.reasoning_default
+            level = settings.reasoning_level
+        # Bounded labels only; caller must not display a route/credential.
+        label = (
+            model
+            if (
+                isinstance(model, str)
+                and 0 < len(model) <= 256
+                and model.isascii()
+                and model[0].isalnum()
+                and all(char.isalnum() or char in "._-/" for char in model)
+            )
+            else "model"
+        )
+        return {
+            "label": label,
+            "capabilities": llm._capabilities,
+            "context_window": llm._capabilities.context_window,
+            "reasoning_levels": tuple(settings.declaration.levels or ())
+            if type(adapter) in _BUILTINS
+            else tuple(settings.reasoning_levels or ()),
+            "reasoning_default": default,
+            "reasoning_level": level,
+            "limits": _adapter_limits(adapter, llm._capabilities),
+        }
+
+
+def _loaded_endpoint(llm):
+    """Private pinned endpoint ONLY for existing admission group normalization."""
+    from ._loader import _check_derivable
+    from ._native import _BUILTINS
+
+    with llm._view_lock:
+        _check_derivable(llm)
+        adapter = llm._adapter
+        if type(adapter) in _BUILTINS:
+            return adapter._settings.route["endpoint"]
+        config = adapter._bound_settings.config
+        return config.get("api_base") or config.get("base_url")

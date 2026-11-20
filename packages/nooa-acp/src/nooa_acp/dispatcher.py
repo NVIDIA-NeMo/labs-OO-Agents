@@ -4,13 +4,13 @@
 
 import asyncio
 from collections.abc import Coroutine
-from contextlib import suppress
 from typing import Any
 
 from nooa_cli.coding import CodingAgent, CodingSlashCommandRegistry
 
 from nooa.interactive import Done, NeedInput, Waiting
 from nooa.slash_dispatch import SlashCommandResult
+from nooa_acp._runtime import _acp_capture, _acp_join, _acp_task, _ACPOutcome
 
 TurnResult = Done | NeedInput | Waiting
 
@@ -18,9 +18,12 @@ TurnResult = Done | NeedInput | Waiting
 class InteractiveSessionDispatcher:
     def __init__(self, agent: CodingAgent) -> None:
         self.agent = agent
-        self._active_task: asyncio.Task[Any] | None = None
+        self._active_task: asyncio.Task[_ACPOutcome] | None = None
+        self._close_task: asyncio.Task[_ACPOutcome] | None = None
         self._cancel_requested = False
         self._cancelling = False
+        self._close_completed: set[str] = set()
+        self._close_failure: _ACPOutcome | None = None
 
     @property
     def active(self) -> bool:
@@ -58,10 +61,13 @@ class InteractiveSessionDispatcher:
             raise RuntimeError("A prompt is already running")
 
         self._cancel_requested = False
-        task = asyncio.create_task(operation, name="nooa-acp-dispatch")
+        task = _acp_task(operation, name="nooa-acp-dispatch")
         self._active_task = task
         try:
-            return await task
+            outcome = await _acp_join(task)
+            if isinstance(outcome.failure, asyncio.CancelledError) and self._cancel_requested:
+                return None
+            return outcome.unwrap()
         except asyncio.CancelledError:
             if self._cancel_requested:
                 return None
@@ -110,17 +116,57 @@ class InteractiveSessionDispatcher:
 
         self._cancelling = True
         self._cancel_requested = True
+        first = _ACPOutcome()
         try:
-            task.cancel()
-            with suppress(asyncio.CancelledError):
-                await task
+            try:
+                task.cancel()
+            except BaseException as error:
+                first = _ACPOutcome(failure=error, traceback=error.__traceback__)
+            outcome = await _acp_join(task)
+            if not isinstance(outcome.failure, asyncio.CancelledError) and first.failure is None:
+                first = outcome
             for channel_name in ("user_messages", "slash_commands"):
-                self.agent.queue_manager.get_channel(channel_name).flush()
-            await self.agent.queue_manager.shutdown()
+
+                async def flush(name=channel_name):
+                    self.agent.queue_manager.get_channel(name).flush()
+
+                result = await _acp_capture(flush())
+                if first.failure is None:
+                    first = result
+
+            async def shutdown():
+                await self.agent.queue_manager.shutdown()
+
+            result = await _acp_capture(shutdown())
+            if first.failure is None:
+                first = result
+            first.unwrap()
             return True
         finally:
             self._cancelling = False
 
     async def close(self) -> None:
-        await self.cancel()
-        await self.agent.close()
+        if self._close_task is None or (
+            self._close_task.done() and self._close_completed != {"cancel", "agent"}
+        ):
+            self._close_task = _acp_task(self._close_resources(), name="nooa-acp-dispatch-close")
+        (await _acp_join(self._close_task)).unwrap()
+
+    async def _close_resources(self) -> None:
+        async def close_agent():
+            await self.agent.close()
+
+        for label, operation in (("cancel", self.cancel), ("agent", close_agent)):
+            if label in self._close_completed:
+                continue
+
+            async def invoke(callback=operation):
+                await callback()
+
+            result = await _acp_capture(invoke())
+            if result.failure is None:
+                self._close_completed.add(label)
+            elif self._close_failure is None:
+                self._close_failure = result
+        if self._close_failure is not None:
+            self._close_failure.unwrap()

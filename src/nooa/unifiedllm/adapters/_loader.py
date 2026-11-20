@@ -285,6 +285,8 @@ def _load_public(name, params, config, selected, media_policy, supplied, require
             )
             seed._client.reasoning_level = settings.get("reasoning_level")
             seed._bound_settings = _Settings(
+                seed._client.model,
+                seed._client._reasoning_config.default,
                 _freeze(seed._client.config),
                 _freeze(seed._client._reasoning_config.levels),
                 seed._client.reasoning_level,

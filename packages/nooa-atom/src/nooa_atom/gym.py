@@ -157,6 +157,12 @@ class AtomHarness(Agent):
         outer_hooks = get_hooks()
 
         class HookedRegistry(SessionRegistry):
+            async def _close_half_built(self, session, *, active_unwind=False):
+                # A benchmark policy failure is latched in the receipt. Unlike
+                # ordinary model transactions, caller cancellation during its
+                # unpublished teardown must still be the public outcome.
+                await super()._close_half_built(session)
+
             def _publish(self, session, reservation):
                 # Closed sessions leave registry.sessions; preserve publication
                 # identities for final coverage of the entire episode tree.
@@ -165,9 +171,11 @@ class AtomHarness(Agent):
                     guard.violate("published_session_uncovered", session_id=session.id)
                 return super()._publish(session, reservation)
 
-            async def _build(self, options, handle, *, restore=False):
+            async def _build(self, options, handle, *, restore=False, shared_parent=None):
                 guard.expect(handle, options)
-                session = await super()._build(options, handle, restore=restore)
+                session = await super()._build(
+                    options, handle, restore=restore, shared_parent=shared_parent
+                )
                 try:
                     guard.install(session)
                     guard.check_session(session, require_ready=False)
@@ -263,8 +271,10 @@ class AtomHarness(Agent):
         outer_hooks = get_hooks()
 
         class HookedRegistry(SessionRegistry):
-            async def _build(self, options, handle, *, restore=False):
-                session = await super()._build(options, handle, restore=restore)
+            async def _build(self, options, handle, *, restore=False, shared_parent=None):
+                session = await super()._build(
+                    options, handle, restore=restore, shared_parent=shared_parent
+                )
                 # Atom starts each session loop in a fresh Context; carry the
                 # harness hooks (tool records, invocation ids) into it.
                 session.add_loop_context_hook(

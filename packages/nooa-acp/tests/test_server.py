@@ -143,7 +143,7 @@ def test_acp_command_passes_the_nvidia_key_for_nvidia_models():
     runner = CliRunner()
     with (
         patch("nooa.secrets.load_secrets_into_env"),
-        patch("nooa.unifiedllm.get_llm_client") as get_llm_client,
+        patch("nooa.unifiedllm.load_llm") as load_llm,
         patch("nooa_acp.server.serve") as serve,
         patch("nooa_acp.cli.asyncio.run"),
     ):
@@ -154,9 +154,10 @@ def test_acp_command_passes_the_nvidia_key_for_nvidia_models():
         )
 
     assert result.exit_code == 0
+    assert serve.call_args.kwargs["model_alias"] == ("nvidia_nim/nvidia/nemotron-3-super-120b-a12b")
     llm_factory = serve.call_args.args[0]
     llm_factory()
-    get_llm_client.assert_called_once_with(
+    load_llm.assert_called_once_with(
         "nvidia_nim/nvidia/nemotron-3-super-120b-a12b",
         client_type=None,
         api_key="nvapi-test",
@@ -167,7 +168,7 @@ def test_acp_command_leaves_the_key_alone_for_other_providers():
     runner = CliRunner()
     with (
         patch("nooa.secrets.load_secrets_into_env"),
-        patch("nooa.unifiedllm.get_llm_client") as get_llm_client,
+        patch("nooa.unifiedllm.load_llm") as load_llm,
         patch("nooa_acp.server.serve") as serve,
         patch("nooa_acp.cli.asyncio.run"),
     ):
@@ -178,8 +179,9 @@ def test_acp_command_leaves_the_key_alone_for_other_providers():
         )
 
     assert result.exit_code == 0
+    assert serve.call_args.kwargs["model_alias"] == "openai/gpt-4o-mini"
     serve.call_args.args[0]()
-    get_llm_client.assert_called_once_with("openai/gpt-4o-mini", client_type=None)
+    load_llm.assert_called_once_with("openai/gpt-4o-mini", client_type=None)
 
 
 class _MCPTools:
@@ -260,7 +262,7 @@ def _write_packaged_command_skill(workspace, value: str) -> None:
 
 async def test_adapter_completes_one_session_prompt(tmp_path):
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
 
     initialized = await adapter.initialize(PROTOCOL_VERSION)
@@ -292,7 +294,7 @@ async def test_adapter_loads_workspace_skills_and_advertises_commands(tmp_path, 
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_config))
     monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
 
     session = await adapter.new_session(str(workspace))
@@ -318,7 +320,7 @@ async def test_adapter_loads_workspace_skills_and_advertises_commands(tmp_path, 
 
 async def test_rejected_bootstrap_commands_do_not_poison_first_prompt(tmp_path):
     client = _RejectFirstCommandsClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
 
     created = await adapter.new_session(str(tmp_path))
@@ -346,7 +348,7 @@ async def test_adapter_dispatches_agent_facing_skill_command(tmp_path, monkeypat
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_config))
     monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     created = await adapter.new_session(str(workspace))
     runtime = await _session(adapter, created.session_id)
@@ -382,7 +384,7 @@ async def test_adapter_renders_user_only_skill_command_without_llm_turn(tmp_path
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_config))
     monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     created = await adapter.new_session(str(workspace))
     runtime = await _session(adapter, created.session_id)
@@ -410,7 +412,7 @@ async def test_adapter_renders_typed_command_error_without_llm_turn(tmp_path):
             return mode
 
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     created = await adapter.new_session(str(tmp_path))
     runtime = await _session(adapter, created.session_id)
@@ -436,7 +438,7 @@ async def test_adapter_renders_typed_command_error_without_llm_turn(tmp_path):
 
 async def test_unknown_slash_command_is_forwarded_as_an_ordinary_prompt(tmp_path):
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     created = await adapter.new_session(str(tmp_path))
     runtime = await _session(adapter, created.session_id)
@@ -459,7 +461,7 @@ async def test_unknown_slash_command_is_forwarded_as_an_ordinary_prompt(tmp_path
 
 async def test_initial_commands_are_deferred_until_new_session_returns(tmp_path):
     client = _RegistrationAwareClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
 
     created = await adapter.new_session(str(tmp_path))
@@ -476,7 +478,7 @@ async def test_initial_commands_are_deferred_until_new_session_returns(tmp_path)
 
 async def test_first_prompt_resends_commands_if_initial_update_was_dropped(tmp_path):
     client = _RegistrationAwareClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
 
     created = await adapter.new_session(str(tmp_path))
@@ -495,14 +497,14 @@ async def test_first_prompt_resends_commands_if_initial_update_was_dropped(tmp_p
 
 async def test_load_session_advertises_commands_to_registered_session(tmp_path):
     create_client = _RecordingClient()
-    create_adapter = CodingACPAdapter(_completed_llm)
+    create_adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     create_adapter.on_connect(create_client)  # type: ignore[arg-type]
     created = await create_adapter.new_session(str(tmp_path))
     await create_adapter.close()
 
     load_client = _RegistrationAwareClient()
     load_client.registered.add(created.session_id)
-    load_adapter = CodingACPAdapter(_completed_llm)
+    load_adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     load_adapter.on_connect(load_client)  # type: ignore[arg-type]
     await load_adapter.load_session(str(tmp_path), created.session_id)
     await asyncio.sleep(0)
@@ -532,7 +534,7 @@ async def test_cancel_interrupts_async_slash_command_and_session_remains_usable(
             return "unreachable"
 
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     created = await adapter.new_session(str(tmp_path))
     runtime = await _session(adapter, created.session_id)
@@ -566,7 +568,7 @@ async def test_cancel_clears_agent_facing_slash_result_and_session_remains_usabl
             return f"work:{args}"
 
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     created = await adapter.new_session(str(tmp_path))
     runtime = await _session(adapter, created.session_id)
@@ -614,7 +616,7 @@ async def test_adapter_republishes_commands_after_skill_activation(tmp_path):
             return "later"
 
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     created = await adapter.new_session(str(tmp_path))
     runtime = await _session(adapter, created.session_id)
@@ -642,7 +644,7 @@ async def test_adapter_replaces_advertised_commands_after_skill_reload(tmp_path,
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_config))
     monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     created = await adapter.new_session(str(workspace))
     runtime = await _session(adapter, created.session_id)
@@ -686,7 +688,7 @@ async def test_failed_skill_reload_keeps_previous_command_and_advertisement(tmp_
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_config))
     monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     created = await adapter.new_session(str(workspace))
     runtime = await _session(adapter, created.session_id)
@@ -716,7 +718,7 @@ async def test_failed_skill_reload_keeps_previous_command_and_advertisement(tmp_
 async def test_adapter_includes_resource_links_in_prompt(tmp_path):
     llm = _completed_llm()
     client = _RecordingClient()
-    adapter = CodingACPAdapter(lambda: llm)
+    adapter = CodingACPAdapter(lambda: llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
 
     session = await adapter.new_session(str(tmp_path))
@@ -731,7 +733,7 @@ async def test_adapter_includes_resource_links_in_prompt(tmp_path):
 
 async def test_adapter_preserves_prompt_whitespace(tmp_path):
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
 
     session = await adapter.new_session(str(tmp_path))
@@ -747,7 +749,7 @@ async def test_adapter_preserves_prompt_whitespace(tmp_path):
 
 async def test_adapter_connects_baseline_stdio_mcp_servers(tmp_path):
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     server = McpServerStdio(
         name="lookup",
@@ -776,7 +778,7 @@ async def test_adapter_connects_baseline_stdio_mcp_servers(tmp_path):
 
 async def test_adapter_connects_forwarded_http_and_sse_mcp_servers(tmp_path):
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     servers = [
         HttpMcpServer(
@@ -821,7 +823,7 @@ async def test_adapter_connects_forwarded_http_and_sse_mcp_servers(tmp_path):
 
 async def test_adapter_skips_forwarded_acp_transport_mcp_server(tmp_path):
     client = _RegistrationAwareClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     server = AcpMcpServer(name="proxied", server_id="server-1", type="acp")
 
@@ -855,7 +857,7 @@ async def test_adapter_skips_forwarded_acp_transport_mcp_server(tmp_path):
 
 async def test_adapter_loads_healthy_mcp_when_another_server_fails(tmp_path):
     client = _RegistrationAwareClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     servers = [
         HttpMcpServer(
@@ -901,7 +903,7 @@ async def test_adapter_loads_healthy_mcp_when_another_server_fails(tmp_path):
 
 async def test_adapter_allows_independent_session_creation(tmp_path):
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     server = McpServerStdio(name="lookup", command="lookup-server", args=[], env=[])
     started = asyncio.Event()
@@ -937,7 +939,7 @@ async def test_adapter_routes_distinct_workspace_commands_to_their_sessions(tmp_
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_config))
     monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
     client = _RegistrationAwareClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
 
     alpha_session = await adapter.new_session(str(alpha))
@@ -1001,7 +1003,7 @@ async def test_adapter_rejects_conflicting_packaged_skills_without_contamination
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_config))
     monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
 
     alpha_session = await adapter.new_session(str(alpha))
@@ -1056,7 +1058,7 @@ async def test_same_checkout_stays_live_until_last_acp_session_closes(
     monkeypatch.setenv("NEMO_OO_USER_DIR", str(user_config))
     monkeypatch.delenv("NEMO_OO_SETTINGS", raising=False)
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
 
     sessions = [
@@ -1084,7 +1086,7 @@ async def test_same_checkout_stays_live_until_last_acp_session_closes(
 
 async def test_adapter_rejects_two_prompts_for_same_session(tmp_path):
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     created = await adapter.new_session(str(tmp_path))
     session = await _session(adapter, created.session_id)
@@ -1109,7 +1111,7 @@ async def test_adapter_rejects_two_prompts_for_same_session(tmp_path):
 
 async def test_adapter_lists_closes_loads_and_replays_durable_session(tmp_path):
     first_client = _RecordingClient()
-    first_adapter = CodingACPAdapter(_completed_llm)
+    first_adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     first_adapter.on_connect(first_client)  # type: ignore[arg-type]
     created = await first_adapter.new_session(str(tmp_path))
     await first_adapter.prompt(created.session_id, [text_block("remember this")])
@@ -1123,7 +1125,7 @@ async def test_adapter_lists_closes_loads_and_replays_durable_session(tmp_path):
     await first_adapter.close()
 
     replay_client = _RecordingClient()
-    replay_adapter = CodingACPAdapter(_completed_llm)
+    replay_adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     replay_adapter.on_connect(replay_client)  # type: ignore[arg-type]
     await replay_adapter.load_session(str(tmp_path), created.session_id)
 
@@ -1145,12 +1147,12 @@ async def test_adapter_lists_closes_loads_and_replays_durable_session(tmp_path):
 
 
 async def test_loading_session_is_not_available_until_replay_finishes(tmp_path):
-    create_adapter = CodingACPAdapter(_completed_llm)
+    create_adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     create_adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
     created = await create_adapter.new_session(str(tmp_path))
     await create_adapter.close()
 
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
     replay_started = asyncio.Event()
     release_replay = asyncio.Event()
@@ -1177,13 +1179,13 @@ async def test_loading_session_is_not_available_until_replay_finishes(tmp_path):
 
 
 async def test_adapter_loads_durable_session_when_forwarded_mcp_is_unavailable(tmp_path):
-    create_adapter = CodingACPAdapter(_completed_llm)
+    create_adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     create_adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
     created = await create_adapter.new_session(str(tmp_path))
     await create_adapter.close()
 
     load_client = _RecordingClient()
-    load_adapter = CodingACPAdapter(_completed_llm)
+    load_adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     load_adapter.on_connect(load_client)  # type: ignore[arg-type]
     server = HttpMcpServer(
         name="offline",
@@ -1217,7 +1219,7 @@ async def test_adapter_loads_durable_session_when_forwarded_mcp_is_unavailable(t
 
 async def test_adapter_reports_unknown_session_on_load(tmp_path):
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
 
     with pytest.raises(RequestError):
@@ -1228,7 +1230,7 @@ async def test_adapter_reports_unknown_session_on_load(tmp_path):
 
 async def test_adapter_skips_duplicate_mcp_names_without_failing_startup(tmp_path):
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     servers = [
         McpServerStdio(name="lookup", command="first", args=[], env=[]),
@@ -1284,7 +1286,7 @@ async def test_adapter_maps_generation_limits_to_stop_reasons(
     tmp_path, message: str, stop_reason: str
 ):
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     session = await adapter.new_session(str(tmp_path))
     runtime = await _session(adapter, session.session_id)
@@ -1298,7 +1300,7 @@ async def test_adapter_maps_generation_limits_to_stop_reasons(
 
 async def test_adapter_propagates_generation_error_message_to_acp_client(tmp_path):
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     session = await adapter.new_session(str(tmp_path))
     runtime = await _session(adapter, session.session_id)
@@ -1328,7 +1330,7 @@ async def test_prompt_on_a_closing_session_is_a_clean_protocol_error(tmp_path):
     reason instead of a typed protocol error.
     """
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
 
     await adapter.initialize(PROTOCOL_VERSION)
@@ -1352,7 +1354,7 @@ async def test_sessions_on_different_workspaces_get_separate_library_dirs(tmp_pa
     on another.
     """
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     first_root = tmp_path / "repo-a"
     second_root = tmp_path / "repo-b"
@@ -1377,7 +1379,7 @@ async def test_mcp_server_named_like_a_core_tool_cannot_replace_it(tmp_path):
     close(). The session must survive with its real shell and a warning.
     """
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     server = McpServerStdio(name="shell", command="lookup-server", args=[], env=[])
 
@@ -1396,7 +1398,7 @@ async def test_mcp_server_named_like_a_core_tool_cannot_replace_it(tmp_path):
 async def test_mcp_server_with_a_reserved_name_does_not_kill_the_session(tmp_path):
     """A reserved attr name raised a bare ValueError out of session/new."""
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     server = McpServerStdio(name="runtime", command="lookup-server", args=[], env=[])
 
@@ -1419,7 +1421,7 @@ async def test_a_skipped_mcp_server_is_reported_to_the_client(tmp_path):
     and no explanation.
     """
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     server = McpServerStdio(name="shell", command="lookup-server", args=[], env=[])
 
@@ -1444,7 +1446,7 @@ async def test_replay_separates_consecutive_turns_from_one_speaker(tmp_path):
     into one bubble — "run sleep(60)run sleep(60)One more time...".
     """
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
 
     created = await adapter.new_session(str(tmp_path))
@@ -1474,7 +1476,7 @@ async def test_initialize_advertises_the_mcp_transports_it_supports():
     servers at all however they are configured — observed against Zed, which
     had authenticated servers and forwarded none.
     """
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     initialized = await adapter.initialize(PROTOCOL_VERSION)
 
     mcp = initialized.agent_capabilities.mcp_capabilities
@@ -1503,7 +1505,7 @@ async def test_slash_command_still_reports_generation_limits(tmp_path):
     end of turn, losing max_tokens.
     """
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     created = await adapter.new_session(str(tmp_path))
     session = await _session(adapter, created.session_id)
@@ -1528,7 +1530,7 @@ async def test_a_turn_that_ends_early_closes_its_open_tool_cards(tmp_path):
     a later cancel then retitled that stale card "Cancelled".
     """
     client = _RecordingClient()
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client)  # type: ignore[arg-type]
     created = await adapter.new_session(str(tmp_path))
     session = await _session(adapter, created.session_id)
@@ -1553,7 +1555,7 @@ async def test_bootstrap_updates_do_not_interleave_into_a_replay(tmp_path):
     updates, so every await in the replay loop let a commands update or an MCP
     warning land in the middle of the restored conversation.
     """
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
     created = await adapter.new_session(str(tmp_path))
     session = await _session(adapter, created.session_id)
@@ -1589,7 +1591,7 @@ def _remembering_llm() -> FakeLLMClient:
 
 async def _session_that_remembered(tmp_path) -> tuple[CodingACPAdapter, str]:
     """A session whose one finished turn set ``self.v.remembered``; adapter still open."""
-    adapter = CodingACPAdapter(_remembering_llm)
+    adapter = CodingACPAdapter(_remembering_llm, model_alias="fake-model")
     adapter.on_connect(_RecordingClient())  # type: ignore[arg-type]
     created = await adapter.new_session(str(tmp_path))
     await adapter.prompt(created.session_id, [text_block("remember this")])
@@ -1597,7 +1599,7 @@ async def _session_that_remembered(tmp_path) -> tuple[CodingACPAdapter, str]:
 
 
 async def _reload(tmp_path, session_id: str, client=None) -> tuple[CodingACPAdapter, object]:
-    adapter = CodingACPAdapter(_completed_llm)
+    adapter = CodingACPAdapter(_completed_llm, model_alias="fake-model")
     adapter.on_connect(client or _RecordingClient())  # type: ignore[arg-type]
     await adapter.load_session(str(tmp_path), session_id)
     return adapter, await _session(adapter, session_id)
@@ -1695,3 +1697,702 @@ async def test_load_session_with_an_unreadable_snapshot_starts_a_fresh_agent(tmp
     assert replayed == ["remember this\n"]
     await second.prompt(session_id, [text_block("still usable")])
     await second.close()
+
+
+# D2: actual public-loader/core-SDK/CodingAgent integration, not fake lifecycle proof.
+@pytest.fixture
+async def d2_native_models(monkeypatch):
+    from nooa.unifiedllm import registry
+    from tests.runtime.public_llm_fixtures import NativeModels
+
+    monkeypatch.setattr(registry, "_loaded", True)
+    monkeypatch.setattr(registry, "MODELS", {})
+    models = NativeModels()
+    yield models
+    await models.close()
+
+
+def _d2_native_cell(family, code, call_id):
+    import json
+
+    from tests.unifiedllm.test_native_load_llm import paid_payload
+
+    data = paid_payload(family, input_tokens=11, output_tokens=3)
+    arguments = json.dumps({"code": code})
+    if family == "openai-chat":
+        data["choices"][0]["message"].update(
+            content=None,
+            tool_calls=[
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": "execute_python", "arguments": arguments},
+                }
+            ],
+        )
+        data["choices"][0]["finish_reason"] = "tool_calls"
+    elif family == "openai-responses":
+        data["output"] = [
+            {
+                "id": call_id,
+                "type": "function_call",
+                "call_id": call_id,
+                "name": "execute_python",
+                "arguments": arguments,
+                "status": "completed",
+            }
+        ]
+    else:
+        data["content"] = [
+            {
+                "type": "tool_use",
+                "id": call_id,
+                "name": "execute_python",
+                "input": {"code": code},
+            }
+        ]
+        data["stop_reason"] = "tool_use"
+    return data
+
+
+@pytest.mark.parametrize("family", ["openai-chat", "openai-responses", "anthropic-messages"])
+async def test_d2_real_native_coding_new_prompt_save_close_load_prompt(
+    family,
+    d2_native_models,
+    tmp_path,
+):
+    import json
+
+    import httpx
+    from nooa_cli.coding.agent import CodingAgent
+
+    from nooa.unifiedllm.request import LLMRequest
+
+    seen, made = [], []
+
+    def handler(request):
+        body = json.loads(request.content)
+        seen.append(body)
+        assert request.headers["x-api-key" if family == "anthropic-messages" else "authorization"]
+        assert body["model"] == "wire-model-not-the-alias"
+        return httpx.Response(
+            200,
+            json=_d2_native_cell(
+                family,
+                "self.v.native_turns = self.v.get('native_turns', 0) + 1\n"
+                "return_result(Done(message='native answer', explanation='native done'))",
+                f"native_{len(seen)}",
+            ),
+        )
+
+    # Required four fields are fixed on the public request, including output_type.
+    assert set(LLMRequest.model_fields) == {"messages", "tools", "tool_choice", "output_type"}
+
+    def factory():
+        model = d2_native_models.make(family, handler=handler, model="wire-model-not-the-alias")
+        made.append(model)
+        return model
+
+    alias = "configured-literal-alias"
+    adapter = CodingACPAdapter(factory, model_alias=alias)
+    adapter.on_connect(_RecordingClient())
+    created = await adapter.new_session(str(tmp_path), [])
+    first = await _session(adapter, created.session_id)
+    assert isinstance(first.agent, CodingAgent)
+    assert first.handle.info.model == alias
+    assert (
+        await adapter.prompt(created.session_id, [text_block("first")])
+    ).stop_reason == "end_turn"
+    assert first.agent.v.native_turns == 1
+    assert first.handle.info.model == alias
+    assert list(first.handle.storage.event_backend.all_events())
+    await adapter.close_session(created.session_id)
+    assert made[0]._closed and first.handle._closed
+    assert all(not http.is_closed for http in d2_native_models.http)
+    assert all(sdk.max_retries == 9 for sdk in d2_native_models.sdks)
+    await adapter.load_session(str(tmp_path), created.session_id, [])
+    second = await _session(adapter, created.session_id)
+    assert isinstance(second.agent, CodingAgent) and second.agent is not first.agent
+    assert second.agent.v.native_turns == 1
+    assert (
+        await adapter.prompt(created.session_id, [text_block("second")])
+    ).stop_reason == "end_turn"
+    assert second.agent.v.native_turns == 2
+    assert second.handle.info.model == alias
+    assert len(seen) == 2 and len(made) == 2
+    await adapter.close()
+    assert all(model._closed for model in made)
+    assert all(not http.is_closed for http in d2_native_models.http)
+
+
+@pytest.mark.parametrize("family", ["openai-chat", "openai-responses", "anthropic-messages"])
+async def test_d2_alias_rejection_precedes_native_factory_or_second_writer(
+    family,
+    d2_native_models,
+    tmp_path,
+):
+    first = CodingACPAdapter(lambda: d2_native_models.make(family), model_alias="saved-alias")
+    first.on_connect(_RecordingClient())
+    created = await first.new_session(str(tmp_path), [])
+    await first.close()
+    calls = []
+
+    def forbidden_factory():
+        calls.append(True)
+        return d2_native_models.make(family)
+
+    other = CodingACPAdapter(forbidden_factory, model_alias="different-alias")
+    other.on_connect(_RecordingClient())
+    with pytest.raises(RequestError):
+        await other.load_session(str(tmp_path), created.session_id, [])
+    assert calls == [] and len(d2_native_models.views) == 1
+    await other.close()
+
+
+@pytest.mark.parametrize("family", ["openai-chat", "openai-responses", "anthropic-messages"])
+@pytest.mark.parametrize(
+    "seam",
+    [
+        "binding",
+        "partial-agent",
+        "dispatcher",
+        "bridge",
+        "commands",
+        "command-callback",
+        "bootstrap-registration",
+    ],
+)
+async def test_d2_native_partial_construction_closes_real_resources(
+    family,
+    seam,
+    d2_native_models,
+    monkeypatch,
+    tmp_path,
+):
+    import nooa_acp.server as server
+    from nooa_cli.coding.agent import CodingAgent
+
+    from nooa.runtime.model_binding import ModelBinding
+
+    sentinel = RuntimeError("native partial " + seam)
+    made, handles, sessions = [], [], []
+    store_create = server.SessionStore.create
+
+    def create(store, *args, **kwargs):
+        handle = store_create(store, *args, **kwargs)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(server.SessionStore, "create", create)
+
+    def factory():
+        view = d2_native_models.make(family)
+        made.append(view)
+        return view
+
+    adapter = CodingACPAdapter(factory, model_alias="native-partial-alias")
+    adapter.on_connect(_RecordingClient())
+    targets = {
+        "binding": (ModelBinding, "__init__"),
+        "partial-agent": (CodingAgent, "__init__"),
+        "dispatcher": (server.InteractiveSessionDispatcher, "__init__"),
+        "bridge": (server.ACPEventBridge, "__init__"),
+        "commands": (server.CodingSlashCommandRegistry, "__init__"),
+        "command-callback": (server.CodingSlashCommandRegistry, "set_on_change"),
+    }
+    if seam == "bootstrap-registration":
+        original_defer = adapter._defer_bootstrap_updates
+
+        class FailedRegistration(set):
+            def add(self, task):
+                raise sentinel
+
+        def fail_registration(session):
+            sessions.append(session)
+            session.notification_tasks = FailedRegistration()
+            original_defer(session)
+
+        monkeypatch.setattr(adapter, "_defer_bootstrap_updates", fail_registration)
+    else:
+        cls, method = targets[seam]
+        original = getattr(cls, method)
+
+        def fail_after_actual(self, *args, **kwargs):
+            original(self, *args, **kwargs)
+            raise sentinel
+
+        monkeypatch.setattr(cls, method, fail_after_actual)
+    with pytest.raises(RuntimeError) as caught:
+        await adapter.new_session(str(tmp_path), [])
+    assert caught.value is sentinel
+    assert len(made) == 1 and made[0]._closed
+    assert all(handle._closed for handle in handles)
+    assert await adapter._sessions.ids() == ()
+    assert not adapter._construction
+    assert all(not client.is_closed for client in d2_native_models.http)
+    assert all(sdk.max_retries == 9 for sdk in d2_native_models.sdks)
+    assert not d2_native_models.seen
+    for session in sessions:
+        assert session.notification_owner is None
+        assert not session.notification_tasks
+    await adapter.close()
+
+
+@pytest.mark.parametrize("family", ["openai-chat", "openai-responses", "anthropic-messages"])
+@pytest.mark.parametrize("seam", ["replay", "replacement-factory", "replacement-agent"])
+async def test_d2_native_restore_failure_retains_and_closes_actual_owners(
+    family,
+    seam,
+    d2_native_models,
+    monkeypatch,
+    tmp_path,
+):
+    import nooa_acp.server as server
+    from nooa_cli.coding.agent import CodingAgent
+
+    from nooa.storage.sqlite import SQLiteStorageManager
+
+    views, handles, agents = [], [], []
+    sentinel = RuntimeError("native restore " + seam)
+    original_agent_init = CodingAgent.__init__
+    original_store_open = server.SessionStore.open
+
+    def factory():
+        if seam == "replacement-factory" and len(views) == 2:
+            raise sentinel
+        view = d2_native_models.make(family)
+        views.append(view)
+        return view
+
+    def agent_init(agent, *args, **kwargs):
+        agents.append(agent)
+        original_agent_init(agent, *args, **kwargs)
+        if seam == "replacement-agent" and len(agents) == 3:
+            raise sentinel
+
+    def store_open(store, *args, **kwargs):
+        handle = original_store_open(store, *args, **kwargs)
+        handles.append(handle)
+        return handle
+
+    adapter = CodingACPAdapter(factory, model_alias="native-restore-alias")
+    adapter.on_connect(_RecordingClient())
+    monkeypatch.setattr(CodingAgent, "__init__", agent_init)
+    created = await adapter.new_session(str(tmp_path), [])
+    await adapter.close_session(created.session_id)
+    monkeypatch.setattr(server.SessionStore, "open", store_open)
+
+    def broken_restore(storage, agent):
+        raise RuntimeError("actual snapshot restore boundary")
+
+    monkeypatch.setattr(SQLiteStorageManager, "restore_latest_snapshot", broken_restore)
+    if seam == "replay":
+
+        async def broken_replay(session):
+            raise sentinel
+
+        monkeypatch.setattr(adapter, "_replay_session", broken_replay)
+    with pytest.raises(RuntimeError) as caught:
+        await adapter.load_session(str(tmp_path), created.session_id, [])
+    assert caught.value is sentinel
+    assert len(views) == (2 if seam == "replacement-factory" else 3)
+    assert all(view._closed for view in views)
+    assert all(handle._closed for handle in handles)
+    assert await adapter._sessions.ids() == ()
+    assert not adapter._construction
+    assert all(not http.is_closed for http in d2_native_models.http)
+    assert all(sdk.max_retries == 9 for sdk in d2_native_models.sdks)
+    await adapter.close()
+
+
+import os as _d2_control_os  # noqa: E402 (additive integration test section)
+
+
+class _D2ACPControl(BaseException):
+    pass
+
+
+@pytest.mark.skipif(
+    _d2_control_os.environ.get("NOOA_D2_ISOLATED_CONTROLS") != "1",
+    reason="interpreter controls run only in the private subprocess driver",
+)
+@pytest.mark.parametrize("control_type", [SystemExit, KeyboardInterrupt, _D2ACPControl])
+@pytest.mark.parametrize("stage", ["bridge", "commands", "agent", "model", "record", "bootstrap"])
+async def test_d2_isolated_native_acp_complete_data_chain(
+    control_type,
+    stage,
+    d2_native_models,
+    monkeypatch,
+    tmp_path,
+    close_every_adapter,
+):
+    import asyncio
+    import inspect
+
+    from nooa_acp._runtime import _acp_capture, _acp_task, _ACPOutcome
+
+    view = d2_native_models.make("openai-chat")
+    adapter = CodingACPAdapter(lambda: view, model_alias="native-control-alias")
+    adapter.on_connect(_RecordingClient())
+    created = await adapter.new_session(str(tmp_path), [])
+    runtime = await adapter._sessions.get(created.session_id)
+    session = runtime.value
+    control = control_type("actual cleanup control " + stage)
+    calls = []
+    if stage == "bootstrap":
+        await asyncio.sleep(0)
+
+        async def failed_notification():
+            raise control
+
+        worker = _acp_task(failed_notification(), name="d2-held-control-bootstrap")
+        session.notification_owner = worker
+        session.notification_tasks.add(worker)
+        await asyncio.sleep(0)
+    else:
+        resource, method = {
+            "bridge": (session.bridge, "close"),
+            "commands": (session.commands, "close"),
+            "agent": (session.agent, "_close_coding_resources"),
+            "model": (view, "aclose"),
+            "record": (session.handle, "close"),
+        }[stage]
+        # Inject at the real CodingAgent cleanup seam, not a new agent method.
+        target = resource
+        actual = getattr(target, method)
+
+        def failed_after_actual(*args, **kwargs):
+            monkeypatch.setattr(target, method, actual)
+            calls.append(resource)
+            result = actual(*args, **kwargs)
+            if inspect.isawaitable(result):
+
+                async def complete():
+                    await result
+                    raise control
+
+                return complete()
+            raise control
+
+        monkeypatch.setattr(target, method, failed_after_actual)
+
+    def contains(error):
+        return error is control or (
+            isinstance(error, BaseExceptionGroup)
+            and any(contains(child) for child in error.exceptions)
+        )
+
+    outer = asyncio.create_task(_acp_capture(adapter.close()))
+    outcome = await outer
+    assert outer.exception() is None and isinstance(outcome, _ACPOutcome)
+    assert contains(outcome.failure)
+    assert await adapter._sessions.ids() == ()
+    assert view._closed and session.handle._closed
+    assert not d2_native_models.http[0].is_closed
+    assert d2_native_models.sdks[0].max_retries == 9
+    for task in (
+        session.close_task,
+        session.construction.close_task,
+        runtime._close_task,
+        adapter._sessions._close_task,
+    ):
+        assert task.done() and not task.cancelled() and task.exception() is None
+        assert isinstance(task.result(), _ACPOutcome)
+    coding_task = session.agent._coding_close_task
+    assert coding_task.done() and coding_task.exception() is None
+    if stage == "agent":
+        assert coding_task.result() is control
+    for _ in range(2):
+        again = await _acp_capture(adapter.close())
+        assert contains(again.failure)
+    assert len(calls) == (0 if stage == "bootstrap" else 1)
+    if stage == "bootstrap":
+        assert worker.done() and worker.exception() is None
+        assert worker.result().failure is control
+    # All real resources have closed; avoid the legacy autouse fixture's
+    # Exception-only catch re-raising a deliberately retained control.
+    close_every_adapter.remove(adapter)
+
+
+@pytest.mark.parametrize("family", ["openai-chat", "openai-responses", "anthropic-messages"])
+@pytest.mark.parametrize("stage", ["retryable-cleanup", "terminal-delegated-release"])
+async def test_d2_native_retirement_prunes_only_settled_obligations(
+    family, stage, d2_native_models, monkeypatch, tmp_path, close_every_adapter
+):
+    import httpx
+    from nooa_acp._runtime import _acp_capture
+
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json=_d2_native_cell(
+                family,
+                "self.v.settled_native = True\n"
+                "return_result(Done(message='paid native turn', explanation='settled'))",
+                "native_retirement",
+            ),
+        )
+
+    view = d2_native_models.make(family, handler=handler)
+    adapter = CodingACPAdapter(lambda: view, model_alias="native-retirement-alias")
+    adapter.on_connect(_RecordingClient())
+    created = await adapter.new_session(str(tmp_path), [])
+    runtime = await adapter._sessions.get(created.session_id)
+    session = runtime.value
+    assert (
+        await adapter.prompt(created.session_id, [text_block("settle")])
+    ).stop_reason == "end_turn"
+    assert session.agent.v.settled_native and len(requests) == 1
+    saved_events = list(session.handle.storage.event_backend.all_events())
+    assert saved_events
+    sentinel = RuntimeError("actual native retirement " + stage)
+    calls = []
+    if stage == "retryable-cleanup":
+        actual = session.bridge.close
+
+        async def close_bridge():
+            calls.append("bridge")
+            if len(calls) == 1:
+                raise sentinel
+            await actual()
+
+        monkeypatch.setattr(session.bridge, "close", close_bridge)
+    else:
+        actual = session.handle.close
+
+        def close_handle():
+            calls.append("delegate")
+            actual()
+            raise sentinel
+
+        monkeypatch.setattr(session.handle, "close", close_handle)
+    close_every_adapter.remove(adapter)
+    first = await _acp_capture(adapter.close_session(created.session_id))
+    assert first.failure is sentinel
+    assert await adapter._sessions.ids() == ()
+    assert await adapter._sessions.owns(created.session_id)
+    assert view._closed and session.handle._closed
+    assert all(not client.is_closed for client in d2_native_models.http)
+    assert all(sdk.max_retries == 9 for sdk in d2_native_models.sdks)
+    second = await _acp_capture(adapter.close_session(created.session_id))
+    assert second.failure is sentinel
+    assert session.construction.failures[0].failure is sentinel
+    if stage == "retryable-cleanup":
+        assert calls == ["bridge", "bridge"]
+        assert not session.construction.retryable
+        assert session.construction.release_completed
+        assert not await adapter._sessions.owns(created.session_id)
+        assert created.session_id not in adapter._sessions._retired
+        # A completed stage is not replayed merely because first-error DATA persists.
+        await adapter.close()
+        assert calls == ["bridge", "bridge"]
+    else:
+        assert calls == ["delegate"]
+        assert session.construction.release_started
+        assert not session.construction.release_completed
+        assert session.construction.release_failure.failure is sentinel
+        assert await adapter._sessions.owns(created.session_id)
+        assert adapter._sessions._retired[created.session_id] is runtime
+        # Real delegated close ran once, but its failure remains unresolved:
+        # a repeat/no-op cannot establish settlement or remove the writer fence.
+        third = await _acp_capture(adapter.close_session(created.session_id))
+        assert third.failure is sentinel and calls == ["delegate"]
+        with pytest.raises(RequestError):
+            await adapter.load_session(str(tmp_path), created.session_id, [])
+
+
+@pytest.mark.parametrize("family", ["openai-chat", "openai-responses", "anthropic-messages"])
+@pytest.mark.parametrize("seam", ["store", "mcp", "skills", "publication"])
+async def test_d2_native_partial_real_store_mcp_skills_publication(
+    family, seam, d2_native_models, monkeypatch, tmp_path, close_every_adapter
+):
+    import sys
+    from contextlib import asynccontextmanager
+    from pathlib import Path
+
+    import nooa_acp.server as server
+    from nooa_cli.sessions.events import SessionStarted
+
+    from nooa.mcp.client import MCPStdioClient
+    from nooa.runtime.event_manager import EventManager
+    from nooa.skill_registry import SkillRegistry
+    from nooa.storage.sqlite import SQLiteStorageManager
+
+    sentinel = RuntimeError("actual native host " + seam)
+    views, handles, storage_closes, mcp_exits, tools = [], [], [], [], []
+    actual_create = server.SessionStore.create
+    actual_storage_close = SQLiteStorageManager.close
+    actual_connect = MCPStdioClient.connect_to_server
+
+    def factory():
+        view = d2_native_models.make(family)
+        views.append(view)
+        return view
+
+    def create(store, *args, **kwargs):
+        handle = actual_create(store, *args, **kwargs)
+        handles.append(handle)
+        return handle
+
+    def storage_close(storage):
+        storage_closes.append(storage)
+        return actual_storage_close(storage)
+
+    @asynccontextmanager
+    async def connect(client):
+        try:
+            async with actual_connect(client) as session:
+                yield session
+        finally:
+            mcp_exits.append(client)
+
+    monkeypatch.setattr(server.SessionStore, "create", create)
+    monkeypatch.setattr(SQLiteStorageManager, "close", storage_close)
+    monkeypatch.setattr(MCPStdioClient, "connect_to_server", connect)
+    adapter = CodingACPAdapter(factory, model_alias="native-partial-host-alias")
+    adapter.on_connect(_RecordingClient())
+    servers = []
+    if seam == "store":
+        actual_add = EventManager.add
+
+        def add(manager, event, *args, **kwargs):
+            result = actual_add(manager, event, *args, **kwargs)
+            if isinstance(event, SessionStarted):
+                raise sentinel
+            return result
+
+        monkeypatch.setattr(EventManager, "add", add)
+    elif seam == "mcp":
+        actual_tools = adapter._create_mcp_tools
+
+        async def create_tools(*args, **kwargs):
+            result = await actual_tools(*args, **kwargs)
+            tools.extend(result[0].values())
+            assert len(tools) == 1
+            raise sentinel
+
+        monkeypatch.setattr(adapter, "_create_mcp_tools", create_tools)
+        servers = [
+            McpServerStdio(
+                name="native-real-wiki",
+                command=sys.executable,
+                args=[
+                    str(Path(__file__).resolve().parents[3] / "examples/assets/wiki_mcp_server.py")
+                ],
+                env=[],
+            )
+        ]
+    elif seam == "skills":
+        actual_register = SkillRegistry.register
+
+        def register(registry, name, *args, **kwargs):
+            result = actual_register(registry, name, *args, **kwargs)
+            if name == "nemo.skill_writing":
+                raise sentinel
+            return result
+
+        monkeypatch.setattr(SkillRegistry, "register", register)
+    else:
+        actual_add = adapter._sessions.add
+
+        async def add_runtime(*args, **kwargs):
+            await actual_add(*args, **kwargs)
+            raise sentinel
+
+        monkeypatch.setattr(adapter._sessions, "add", add_runtime)
+    close_every_adapter.remove(adapter)
+    with pytest.raises(RuntimeError) as caught:
+        await adapter.new_session(str(tmp_path), mcp_servers=servers)
+    assert caught.value is sentinel
+    assert len(views) == 1 and views[0]._closed
+    assert all(handle._closed for handle in handles)
+    assert storage_closes and all(storage._closed for storage in storage_closes)
+    assert await adapter._sessions.ids() == ()
+    assert not adapter._sessions._runtimes and not adapter._sessions._retired
+    assert not adapter._construction
+    assert not d2_native_models.seen
+    assert all(not client.is_closed for client in d2_native_models.http)
+    assert all(sdk.max_retries == 9 for sdk in d2_native_models.sdks)
+    if seam == "mcp":
+        assert len(tools) == len(mcp_exits) == 1
+        assert tools[0]._client is mcp_exits[0]
+        # NOOA's actual MCP client scopes its subprocess to connect/discovery;
+        # MCPTool itself has no persistent process or close/aclose protocol.
+        assert not callable(getattr(tools[0], "close", None))
+        assert not callable(getattr(tools[0], "aclose", None))
+    await adapter.close()
+
+
+@pytest.mark.skipif(
+    _d2_control_os.environ.get("NOOA_D2_ISOLATED_CONTROLS") != "1",
+    reason="native wrapper controls run only in the isolated offline subprocess",
+)
+@pytest.mark.parametrize("family", ["openai-chat", "openai-responses", "anthropic-messages"])
+@pytest.mark.parametrize(
+    "control_type", [RuntimeError, asyncio.CancelledError, _D2ACPControl, SystemExit]
+)
+async def test_d2_native_actual_coding_shell_owner_survives_skill_removal(
+    family, control_type, d2_native_models, monkeypatch, tmp_path
+):
+    from nooa_cli.coding.agent import CodingAgent
+
+    from nooa.interactive import SummarizationConfig
+    from nooa.unifiedllm import registry
+    from tests.runtime.test_public_llm_factory_calls import generate
+    from tests.unifiedllm.test_native_load_llm import zero_delay
+
+    root = d2_native_models.make(family)
+    monkeypatch.setitem(
+        registry.MODELS,
+        "native-shell-owner-alias",
+        {
+            "adapter": family,
+            "model": "fixture-model",
+            "api_key": "fixture-key",
+            "base_url": "https://fixture.invalid/v1",
+            "client": d2_native_models.sdks[-1],
+            "context_window": 12800,
+            "max_tokens": 100,
+            "retry_config": zero_delay(),
+        },
+    )
+    agent = CodingAgent(
+        llm="native-shell-owner-alias",
+        cwd=tmp_path,
+        libs_dir=tmp_path / "skills",
+        summarization=SummarizationConfig(policy="none"),
+    )
+    view, binding = agent.llm, agent.llms["main"]
+    wrapper = agent.shell
+    assert agent._coding_shell_owner is wrapper
+    assert view is not root and binding._owned[id(view)] is view
+    await generate(agent)
+    assert len(d2_native_models.seen) == 1
+    control, calls = control_type("actual wrapper close control"), []
+    actual = wrapper.close
+
+    async def close_wrapper():
+        calls.append(wrapper)
+        assert getattr(agent, "shell", None) is None
+        await actual()
+        raise control
+
+    monkeypatch.setattr(wrapper, "close", close_wrapper)
+    from nooa_acp._runtime import _acp_capture
+
+    for _ in range(3):
+        outcome = await _acp_capture(agent.close())
+        assert outcome.failure is control
+        assert agent._coding_cleanup_failures[0] is control
+        task = agent._coding_close_task
+        assert task.done() and not task.cancelled() and task.exception() is None
+        assert task.result() is control
+    assert calls == [wrapper, wrapper, wrapper]
+    assert agent._coding_cleanup_done == {"agent", "skills", "queues"}
+    assert view._closed and binding._references == 0 and not binding._owned
+    assert not root._closed and root._lease.leases == 1
+    assert all(not http.is_closed for http in d2_native_models.http)
+    assert all(sdk.max_retries == 9 for sdk in d2_native_models.sdks)

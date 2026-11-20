@@ -44,6 +44,7 @@ from nooa.storage.snapshot_vars import SnapshotVars
 
 with hidden:
     from nooa import Agent, no_trace
+    from nooa.agent import INHERIT
     from nooa.agents import TokenBudgetSummarizer
     from nooa.config import CodeActConfig, PredictConfig  # noqa: F401
     from nooa.events import _json_safe
@@ -339,15 +340,8 @@ class SummarizationConfig(BaseModel):
 # (overridden at instantiation).
 DEFAULT_MODEL = "claude-opus-4-8"
 
-with hidden:
-    try:
-        from nooa.unifiedllm import get_llm_client
-
-        _DEFAULT_LLM = get_llm_client(DEFAULT_MODEL)
-    except Exception:
-        from nooa.unifiedllm import FakeLLMClient
-
-        _DEFAULT_LLM = FakeLLMClient()
+# A default alias is resolved by the instance owner, not an import-time pool.
+_DEFAULT_LLM = DEFAULT_MODEL
 
 
 # Summarizer trigger as a fraction of the LLM's context window. This is the
@@ -368,9 +362,25 @@ def _summarizer_budget(
     Falls back to 100K when the LLM doesn't expose ``context_window`` so
     we still have a functional threshold.
     """
-    from nooa.agents.summarization import context_budget
+    from nooa.runtime.llm_call import context_limits
 
-    return context_budget(llm, threshold_fraction, fallback_reserve=fallback_reserve)
+    limit = context_limits(llm, fallback_reserve=fallback_reserve).usable_input_tokens
+    return max(1, int(limit * threshold_fraction)) if limit is not None else 100_000
+
+
+def _prepare_model_limits(agent: Agent, client) -> tuple:
+    prepared = []
+    for summarizer in getattr(agent, "_summarizers", []):
+        if getattr(summarizer, "_automatic_context_budget", False):
+            maximum = _summarizer_budget(
+                client,
+                agent._truncation.response_reserve_tokens,
+                threshold_fraction=summarizer._automatic_context_budget_percent,
+            )
+            prepared.append(
+                (summarizer, summarizer.config.model_copy(update={"max_tokens": maximum}))
+            )
+    return tuple(prepared)
 
 
 def apply_model_limits(agent: Agent) -> None:
@@ -380,16 +390,8 @@ def apply_model_limits(agent: Agent) -> None:
     new context window. Runtime-level event truncation picks up the new
     window automatically on the next ``_build_messages`` call.
     """
-    for summarizer in getattr(agent, "_summarizers", []):
-        if not getattr(summarizer, "_automatic_context_budget", False):
-            continue
-        summarizer_max = _summarizer_budget(
-            agent.llm,
-            agent._truncation.response_reserve_tokens,
-            threshold_fraction=summarizer._automatic_context_budget_percent,
-        )
-        current = summarizer.config
-        summarizer.config = current.model_copy(update={"max_tokens": summarizer_max})
+    for summarizer, config in _prepare_model_limits(agent, agent.llm):
+        summarizer.config = config
 
 
 def install_summarizer(config: SummarizationConfig, agent: Agent) -> None:
@@ -476,9 +478,9 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
     # AskPolicy). None: no host policy, a turn may ask.
     ask_policy: Annotated[AskPolicy | None, hidden, nosnapshot]
 
-    def __init__(self, llm=None, *, producers: bool = True, **kwargs):  # noqa: F811 (not the module)
+    def __init__(self, llm=INHERIT, *, producers: bool = True, **kwargs):  # noqa: F811 (not the module)
         """``producers=False``: no ``self.producers`` (a subclass with its own timers)."""
-        super().__init__(llm=llm or _DEFAULT_LLM, **kwargs)
+        super().__init__(llm=_DEFAULT_LLM if llm is None else llm, **kwargs)
         self.ask_policy = None
         self.vars = SnapshotVars()
         self.queue_manager = QueueManager(event_manager=self.event_manager)
@@ -504,6 +506,7 @@ class InteractiveAgent(Agent, llm=_DEFAULT_LLM):
         Self-close from an executing turn is rejected; its external owner must
         close after settlement. This avoids joining one's own task indirectly.
         """
+        self.event_manager._check_close_dependencies()
         if self.turns.in_turn:
             raise RuntimeError("an executing turn cannot close its own agent")
         # Register for this close epoch; the manager shields and joins cleanup.

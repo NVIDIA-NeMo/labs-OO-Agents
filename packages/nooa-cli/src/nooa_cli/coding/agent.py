@@ -4,10 +4,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
+from contextvars import ContextVar
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import Annotated, Any
 
-from nooa import Context, hidden, strategy
+from nooa import Context, hidden, no_trace, strategy
+from nooa.agent import INHERIT
 from nooa.agentdoc import doc, spec
 from nooa.agents import TokenBudgetSummarizer
 from nooa.config import CodeActConfig, PredictConfig
@@ -22,6 +26,7 @@ from nooa.interactive import (
 )
 from nooa.paths import get_project_dir
 from nooa.runtime.channels import Channel
+from nooa.runtime.model_binding import _join_tasks
 from nooa.skill_registry import SkillRegistry
 from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActStrategy, PredictStrategy
@@ -32,10 +37,10 @@ from nooa_cli.coding.activity import ActivityShellTools
 from nooa_cli.coding.instructions import render_agent_instructions
 from nooa_cli.tools.repo_tools import RepoTools
 
-if TYPE_CHECKING:
-    from nooa.unifiedllm import UnifiedLLM
-
 __all__ = ["CodingAgent"]
+
+logger = logging.getLogger(__name__)
+_coding_constructed = ContextVar("coding_constructed", default=None)
 
 
 class CodingAgent(InteractiveAgent):
@@ -74,13 +79,17 @@ class CodingAgent(InteractiveAgent):
     skill_writing: Annotated[SkillWriting, nosnapshot]
     skills: Annotated[SkillRegistry, nosnapshot]
     _base_shell: Annotated[ShellTools, hidden, nosnapshot]
+    _coding_shell_owner: Annotated[ActivityShellTools | None, hidden, nosnapshot]
     _summarizers: Annotated[list[Any], hidden, nosnapshot]
+    _coding_close_task: Annotated[asyncio.Task[BaseException | None] | None, hidden, nosnapshot]
+    _coding_cleanup_done: Annotated[set[str], hidden, nosnapshot]
+    _coding_cleanup_failures: Annotated[list[BaseException], hidden, nosnapshot]
     # Set by CodingSlashCommandRegistry; rebuilt with the host, never saved.
     _command_registry: Annotated[Any, hidden, nosnapshot]
 
     def __init__(
         self,
-        llm: UnifiedLLM | None = None,
+        llm=INHERIT,
         *,
         cwd: str | Path = ".",
         summarization: SummarizationConfig | None = None,
@@ -88,6 +97,16 @@ class CodingAgent(InteractiveAgent):
         libs_dir: Path | None = None,
         **kwargs: Any,
     ) -> None:
+        self._coding_close_task = None
+        self._coding_cleanup_done = set()
+        self._coding_cleanup_failures = []
+        self._base_shell = None
+        self._coding_shell_owner = None
+        self.shell = None
+        self.skills = None
+        observer = _coding_constructed.get()
+        if observer is not None:
+            observer(self)
         super().__init__(llm=llm, **kwargs)
         self._slash_commands_in = self.queue_manager.queue("slash_commands")
         self.slash_commands = self._slash_commands_in.reader
@@ -96,6 +115,7 @@ class CodingAgent(InteractiveAgent):
         self.cwd = Path(cwd).resolve()
         self._base_shell = ShellTools(cwd=str(self.cwd))
         self.shell = ActivityShellTools(self._base_shell, self.event_manager)
+        self._coding_shell_owner = self.shell
         self.repo = RepoTools(root=self.cwd, session=self.shell.session)
         self.todo = TodoManager()
         self.skills = SkillRegistry(self)
@@ -220,19 +240,84 @@ class CodingAgent(InteractiveAgent):
         ...
 
     @hidden
+    @no_trace
     async def close(self) -> None:
-        shell = self.shell
+        # Reject real self-close/dependency cycles as before. A damaged
+        # partial-host getter is a cleanup failure, not permission to skip
+        # unrelated host resources.
         try:
-            await self.aclose()
-            await self.skills.aclose()
-        finally:
-            try:
-                await self.queue_manager.shutdown()
-            finally:
+            events = getattr(self, "event_manager", None)
+            turns = getattr(self, "turns", None)
+        except BaseException as error:
+            self._coding_cleanup_failures.append(error)
+        else:
+            if events is not None:
+                events._check_close_dependencies()
+            if turns is not None and turns.in_turn:
+                raise RuntimeError("an executing turn cannot close its own agent")
+        task = self._coding_close_task
+        if task is None or (task.done() and len(self._coding_cleanup_done) < 4):
+            operation = self._close_coding_resources()
+
+            async def capture() -> BaseException | None:
                 try:
-                    await shell.close()
-                finally:
-                    await self.llm.aclose()
+                    return await operation
+                except BaseException as error:
+                    if all(retained is not error for retained in self._coding_cleanup_failures):
+                        self._coding_cleanup_failures.append(error)
+                    return error
+
+            worker = capture()
+            try:
+                task = self._coding_close_task = asyncio.create_task(worker)
+            except BaseException as error:
+                worker.close()
+                operation.close()
+                self._coding_cleanup_failures.append(error)
+                raise
+        await _join_tasks((task,))
+        failure = task.result()
+        if failure is not None:
+            raise failure
+
+    @hidden
+    @no_trace
+    async def _close_coding_resources(self) -> BaseException | None:
+        failure = self._coding_cleanup_failures[0] if self._coding_cleanup_failures else None
+        try:
+            for what in ("agent", "skills", "queues", "shell"):
+                if what in self._coding_cleanup_done:
+                    continue
+                try:
+                    if what == "agent":
+                        close = self.aclose
+                    elif what == "skills":
+                        resource = getattr(self, "skills", None)
+                        close = resource.aclose if resource is not None else None
+                    elif what == "queues":
+                        resource = getattr(self, "queue_manager", None)
+                        close = resource.shutdown if resource is not None else None
+                    else:
+                        resource = self._coding_shell_owner
+                        if resource is None:
+                            resource = getattr(self, "_base_shell", None)
+                        close = resource.close if resource is not None else None
+                    if close is not None:
+                        await close()
+                    self._coding_cleanup_done.add(what)
+                except BaseException as error:
+                    if all(retained is not error for retained in self._coding_cleanup_failures):
+                        self._coding_cleanup_failures.append(error)
+                    if failure is None:
+                        failure = error
+                    try:
+                        logger.warning("Coding agent %s cleanup failed", what, exc_info=True)
+                    except BaseException:
+                        pass
+        except BaseException as error:
+            if failure is None:
+                failure = error
+        return failure
 
 
 # A blocked subprocess/os.system: use the agent's shell.

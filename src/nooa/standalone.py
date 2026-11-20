@@ -22,6 +22,7 @@ Design constraints:
   module so ``filter_module_globals`` exposes the caller's types to generated code.
 """
 
+import asyncio
 import contextvars
 import inspect
 import types
@@ -204,6 +205,7 @@ def create_standalone_wrapper(
     # Shared resolution lives in nooa.method_llm.resolve_alias so this path
     # and the agent-method path report identical errors.
     _alias_cache: dict[str, Any] = {}
+    _alias_bindings: dict[int, Any] = {}
     _decision_alias_cache: dict[str, Any] = {}
 
     # Only decision strategies consume a decision model. Other strategies must
@@ -212,8 +214,56 @@ def create_standalone_wrapper(
     # A function parameter named decision_model shadows the call-site override.
     _has_user_decision_model_param = "decision_model" in inspect.signature(func).parameters
 
+    _invocations = set()
+    _owner_managers = set()
+    _closed = False
+    _close_task = None
+
+    class Invocation:
+        def __init__(self):
+            from nooa.runtime.event_manager import _CloseDependency
+
+            self.logical_done = asyncio.get_running_loop().create_future()
+            self.binding = None
+            self.agent = None
+            self.dependency = _CloseDependency()
+            self.dependency.on_settled = self.settled
+            for manager in _owner_managers:
+                self.dependency.attach(manager)
+
+        def settled(self):
+            if self.dependency.active:
+                return
+            runtime = getattr(self.agent, "runtime", None)
+            if not getattr(runtime, "_dispatch_bindings", None):
+                _invocations.discard(self)
+
+    def register_owner(parent):
+        manager = getattr(parent, "event_manager", None)
+        if manager is not None and manager not in _owner_managers:
+            _owner_managers.add(manager)
+            manager.on_close(aclose)
+            for invocation in _invocations:
+                invocation.dependency.attach(manager)
+
     @wraps(func)
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if _closed:
+            raise RuntimeError("Standalone model owner is closed")
+        # Keep alias ownership visible in this public wrapper's closure.
+        # Resolution and disposal share this exact cache, not a copied graph.
+        invocation = Invocation()
+        invocation.alias_bindings = _alias_bindings
+        _invocations.add(invocation)
+        token = invocation.dependency.enter()
+        try:
+            return await invoke(invocation, args, kwargs)
+        finally:
+            invocation.dependency.reset(token)
+            invocation.logical_done.set_result(None)
+            invocation.dependency.finish()
+
+    async def invoke(invocation, args, kwargs):
         from nooa.decisions.resolution import is_decision_model, resolve_decision_alias
         from nooa.runtime.context_vars import _parent_agent_var
 
@@ -275,20 +325,50 @@ def create_standalone_wrapper(
                     origin="standalone @strategy(llm=...)",
                 )
             if resolved_llm is None and parent is not None:
-                resolved_llm = getattr(parent, "_llm", None)
+                resolved_llm = getattr(parent, "llms", {}).get(
+                    "main", getattr(parent, "_llm", None)
+                )
             if resolved_llm is None:
                 raise RuntimeError(
                     f"No LLM client for standalone function '{func.__name__}'. "
                     "Pass llm=<client> to @strategy or call it from an agent with an LLM."
                 )
 
+        from nooa.runtime.model_binding import ModelBinding
+
+        call_binding = None
+        if resolved_llm is not None:
+            if any(resolved_llm is view for view in _alias_cache.values()):
+                owner = _alias_bindings.get(id(resolved_llm))
+                if owner is None:
+                    owner = ModelBinding(resolved_llm, owned=True)
+                    _alias_bindings[id(resolved_llm)] = owner
+                call_binding = owner.retain()
+                register_owner(parent)
+            else:
+                call_binding = ModelBinding(resolved_llm)
+            resolved_llm = call_binding
+            invocation.binding = call_binding
+
         # Fresh agent per call — no shared state, history resets automatically
-        agent_cls = _get_agent_cls(func.__module__)
-        agent = agent_cls(
-            llm=resolved_llm,
-            decision_model=resolved_decision_model,
-            agent_id=_standalone_agent_id,
-        )
+        try:
+            agent_cls = _get_agent_cls(func.__module__)
+            agent = agent_cls(
+                llm=resolved_llm,
+                decision_model=resolved_decision_model,
+                agent_id=_standalone_agent_id,
+            )
+            invocation.agent = agent
+            agent._cleanup_settled = invocation.settled
+        except BaseException:
+            if call_binding is not None:
+                try:
+                    call_binding._drop_reference(
+                        owner=not any(call_binding is owner for owner in _alias_bindings.values())
+                    )
+                except BaseException:
+                    pass
+            raise
 
         # ATIF exporter cascade: if an exporter is active in the surrounding
         # context, attach it to this child agent's
@@ -303,17 +383,81 @@ def create_standalone_wrapper(
             except Exception:  # noqa: BLE001
                 # Cascade is best-effort; never break the wrapped call.
                 _attached_exporter = None
+        parent_token = _parent_agent_var.set(agent)
         try:
             return await agent.runtime._execute_with_generation(
                 _adapted, args, kwargs, func.__name__
             )
         finally:
+            _parent_agent_var.reset(parent_token)
             if _attached_exporter is not None:
                 try:
                     _attached_exporter._detach_child(agent.event_manager)
                 except Exception:  # noqa: BLE001
                     pass
+            if call_binding is not None:
+                call_binding._drop_reference(
+                    owner=not any(call_binding is owner for owner in _alias_bindings.values())
+                )
 
+    async def aclose():
+        """End this globally shared wrapper for all enclosing owners; join its work.
+
+        Call explicitly before event-loop shutdown when no enclosing owner exists.
+        Borrowed clients remain open; active logical/provider work is not cancelled.
+        """
+        nonlocal _closed, _close_task
+        from nooa.runtime.event_manager import _active_close_dependencies
+        from nooa.runtime.model_binding import _cleanup_result, _join_cleanup_tasks
+
+        dependencies = _active_close_dependencies.get()
+        if any(
+            invocation.dependency.active and invocation.dependency in dependencies
+            for invocation in _invocations
+        ):
+            raise RuntimeError("active standalone work cannot close its dependent owner")
+        if _close_task is None:
+            _closed = True
+            invocations = tuple(_invocations)
+
+            async def close_aliases():
+                failure = None
+                for invocation in invocations:
+                    try:
+                        await asyncio.shield(invocation.logical_done)
+                        if invocation.binding is not None:
+                            await invocation.binding._join_owner_cleanup(invocation.agent)
+                    except BaseException as error:
+                        if failure is None:
+                            failure = error
+                    runtime = getattr(invocation.agent, "runtime", None)
+                    bindings = getattr(runtime, "_dispatch_bindings", ())
+                    for binding in tuple(bindings):
+                        try:
+                            await binding._join_cleanup()
+                        except BaseException as error:
+                            if failure is None:
+                                failure = error
+                        try:
+                            await binding._join_owner_cleanup(invocation.agent)
+                        except BaseException as error:
+                            if failure is None:
+                                failure = error
+                    _invocations.discard(invocation)
+                for owner in tuple(_alias_bindings.values()):
+                    try:
+                        await owner.aclose()
+                    except BaseException as error:
+                        if failure is None:
+                            failure = error
+                _alias_cache.clear()
+                if failure is not None:
+                    raise failure
+
+            _close_task = asyncio.create_task(_cleanup_result(close_aliases))
+        await _join_cleanup_tasks((_close_task,))
+
+    wrapper.aclose = aclose  # type: ignore[attr-defined]
     wrapper._standalone = True  # type: ignore[attr-defined]
     wrapper._needs_generation = True  # type: ignore[attr-defined]
     wrapper._plan_strategy = strategy  # type: ignore[attr-defined]

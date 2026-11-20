@@ -37,7 +37,7 @@ from nooa.agent import Agent
 from nooa.decisions import DecisionRequest, DecisionResponse, UnifiedDecisionModel
 from nooa.events import ExecutionResult
 from nooa.runtime.actor import ActorRuntime
-from nooa.unifiedllm import CacheBoundary, LLMResponse, UnifiedLLM
+from nooa.unifiedllm import CacheBoundary, LLMResponse
 
 # Sentinel indicating that ``AgentCallContext.result`` has not been set yet.
 # Distinguishes "middleware never ran the inner handler" from "method returned None".
@@ -148,7 +148,7 @@ class LLMCallContext(BaseModel):
     params: dict[str, Any] = {}
     agent: Agent | None = None
     runtime: ActorRuntime | None = None
-    client: UnifiedLLM | None = Field(default=None, frozen=True)
+    client: Any = Field(default=None, frozen=True)
     filtered_history: bool = False
     response: LLMResponse | None = None
 

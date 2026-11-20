@@ -258,7 +258,9 @@ async def _run(
     enable_atif: bool = False,
 ) -> int:
     """Async main: instantiate, wire, run.  Returns exit code (0 = success)."""
-    from nooa.unifiedllm import get_llm_client
+    from nooa.runtime.model_binding import _join_tasks
+    from nooa.unifiedllm import get_llm_client, load_llm
+    from nooa.unifiedllm.registry import get_llm_client as default_get_llm_client
 
     # Build LLM client — honour env-var overrides for local vLLM deployments.
     llm_overrides: dict[str, str] = {}
@@ -269,9 +271,13 @@ async def _run(
     if api_key := os.environ.get("OPENAI_API_KEY"):
         llm_overrides["api_key"] = api_key
 
-    llm_client = get_llm_client(model, **llm_overrides)
+    # Preserve the legacy injection hook without selecting the legacy provider
+    # path by default: ordinary runs still use the public native loader.
+    loader = get_llm_client if get_llm_client is not default_get_llm_client else load_llm
+    llm_client = loader(model, **llm_overrides)
 
     agent: Any = None
+    primary: BaseException | None = None
     try:
         # Instantiate inside the lifecycle guard so a constructor failure still
         # closes the already-created model client.
@@ -324,26 +330,43 @@ async def _run(
             return 0
         logger.error("Agent reported failure.")
         return 1
+    except BaseException as error:
+        primary = error
+        raise
     finally:
+
+        async def cleanup() -> BaseException | None:
+            control = None
+            for what, owner, method in (
+                ("Agent", agent, "close"),
+                ("Model client", llm_client, "aclose"),
+            ):
+                try:
+                    close = getattr(owner, method, None) if owner is not None else None
+                    if callable(close):
+                        close_result = close()
+                        if inspect.isawaitable(close_result):
+                            await close_result
+                except BaseException as error:
+                    if not isinstance(error, Exception) and control is None:
+                        control = error
+                    logger.warning("%s cleanup failed", what, exc_info=True)
+            return control
+
+        task = asyncio.create_task(cleanup())
+        join_failure = None
         try:
-            close = getattr(agent, "close", None) if agent is not None else None
-            if callable(close):
-                close_result = close()
-                if inspect.isawaitable(close_result):
-                    await close_result
-        except Exception:
-            # Cleanup must not replace the benchmark result or its original error.
-            # Cancellation still propagates, with client cleanup guaranteed below.
-            logger.warning("Agent cleanup failed", exc_info=True)
-        finally:
-            try:
-                aclose = getattr(llm_client, "aclose", None)
-                if callable(aclose):
-                    close_result = aclose()
-                    if inspect.isawaitable(close_result):
-                        await close_result
-            except Exception:
-                logger.warning("Model client cleanup failed", exc_info=True)
+            await _join_tasks((task,))
+        except BaseException as error:
+            join_failure = error
+            if primary is not None:
+                logger.warning("Cleanup join interrupted during original failure", exc_info=True)
+        control = task.result()
+        if primary is None:
+            if join_failure is not None:
+                raise join_failure
+            if control is not None:
+                raise control
 
 
 @click.command()

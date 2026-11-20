@@ -355,7 +355,7 @@ def test_the_default_llm_factory_uses_the_workspace_default_model(workspace, mon
     (workspace / ".nooa" / "settings.yaml").write_text("atom:\n  default_model: ws-model\n")
     built: list[str] = []
     monkeypatch.setattr(
-        factory, "workspace_llm_client", lambda alias, workspace: built.append(alias) or alias
+        factory, "workspace_load_llm", lambda alias, workspace: built.append(alias) or alias
     )
     make = default_llm_factory()
     assert make(None, workspace) == "ws-model"
@@ -379,7 +379,7 @@ async def test_a_host_registry_builds_the_workspace_default_model(
         built.append(TrackedLLM(alias, []))
         return built[-1]
 
-    monkeypatch.setattr(factory, "workspace_llm_client", fake_client)
+    monkeypatch.setattr(factory, "workspace_load_llm", fake_client)
     make = default_llm_factory()
     aliases: list[str | None] = []
 
@@ -401,3 +401,48 @@ async def test_a_host_registry_builds_the_workspace_default_model(
         assert client.closed is True
     finally:
         await registry.close_all()
+
+
+async def test_sixth_default_factory_calls_contracted_helper_with_actual_native_dispatch(
+    workspace, monkeypatch
+):
+    from nooa_atom.agent import factory
+    from nooa_atom.workspace import models
+
+    from nooa.unifiedllm import registry
+    from nooa.unifiedllm.request import LLMRequest
+    from tests.runtime.public_llm_fixtures import NativeModels
+
+    native = NativeModels()
+    monkeypatch.setattr(registry, "_loaded", True)
+    monkeypatch.setattr(registry, "MODELS", {})
+    native.make()
+    config = {
+        "adapter": "openai-chat",
+        "model": "contracted-native",
+        "context_window": 12800,
+        "max_tokens": 100,
+        "api_key": "fixture-key",
+        "base_url": "https://fixture.invalid/v1",
+    }
+    monkeypatch.setattr(models, "workspace_models", lambda path: {"chosen": config})
+    calls = []
+    actual = models.workspace_load_llm
+
+    def observe(name, path):
+        calls.append((name, path))
+        view = actual(name, path, client=native.sdks[-1])
+        native.views.append(view)
+        return view
+
+    monkeypatch.setattr(factory, "workspace_load_llm", observe)
+    try:
+        view = factory.default_llm_factory(workspace_default="chosen")(None, workspace)
+        response = await view.acall(LLMRequest(messages=[{"role": "user", "content": "native"}]))
+        assert response.usage.input_tokens > 0
+        assert calls == [("chosen", workspace)]
+        assert native.seen[-1][1]["model"] == "contracted-native"
+        assert native.sdks[-1].max_retries == 9
+        assert not native.http[-1].is_closed
+    finally:
+        await native.close()

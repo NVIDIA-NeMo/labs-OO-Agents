@@ -75,7 +75,11 @@ def _is_client(spec: Any) -> bool:
     """
     import inspect
 
+    from nooa.runtime.model_binding import ModelBinding
     from nooa.unifiedllm import UnifiedLLM
+
+    if isinstance(spec, ModelBinding):
+        return True
 
     if isinstance(spec, UnifiedLLM):
         return True
@@ -135,15 +139,12 @@ def resolve_alias(
                 )
             return cast("UnifiedLLM", cached)
 
-    from nooa.unifiedllm import get_llm_client
+    from nooa.unifiedllm import load_llm
 
     try:
-        client = get_llm_client(alias)
+        client = load_llm(alias)
     except Exception as exc:
-        raise RuntimeError(
-            f"The {origin} alias {alias!r} for '{method_name}' could not be "
-            f"resolved by get_llm_client: {type(exc).__name__}: {exc}"
-        ) from exc
+        raise RuntimeError("Model alias resolution failed") from exc
 
     if not _is_client(client):
         raise TypeError(
@@ -187,7 +188,22 @@ def _resolve_alias(
             setattr(agent, _INSTANCE_LLM_CACHE_ATTR, cache)
         except (AttributeError, TypeError):
             cache = None
-    return resolve_alias(alias, cache, method_name, origin=origin)
+    client = resolve_alias(alias, cache, method_name, origin=origin)
+    # Keep the resolver's client return contract while registering creator
+    # ownership with the same captured-binding lifetime as named slots.
+    releases = getattr(agent, "_binding_releases", None)
+    if cache is not None and releases is not None:
+        from nooa.runtime.model_binding import ModelBinding
+
+        bindings = getattr(agent, "_strategy_llm_alias_bindings", None)
+        if bindings is None:
+            bindings = {}
+            agent._strategy_llm_alias_bindings = bindings
+        if id(client) not in bindings:
+            binding = ModelBinding(client, owned=True)
+            bindings[id(client)] = binding
+            releases.append(binding.aclose)
+    return client
 
 
 def validate_method_llm_spec(
@@ -301,9 +317,7 @@ def resolve_method_llm(
     try:
         resolved = spec(agent)
     except Exception as exc:
-        raise RuntimeError(
-            f"The {origin} callable for '{method_name}' raised {type(exc).__name__}: {exc}"
-        ) from exc
+        raise RuntimeError("Model resolver failed") from exc
 
     if not _is_client(resolved):
         raise TypeError(

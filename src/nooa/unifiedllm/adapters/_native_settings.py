@@ -177,7 +177,12 @@ def _select(family, model, raw, declaration, selection, overrides=None):
             raise _config("Recognized native controls must be top-level settings, not extra_body")
     try:
         params = apply_reasoning_level(declaration, model, raw, overrides, selection)
-        _check_settings_identity({k: v for k, v in params.items() if k != "extra_query"})
+        # A valid top-level initial cache key is pinned identity, not a cheap
+        # view knob. _derive_native checks new options before reaching here;
+        # declaration patches are checked separately at load below.
+        _check_settings_identity(
+            {k: v for k, v in params.items() if k not in {"extra_query", "prompt_cache_key"}}
+        )
     except (ValueError, TypeError) as exc:
         raise _config("Invalid native model settings") from exc
     # Query extensions are identity-bearing and fixed at load, never a bind knob.
@@ -491,6 +496,10 @@ def _resolve_native(family, name, config, overrides):
     if set(enabled) - supported:
         raise _config("Declared media cannot be represented by this native family")
     for patch in (declaration.levels or {}).values():
+        try:
+            _check_settings_identity(patch)
+        except (ValueError, TypeError) as exc:
+            raise _config("Native reasoning patches cannot change route/identity") from exc
         _select(
             family,
             model,

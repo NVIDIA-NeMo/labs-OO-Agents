@@ -56,6 +56,7 @@ class SessionOptions(BaseModel):
     agent_spec: str
     model: str | None = None
     llm: Any | None = Field(default=None, exclude=True)
+    model_binding: Any | None = Field(default=None, exclude=True)
     # ``handle_orchestrate`` is an unattended root that plans, delegates and
     # verifies; its children run ``handle_work`` (SessionPort.delegate/spawn).
     turn_method: Literal["handle", "handle_batch", "handle_work", "handle_orchestrate"] = "handle"
@@ -93,6 +94,13 @@ class SessionOptions(BaseModel):
                 raise ValueError(f"benchmark title policy requires benchmark_policy={POLICY!r}")
         return data
 
+    @model_validator(mode="after")
+    def _coherent_model(self):
+        if self.llm is not None and self.model_binding is not None:
+            if self.llm is not self.model_binding.client:
+                raise ValueError("llm and model_binding must select the same client")
+        return self
+
     def inherit(self, **overrides: Any) -> "SessionOptions":
         """Options for a child: same workspace, agent, model, mode and depth cap.
 
@@ -101,11 +109,18 @@ class SessionOptions(BaseModel):
         """
         reject_removed_options("inherit()", overrides)
         values = {key: value for key, value in overrides.items() if value is not None}
+        binding = self.model_binding
         llm = self.llm
         if "model" in values and values["model"] != self.model:
             llm = None
+            binding = None
+        if "llm" in values:
+            binding = None
+        elif binding is not None:
+            llm = binding.client
         data = self.model_dump()
         data.update(name=None, kept=False, todo_id=None)
         data.update(values)
         data["llm"] = values.get("llm", llm)
+        data["model_binding"] = values.get("model_binding", binding)
         return SessionOptions.model_validate(data)

@@ -35,7 +35,7 @@ async def test_circular_debug_value_does_not_prevent_success_or_verifier_answer(
 
     monkeypatch.setattr(runner, "LOGS_DIR", tmp_path)
     monkeypatch.setattr(runner, "_import_agent_class", lambda _: FinishedAgent)
-    monkeypatch.setattr("nooa.unifiedllm.get_llm_client", lambda *args, **kwargs: FakeLLMClient())
+    monkeypatch.setattr("nooa.unifiedllm.load_llm", lambda *args, **kwargs: FakeLLMClient())
     monkeypatch.setattr(runner, "_write_answer", lambda result: answers.append(result["response"]))
     (tmp_path / "trajectory.json").write_text("[]")
     (tmp_path / "behavior.json").write_text('{"task_id": "previous-task"}')
@@ -68,7 +68,7 @@ async def test_enable_atif_adds_atif_alongside_event_trajectory(monkeypatch, tmp
 
     monkeypatch.setattr(runner, "LOGS_DIR", tmp_path)
     monkeypatch.setattr(runner, "_import_agent_class", lambda _: FinishedAgent)
-    monkeypatch.setattr("nooa.unifiedllm.get_llm_client", lambda *args, **kwargs: FakeLLMClient())
+    monkeypatch.setattr("nooa.unifiedllm.load_llm", lambda *args, **kwargs: FakeLLMClient())
 
     assert await runner._run("task", "model", "bench", None, enable_atif=True) == 0
 
@@ -121,7 +121,7 @@ async def test_cleanup_failures_preserve_the_original_outcome(
         if outcome == "write_error":
             raise original_error
 
-    monkeypatch.setattr("nooa.unifiedllm.get_llm_client", lambda *args, **kwargs: client)
+    monkeypatch.setattr("nooa.unifiedllm.load_llm", lambda *args, **kwargs: client)
     monkeypatch.setattr(runner, "_import_agent_class", lambda name: FakeAgent)
     monkeypatch.setattr(runner, "_write_result", write_result)
     for name in ("_write_trajectory", "_write_behavior_report", "_write_answer"):
@@ -157,7 +157,7 @@ async def test_run_closes_agent_and_llm_when_result_writing_fails(monkeypatch):
         async def close(self):
             calls.append("agent")
 
-    monkeypatch.setattr("nooa.unifiedllm.get_llm_client", lambda *args, **kwargs: FakeLLM())
+    monkeypatch.setattr("nooa.unifiedllm.load_llm", lambda *args, **kwargs: FakeLLM())
     monkeypatch.setattr(runner, "_import_agent_class", lambda name: FakeAgent)
     monkeypatch.setattr(
         runner, "_write_result", lambda *args: (_ for _ in ()).throw(OSError("disk"))
@@ -181,7 +181,7 @@ async def test_run_closes_llm_when_agent_construction_fails(monkeypatch):
         def __init__(self, llm):
             raise RuntimeError("constructor failed")
 
-    monkeypatch.setattr("nooa.unifiedllm.get_llm_client", lambda *args, **kwargs: FakeLLM())
+    monkeypatch.setattr("nooa.unifiedllm.load_llm", lambda *args, **kwargs: FakeLLM())
     monkeypatch.setattr(runner, "_import_agent_class", lambda name: BrokenAgent)
 
     with pytest.raises(RuntimeError, match="constructor failed"):
@@ -255,7 +255,7 @@ async def test_runner_executes_delegation_and_preserves_provider_turns(
             ),
         ]
     )
-    monkeypatch.setattr("nooa.unifiedllm.get_llm_client", lambda *args, **kwargs: llm)
+    monkeypatch.setattr("nooa.unifiedllm.load_llm", lambda *args, **kwargs: llm)
     monkeypatch.setattr(runner, "LOGS_DIR", tmp_path / "logs")
     monkeypatch.setattr(runner, "ANSWER_FILE", tmp_path / "answer.txt")
     assert (
@@ -336,7 +336,7 @@ async def test_bench_runner_writes_task_result_value(monkeypatch, tmp_path, valu
             )
         ]
     )
-    monkeypatch.setattr("nooa.unifiedllm.get_llm_client", lambda *args, **kwargs: llm)
+    monkeypatch.setattr("nooa.unifiedllm.load_llm", lambda *args, **kwargs: llm)
     monkeypatch.setattr(runner, "LOGS_DIR", tmp_path / "logs")
     monkeypatch.setattr(runner, "ANSWER_FILE", tmp_path / "answer.txt")
 

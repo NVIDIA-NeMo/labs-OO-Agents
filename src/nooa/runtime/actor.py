@@ -329,7 +329,7 @@ def _context_window_for_error(
     if reported:
         return reported
     if params is not None:
-        from nooa.unifiedllm.limits import context_limits_for
+        from nooa.runtime.llm_call import context_limits as context_limits_for
 
         return context_limits_for(llm_client, params).context_window
     return getattr(llm_client, "context_window", None)
@@ -1099,9 +1099,32 @@ class ActorRuntime:
             attributes["decision.resolved_model"] = resolved_model
         self._decision_trace_attributes[generation_id] = attributes
 
-    async def generate(
+    async def generate(self, *, tools=None, output_model=None, **kwargs):
+        """Generate through the selected real client, retaining temporary views."""
+        from nooa.runtime.llm_call import CallViews, _accepted_generation
+
+        views = CallViews(self)
+        token = _accepted_generation.set(views)
+        try:
+            result = await self._generate_with_views(
+                _views=views, tools=tools, output_model=output_model, **kwargs
+            )
+        except BaseException:
+            try:
+                await views.aclose()
+            except BaseException:
+                pass
+            raise
+        else:
+            await views.aclose()
+            return result
+        finally:
+            _accepted_generation.reset(token)
+
+    async def _generate_with_views(
         self,
         *,
+        _views,
         tools: list[dict[str, Any]] | None = None,
         output_model: type | None = None,
         **kwargs: Any,
@@ -1124,6 +1147,7 @@ class ActorRuntime:
             - LLMResponse from unifiedllm with content, reasoning, usage
             - event_id identifies the canonical provider turn for inspection or linking
         """
+        from nooa.runtime.model_binding import public_base
         from nooa.unifiedllm._accounting import _invocation_delivery
 
         # Keep the final invocation receipt through both paths' canonical event add.
@@ -1131,11 +1155,17 @@ class ActorRuntime:
             if self._current_method is None:
                 raise RuntimeError("generate() called with no current method context")
 
-            from nooa.unifiedllm.limits import context_limits_for, reduced_reply_params
+            from nooa.runtime.llm_call import context_limits as context_limits_for
+            from nooa.runtime.llm_call import dispatch, freeze_request, model_label
+            from nooa.unifiedllm.limits import reduced_reply_params
 
             # A limit a recovery learned earlier in this session (e.g. images): stay under it.
             for recovery in self._request_recoveries:
                 recovery.before_request()
+            llm_client = _current_llm_var.get()
+            if llm_client is None:
+                raise RuntimeError("generate() called with no LLM client in context")
+            llm_client = _views.prepare(llm_client, kwargs)
             # Build messages from context + events (timers inside _build_messages).
             # No proactive clamping — recovery is error-driven. If the API rejects
             # with ContextWindowExceededError, the except handler archives events,
@@ -1146,13 +1176,9 @@ class ActorRuntime:
                 call_kwargs=self._current_call.kwargs if self._current_call else {},
                 tools=tools,
                 request_params=kwargs,
+                llm_client=llm_client,
             )
             _gen_hm = get_harness_metrics()
-
-            # Get LLM client from context var (set by _execute_with_generation)
-            llm_client = _current_llm_var.get()
-            if llm_client is None:
-                raise RuntimeError("generate() called with no LLM client in context")
 
             current_generation_id = (
                 self._generation_id_stack[-1] if self._generation_id_stack else None
@@ -1238,20 +1264,45 @@ class ActorRuntime:
                         ),
                     )
 
-                    async def _core_llm(ctx: LLMCallContext) -> LLMCallContext:
-                        self._update_context_limits(ctx.client, ctx.params)
-                        # Tracing hook fires AFTER middleware pre-processing,
-                        # so it sees the final (possibly modified) messages.
-                        call_before_hook(
-                            "on_messages_built",
-                            agent=self.agent,
-                            method_name=self._current_method.__name__,
-                            messages=ctx.messages,
-                            generation_id=current_generation_id or "",
-                            context_stats=self._last_context_stats,
+                    # Freeze the middleware input by value: nested edits are as
+                    # significant as list replacement, and cannot be attributed
+                    # to the original event-rendered blocks.
+                    _middleware_input = copy.deepcopy(messages)
+                    _middleware_params = copy.deepcopy(params)
+                    _middleware_client = llm_client
+                    _middleware_payload_edited = False
+
+                    async def _core_llm(call_ctx: LLMCallContext) -> LLMCallContext:
+                        nonlocal llm_client, _dynamic_context, ctx, _middleware_payload_edited
+                        ctx = call_ctx
+                        _middleware_payload_edited = ctx.messages != _middleware_input
+                        _middleware_settings_changed = (
+                            ctx.params != _middleware_params or ctx.client is not _middleware_client
                         )
-                        om = ctx.params.get("output_model", None)
-                        call_params = {k: v for k, v in ctx.params.items() if k != "output_model"}
+                        llm_client = _views.prepare(ctx.client, ctx.params)
+                        ctx = ctx.model_copy(update={"client": llm_client})
+                        ctx.params.setdefault("output_model", None)
+                        self._update_context_limits(llm_client, ctx.params)
+                        # Only provenance-preserving payloads can be rendered
+                        # and block-trimmed. No-op middleware needs no re-render.
+                        if _middleware_payload_edited:
+                            self._last_context_stats = None
+                            self._last_prompt_tokens_actual = None
+                            from nooa.tracing import _context_sideband
+
+                            _context_sideband.set_journal_payload(None)
+                        elif _middleware_settings_changed:
+                            ctx.messages = await self._build_messages(
+                                self._current_method,
+                                call_args=self._current_call.args if self._current_call else (),
+                                call_kwargs=self._current_call.kwargs if self._current_call else {},
+                                tools=ctx.params.get("tools"),
+                                request_params=ctx.params,
+                                llm_client=llm_client,
+                            )
+                        _dynamic_context = _snapshot_llm_request(
+                            self.event_manager, ctx.messages, current_generation_id or ""
+                        )
                         _mw_strategy = _current_strategy_var.get()
                         _mw_strategy_tag = (
                             type(_mw_strategy).__name__ if _mw_strategy is not None else "default"
@@ -1260,26 +1311,67 @@ class ActorRuntime:
                             "prompt_cache_key",
                             _derive_prompt_cache_key(self.agent._agent_id, _mw_strategy_tag),
                         )
-                        call_params["prompt_cache_key"] = ctx.params["prompt_cache_key"]
-                        ctx.response = await llm_client.acall(
-                            ctx.messages,
-                            output_model=om,
-                            **call_params,
+                        request = freeze_request(llm_client, ctx.messages, ctx.params)
+                        # Keep accepted provenance out of user-mutable contexts.
+                        # Boundary objects remain read-only references, as in forks.
+                        from nooa.agents.summarization import _copy_request_containers
+                        from nooa.runtime.llm_call import AcceptedCall
+
+                        accepted = AcceptedCall(
+                            llm_client,
+                            _copy_request_containers(
+                                request.messages if request is not None else ctx.messages
+                            ),
+                            _copy_request_containers(ctx.params),
                         )
+                        if request is not None:
+                            accepted.params.update(
+                                tools=_copy_request_containers(request.tools),
+                                tool_choice=request.tool_choice,
+                                output_type=request.output_type,
+                            )
+                            accepted.params.pop("output_model", None)
+                        # Tracing sees final middleware input, but cannot rewrite
+                        # the accepted request, view, or affinity identity.
+                        call_before_hook(
+                            "on_messages_built",
+                            agent=self.agent,
+                            method_name=self._current_method.__name__,
+                            messages=ctx.messages,
+                            generation_id=current_generation_id or "",
+                            context_stats=self._last_context_stats,
+                        )
+                        ctx.response = await dispatch(
+                            llm_client, ctx.messages, accepted.params, request=request
+                        )
+                        _views.accepted = accepted
                         return ctx
 
                     _emit_llm_start()
 
                     async def _rebuild_middleware_messages() -> None:
-                        nonlocal _dynamic_context
+                        nonlocal \
+                            _dynamic_context, \
+                            _middleware_input, \
+                            _middleware_params, \
+                            _middleware_client
+                        if _middleware_payload_edited:
+                            # Reapply the middleware to the same input rather
+                            # than archiving invented contributors or applying
+                            # append/edit operations twice to their own output.
+                            ctx.messages = copy.deepcopy(_middleware_input)
+                            return
                         ctx.messages = await self._build_messages(
                             self._current_method,
                             call_args=self._current_call.args if self._current_call else (),
                             call_kwargs=self._current_call.kwargs if self._current_call else {},
                             tools=ctx.params.get("tools"),
                             request_params=ctx.params,
-                            llm_client=ctx.client,
+                            llm_client=_views.prepare(ctx.client, ctx.params),
                         )
+                        _middleware_input = copy.deepcopy(ctx.messages)
+                        _middleware_params = copy.deepcopy(ctx.params)
+                        _middleware_client = ctx.client
                         _dynamic_context = _snapshot_llm_request(
                             self.event_manager, ctx.messages, current_generation_id or ""
                         )
@@ -1291,11 +1383,12 @@ class ActorRuntime:
                         # Always archive first — even if we can't reduce max_tokens,
                         # shedding events lets the retry (or caller's next attempt) succeed.
                         _ctx_window = _context_window_for_error(ctx.client, _cw_exc, ctx.params)
-                        self._archive_on_context_error(_ctx_window, exc=_cw_exc)
+                        if not _middleware_payload_edited:
+                            self._archive_on_context_error(_ctx_window, exc=_cw_exc)
                         _reduced = _compute_reduced_max_tokens(
                             _cw_exc,
                             _ctx_window,
-                            context_limits_for(ctx.client, ctx.params).reserved_output_tokens,
+                            context_limits_for(llm_client, ctx.params).reserved_output_tokens,
                         )
                         if _reduced is None:
                             return False
@@ -1325,6 +1418,15 @@ class ActorRuntime:
                         )
                 else:
                     # Fast path — no middleware registered
+                    request = freeze_request(
+                        llm_client,
+                        messages,
+                        {
+                            **kwargs,
+                            "tools": tools,
+                            "output_model": output_model,
+                        },
+                    )
                     call_before_hook(
                         "on_messages_built",
                         agent=self.agent,
@@ -1359,21 +1461,47 @@ class ActorRuntime:
                     _emit_llm_start()
 
                     async def _rebuild_messages() -> None:
-                        nonlocal messages, _dynamic_context
+                        nonlocal messages, _dynamic_context, llm_client, request
+                        llm_client = _views.prepare(llm_client, _kwargs)
                         messages = await self._build_messages(
                             self._current_method,
                             call_args=self._current_call.args if self._current_call else (),
                             call_kwargs=self._current_call.kwargs if self._current_call else {},
                             tools=tools,
                             request_params=_kwargs,
+                            llm_client=llm_client,
+                        )
+                        request = freeze_request(
+                            llm_client,
+                            messages,
+                            {
+                                **_kwargs,
+                                "tools": tools,
+                                "output_model": output_model,
+                            },
                         )
                         _dynamic_context = _snapshot_llm_request(
                             self.event_manager, messages, current_generation_id or ""
                         )
+                        call_before_hook(
+                            "on_messages_built",
+                            agent=self.agent,
+                            method_name=self._current_method.__name__,
+                            messages=messages,
+                            generation_id=current_generation_id or "",
+                            context_stats=self._last_context_stats,
+                        )
 
                     async def _call_llm() -> Any:
-                        return await llm_client.acall(
-                            messages, tools=tools, output_model=output_model, **_kwargs
+                        return await dispatch(
+                            llm_client,
+                            messages,
+                            {
+                                **_kwargs,
+                                "tools": tools,
+                                "output_model": output_model,
+                            },
+                            request=request,
                         )
 
                     def _recover_window(_cw_exc: BaseException) -> bool:
@@ -1421,7 +1549,8 @@ class ActorRuntime:
                     "LLM middleware returned an already-recorded LLMResponse; "
                     "each call must return a fresh response object"
                 )
-            response.model_name = getattr(llm_client, "model", "") or response.model_name
+            if not response.model_name and public_base(llm_client) is None:
+                response.model_name = model_label(llm_client) or response.model_name
             response.generation_id = current_generation_id or ""
             response.dynamic_context = _dynamic_context
             _notify_llm_call(response=response)
@@ -2927,7 +3056,9 @@ class ActorRuntime:
                     f"The decision_model for '{method_name}' must implement adecide(), got "
                     f"{type(decision_model).__name__}."
                 )
-            llm_client = getattr(self.agent, "_llm", None)
+            llm_client = getattr(self.agent, "llms", {}).get(
+                "main", getattr(self.agent, "_llm", None)
+            )
             llm_selection_source = "agent_default"
             decision_mode = "native"
             active_model_name = getattr(decision_model, "model", "") or ""
@@ -2947,19 +3078,33 @@ class ActorRuntime:
             )
             llm_selection_source = "call_site"
             decision_mode = None
-            active_model_name = getattr(llm_client, "model", "") or ""
+            active_model_name = ""
         elif plan_llm is not None:
             from nooa.method_llm import resolve_method_llm
 
             llm_client = resolve_method_llm(plan_llm, self.agent, method_name)
             llm_selection_source = "decorator"
             decision_mode = None
-            active_model_name = getattr(llm_client, "model", "") or ""
+            active_model_name = ""
         else:
-            llm_client = getattr(self.agent, "_llm", None)
+            llm_client = getattr(self.agent, "llms", {}).get(
+                "main", getattr(self.agent, "_llm", None)
+            )
             llm_selection_source = "agent_default"
             decision_mode = None
-            active_model_name = getattr(llm_client, "model", "") or ""
+            active_model_name = ""
+        from nooa.runtime.llm_call import model_label
+        from nooa.runtime.model_binding import ModelBinding
+
+        selected_binding = (
+            llm_client
+            if isinstance(llm_client, ModelBinding)
+            else getattr(self.agent, "_strategy_llm_alias_bindings", {}).get(id(llm_client))
+        )
+        if selected_binding is not None:
+            llm_client = selected_binding.client
+        if decision_model is None:
+            active_model_name = model_label(llm_client)
         if llm_client is None and decision_model is None:
             raise RuntimeError(
                 f"No LLM client available for {method_name}. A decision-only agent "
@@ -2973,7 +3118,7 @@ class ActorRuntime:
                 f"{type(strategy).__name__}: expected acall(), got "
                 f"{type(llm_client).__name__}."
             )
-        llm_model_name = getattr(llm_client, "model", "") or ""
+        llm_model_name = model_label(llm_client)
 
         # Resolve truncation config: method-level @strategy(truncation=...) > agent-level
         method_truncation = getattr(base_method, "_strategy_truncation", None)
@@ -3029,28 +3174,34 @@ class ActorRuntime:
                 "llm.model_name": active_model_name,
                 "llm.selection_source": llm_selection_source,
             }
-        if should_trace:
-            hook_context = call_before_hook(
-                "before_generation",
-                agent=self.agent,
-                method_name=method_name,
-                strategy=strategy_name,
-                generation_id=generation_id,
-                parent_generation_id=parent_generation_id,
-                agent_call_id=self._agent_call_id,
-                **model_attributes,
-                **strategy_kwargs,  # Add strategy config parameters
-            )
 
         result = None
         exception_caught = None
 
         # Start harness metrics + unifiedllm bridge (cleaned up in finally below)
         _hm_ctx = _harness_metrics_lifecycle(should_trace)
-        _hm_ctx.__enter__()
+        _hm_entered = False
 
         # Dispatch to appropriate executor based on strategy
+        binding_capture = None
         try:
+            if selected_binding is not None:
+                binding_capture = selected_binding.capture(owner=self.agent)
+                llm_client = await binding_capture.__aenter__()
+            if should_trace:
+                hook_context = call_before_hook(
+                    "before_generation",
+                    agent=self.agent,
+                    method_name=method_name,
+                    strategy=strategy_name,
+                    generation_id=generation_id,
+                    parent_generation_id=parent_generation_id,
+                    agent_call_id=self._agent_call_id,
+                    **model_attributes,
+                    **strategy_kwargs,  # Add strategy config parameters
+                )
+            _hm_ctx.__enter__()
+            _hm_entered = True
             # NOTE: agent_call_id is pushed by the decorator (decorators.py/metaclass.py)
             # before calling _call_plan or _execute_task. We don't push here anymore.
 
@@ -3151,43 +3302,50 @@ class ActorRuntime:
             exception_caught = e
             raise
         finally:
-            # NOTE: agent_call_id is popped by the decorator (decorators.py/metaclass.py)
-            # after _call_plan or _execute_task returns. We don't pop here anymore.
+            try:
+                # NOTE: agent_call_id is popped by the decorator (decorators.py/metaclass.py)
+                # after _call_plan or _execute_task returns. We don't pop here anymore.
 
-            # Pop generation_id from stack using copy-on-write semantics
-            _pop_generation_id()
+                # Pop generation_id from stack using copy-on-write semantics
+                _pop_generation_id()
 
-            # Flush harness metrics BEFORE after_generation ends the span —
-            # otherwise get_current_span() no longer returns the generation
-            # span and harness.* attributes are dropped. Pass real exception
-            # info so the context manager can chain correctly if its
-            # teardown raises.
-            if exception_caught is not None:
-                _hm_ctx.__exit__(
-                    type(exception_caught),
-                    exception_caught,
-                    exception_caught.__traceback__,
-                )
-            else:
-                _hm_ctx.__exit__(None, None, None)
+                # Flush harness metrics BEFORE after_generation ends the span —
+                # otherwise get_current_span() no longer returns the generation
+                # span and harness.* attributes are dropped. Pass real exception
+                # info so the context manager can chain correctly if its
+                # teardown raises.
+                if _hm_entered:
+                    _hm_ctx.__exit__(
+                        type(exception_caught) if exception_caught is not None else None,
+                        exception_caught,
+                        exception_caught.__traceback__ if exception_caught is not None else None,
+                    )
 
-            # Call after generation hook
-            decision_trace_attributes = self._decision_trace_attributes.pop(generation_id, {})
-            if should_trace:
-                call_after_hook(
-                    "after_generation",
-                    hook_context,
-                    agent=self.agent,
-                    method_name=method_name,
-                    result=result,
-                    exception=exception_caught,
-                    generation_id=generation_id,
-                    **decision_trace_attributes,
-                )
+                # Call after generation hook
+                decision_trace_attributes = self._decision_trace_attributes.pop(generation_id, {})
+                if should_trace:
+                    call_after_hook(
+                        "after_generation",
+                        hook_context,
+                        agent=self.agent,
+                        method_name=method_name,
+                        result=result,
+                        exception=exception_caught,
+                        generation_id=generation_id,
+                        **decision_trace_attributes,
+                    )
 
-            # Restore previous context variable value
-            # (handles nested generation sessions correctly)
-            _in_generation_session.set(prev_in_session)
+                # Restore previous context variable value
+                # (handles nested generation sessions correctly)
+                _in_generation_session.set(prev_in_session)
+            finally:
+                _in_generation_session.set(prev_in_session)
+                if binding_capture is not None:
+                    await binding_capture.__aexit__(
+                        type(exception_caught) if exception_caught is not None else None,
+                        exception_caught,
+                        exception_caught.__traceback__ if exception_caught is not None else None,
+                    )
 
     def _indent_code(self, code: str, indent: str) -> str:
         """Indent each line of code, preserving multiline string indentation."""
@@ -3338,7 +3496,7 @@ class ActorRuntime:
 
     def _update_context_limits(self, llm_client: Any, params: dict[str, Any]):
         """Refresh budgets before dynamic context is rendered or a call is sent."""
-        from nooa.unifiedllm.limits import context_limits_for
+        from nooa.runtime.llm_call import context_limits as context_limits_for
 
         fallback = self.truncation_config.response_reserve_tokens
         limits = context_limits_for(llm_client, params, fallback_reserve=fallback)

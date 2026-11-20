@@ -11,10 +11,15 @@ import shutil
 import socket
 import sqlite3
 import uuid
-from contextlib import closing
+from collections.abc import Callable
+from contextlib import ExitStack, closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from nooa_atom.session.session import _MaintenanceOwner
 
 from nooa._platform import require_posix
 from nooa.runtime.event_manager import EventManager
@@ -22,11 +27,15 @@ from nooa.storage import read_lock_owner
 from nooa.storage.sqlite import (
     SessionAlreadyActiveError,
     SQLiteStorageManager,
+    _append_coordinated_batches,
+    _locked_storage_connections,
     delete_sqlite_database,
 )
 from nooa_atom.session.events import (
     SESSION_EVENT_TYPES,
     ItemDiscarded,
+    MaintenanceUsageAttributed,
+    MaintenanceUsageRecorded,
     SessionModeChanged,
     SessionModelChanged,
     SessionReasoningChanged,
@@ -58,6 +67,134 @@ _ITEM_EVENT_TYPES = frozenset(("ItemAdmitted", "ItemConsumed", "ItemWithdrawn", 
 _PROBE_MISSES = 50
 """Consecutive rowids that do not read before a row-by-row probe stops."""
 _PREVIEW_CHARS = 200
+
+
+def _record_model_changes(
+    changes: tuple[tuple[SessionHandle, str, str | None], ...],
+) -> tuple[SessionInfo, ...]:
+    """Publish prepared metadata only after one existing-connection transaction.
+
+    No observers are called here. The owning runtime publishes its binding and
+    already-prepared live infos synchronously immediately after this returns.
+    """
+    if not changes or len({id(handle) for handle, _, _ in changes}) != len(changes):
+        raise ValueError("Unsupported model metadata operation")
+    ordered = sorted(changes, key=lambda item: str(item[0].storage._canonical_path))
+    with ExitStack() as locks:
+        for handle, _, _ in ordered:
+            locks.enter_context(handle._metadata_lock)
+            handle._ensure_open()
+        batches = []
+        replacements = []
+        for handle, kind, value in changes:
+            if kind == "model" and type(value) is str:
+                events = [SessionModelChanged(model=value)]
+                update = {"model": value, "reasoning": None, "reasoning_selected": False}
+            elif kind == "reasoning" and (value is None or type(value) is str):
+                events = [SessionReasoningChanged(level=value)]
+                update = {"reasoning": value, "reasoning_selected": True}
+            else:
+                raise ValueError("Unsupported model metadata operation")
+            replacements.append(handle._info.model_copy(update=update, deep=True))
+            batches.append((handle.storage, events))
+        result = tuple(replacements)
+        publications = tuple(zip((item[0] for item in changes), result, strict=True))
+        _append_coordinated_batches(batches)
+        for handle, info in publications:
+            handle._info = info
+        return result
+
+
+# Only active/failed maintenance resource obligations live here. Successful
+# passes prune immediately; no provider or successful per-call history is kept.
+_maintenance_owners: dict[str, _MaintenanceOwner] = {}
+
+
+def _maintenance_key(handle: SessionHandle) -> str:
+    return str(handle.storage._canonical_path)
+
+
+def _guard_maintenance_owner(path: Path) -> None:
+    owner = _maintenance_owners.get(str(path.resolve()))
+    if owner is not None:
+        raise RuntimeError(
+            f"Session {owner.session.id!r} retains an unresolved maintenance writer; "
+            "close/retry that original owner before loading a replacement"
+        )
+
+
+def _record_maintenance_usage(
+    changes: tuple[
+        tuple[SessionHandle, MaintenanceUsageRecorded | MaintenanceUsageAttributed], ...
+    ],
+    *,
+    prepare_publications: Callable[[tuple], None] | None = None,
+) -> tuple[tuple[SessionHandle, SessionInfo, object, bool], ...]:
+    """Idempotent maintenance rows on the actual owned connections.
+
+    OWN numeric usage was charged at terminal capture. Only a newly committed
+    ATTR row adds numeric attributed usage. No callbacks run in the transaction.
+    """
+    handles = {id(handle): handle for handle, _ in changes}
+    ordered = sorted(handles.values(), key=_maintenance_key)
+    with ExitStack() as locks:
+        for handle in ordered:
+            locks.enter_context(handle._metadata_lock)
+            handle._ensure_open()
+        connections = locks.enter_context(
+            _locked_storage_connections([handle.storage for handle in ordered])
+        )
+        batches: dict[int, tuple[SessionHandle, list]] = {}
+        infos = {id(handle): handle._info.model_copy(deep=True) for handle in ordered}
+        publications = []
+        seen = {}
+        for handle, event in changes:
+            kind = type(event).__name__
+            key = (id(handle), kind, event.source_session_id, event.logical_call_id)
+            existing = seen.get(key)
+            if existing is None:
+                rows = (
+                    connections[id(handle.storage)]
+                    .execute(
+                        "SELECT data FROM events WHERE event_type = ? "
+                        "AND json_extract(data, '$.source_session_id') = ? "
+                        "AND json_extract(data, '$.logical_call_id') = ?",
+                        (kind, event.source_session_id, event.logical_call_id),
+                    )
+                    .fetchall()
+                )
+                existing = [type(event).model_validate_json(row[0]) for row in rows]
+            if len(existing) > 1:
+                raise ValueError("Duplicate physical maintenance correlation")
+            if existing and existing[0].usage != event.usage:
+                raise ValueError("Conflicting maintenance correlation")
+            inserted = not existing
+            seen[key] = [event]
+            info = infos[id(handle)]
+            if inserted:
+                batches.setdefault(id(handle), (handle, []))[1].append(event)
+                if isinstance(event, MaintenanceUsageAttributed):
+                    values = info.usage.model_dump()
+                    for name in USAGE_FIELDS:
+                        values[f"attributed_{name}"] += getattr(event.usage, name) or 0
+                    info = infos[id(handle)] = info.model_copy(
+                        update={"usage": Usage.model_validate(values)}, deep=True
+                    )
+            publications.append((handle, info, event, inserted))
+        # Everything needed to publish has been allocated before BEGIN/COMMIT.
+        result = tuple(
+            (handle, infos[id(handle)], event, inserted)
+            for handle, _, event, inserted in publications
+        )
+        replacements = tuple((handle, infos[id(handle)]) for handle in ordered)
+        if prepare_publications is not None:
+            prepare_publications(result)
+        _append_coordinated_batches(
+            [(handle.storage, events) for handle, events in batches.values()]
+        )
+        for handle, info in replacements:
+            handle._info = info
+        return result
 
 
 def sessions_root(workspace: Path, override: Path | None = None) -> Path:
@@ -192,6 +329,24 @@ def _stored_usage(connection: sqlite3.Connection) -> Usage:
         cast = float if name == "cost_usd" else int
         values[name] = cast(own[index] or 0)
         values[f"attributed_{name}"] = cast(attributed[index] or 0)
+    seen = set()
+    for kind, raw in connection.execute(
+        "SELECT event_type, data FROM events WHERE event_type IN "
+        "('MaintenanceUsageRecorded', 'MaintenanceUsageAttributed') ORDER BY insertion_order"
+    ):
+        event_type = (
+            MaintenanceUsageRecorded
+            if kind == "MaintenanceUsageRecorded"
+            else MaintenanceUsageAttributed
+        )
+        event = event_type.model_validate_json(raw)
+        key = (kind, event.source_session_id, event.logical_call_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        for name in USAGE_FIELDS:
+            target = name if event_type is MaintenanceUsageRecorded else f"attributed_{name}"
+            values[target] += getattr(event.usage, name) or 0
     return Usage.model_validate(values)
 
 
@@ -515,14 +670,18 @@ class SessionHandle:
         self._events.add(SessionModelChanged(model=model))
         with self._metadata_lock:
             # A new model starts from its own reasoning default.
-            self._info = self._info.model_copy(update={"model": model, "reasoning": None})
+            self._info = self._info.model_copy(
+                update={"model": model, "reasoning": None, "reasoning_selected": False}
+            )
 
     def set_reasoning(self, level: str | None) -> None:
         """Persist a reasoning level (``None`` clears it) and update this handle's metadata."""
         self._ensure_open()
         self._events.add(SessionReasoningChanged(level=level))
         with self._metadata_lock:
-            self._info = self._info.model_copy(update={"reasoning": level})
+            self._info = self._info.model_copy(
+                update={"reasoning": level, "reasoning_selected": True}
+            )
 
     def update_usage(self, usage: Usage) -> None:
         """Set the session's usage totals (a copy) as ``info`` reports them."""
@@ -652,6 +811,7 @@ class SessionStore:
 
     def open(self, session_id: str) -> SessionHandle:
         path = self.path_for(session_id)
+        _guard_maintenance_owner(path)
         info = self._read_info(path)
         if info is None:
             raise SessionNotFoundError(f"Session {session_id!r} was not found or is invalid")
@@ -1085,6 +1245,7 @@ class SessionStore:
         mode = str(start.get("mode") or "auto")
         model = str(start.get("model", ""))
         reasoning: str | None = None
+        reasoning_selected = False
         for event_type, data in setting_rows:
             raw = self._decode_data(data, path)
             if raw is None:
@@ -1094,8 +1255,10 @@ class SessionStore:
             elif event_type == "SessionModelChanged" and raw.get("model"):
                 model = str(raw["model"])
                 reasoning = None
-            elif event_type == "SessionReasoningChanged" and raw.get("level"):
-                reasoning = str(raw["level"])
+                reasoning_selected = False
+            elif event_type == "SessionReasoningChanged" and "level" in raw:
+                reasoning = None if raw["level"] is None else str(raw["level"])
+                reasoning_selected = True
 
         forked_from: str | None = None
         if recovered_row is not None:
@@ -1118,6 +1281,7 @@ class SessionStore:
             id=path.stem,
             model=model,
             reasoning=reasoning,
+            reasoning_selected=reasoning_selected,
             mode=mode,
             agent=str(start.get("agent", start.get("agent_cls", ""))),
             created_at=started_at,

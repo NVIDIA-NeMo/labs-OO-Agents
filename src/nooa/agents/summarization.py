@@ -26,6 +26,7 @@ import contextvars
 import json
 import logging
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Annotated, Any
 
 from nooa.agent import Agent
@@ -33,6 +34,7 @@ from nooa.agentdoc import hidden
 from nooa.config.strategy_config import PredictConfig
 from nooa.decorators import strategy
 from nooa.metaclass import no_trace
+from nooa.storage.markers import nosnapshot
 from nooa.strategies import PredictStrategy
 
 logger = logging.getLogger(__name__)
@@ -101,6 +103,7 @@ class SummarizationAgent(Agent):
 
     # Background task state
     _pending_task: Annotated[asyncio.Task[Any] | None, hidden]
+    _summary_close_task: Annotated[asyncio.Task[BaseException | None] | None, hidden, nosnapshot]
     _pending_range: Annotated[tuple[str, str] | None, hidden]
     _pending_summary: Annotated[str | None, hidden]
     _unsub_before: Annotated[Callable[[], None] | None, hidden]
@@ -170,6 +173,7 @@ class SummarizationAgent(Agent):
         super().__init__(**kwargs)
 
         # Background task state
+        self._summary_close_task: asyncio.Task[BaseException | None] | None = None
         self._pending_task: asyncio.Task[Any] | None = None
         self._pending_range: tuple[str, str] | None = None
         self._pending_summary: str | None = None
@@ -196,6 +200,35 @@ class SummarizationAgent(Agent):
         if override is not None:
             return override
         return self._target_agent.llm if self._inherits_parent_llm else self.llm
+
+    @hidden
+    @no_trace
+    @asynccontextmanager
+    async def _capture_summary_client(self, client):
+        """Own the exact selected dispatch, including callable/raw-client paths."""
+        from nooa.runtime.model_binding import ModelBinding
+
+        binding = next(
+            (
+                binding
+                for agent in (self, self._target_agent)
+                if agent is not None
+                for slot in agent._model_bindings.values()
+                if (binding := slot._binding_for(client)) is not None
+            ),
+            None,
+        )
+        temporary = binding is None
+        if temporary:
+            binding = ModelBinding(client)
+            self._retired_bindings.append(binding)
+            binding._on_settled = lambda: self._retired_bindings.remove(binding)
+        try:
+            async with binding._capture_exact(client, owner=self) as selected:
+                yield selected
+        finally:
+            if temporary:
+                binding._drop_reference(owner=True)
 
     @hidden
     @no_trace
@@ -233,13 +266,38 @@ class SummarizationAgent(Agent):
     @no_trace
     async def aclose(self) -> None:
         """Stop subscriptions and await cancellation before the shared client closes."""
-        task = self._pending_task
-        self._uninstall()
-        if task is not None:
-            await asyncio.gather(task, return_exceptions=True)
-        self._pending_task = None
-        self._pending_range = None
-        self._pending_summary = None
+        self.event_manager._check_close_dependencies()
+        from nooa.runtime.model_binding import _join_cleanup_tasks, _join_tasks
+
+        if self._summary_close_task is None:
+
+            async def close_summary():
+                task = self._pending_task
+                failure = None
+                try:
+                    self._uninstall()
+                except BaseException as exc:
+                    failure = exc
+                if task is not None:
+                    if not task.done():
+                        task.cancel()
+                    try:
+                        await _join_tasks((task,))
+                    except BaseException as exc:
+                        if not task.cancelled() and failure is None:
+                            failure = exc
+                self._pending_task = None
+                self._pending_range = None
+                self._pending_summary = None
+                try:
+                    await super(SummarizationAgent, self).aclose()
+                except BaseException as exc:
+                    if failure is None:
+                        failure = exc
+                return failure
+
+            self._summary_close_task = asyncio.create_task(close_summary())
+        await _join_cleanup_tasks((self._summary_close_task,))
 
     # -------------------------------------------------------------------------
     # Event handlers
@@ -382,7 +440,8 @@ class SummarizationAgent(Agent):
                 f"Scheduling summarization: {start_tag} -> {end_tag} "
                 f"({len(history_markdown)} chars)"
             )
-            summary = await self.summarize(history_markdown, self.config.target_chars)
+            async with self._capture_summary_client(summary_llm):
+                summary = await self.summarize(history_markdown, self.config.target_chars)
             self._pending_summary = summary
             logger.debug(
                 f"Summarization complete: {start_tag} -> {end_tag} (summary: {len(summary)} chars)"
@@ -702,17 +761,32 @@ class TokenBudgetSummarizer(SummarizationAgent):
         response and tool work produced by this turn must not be collapsed by a
         summary that never saw them.
         """
+        from nooa.runtime.model_binding import public_base
+
         if _in_summary_fork.get() or self._pending_task is not None:
             return await nxt(ctx)
         tags = self.target_event_manager.keys()
         selected = tags[: -self.config.preserve_recent] if self.config.preserve_recent else tags
         source = tuple((tag, self.target_event_manager[tag].id) for tag in selected)
+        from nooa.runtime.llm_call import AcceptedCall, _accepted_generation
+
+        generation = _accepted_generation.get()
         ctx = await nxt(ctx)
-        if self._automatic_context_budget and ctx.client is not None:
+        accepted = generation.accepted if generation is not None else None
+        if accepted is None:
+            if generation is not None or public_base(ctx.client) is not None:
+                # Public/runtime shortcuts have no actual dispatched provenance.
+                return ctx
+            # Preserve the established direct legacy middleware API. Real Actor
+            # generations (including legacy clients) use the dispatched snapshot.
+            accepted = AcceptedCall(ctx.client, ctx.messages, ctx.params)
+        client = accepted.client
+        if self._automatic_context_budget and client is not None:
             budget = context_budget(
-                ctx.client,
+                client,
                 self._automatic_context_budget_percent,
-                request_params=ctx.params,
+                # Public dispatch has already selected its final settings view.
+                request_params=None if public_base(client) is not None else accepted.params,
                 fallback_reserve=ctx.runtime.truncation_config.response_reserve_tokens,
             )
             self.config = self.config.model_copy(update={"max_tokens": budget})
@@ -728,7 +802,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
         if ctx.filtered_history:
             self._warn_filtered_history()
             return ctx
-        if ctx.client is None:
+        if client is None:
             logger.warning("Skipping summary fork: no effective client; history is unchanged.")
             return ctx
 
@@ -736,8 +810,8 @@ class TokenBudgetSummarizer(SummarizationAgent):
         # dictionaries belong to the fork; read-only response/boundary objects
         # travel unchanged so their provider state is not flattened or copied.
         try:
-            messages = _copy_request_containers(ctx.messages)
-            params = _copy_request_containers(ctx.params)
+            messages = _copy_request_containers(accepted.messages)
+            params = _copy_request_containers(accepted.params)
             params.setdefault("output_model", None)
         except Exception:
             logger.warning(
@@ -762,6 +836,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
         )
         fork = ctx.model_copy(
             update={
+                "client": client,
                 "messages": messages,
                 "params": params,
                 "response": None,
@@ -789,9 +864,26 @@ class TokenBudgetSummarizer(SummarizationAgent):
         try:
 
             async def dispatch(request: Any) -> Any:
-                request.response = await client.acall(
-                    _copy_request_containers(messages), **_copy_request_containers(params)
-                )
+                from nooa.runtime.llm_call import dispatch as dispatch_llm
+                from nooa.runtime.model_binding import public_base
+
+                # A fork settles its own receipt, never the parent's canonical
+                # response receipt inherited by this background task.
+                from nooa.unifiedllm._accounting import _invocation_delivery
+
+                async with self._capture_summary_client(client):
+                    with _invocation_delivery():
+                        if public_base(client) is not None:
+                            request.response = await dispatch_llm(
+                                client,
+                                _copy_request_containers(messages),
+                                _copy_request_containers(params),
+                            )
+                        else:
+                            request.response = await client.acall(
+                                _copy_request_containers(messages),
+                                **_copy_request_containers(params),
+                            )
                 return request
 
             result = await self.target_event_manager.run_middleware("llm_call", ctx, dispatch)

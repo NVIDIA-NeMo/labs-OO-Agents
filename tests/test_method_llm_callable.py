@@ -159,7 +159,7 @@ class TestResolution:
         def resolver(agent):
             return agent.does_not_exist
 
-        with pytest.raises(RuntimeError, match=r"callable for 'analyze' raised AttributeError"):
+        with pytest.raises(RuntimeError, match="Model resolver failed"):
             resolve_method_llm(resolver, object(), "analyze")
 
     def test_callable_exception_chains_original(self) -> None:
@@ -368,14 +368,14 @@ class TestEndToEnd:
                 """Return a word."""
                 ...
 
-        with pytest.raises(RuntimeError, match=r"callable for 'run' raised AttributeError"):
+        with pytest.raises(RuntimeError, match="Model resolver failed"):
             await Broken().run()
 
 
 class TestAliasResolution:
-    """String aliases resolve lazily through get_llm_client, cached per instance."""
+    """String aliases resolve lazily through load_llm, cached per instance."""
 
-    def test_alias_resolves_via_get_llm_client(self, monkeypatch) -> None:
+    def test_alias_resolves_via_load_llm(self, monkeypatch) -> None:
         client = _fake("ok")
         calls = []
 
@@ -383,7 +383,7 @@ class TestAliasResolution:
             calls.append(name)
             return client
 
-        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_get)
+        monkeypatch.setattr("nooa.unifiedllm.load_llm", fake_get)
 
         class Stub:
             pass
@@ -400,7 +400,7 @@ class TestAliasResolution:
             calls.append(name)
             return client
 
-        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_get)
+        monkeypatch.setattr("nooa.unifiedllm.load_llm", fake_get)
 
         class Stub:
             pass
@@ -409,7 +409,7 @@ class TestAliasResolution:
         first = resolve_method_llm("alias", agent, "method")
         second = resolve_method_llm("alias", agent, "method")
         assert first is second is client
-        assert calls == ["alias"], "get_llm_client must run once per (instance, alias)"
+        assert calls == ["alias"], "load_llm must run once per (instance, alias)"
 
         other = Stub()
         third = resolve_method_llm("alias", other, "method")
@@ -420,15 +420,15 @@ class TestAliasResolution:
         def fake_get(name, **kw):  # noqa: ANN001, ANN003
             raise ValueError("unknown model")
 
-        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_get)
+        monkeypatch.setattr("nooa.unifiedllm.load_llm", fake_get)
 
-        with pytest.raises(RuntimeError, match=r"alias 'no-such-model' for 'analyze'"):
+        with pytest.raises(RuntimeError, match="Model alias resolution failed"):
             resolve_method_llm("no-such-model", object(), "analyze")
 
     def test_alias_cache_survives_uncacheable_agent(self, monkeypatch) -> None:
         """A stub that refuses new attributes still resolves (without caching)."""
         client = _fake("ok")
-        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", lambda name, **kw: client)
+        monkeypatch.setattr("nooa.unifiedllm.load_llm", lambda name, **kw: client)
 
         class Slotted:
             __slots__ = ()
@@ -439,7 +439,7 @@ class TestAliasResolution:
         def fake_get(name, **kw):  # noqa: ANN001, ANN003
             raise KeyError("registry")
 
-        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_get)
+        monkeypatch.setattr("nooa.unifiedllm.load_llm", fake_get)
 
         with pytest.raises(RuntimeError) as exc_info:
             resolve_method_llm("alias", object(), "method")
@@ -453,7 +453,7 @@ class TestAliasEndToEnd:
     async def test_method_runs_on_aliased_model(self, monkeypatch) -> None:
         aliased = _fake("aliased-answer")
         default = _fake("default-answer")
-        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", lambda name, **kw: aliased)
+        monkeypatch.setattr("nooa.unifiedllm.load_llm", lambda name, **kw: aliased)
 
         class SupportAgent(Agent, llm=default):
             """A support agent."""
@@ -477,7 +477,7 @@ class TestAliasEndToEnd:
             calls.append(name)
             return aliased
 
-        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_get)
+        monkeypatch.setattr("nooa.unifiedllm.load_llm", fake_get)
 
         class LazyAgent(Agent, llm=default):
             """A lazy agent."""
@@ -502,7 +502,7 @@ class TestAliasEndToEnd:
         aliased = _fake("aliased-answer")
         override = _fake("override-answer")
         default = _fake("default-answer")
-        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", lambda name, **kw: aliased)
+        monkeypatch.setattr("nooa.unifiedllm.load_llm", lambda name, **kw: aliased)
 
         class SupportAgent(Agent, llm=default):
             """A support agent."""
@@ -526,7 +526,7 @@ class TestAliasEndToEnd:
             calls.append(name)
             return aliased
 
-        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_get)
+        monkeypatch.setattr("nooa.unifiedllm.load_llm", fake_get)
 
         class SupportAgent(Agent, llm=default):
             """A support agent."""
@@ -551,7 +551,7 @@ class TestAliasEndToEnd:
             calls.append(name)
             return aliased
 
-        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_get)
+        monkeypatch.setattr("nooa.unifiedllm.load_llm", fake_get)
 
         @strategy(PredictStrategy(), llm="my-alias")
         async def standalone_summarize(text: str) -> str:
@@ -582,7 +582,7 @@ class TestAliasReviewHardening:
             clients.append(client)
             return client
 
-        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_get)
+        monkeypatch.setattr("nooa.unifiedllm.load_llm", fake_get)
 
         class Pair(Agent, llm=default):
             """A pair."""
@@ -607,7 +607,7 @@ class TestAliasReviewHardening:
             calls.append(name)
             return _fake("aliased", times=2)
 
-        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_get)
+        monkeypatch.setattr("nooa.unifiedllm.load_llm", fake_get)
 
         class Twin(Agent, llm=default):
             """A twin."""
@@ -628,8 +628,8 @@ class TestAliasReviewHardening:
         assert calls == ["cheap"], "methods sharing an alias share one client"
 
     def test_alias_resolving_to_non_client_raises_typeerror(self, monkeypatch) -> None:
-        """get_llm_client returning garbage is caught, not passed to generation."""
-        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", lambda name, **kw: 42)
+        """load_llm returning garbage is caught, not passed to generation."""
+        monkeypatch.setattr("nooa.unifiedllm.load_llm", lambda name, **kw: 42)
 
         with pytest.raises(TypeError, match="resolved to int, not a UnifiedLLM instance"):
             resolve_method_llm("bad-alias", object(), "method")
@@ -648,7 +648,7 @@ class TestAliasReviewHardening:
                 raise ValueError("unknown model")
             return _fake("fixed")
 
-        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_get)
+        monkeypatch.setattr("nooa.unifiedllm.load_llm", fake_get)
 
         class Flaky(Agent, llm=default):
             """A flaky agent."""
@@ -659,7 +659,7 @@ class TestAliasReviewHardening:
                 ...
 
         agent = Flaky()
-        with pytest.raises(RuntimeError, match=r"alias 'flaky-alias' for 'run'"):
+        with pytest.raises(RuntimeError, match="Model alias resolution failed"):
             await agent.run()
 
         state["fail"] = False
@@ -673,7 +673,7 @@ class TestAliasReviewHardening:
         default = _fake("default")
         resolver_calls = []
 
-        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", lambda name, **kw: aliased)
+        monkeypatch.setattr("nooa.unifiedllm.load_llm", lambda name, **kw: aliased)
 
         class Guarded(Agent, llm=default):
             """A guarded agent."""
@@ -701,7 +701,7 @@ class TestAliasReviewHardening:
             clients.append(client)
             return client
 
-        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_get)
+        monkeypatch.setattr("nooa.unifiedllm.load_llm", fake_get)
 
         @strategy(PredictStrategy(), llm="shared")
         async def first_fn(text: str) -> str:
@@ -722,7 +722,7 @@ class TestAliasReviewHardening:
         def fake_get(name, **kw):  # noqa: ANN001, ANN003
             raise ValueError("unknown model")
 
-        monkeypatch.setattr("nooa.unifiedllm.get_llm_client", fake_get)
+        monkeypatch.setattr("nooa.unifiedllm.load_llm", fake_get)
 
         @strategy(PredictStrategy(), llm="no-such-alias")
         async def named_fn(text: str) -> str:
@@ -731,7 +731,7 @@ class TestAliasReviewHardening:
 
         with pytest.raises(
             RuntimeError,
-            match=r"standalone @strategy\(llm=\.\.\.\) alias 'no-such-alias' for 'named_fn'",
+            match="Model alias resolution failed",
         ):
             await named_fn("x")
 

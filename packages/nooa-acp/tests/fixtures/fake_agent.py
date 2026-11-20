@@ -34,4 +34,4 @@ def llm_factory() -> FakeLLMClient:
     )
 
 
-asyncio.run(serve(llm_factory))
+asyncio.run(serve(llm_factory, model_alias="fake-model"))

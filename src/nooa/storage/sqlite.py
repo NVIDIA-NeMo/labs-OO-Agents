@@ -17,6 +17,7 @@ import threading
 import typing
 import uuid
 from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
@@ -64,6 +65,201 @@ if len(_CONTEXT_BLOCKS_TYPES) < 3:
 # These are also present in _EVENT_REGISTRY, but we keep a snapshot here
 # to seed per-instance registries and to validate at import time.
 _CORE_TYPES: dict[str, type[EventBase]] = {}
+
+
+class _UnsupportedCoordinatedBatch(ValueError):
+    """Safe category for layouts that cannot support one coordinated transaction."""
+
+
+@contextmanager
+def _locked_storage_connections(storages):
+    """Hold the actual owned SQLite connections in canonical lock order.
+
+    Internal coordinated recorders must keep correlation reads and their writes
+    under the same locks; do not expose the manager's lock to host packages.
+    """
+    ordered = sorted(storages, key=lambda storage: str(storage._canonical_path))
+    with ExitStack() as locks:
+        for storage in ordered:
+            if type(storage) is not SQLiteStorageManager:
+                raise _UnsupportedCoordinatedBatch("unsupported-storage")
+            locks.enter_context(storage._db_lock)
+            if storage._closed:
+                raise _UnsupportedCoordinatedBatch("closed-storage")
+        yield {id(storage): storage._conn for storage in ordered}
+
+
+def _append_coordinated_batches(
+    batches: list[tuple[SQLiteStorageManager, list[EventBase]]],
+) -> tuple[list[str], ...]:
+    """Private Atom recorder using the existing owned connections and locks.
+
+    Caller holds ordered metadata locks. DELETE/FULL same-device file databases
+    only, within the actual connection attachment limit. Ordinary atomic commit
+    and rollback, not a shared-filesystem crash/power-loss durability guarantee.
+    No new leases, observers, user callbacks, reconnect or compensating writes.
+    """
+    from nooa.runtime.event_backend import tagged_batch
+
+    if not batches:
+        return ()
+    if any(type(s) is not SQLiteStorageManager for s, _ in batches):
+        raise _UnsupportedCoordinatedBatch("unsupported-storage")
+    if any(s._canonical_path is None for s, _ in batches):
+        raise _UnsupportedCoordinatedBatch("file-required")
+    keys = [str(s._canonical_path) for s, _ in batches]
+    if len(set(keys)) != len(keys):
+        raise _UnsupportedCoordinatedBatch("duplicate-path")
+    indexed = sorted(enumerate(batches), key=lambda item: keys[item[0]])
+    with ExitStack() as locks:
+        for _, (storage, _) in indexed:
+            locks.enter_context(storage._db_lock)
+        identities = []
+        for i, (storage, _) in enumerate(batches):
+            if storage._closed:
+                raise _UnsupportedCoordinatedBatch("closed-storage")
+            if storage._check_same_thread:
+                raise _UnsupportedCoordinatedBatch("thread-affine")
+            backend, c = storage._backend, storage._conn
+            if (
+                type(backend) is not SQLiteEventBackend
+                or backend._conn is not c
+                or backend._lock is not storage._db_lock
+            ):
+                raise _UnsupportedCoordinatedBatch("backend-identity")
+            # This probe fails safely with the original sqlite error if someone
+            # closed the raw connection without setting the manager flag.
+            databases = c.execute("PRAGMA database_list").fetchall()
+            if c.in_transaction:
+                raise _UnsupportedCoordinatedBatch("active-transaction")
+            if any(name not in {"main", "temp"} for _, name, _ in databases):
+                raise _UnsupportedCoordinatedBatch("existing-attachments")
+            main = next((p for _, name, p in databases if name == "main"), "")
+            if not main or str(Path(main).resolve(strict=True)) != keys[i]:
+                raise _UnsupportedCoordinatedBatch("connection-path")
+            stat = storage._canonical_path.stat()
+            identity = (stat.st_dev, stat.st_ino)
+            if identity != storage._file_identity:
+                raise _UnsupportedCoordinatedBatch("replaced-file")
+            identities.append(identity)
+            if c.execute("PRAGMA journal_mode").fetchone()[0].lower() != "delete":
+                raise _UnsupportedCoordinatedBatch("delete-required")
+            if c.execute("PRAGMA synchronous").fetchone()[0] != 2:
+                raise _UnsupportedCoordinatedBatch("full-required")
+        if len(set(identities)) != len(identities):
+            raise _UnsupportedCoordinatedBatch("duplicate-file")
+        if len({dev for dev, _ in identities}) != 1:
+            raise _UnsupportedCoordinatedBatch("same-device-required")
+        coordinator_index, (coordinator, _) = indexed[0]
+        c = coordinator._conn
+        if len(batches) - 1 > c.getlimit(sqlite3.SQLITE_LIMIT_ATTACHED):
+            raise _UnsupportedCoordinatedBatch("attachment-capacity")
+        objects = [id(event) for _, events in batches for event in events]
+        if len(set(objects)) != len(objects):
+            raise ValueError("record_batch requires fresh distinct event objects")
+        aliases = {coordinator_index: "main"}
+        attached: list[str] = []
+        try:
+            for index, (storage, _) in indexed[1:]:
+                alias = f"nooa_batch_{index}"
+                target = storage._canonical_path.as_uri() + "?mode=rw"
+                c.execute(f'ATTACH DATABASE ? AS "{alias}"', (target,))
+                attached.append(alias)
+                aliases[index] = alias
+                if c.execute(f'PRAGMA "{alias}".journal_mode').fetchone()[0] != "delete":
+                    raise _UnsupportedCoordinatedBatch("attached-delete-required")
+                if c.execute(f'PRAGMA "{alias}".synchronous').fetchone()[0] != 2:
+                    raise _UnsupportedCoordinatedBatch("attached-full-required")
+            # ATTACH can race an ordinary external rename. Recheck ALL paths,
+            # including the coordinator, against the identity frozen at open.
+            # This is not protection from malicious replacement between every
+            # filesystem observation and SQLite I/O (no OS-specific fd tricks).
+            attached_paths = {name: path for _, name, path in c.execute("PRAGMA database_list")}
+            for index, (storage, _) in enumerate(batches):
+                alias = aliases[index]
+                path = attached_paths.get(alias)
+                if not path or Path(path).resolve(strict=True) != storage._canonical_path:
+                    raise _UnsupportedCoordinatedBatch("attached-path")
+                stat = storage._canonical_path.stat()
+                if (stat.st_dev, stat.st_ino) != storage._file_identity:
+                    raise _UnsupportedCoordinatedBatch("replaced-file")
+                if c.execute(f'PRAGMA "{alias}".journal_mode').fetchone()[0] != "delete":
+                    raise _UnsupportedCoordinatedBatch("attached-delete-required")
+                if c.execute(f'PRAGMA "{alias}".synchronous').fetchone()[0] != 2:
+                    raise _UnsupportedCoordinatedBatch("attached-full-required")
+            with ExitStack() as tag_contexts:
+                results, prepared, counters = [], [], []
+                for storage, events in batches:
+                    backend = storage._backend
+
+                    def contains(identity: str, backend=backend) -> bool:
+                        return (
+                            backend._conn.execute(
+                                "SELECT 1 FROM events WHERE event_id=? LIMIT 1", (identity,)
+                            ).fetchone()
+                            is not None
+                        )
+
+                    tags = tag_contexts.enter_context(
+                        tagged_batch(events, backend, contains_id=contains)
+                    )
+                    rows = [
+                        (
+                            tag,
+                            event.id,
+                            event.event_type,
+                            event.status.value,
+                            backend._serialize(event),
+                            backend._insertion_counter + i,
+                        )
+                        for i, (tag, event) in enumerate(zip(tags, events, strict=True))
+                    ]
+                    position = backend._max_position() + 1
+                    results.append(tags)
+                    prepared.append((rows, [(position + i, tag) for i, tag in enumerate(tags)]))
+                    counters.append(
+                        (
+                            backend,
+                            backend._next_tag_num + len(events),
+                            backend._insertion_counter + len(events),
+                        )
+                    )
+                result = tuple(results)
+                try:
+                    c.execute("BEGIN IMMEDIATE")
+                    for index, (rows, active) in enumerate(prepared):
+                        alias = aliases[index]
+                        c.executemany(
+                            f'INSERT INTO "{alias}".events '
+                            "(tag,event_id,event_type,status,data,insertion_order) "
+                            "VALUES (?,?,?,?,?,?)",
+                            rows,
+                        )
+                        c.executemany(
+                            f'INSERT INTO "{alias}".active_tags (position,tag) VALUES (?,?)',
+                            active,
+                        )
+                    c.commit()
+                except BaseException:
+                    try:
+                        if c.in_transaction:
+                            c.rollback()
+                    except BaseException:
+                        coordinator._batch_cleanup_errors = ("rollback-cleanup",)
+                    raise
+                # All fallible publication values were prepared before commit.
+                for backend, next_tag, next_order in counters:
+                    backend._next_tag_num = next_tag
+                    backend._insertion_counter = next_order
+        finally:
+            # Outside tagged_batch: successful commit must never reset tags,
+            # counters or downstream publication just because DETACH fails.
+            for alias in reversed(attached):
+                try:
+                    c.execute(f'DETACH DATABASE "{alias}"')
+                except BaseException:
+                    coordinator._batch_cleanup_errors = ("detach-cleanup",)
+        return result
 
 
 def _registry_key(cls: type[EventBase]) -> str:
@@ -871,6 +1067,10 @@ class SQLiteStorageManager:
         # methods, close), so calls from several threads are serialised.
         # save_snapshot_json() relies on this to run in a worker thread.
         self._db_path = str(db_path)
+        # Keep public spelling, but freeze connection/lock identity across cwd changes.
+        self._canonical_path = None if self._db_path == ":memory:" else Path(db_path).resolve()
+        self._batch_cleanup_errors: tuple[str, ...] = ()
+        self._file_identity: tuple[int, int] | None = None
         self._check_same_thread = check_same_thread
         self._must_exist = must_exist
         self._journal_mode = journal_mode
@@ -882,13 +1082,16 @@ class SQLiteStorageManager:
             # stray lock file. mode=rw below still covers a delete after this.
             if must_exist and not Path(self._db_path).exists():
                 raise sqlite3.OperationalError(f"unable to open database file: {self._db_path}")
-            lock_path = str(Path(self._db_path).with_suffix(".lock"))
+            lock_path = str(self._canonical_path.with_suffix(".lock"))
             self._lock_fd = _acquire_session_lock(lock_path)
 
         self._db_lock = threading.RLock()
 
         try:
             self._conn = self._open_connection()
+            if self._canonical_path is not None:
+                stat = self._canonical_path.stat()
+                self._file_identity = (stat.st_dev, stat.st_ino)
             _ensure_schema(self._conn)
             self._backend = SQLiteEventBackend(self._conn, lock=self._db_lock)
             self._backend._on_io_error = self._reconnect
@@ -898,11 +1101,24 @@ class SQLiteStorageManager:
 
     def _open_connection(self) -> sqlite3.Connection:
         """Create and configure a new SQLite connection."""
-        if self._must_exist:
-            uri = f"{Path(self._db_path).resolve().as_uri()}?mode=rw"
+        if self._canonical_path is not None:
+            if self._file_identity is not None:
+                stat = self._canonical_path.stat()
+                if (stat.st_dev, stat.st_ino) != self._file_identity:
+                    raise _UnsupportedCoordinatedBatch("replaced-file")
+            mode = "rw" if self._must_exist else "rwc"
+            uri = f"{self._canonical_path.as_uri()}?mode={mode}"
             conn = sqlite3.connect(uri, uri=True, check_same_thread=self._check_same_thread)
         else:
-            conn = sqlite3.connect(self._db_path, check_same_thread=self._check_same_thread)
+            conn = sqlite3.connect(":memory:", check_same_thread=self._check_same_thread)
+        if self._canonical_path is not None and self._file_identity is not None:
+            try:
+                stat = self._canonical_path.stat()
+                if (stat.st_dev, stat.st_ino) != self._file_identity:
+                    raise _UnsupportedCoordinatedBatch("replaced-file")
+            except BaseException:
+                conn.close()
+                raise
         # Retry up to 5 s on SQLITE_BUSY before raising, giving concurrent
         # readers time to release shared locks on virtiofs/FUSE mounts.
         conn.execute("PRAGMA busy_timeout=5000")
@@ -1063,7 +1279,7 @@ class SQLiteStorageManager:
                 # Blank the record before releasing, so a machine that cannot see
                 # the kernel lock reads "free" and not a stale owner.
                 if self._db_path != ":memory:":
-                    _blank_lock_if_ours(str(Path(self._db_path).with_suffix(".lock")))
+                    _blank_lock_if_ours(str(self._canonical_path.with_suffix(".lock")))
                 _release_session_lock(self._lock_fd)
                 self._lock_fd = None
 

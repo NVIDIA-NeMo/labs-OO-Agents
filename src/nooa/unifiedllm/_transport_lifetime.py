@@ -56,6 +56,9 @@ def _record_admission_observation(detail: dict[str, Any]) -> None:
 # through actual exit rather than caller cancellation.
 _provider_lifetime: ContextVar[Any] = ContextVar("_provider_lifetime", default=None)
 
+# Exact lexical runtime capture, observed after dispatch owns its existing resources.
+_dispatch_registrar: ContextVar[Any] = ContextVar("_dispatch_registrar", default=None)
+
 
 async def _run_async_provider_call[T](
     call: Callable[[], Coroutine[Any, Any, T]],
@@ -72,6 +75,8 @@ async def _run_async_provider_call[T](
     its admission permit and transport lease through streaming/actual exit.
     """
     lifetime = _provider_lifetime.get()
+    registrar = _dispatch_registrar.get()
+    receipt = None
     admission_controller = _current_admission_controller()
     if _attempt_owner is not None:
         _attempt_owner.writer.admission()
@@ -103,10 +108,26 @@ async def _run_async_provider_call[T](
         def release_task_resources(completed):
             # A done callback also covers cancellation before coroutine entry.
             # Admission owns its normal finally; do not release it twice.
-            if not started and permit is not None:
-                permit.release()
-            if _wire_owner is not None:
-                _wire_owner.release()
+            failure = None
+            try:
+                if not started and permit is not None:
+                    permit.release()
+            except BaseException as error:
+                failure = error
+            try:
+                if _wire_owner is not None:
+                    _wire_owner.release()
+            except BaseException as error:
+                if failure is None:
+                    failure = error
+            finally:
+                if receipt is not None:
+                    try:
+                        receipt(failure)
+                    except BaseException:
+                        logger.warning("Runtime dispatch receipt failed", exc_info=True)
+            if failure is not None:
+                logger.warning("Provider resource release failed: %r", failure)
 
         task = asyncio.create_task(owned_call())
         task.add_done_callback(release_task_resources)
@@ -116,6 +137,10 @@ async def _run_async_provider_call[T](
         if acquired:
             _wire_owner.release()
         raise
+    # The task callback now owns cleanup. Registrar failure cannot roll it back.
+    task.add_done_callback(_consume_async_provider_result)
+    if registrar is not None:
+        receipt = registrar(task, _wire_owner)
     return await _await_provider_task(task, request_timeout)
 
 

@@ -30,7 +30,7 @@ def requested(monkeypatch):
         calls.append((name, kwargs))
         return name
 
-    monkeypatch.setattr("nooa_atom.workspace.models.workspace_llm_client", fake_client)
+    monkeypatch.setattr("nooa_atom.workspace.models.workspace_llm", fake_client)
     return calls
 
 
@@ -80,7 +80,13 @@ def test_the_factory_reads_the_session_workspace_configuration(served, tmp_path,
         "models:\n  mine:\n    model_name: openai/mine-model\n"
     )
     assert _invoke([]).exit_code == 0
-    assert served["llm_factory"]("mine", tmp_path).model == "openai/mine-model"
+    from nooa.runtime.llm_call import model_label
+
+    view = served["llm_factory"]("mine", tmp_path)
+    try:
+        assert model_label(view) == "openai/mine-model"
+    finally:
+        view.close()
 
 
 def test_a_relative_agent_file_is_resolved_where_the_command_runs(served, tmp_path, monkeypatch):
