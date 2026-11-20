@@ -301,7 +301,11 @@ def test_collapse_hint_names_the_real_parameters():
 
 
 @pytest.mark.parametrize("backend", ["memory", "sqlite"])
-def test_recollapse_of_a_summary_range_rewrites_its_text_in_place(backend, tmp_path):
+@pytest.mark.parametrize(
+    "kwargs,expected",
+    [({}, "first"), ({"summary_text": None}, "first"), ({"summary_text": "second"}, "second")],
+)
+def test_recollapse_of_a_summary_range_reuses_it_in_place(backend, tmp_path, kwargs, expected):
     """Collapsing a summary's own range again keeps the summary (SQLite used to raise
     IntegrityError after archiving it)."""
     from nooa.storage.sqlite import SQLiteStorageManager
@@ -315,10 +319,10 @@ def test_recollapse_of_a_summary_range_rewrites_its_text_in_place(backend, tmp_p
         assert agent.events.collapse("2", "4", summary_text="first") == "2..4"
         children = agent.events["2..4"].children_tags
 
-        assert agent.events.collapse("2", "4", summary_text="second") == "2..4"
+        assert agent.events.collapse("2", "4", **kwargs) == "2..4"
 
         assert agent.events.keys() == ["1", "2..4", "5"]
-        assert agent.events["2..4"].summary_text == "second"
+        assert agent.events["2..4"].summary_text == expected
         assert agent.events["2..4"].children_tags == children
         assert all(agent.events.get(tag) is not None for tag in tags)
     finally:

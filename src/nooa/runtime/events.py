@@ -232,7 +232,9 @@ class EventsApi(Skill):
         Args:
             start_tag: First tag to collapse (inclusive), e.g. "2".
             end_tag: Last tag to collapse (inclusive), e.g. "40".
-            summary_text: Optional summary. None = truncation (no text).
+            summary_text: Optional summary. None = truncation (no text) for a new
+                summary. Re-collapsing an active summary's exact range preserves
+                its text when omitted or None; a string replaces its text.
 
         Returns:
             The summary tag, e.g. "2..40".
