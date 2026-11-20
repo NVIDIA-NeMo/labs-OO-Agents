@@ -248,6 +248,41 @@ class TestPurePythonIntegration:
         assert fake_llm.call_count == 1
 
     @pytest.mark.asyncio
+    async def test_argument_named_like_a_runtime_name_wins(self):
+        """A call argument named ``show`` (a runtime name) is the caller's value, as on main."""
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(PurePythonStrategy())
+            async def render(self, show: bool) -> str:
+                """Report the show flag."""
+                ...
+
+        fake_llm = FakeLLMClient(scripted_responses=[_resp("return repr(show)")])
+        agent_instance = TestAgent(llm=fake_llm)
+
+        assert await agent_instance.render(show=False) == "False"
+
+    @pytest.mark.asyncio
+    async def test_argument_named_like_a_runtime_name_can_be_rebound_and_deleted(self):
+        """The call's own ``show`` is an ordinary global: assign and ``del`` both work."""
+
+        class TestAgent(Agent, llm=_TEST_LLM):
+            @strategy(PurePythonStrategy())
+            async def flip(self, show: bool) -> str:
+                """Flip the show flag."""
+                ...
+
+        code = (
+            "show = not show\nflipped = show\ndel show\n"
+            "try:\n    show\n    gone = False\nexcept NameError:\n    gone = True\n"
+            "return repr(flipped) + ' ' + repr(gone)"
+        )
+        fake_llm = FakeLLMClient(scripted_responses=[_resp(code)])
+        agent_instance = TestAgent(llm=fake_llm)
+
+        assert await agent_instance.flip(show=False) == "True True"
+
+    @pytest.mark.asyncio
     async def test_empty_method_for_none_return(self):
         """Test that empty/pass method body is allowed for methods returning None."""
 

@@ -7,14 +7,13 @@ and instead returns structured issues that strategies can convert into feedback.
 
 Key invariants:
 - Keep runtime-level safety validation in `validate_planning_code()` (imports, exec/eval/compile).
-- Ensure helper functions are compiled with an execution namespace consistent with
-  `ActorRuntime.execute_code()` to avoid NameError surprises (e.g. missing asyncio).
+- Helper functions are compiled by the cell engine itself
+  (`nooa.runtime.execution_namespace`), never pre-compiled here.
 """
 
 import ast
 import inspect
 import types
-from dataclasses import dataclass, field
 from typing import Any, get_type_hints
 
 from pydantic import TypeAdapter
@@ -29,69 +28,6 @@ from nooa.strategies.current_call import bind_call_arguments
 def _pformat(value: Any, tc: TruncationConfig) -> str:
     """Format a value using truncation config's value-render settings."""
     return pformat(value, **tc.event_format.model_dump())
-
-
-@dataclass(frozen=True)
-class HelperApplyResult:
-    """Outcome of pre-compiling helper function defs from an LLM code cell.
-
-    installed — names added to session_locals as plain callables.
-    errors — compile/decoration errors surfaced back to the LLM before main exec.
-    """
-
-    installed: list[str]
-    errors: list[str] = field(default_factory=list)
-
-
-class ExecutionNamespaceBuilder:
-    """Build an execution namespace for compiling helper functions.
-
-    This is designed to mirror the *effective* globals used by `ActorRuntime.execute_code()`.
-    Strategies can extend via `extra`.
-    """
-
-    @staticmethod
-    def build(agent: Any, *, extra: dict[str, Any] | None = None) -> dict[str, Any]:
-        import asyncio
-        import typing as _typing
-
-        # Start with the agent's defining-module globals (module-level imports
-        # passthrough), merged across the MRO so parent-module symbols of
-        # cross-module ancestors are also available. Mirrors execute_code().
-        from nooa.agentdoc.visibility import filter_mro_module_globals
-
-        namespace: dict[str, Any] = filter_mro_module_globals(type(agent))
-
-        # Mirror core execute_code symbols.
-        from nooa.agentdoc import doc
-        from nooa.agentdoc.introspect import methods, variables
-        from nooa.decorators import strategy
-        from nooa.runtime.pprint import pprint
-
-        # NOTE: stdout/stderr capture is handled by the execution framework.
-        # No special print() handling needed here.
-
-        namespace.update(
-            {
-                "self": agent,
-                "asyncio": asyncio,
-                "typing": _typing,
-                # agentdoc helpers (doc respects hidden fields)
-                "doc": doc,
-                "methods": methods,
-                "variables": variables,
-                "help": doc,  # Shadow built-in help() to prevent blocking on stdin
-                # decorators (for helper functions with @strategy)
-                "strategy": strategy,
-                # Pretty printing with Rich-compatible API
-                "pprint": pprint,
-            }
-        )
-
-        if extra:
-            namespace.update(extra)
-
-        return namespace
 
 
 class GeneratedCodeValidator:
@@ -199,165 +135,6 @@ class GeneratedCodeValidator:
             current = parent
 
         return False
-
-
-def _exec_with_source_tracking(
-    node: ast.FunctionDef | ast.AsyncFunctionDef,
-    method_code: str,
-    namespace: dict[str, Any],
-    method_name: str,
-) -> Any:
-    """Execute a function definition with _generated_source tracking.
-
-    For decorated functions, we need special handling:
-    1. Extract decorators from the AST node
-    2. Create a bare function without decorators
-    3. Execute and set _generated_source on it
-    4. Apply decorators manually
-
-    This enables has_ellipsis_body() to work for exec'd functions by checking
-    _generated_source when inspect.getsource() fails.
-
-    Args:
-        node: The AST node for the function definition
-        method_code: The unparsed source code
-        namespace: Execution namespace
-        method_name: Name of the function
-
-    Returns:
-        The final function (with decorators applied if any)
-
-    Raises:
-        Any exception from exec or decorator application
-    """
-    if not node.decorator_list:
-        # No decorators - simple case, just exec and set _generated_source
-        exec(compile(method_code, "<generated_helper>", "exec"), namespace)
-        func = namespace.get(method_name)
-        if func is not None:
-            func._generated_source = method_code
-        return func
-
-    # Has decorators - need to exec bare function first, then apply decorators
-    # 1. Create a copy of the node without decorators
-    bare_node = type(node)(  # type: ignore[call-overload]
-        name=node.name,
-        args=node.args,
-        body=node.body,
-        decorator_list=[],  # Remove decorators
-        returns=node.returns,
-        type_comment=getattr(node, "type_comment", None),
-    )
-    # Copy line info for better error messages
-    ast.copy_location(bare_node, node)
-    ast.fix_missing_locations(bare_node)
-
-    # 2. Wrap in module and exec the bare function
-    bare_module = ast.Module(body=[bare_node], type_ignores=[])
-    bare_code = ast.unparse(bare_module)
-    exec(compile(bare_code, "<generated_helper>", "exec"), namespace)
-
-    # 3. Get the bare function and set _generated_source
-    func = namespace.get(method_name)
-    if func is None:
-        return None
-
-    # Set _generated_source with the FULL method code (including decorators)
-    # This enables has_ellipsis_body() to detect ellipsis via AST parsing
-    func._generated_source = method_code
-
-    # 4. Apply decorators in reverse order (bottom-up, as Python does)
-    for decorator_node in reversed(node.decorator_list):
-        # Evaluate the decorator expression
-        decorator_code = ast.unparse(decorator_node)
-        decorator = eval(decorator_code, namespace)  # noqa: S307 - controlled input
-        func = decorator(func)
-
-    # 5. Update namespace with the decorated function
-    namespace[method_name] = func
-
-    return func
-
-
-class HelperFunctionManager:
-    """Pre-compile helper function defs from an LLM code cell.
-
-    Runs before the main exec to:
-
-    1. Attach ``_generated_source`` so ``@strategy(...)`` decorators can detect
-       ellipsis bodies via ``has_ellipsis_body``.
-    2. Write the compiled functions into ``session_locals`` as plain callables
-       so subsequent cells see them as top-level names in ``exec_globals``.
-    """
-
-    def apply(
-        self,
-        code: str,
-        agent: Any,
-        session_locals: dict[str, Any],
-        *,
-        namespace: dict[str, Any],
-    ) -> HelperApplyResult:
-        if inspect.isclass(agent):
-            raise TypeError(f"Expected an agent instance but received a class: {agent}.")
-
-        try:
-            tree = ast.parse(code)
-        except SyntaxError:
-            return HelperApplyResult(installed=[])
-
-        installed: list[str] = []
-        errors: list[str] = []
-        cell_bound = _names_bound_by(tree)
-
-        for node in tree.body:
-            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-
-            method_name = node.name
-            method_code = ast.unparse(node)
-
-            try:
-                func = _exec_with_source_tracking(node, method_code, namespace, method_name)
-            except NameError as e:
-                if getattr(e, "name", None) in cell_bound:
-                    # A default argument or decorator uses a name this cell binds
-                    # (``KT = 3`` then ``def f(k=KT)``), which does not exist yet.
-                    # The runtime defines the function again after the cell body
-                    # runs, so skip pre-definition instead of rejecting the cell.
-                    continue
-                # A genuinely undefined name (a typo such as ``@stratgy``).
-                errors.append(f"Error defining `{method_name}`: {type(e).__name__}: {e}")
-                continue
-            except Exception as e:
-                errors.append(f"Error defining `{method_name}`: {type(e).__name__}: {e}")
-                continue
-
-            func = func or namespace.get(method_name)
-            if not callable(func):
-                continue
-
-            # Store as a plain callable; never attached to the agent.
-            session_locals[method_name] = func
-            installed.append(method_name)
-
-        return HelperApplyResult(installed=installed, errors=errors)
-
-
-def _names_bound_by(tree: ast.AST) -> set[str]:
-    """Names a cell binds anywhere: assignments, imports, loop/with targets, defs."""
-    names: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
-            names.add(node.id)
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            for alias in node.names:
-                names.add((alias.asname or alias.name).split(".")[0])
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            names.add(node.name)
-        elif isinstance(node, ast.ExceptHandler) and node.name:
-            names.add(node.name)
-    return names
 
 
 def _type_name(t: Any) -> str:
