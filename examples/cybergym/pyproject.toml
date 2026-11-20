@@ -31,11 +31,11 @@ allow-direct-references = true
 
 [tool.uv]
 # Ignore packages uploaded less than 7 days ago to mitigate supply-chain attacks
-exclude-newer = "2026-10-21T00:00:00Z"
+exclude-newer = "2026-11-11T00:00:00Z"
 # Keep the LiteLLM stack this example was locked with; newer releases change
 # tracing behavior (see the root pyproject.toml).
 constraint-dependencies = [
-    "litellm==1.93.0",
+    "litellm==1.100.5",
     "openinference-instrumentation==0.1.54",
     "openinference-instrumentation-litellm==0.1.34",
 ]
