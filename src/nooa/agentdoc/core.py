@@ -110,7 +110,7 @@ def doc(
 
     Referenced types are expanded inline and deduplicated across the result.
     Objects without docstrings (e.g. pxr) show their library's official docs
-    index text when one is registered; ``doc.search("keywords")`` finds names.
+    index text when one is registered.
 
     Args:
         *objs: Objects to document: ``doc(MyClass)``, ``doc(Class, fn)``, or

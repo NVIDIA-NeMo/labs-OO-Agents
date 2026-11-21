@@ -6,6 +6,17 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `import nooa` no longer redirects faulthandler: when the host already enabled
+  it (e.g. to a log file), `install_debug_handler()` leaves it alone.
+- AttributeErrors on objects of any package that registered doc entries
+  (`register_doc_entries`, e.g. a skill) get up to four "did you mean"
+  suggestions with one-line summaries, ranked by name similarity and by BM25
+  of the missing name's words over the entries' docs
+  (`Transform.matrix` -> `Prim.world_transform() -> np.ndarray — 4x4 local-to-world matrix`).
+  New `modules=` and `owners=` arguments map live classes to entry names.
+- Agent-facing text (hint footers, the "Official description" addendum, the
+  `doc()` docstring) no longer mentions `doc.search`; the function still works.
+
 - `doc()` gives short curated views for NumPy, Pillow, SciPy and trimesh
   (`nooa.agentdoc.adapters.numpy`, `.pil`, `.scipy`, `.trimesh`). They load
   lazily once the library is imported, and `register_all()` includes them.

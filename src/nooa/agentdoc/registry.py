@@ -295,16 +295,26 @@ def get_attribute_hint(error: BaseException) -> str | None:
     if not keys or name.startswith("__"):
         return None
     owner_key = keys[0]
+    matched = False
     for prefix, provider in providers:
         if owner_key != prefix and not owner_key.startswith(prefix + "."):
             continue
+        matched = True
         try:
             hint = provider(obj, name, owner_key)
         except Exception:  # noqa: BLE001 - a hint must never break error formatting
             hint = None
         if hint:
             return hint
-    return None
+    # Generic did-you-mean from registered doc entries (skills, wrappers), for
+    # owners no library provider covers. docindex is loaded once an index exists.
+    docindex = sys.modules.get("nooa.agentdoc.docindex")
+    if matched or docindex is None:
+        return None
+    try:
+        return docindex.indexed_attribute_hint(obj, name, owner_key)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def register_attribute_hint_provider(prefix: str, provider: AttributeHintProvider) -> None:

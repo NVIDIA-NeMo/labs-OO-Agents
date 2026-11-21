@@ -177,6 +177,7 @@ def test_official_addendum_only_when_it_adds_text(geo):
         added = docindex.official_addendum(marker, "Curated recipe only.")
         assert added.startswith("Official description (geo C++ docs, geo/subset.h:10):")
         assert "Create a subset of mesh faces." in added
+        assert "search" not in added
     finally:
         docindex._resolvers[:] = [(p, r) for p, r in docindex._resolvers if p != __name__]
 
@@ -218,3 +219,136 @@ def test_importing_agentdoc_loads_no_index_and_no_pxr():
         "assert 'nooa.agentdoc.adapters.pxr_index' not in sys.modules\n"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+# ----------------------------------------------------------------------------- did you mean for skills
+
+
+class _Transform:
+    """Like a skill's pydantic model: real fields, no doc entries of its own."""
+
+    translate = (0.0, 0.0, 0.0)
+    scale = (1.0, 1.0, 1.0)
+
+
+class _Prim:
+    def local_transform(self): ...
+    def world_transform(self): ...
+    def set_transform(self, translate=None): ...
+
+
+class _Mesh(_Prim):
+    pass
+
+
+class _Skill:
+    def open(self, path): ...
+
+
+for _cls in (_Transform, _Prim, _Mesh, _Skill):
+    _cls.__module__ = "fakeskill._impl"
+    _cls.__qualname__ = _cls.__name__ = _cls.__name__.lstrip("_")
+
+SKILL = [
+    {"name": "usd", "kind": "class", "summary": "Create and inspect stages."},
+    {
+        "name": "usd.open",
+        "kind": "method",
+        "signature": "(self, path: str) -> 'Stage'",
+        "summary": "Open a stage file.",
+    },
+    {
+        "name": "Prim.local_transform",
+        "kind": "method",
+        "signature": "(self) -> 'Transform'",
+        "summary": "Local transform components (translate, rotate, scale).",
+    },
+    {
+        "name": "Prim.world_transform",
+        "kind": "method",
+        "signature": "(self) -> 'np.ndarray'",
+        "summary": "Local-to-world 4x4 matrix (row-vector convention).",
+    },
+    {
+        "name": "Prim.set_transform",
+        "kind": "method",
+        "signature": "(self, translate: \"Annotated[tuple[float, float, float] | None, 'units']\" = None)"
+        " -> 'Transform'",
+        "summary": "Set the local transform from components.",
+        "text": "Set the local transform from components. To apply a matrix, decompose it first.",
+    },
+    {
+        "name": "Stage.up_axis",
+        "kind": "method",
+        "signature": "(self) -> str",
+        "summary": "'Y' or 'Z'.",
+    },
+    {
+        "name": "Mesh.subsets",
+        "kind": "method",
+        "signature": "(self) -> list",
+        "summary": "GeomSubsets.",
+    },
+]
+
+
+@pytest.fixture
+def fakeskill():
+    index = register_doc_entries("fakeskill", SKILL, replace=True, owners={"usd": _Skill})
+    yield index
+    unregister_doc_index("fakeskill")
+
+
+def _skill_hint(code):
+    with pytest.raises(AttributeError) as error:
+        code()
+    return get_attribute_hint(error.value)
+
+
+def test_skill_hint_ranks_members_whose_docs_mention_the_missing_word(fakeskill):
+    hint = _skill_hint(lambda: _Transform().matrix)
+    lines = hint.splitlines()
+    assert lines[0] == "Transform has no 'matrix'. Did you mean:"
+    assert lines[1] == (
+        "  Prim.world_transform() -> np.ndarray — Local-to-world 4x4 matrix (row-vector convention)."
+    )
+    assert lines[2].startswith(
+        "  Prim.set_transform(translate: tuple[float, float, float] | None = None)"
+    )
+    assert len(lines) <= 5
+    assert "search" not in hint
+
+
+def test_skill_hint_uses_name_similarity_owner_aliases_and_real_members(fakeskill):
+    hint = _skill_hint(lambda: _Prim().world_matrix)
+    assert hint.splitlines()[1].startswith("  Prim.world_transform()")
+    hint = _skill_hint(lambda: _Skill().open_stage)
+    assert hint.splitlines()[:2] == [
+        "usd has no 'open_stage'. Did you mean:",
+        "  usd.open(path: str) -> Stage — Open a stage file.",
+    ]
+    hint = _skill_hint(lambda: _Mesh().up_axis)  # the same name on another owner first
+    assert hint.splitlines()[0] == "Mesh has no 'up_axis'. Did you mean:"
+    assert hint.splitlines()[1].startswith("  Stage.up_axis() -> str")
+    hint = _skill_hint(lambda: _Transform().translation)  # an undocumented real member
+    assert hint.splitlines()[1] == "  Transform.translate"
+    hint = _skill_hint(lambda: _Prim().transform)
+    assert 2 <= len(hint.splitlines()) <= 5
+
+
+def test_skill_hint_needs_a_covering_index(fakeskill):
+    assert _skill_hint(lambda: Holder().matrix) is None  # this module is not "fakeskill"
+    register_doc_entries("fakeskill", [], modules=["elsewhere"])
+    try:
+        assert _skill_hint(lambda: _Transform().matrix) is None
+    finally:
+        fakeskill.modules = ("fakeskill",)
+
+
+def test_short_signature_keeps_unions_and_drops_annotated_docs():
+    sig = "(self, family: 'Annotated[str | None, \"filter, e.g. (x)\"]' = None) -> 'list[Subset]'"
+    assert docindex.short_signature(sig) == "(family: str | None = None) -> list[Subset]"
+    long = "(self, " + ", ".join(f"a{k}: 'Annotated[int, \"doc\"]' = {k}" for k in range(9)) + ")"
+    assert docindex.short_signature(long) == "(" + ", ".join(f"a{k}=…" for k in range(9)) + ")"
+    assert docindex.short_signature("(a: int) -> int | (a: str) -> str") == "(a: int) -> int"
+    assert docindex.short_signature(" = 'face'") == "= 'face'"
