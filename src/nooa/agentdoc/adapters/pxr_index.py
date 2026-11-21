@@ -308,7 +308,7 @@ def _attribute_hint(obj: Any, name: str, owner_key: str) -> str | None:
     if entry is not None and entry.summary:
         summary = entry.summary if len(entry.summary) <= 140 else entry.summary[:139] + "…"
         hint += f"\n{found[0]}{entry.signature.split(' | ')[0]} — {summary}"
-    return hint + "\ndoc(name) shows its docs; doc.search('keywords') searches the OpenUSD docs."
+    return hint + "\ndoc(name) shows its docs."
 
 
 def install() -> None:
