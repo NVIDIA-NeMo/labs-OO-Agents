@@ -417,12 +417,15 @@ def install_debug_handler(dump_dir: Path | None = None) -> None:
         return
 
     # Enable basic faulthandler for segfaults etc.
+    # A host that already enabled faulthandler (e.g. to a log file) keeps its
+    # target: calling enable() again would redirect the dump to stderr.
     # Best-effort: skip when stderr lacks a real file descriptor (Textual TUI,
     # Jupyter notebooks, or any host that replaces sys.stderr).
-    try:
-        faulthandler.enable()
-    except (RuntimeError, AttributeError, OSError) as exc:
-        logger.debug("faulthandler.enable() skipped: %s", exc)
+    if not faulthandler.is_enabled():
+        try:
+            faulthandler.enable()
+        except (RuntimeError, AttributeError, OSError) as exc:
+            logger.debug("faulthandler.enable() skipped: %s", exc)
 
     # Install SIGUSR2 handler (less commonly used than SIGUSR1). SIGUSR2 is
     # POSIX-only; on native Windows the dump-on-signal feature is simply off
