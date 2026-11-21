@@ -593,9 +593,47 @@ class TestInstallDebugHandler:
 
         import nooa.runtime.debug_handler as dh
 
-        with patch("faulthandler.enable") as mock_fh:
+        with (
+            patch("faulthandler.is_enabled", return_value=False),
+            patch("faulthandler.enable") as mock_fh,
+        ):
             dh.install_debug_handler()
             mock_fh.assert_called_once()
+
+    def test_install_keeps_host_faulthandler(self):
+        import nooa.runtime.debug_handler as dh
+
+        with (
+            patch("faulthandler.is_enabled", return_value=True),
+            patch("faulthandler.enable") as mock_fh,
+        ):
+            dh.install_debug_handler()
+            mock_fh.assert_not_called()
+
+    def test_host_faulthandler_file_survives_import(self, tmp_path):
+        """A crash after ``import nooa`` still dumps to the host's file."""
+        import subprocess
+        import textwrap
+
+        log = tmp_path / "host-faulthandler.log"
+        child = textwrap.dedent(
+            f"""
+            import faulthandler, sys
+            fh = open({str(log)!r}, "w")
+            faulthandler.enable(file=fh, all_threads=True)
+            import nooa  # runs install_debug_handler()
+            from nooa.runtime.debug_handler import install_debug_handler
+            install_debug_handler()
+            faulthandler._sigsegv()
+            """
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", child], capture_output=True, text=True, timeout=120
+        )
+        assert proc.returncode != 0
+        text = log.read_text()
+        assert "Fatal Python error" in text, (text, proc.stderr[-2000:])
+        assert "Fatal Python error" not in proc.stderr
 
     def test_install_handles_signal_error_gracefully(self):
         import nooa.runtime.debug_handler as dh
