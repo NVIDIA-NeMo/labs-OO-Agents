@@ -149,9 +149,6 @@ class TestRenderContextTruncation:
         system_content = result[0]["content"]
         # Long content survives intact
         assert long_content in system_content
-        # No legacy wrapper
-        assert "output too large" not in system_content.lower()
-        assert "<truncated-output>" not in system_content
 
     def test_no_truncation_without_limit(self):
         """render_context() does not truncate when no limit is set."""

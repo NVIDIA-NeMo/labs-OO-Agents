@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Output that arrives over time: ``TextStream``.
+"""Output that arrives over time: ``TextStream`` (one writer) and ``SharedTextStream`` (several).
 
 The second producer of snapshots, next to ``capture``: it builds a ``Text``
 incrementally, so the whole output is never held in memory. It reads no
@@ -14,15 +14,20 @@ overflow file only once its output is cut, and bounds it.
 from __future__ import annotations
 
 import collections
+import functools
 import logging
+import os
 import re
+import threading
+import weakref
+from collections.abc import Callable, Iterable
 from typing import Literal
 
 from nooa.overflow import OverflowDir, OverflowWriter
 from nooa.snapshot._codec import complete_prefix, encode_text, safe_end, safe_start
 from nooa.snapshot._model import Overflow, Text
 
-__all__ = ["TextStream"]
+__all__ = ["SharedTextStream", "TextStream"]
 
 _log = logging.getLogger(__name__)
 _SURROGATE = re.compile("[\ud800-\udfff]")
@@ -73,7 +78,8 @@ class TextStream:
     Threads: one writer. ``snapshot()`` only reads memory but is not
     synchronised with ``write``: call it from
     the writer's thread, or serialise it with writes.
-    There is no lock.
+    There is no lock; ``SharedTextStream`` is the same stream for several
+    writers.
 
     Raises ``ValueError`` for an unknown ``unit``, or a negative ``head``,
     ``tail`` or ``overflow_bytes``.
@@ -121,6 +127,14 @@ class TextStream:
         self._file: OverflowWriter | None = None  # the open overflow file, if any
         self._path: str | None = None  # its path, for ``Text.full``
         self._file_failed = False
+        # Warnings wait in ``_deferred_warnings``, not logged, while this is
+        # set: SharedTextStream sets it and logs them after releasing its lock
+        # (a logging handler that writes back into the stream would deadlock on
+        # it). It covers every warning this stream's file can make while that
+        # lock is held: the write error (``_to_file``) and the ones the
+        # overflow folder makes itself, which gets ``_warn_later`` as ``warn``.
+        self._defer_warnings = False
+        self._deferred_warnings: list[Callable[[], None]] = []
         self._kept = 0  # bytes written to the file
         self._produced = 0  # bytes produced
         # A chars stream, until its file opens: the (start, end) of each write holding a
@@ -138,7 +152,11 @@ class TextStream:
         would have given.
         """
         folder, self._folder = self._folder, None
-        writer = folder.open(max_bytes=self._file_bytes) if folder is not None else None
+        writer = (
+            folder.open(max_bytes=self._file_bytes, warn=self._warn_later)
+            if folder is not None
+            else None
+        )
         if writer is None:
             self._file_failed = True
             return
@@ -162,14 +180,15 @@ class TextStream:
         self._file_failed = True
         file, self._file = self._file, None
         if file is not None:
-            file.finish(delete=True)
+            file.finish(delete=True, warn=self._warn_later)
 
     def _to_file(self, data: bytes) -> None:
         """Write what fits of ``data`` to the overflow file.
 
         The file keeps a prefix of the output, at most ``max_bytes``; a chars
-        stream's prefix ends on a code point boundary. A write error is
-        logged and ends the file (``_fail``); it never raises.
+        stream's prefix ends on a code point boundary. A write error is warned
+        (deferred to the caller under ``_defer_warnings``) and ends the file
+        (``_fail``); it never raises.
         """
         writer = self._file
         if writer is None:
@@ -186,9 +205,21 @@ class TextStream:
             self._file_max = self._kept + len(part)
         try:
             self._kept += writer.write(part)
-        except OSError:
-            _log.warning("could not write the overflow file; keeping memory only", exc_info=True)
+        except OSError as error:
             self._fail()
+            self._warn_later(functools.partial(_warn_file_error, error))
+
+    def _warn_later(self, log: Callable[[], None]) -> None:
+        """Log ``log()`` now, or hold it for the caller while ``_defer_warnings`` is set."""
+        if self._defer_warnings:
+            self._deferred_warnings.append(log)
+        else:
+            log()
+
+    def _take_warnings(self) -> list[Callable[[], None]]:
+        """The warnings held for the caller, and forget them (``SharedTextStream`` logs them unlocked)."""
+        held, self._deferred_warnings = self._deferred_warnings, []
+        return held
 
     # --- writing ----------------------------------------------------------
 
@@ -290,7 +321,10 @@ class TextStream:
             return self._closed
         text = self._text()
         writer, self._file = self._file, None
-        if writer is not None and not writer.finish(delete=text.complete) and not text.complete:
+        closed = (
+            True if writer is None else writer.finish(delete=text.complete, warn=self._warn_later)
+        )
+        if not closed and not text.complete:
             self._file_failed = True  # the file did not close cleanly (logged, deleted)
             text = self._text()
         self._closed = text
@@ -365,3 +399,187 @@ class _Window:
     def tail(self) -> str | bytes:
         """The kept tail, joined (at most ``tail`` units, the last ones written after the head)."""
         return self._empty.join(self._tail)  # type: ignore[arg-type]
+
+
+class SharedTextStream:
+    """A ``TextStream`` for several writers: the same API, every call under one lock; also a text file.
+
+    ``SharedTextStream(*, unit, head, tail, overflow=None, overflow_bytes=None)``
+    takes ``TextStream``'s arguments and keeps the same guarantees (bounded
+    memory, exact accounting, UTF-8-safe cuts, the overflow file). The
+    difference is threads: ``write``, ``snapshot`` and ``close`` each run
+    under one lock, including the lazy opening of the overflow file, so
+    writes from several threads never interleave inside one another and a
+    ``snapshot`` never sees half a write. In a forked child the lock is a
+    new one (``os.register_at_fork``), so a child never waits on a lock a
+    parent thread held at the fork; the stream's state is whatever it was at
+    the fork, and an inherited overflow file is inert there (``nooa.overflow``).
+
+    It is also the text file a ``sys.stdout`` replacement needs:
+
+    - ``write(data) -> int``: appends and returns ``len(data)``; a chars
+      stream raises ``TypeError`` for anything but ``str``. After
+      ``close()`` a write is dropped (still returns ``len(data)``): a thread
+      still printing once the output is final does not fail. The dropped
+      units (chars or bytes, as ``unit``) are counted in
+      ``dropped_after_close``, and the first dropped write logs one warning
+      per stream (``logging``, logger ``nooa.snapshot._stream``); later ones
+      are counted only.
+    - ``writelines(lines)``, ``flush()`` (nothing to flush: the overflow
+      file is unbuffered), ``isatty() -> False``, ``readable() -> False``,
+      ``writable() -> True``.
+
+    Use ``TextStream`` when one thread writes: it takes no lock.
+
+    >>> from nooa.snapshot import SharedTextStream, render_output
+    >>> stream = SharedTextStream(unit="chars", head=4, tail=4)
+    >>> stream.write("0123456789abcdef")
+    16
+    >>> print(render_output(stream.close()))
+    0123
+    [... 8 chars omitted; full output not kept]
+    cdef
+    """
+
+    def __init__(
+        self,
+        *,
+        unit: Literal["chars", "bytes"],
+        head: int,
+        tail: int,
+        overflow: OverflowDir | None = None,
+        overflow_bytes: int | None = None,
+    ) -> None:
+        self._stream = TextStream(
+            unit=unit, head=head, tail=tail, overflow=overflow, overflow_bytes=overflow_bytes
+        )
+        # The file's warnings are logged by write()/close() after the lock is released.
+        self._stream._defer_warnings = True
+        self._lock = threading.Lock()
+        self._dropped = 0
+        _shared_streams.add(self)
+
+    @property
+    def unit(self) -> Literal["chars", "bytes"]:
+        """``"chars"`` or ``"bytes"``, as given."""
+        return self._stream.unit
+
+    @property
+    def head(self) -> int:
+        """The units kept from the start, as given."""
+        return self._stream.head
+
+    @property
+    def tail(self) -> int:
+        """The units kept from the end, as given."""
+        return self._stream.tail
+
+    @property
+    def dropped_after_close(self) -> int:
+        """The units (chars or bytes, as ``unit``) written after ``close()`` and dropped."""
+        return self._dropped
+
+    def write(self, data: str | bytes | bytearray | memoryview) -> int:
+        """Append ``data`` (as ``TextStream.write``) and return ``len(data)``; dropped after ``close()``, counted."""
+        deferred: list[Callable[[], None]] = []
+        with self._lock:
+            if self._stream._closed is None:
+                try:
+                    self._stream.write(data)
+                finally:
+                    deferred = self._stream._take_warnings()
+                written = True
+            else:
+                # Closed: the output is final, drop the write but count it.
+                written = False
+                size = _units(data, self._stream.unit)
+                first = self._dropped == 0 and size > 0
+                self._dropped += size
+        # Logged with the lock released: a logging handler that writes to this
+        # stream re-enters write(), which would wait on the lock forever.
+        for log in deferred:
+            log()
+        if written:
+            return len(data)
+        if first:
+            _log.warning(
+                "%d %s written after the stream closed were dropped "
+                "(later writes are counted in dropped_after_close, not logged)",
+                size,
+                self._stream.unit,
+            )
+        return len(data)
+
+    def writelines(self, lines: Iterable[str]) -> None:
+        """``write`` each of ``lines``."""
+        for line in lines:
+            self.write(line)
+
+    def flush(self) -> None:
+        """Nothing to do: memory is current and the overflow file has no buffer."""
+
+    def isatty(self) -> bool:
+        """``False``: not a terminal."""
+        return False
+
+    def readable(self) -> bool:
+        """``False``: write only."""
+        return False
+
+    def writable(self) -> bool:
+        """``True``."""
+        return True
+
+    def snapshot(self) -> Text:
+        """The whole stream so far, as a ``Text`` (``TextStream.snapshot``), between writes."""
+        with self._lock:
+            return self._stream.snapshot()
+
+    def close(self) -> Text:
+        """Finish the stream and return the final ``Text`` (``TextStream.close``); repeatable."""
+        with self._lock:
+            text = self._stream.close()
+            deferred = self._stream._take_warnings()
+        # Logged with the lock released: a logging handler that writes to this
+        # stream re-enters write(), which would wait on the lock forever.
+        for log in deferred:
+            log()
+        return text
+
+    def __enter__(self) -> SharedTextStream:
+        """Return the stream itself, for ``with SharedTextStream(...) as stream:``."""
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        """``close()`` the stream on leaving the ``with`` block."""
+        self.close()
+
+
+def _warn_file_error(error: OSError) -> None:
+    """Log that the overflow file could not be written (``TextStream._to_file``)."""
+    _log.warning("could not write the overflow file; keeping memory only", exc_info=error)
+
+
+def _units(data: object, unit: Literal["chars", "bytes"]) -> int:
+    """The size of a dropped write in ``unit``: chars of a ``str``, bytes of a bytes-like (``memoryview.nbytes``)."""
+    if type(data) is memoryview:
+        return data.nbytes
+    if isinstance(data, str):
+        return len(data) if unit == "chars" else len(encode_text(data))
+    if isinstance(data, (bytes, bytearray)):
+        return len(data)
+    return 0
+
+
+# Every live SharedTextStream, so that a forked child can give each a new lock.
+_shared_streams: weakref.WeakSet[SharedTextStream] = weakref.WeakSet()
+
+
+def _after_fork_in_child() -> None:
+    """A forked child: every stream gets a new lock (a parent thread may have held the old one)."""
+    for stream in list(_shared_streams):
+        stream._lock = threading.Lock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_after_fork_in_child)

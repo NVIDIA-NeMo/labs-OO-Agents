@@ -176,7 +176,6 @@ def test_large_diff_keeps_only_the_head_and_reports_omitted_lines(monkeypatch):
     assert len(preview) <= limit
     assert kept_lines == complete_lines[: len(kept_lines)]
     assert preview_lines[-1] == f"… +{len(complete_lines) - len(kept_lines)} lines"
-    assert "<truncated-output>" not in preview
 
 
 async def test_diff_generation_has_a_separate_input_safety_limit(tmp_path, monkeypatch):
@@ -292,14 +291,14 @@ async def test_activity_payloads_are_bounded(tmp_path):
     assert edit.diff.startswith("--- a/large.txt\n+++ b/large.txt\n")
     assert edit.diff.endswith(" lines\n")
     assert "… +" in edit.diff
-    assert "<truncated-output>" not in edit.diff
     assert "str(len=" not in edit.diff
     assert edit.content_complete is False
     assert edit.diff_complete is False
     assert (starts[0].stdin or "").startswith("str(len=50000,")
     assert starts[0].stdin_truncated is True
     assert sum(len(event.stdout) + len(event.stderr) for event in stream_outputs) <= 31_000
-    assert stream_outputs[0].stdout.startswith("<truncated-output>")
+    assert stream_outputs[0].stdout.startswith("y" * 15_000 + "\n[... ")
+    assert "chars omitted; full output not kept]\n" in stream_outputs[0].stdout
     assert stream_finished.output_truncated is True
     assert streamed[-1].kind == "done"
 
@@ -434,7 +433,7 @@ async def test_overwrite_reads_the_previous_content_boundedly(tmp_path):
     """The bound must be on the read, not only on what is emitted.
 
     The other activity tests assert on the emitted event, which is produced by
-    pformat/TruncatingStringIO *after* the read — so reverting to an unbounded
+    the snapshot renderers *after* the read — so reverting to an unbounded
     read_text() of a workspace-controlled file is invisible to them.
     """
     reads: list[int] = []

@@ -135,6 +135,39 @@ async def test_run_log_path_gets_the_full_output_and_keeps_the_exit_code(agent, 
     assert agent.jobs.get("noisy").log_path == str(log)
 
 
+async def test_run_log_path_cut_tail_names_the_log(agent, tmp_path):
+    # fit 1 (scratch-fit/test_fit_jobs_log.py): the log held all 108,894 bytes,
+    # yet the done update's cut line said "full output not kept".
+    await agent.jobs.run("seq 1 20000", name="big", log_path="big.log")
+    item = await _next(agent)
+    while not (isinstance(item, JobUpdate) and item.done):
+        item = await _next(agent)
+    log = tmp_path / "big.log"
+    assert item.log_path == str(log)
+    assert log.read_text() == "".join(f"{i}\n" for i in range(1, 20001))
+    first = item.stdout.splitlines()[0]
+    assert first == (
+        f"[... 88,894 chars omitted; full output (stdout and stderr together, "
+        f"in arrival order): {log}]"
+    )
+
+
+async def test_run_log_path_long_line_names_the_log_which_holds_it_whole(agent, tmp_path):
+    await agent.jobs.run(
+        "head -c 20000 /dev/zero | tr '\\0' x; echo; echo short",
+        name="wide",
+        log_path="wide.log",
+    )
+    item = await _next(agent)
+    log = tmp_path / "wide.log"
+    assert log.read_text() == "x" * 20_000 + "\nshort\n"
+    assert item.stdout == (
+        "x" * 8_000
+        + "\n[... 12,000 chars omitted; full output (stdout and stderr together, "
+        + f"in arrival order): {log}]\nshort\n"
+    )
+
+
 async def test_run_log_path_is_relative_to_the_commands_directory(agent, tmp_path):
     (tmp_path / "sub").mkdir()
     await agent.jobs.run("echo hi", name="here", cwd="sub", log_path="run.log")
@@ -854,6 +887,25 @@ async def test_a_failing_stream_sends_its_pending_values_then_an_empty_done_upda
     assert agent.jobs.get("b").state == "failed"
 
 
+async def test_a_failing_pipe_reader_fails_the_shell_job(agent, monkeypatch):
+    # #580 review: a pump that raised only put the end-of-stream marker, so a
+    # read error looked like a clean end and the job reported success.
+    import nooa_atom.agent.jobs as jobs_module
+
+    real = jobs_module.bounded_lines
+
+    async def failing(stream, **kwargs):
+        async for line in real(stream, **kwargs):
+            yield line
+        raise OSError("pipe read failed")
+
+    monkeypatch.setattr(jobs_module, "bounded_lines", failing)
+    await agent.jobs.run("echo out", name="p")
+    item = await _next(agent)
+    assert item.done and item.error == "OSError: pipe read failed"
+    assert agent.jobs.get("p").state == "failed"
+
+
 async def test_a_stream_ends_with_its_last_pending_values(agent):
     async def three():
         for i in range(3):
@@ -877,14 +929,18 @@ async def test_a_big_run_result_keeps_the_last_20000_chars_of_each_stream(agent)
     result = item
     out = "".join(f"line {i:05d}\n" for i in range(5000))  # 55,000 chars
     err = "".join(f"err {i:05d}\n" for i in range(3000))  # 30,000 chars
-    # Each stream keeps exactly its own last 20,000 chars, after a one-line
-    # notice that names no file (there is none).
-    assert result.stdout == f"[... {55_000 - 20_000:,} chars omitted]\n" + out[-20_000:]
-    assert result.stderr == f"[... {30_000 - 20_000:,} chars omitted]\n" + err[-20_000:]
+    # Each stream keeps exactly its own last 20,000 chars (a chars TextStream
+    # with no head), after render_output's cut line: no file keeps the rest.
+    assert result.stdout == (
+        f"[... {55_000 - 20_000:,} chars omitted; full output not kept]\n" + out[-20_000:]
+    )
+    assert result.stderr == (
+        f"[... {30_000 - 20_000:,} chars omitted; full output not kept]\n" + err[-20_000:]
+    )
     for stream in (result.stdout, result.stderr):
         notice, _, kept = stream.partition("\n")
         assert len(kept) == 20_000
-        assert "full output" not in notice and "/" not in notice and ".log" not in notice
+        assert "/" not in notice and ".log" not in notice
 
 
 async def test_a_run_under_the_cap_is_not_truncated(agent):
@@ -961,11 +1017,21 @@ async def test_a_5mb_line_stays_bounded_and_later_lines_still_arrive(agent):
         tracemalloc.stop()
     assert peak < 2_000_000, f"peak {peak:,} bytes above baseline"
     lines = [line for update in updates[:-1] for line in update.lines]
-    assert lines[0] == "x" * 8_000 + "[... 4,992,000 chars of this line omitted]"
+    assert lines[0] == "x" * 8_000 + "\n[... 4,992,000 chars omitted; full output not kept]"
     assert lines[1:] == ["after-1", "after-2"]
     done = updates[-1]
     assert done.done and len(done.stdout) <= 20_000
     assert done.stdout.endswith("after-1\nafter-2\n")
+
+
+async def test_a_single_overlong_line_is_cut_in_the_snapshot_notation_in_the_tail(agent):
+    """The done update's tail is of line-framed output: the line's own cut is render_output's."""
+    cmd = "python3 -c \"import sys; sys.stdout.write('A' * 30_000 + 'THE_REAL_END\\n')\""
+    await agent.jobs.run(cmd, name="long")
+    done = (await _stream_updates(agent, "long"))[-1]
+    assert done.done and done.returncode == 0
+    # 30,012 chars: the first 8,000, then the omitted rest, counted by the snapshot.
+    assert done.stdout == "A" * 8_000 + "\n[... 22,012 chars omitted; full output not kept]\n"
 
 
 async def test_a_throttled_chatty_run_sends_batches_early_at_the_cap(agent):
@@ -988,7 +1054,7 @@ async def test_tail_caps_a_5mb_line(agent, tmp_path):
         handle.write("y" * 5_000_000 + "\nshort\n")
     first = await _next(agent)
     second = await _next(agent)
-    assert first.lines == ["y" * 8_000 + "[... 4,992,000 chars of this line omitted]"]
+    assert first.lines == ["y" * 8_000 + "\n[... 4,992,000 chars omitted; full output not kept]"]
     assert second.lines == ["short"]
     await agent.jobs.cancel("log")
 

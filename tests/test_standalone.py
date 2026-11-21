@@ -786,6 +786,43 @@ class _CaptureKwargsLLM(FakeLLMClient):
         return await super().acall(messages, tools, output_model, **kwargs)
 
 
+class _StandaloneLimits(BaseModel):
+    """A package config model, for the standalone ``configs=`` override."""
+
+    a: int = 10
+
+
+def _standalone_seen() -> list[int]:
+    """What a standalone function's generated code sees: the configs in force."""
+    from nooa.config import TruncationConfig, effective
+
+    return [effective(TruncationConfig).capture.max_stdout, effective(_StandaloneLimits).a]
+
+
+class TestStandaloneConfigOverrides:
+    @pytest.mark.asyncio
+    async def test_truncation_and_configs_overrides_apply(self) -> None:
+        # #580 review: _make_adapter did not copy _strategy_truncation /
+        # _strategy_configs, so a standalone override was silently dropped.
+        from nooa.config import CaptureConfig, TruncationConfig
+
+        fake_llm = FakeLLMClient(
+            scripted_responses=[_resp(tool_calls=[_exec("return_result(_standalone_seen())")])]
+        )
+
+        @strategy(
+            CodeActStrategy(),
+            llm=fake_llm,
+            truncation=TruncationConfig(capture=CaptureConfig(max_stdout=333)),
+            configs=[_StandaloneLimits(a=44)],
+        )
+        async def probe() -> list[int]:
+            """Call _standalone_seen() and return its result."""
+            ...
+
+        assert await probe() == [333, 44]
+
+
 class TestStandaloneAgentIdSharding:
     """`prompt_cache_key` sharding contract for standalone functions.
 

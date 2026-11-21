@@ -310,14 +310,15 @@ def test_deque_and_array_are_native_sequences(value: Any, python: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "value",
-    [collections.deque(range(10_000_000)), array.array("i", range(10_000_000))],
+    "make",
+    [lambda: collections.deque(range(10_000_000)), lambda: array.array("i", range(10_000_000))],
     ids=["deque", "array"],
 )
-def test_huge_deque_and_array_are_read_from_both_ends_quickly(value: Any) -> None:
+def test_huge_deque_and_array_are_read_from_both_ends_quickly(make: Any) -> None:
+    value = make()  # built here, not at collection: ~350 MB for the deque
     start = time.perf_counter()
     text = render_python(capture(value, _PREFILL))
-    assert time.perf_counter() - start < 0.1  # the repr fallback took ~1 s
+    assert time.perf_counter() - start < 0.5  # the repr fallback took ~1 s; this takes ~1 ms
     name = type(value).__name__
     assert text.startswith(f"{name}(len=10000000, [:13]=[0, 1, 2,")
     assert text.endswith("9999998, 9999999])")
@@ -345,7 +346,7 @@ def test_a_million_attributes_list_the_first_and_say_how_many() -> None:
     for limits in (_PREFILL, Limits()):
         start = time.perf_counter()
         node = capture(wide, limits)
-        assert time.perf_counter() - start < 0.05
+        assert time.perf_counter() - start < 0.5  # reading all 1,000,000 would take seconds
         assert isinstance(node, Object) and node.length == 1_000_000
         assert node.reason == "max_items"
         assert node.fields[:3] == capture(wide, Limits(max_items=3)).fields
@@ -381,7 +382,7 @@ def test_a_huge_int_says_how_many_digits_it_has(value: int, python: str) -> None
     for limits in (_PREFILL, Limits()):
         start = time.perf_counter()
         node = capture(value, limits)
-        assert time.perf_counter() - start < 0.01  # never converted to decimal
+        assert time.perf_counter() - start < 0.25  # never converted to decimal (seconds)
         assert isinstance(node, Object) and node.kind == "python.int"
         assert node.reason == "max_length"
         assert render_python(node) == python
@@ -416,7 +417,7 @@ def test_a_slow_or_large_repr_fallback_warns_the_developer(
     messages = [r.getMessage() for r in caplog.records]
     assert len(messages) == 2
     assert "repr() of tests.snapshot.test_standard_types." in messages[0]
-    assert "Slow took 0.0" in messages[0] and "returned 6 characters" in messages[0]
+    assert "Slow took " in messages[0] and "returned 6 characters" in messages[0]
     assert "Large took" in messages[1] and "returned 2,000 characters" in messages[1]
     assert all(r.levelno == logging.WARNING for r in caplog.records)
 

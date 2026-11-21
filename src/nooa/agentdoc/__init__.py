@@ -33,12 +33,6 @@ from typing import Annotated, Any
 from nooa._version import __version__ as __version__
 from nooa.agentdoc._docs import spec
 from nooa.agentdoc._pformat import _pformat
-from nooa.agentdoc._truncating_stream import (
-    FileBackedTruncatingStringIO,
-    LineSplitter,
-    TruncatingStringIO,
-    bounded_lines,
-)
 from nooa.agentdoc._visibility import hidden
 from nooa.agentdoc.core import doc
 from nooa.agentdoc.doc_config import DocConfig
@@ -52,13 +46,19 @@ def truncating_pformat(
     obj: Annotated[Any, "Object to format"],
     *,
     max_chars: Annotated[
-        int | None, "Hard char cap on non-string rendering via TruncatingStringIO"
+        int | None, "Hard char cap on non-string rendering: half head, half tail"
     ] = None,
     **kwargs: Any,
 ) -> str:
     """Format a value, with a hard total-size cap for non-string objects.
 
     Strings pass through unchanged. Other options are forwarded to ``pformat()``.
+    With ``max_chars``, a value is a bounded-snapshot preview: it is captured
+    within a ``max_chars`` budget (so memory and time follow the output, not
+    the input), and its long containers and strings say what they left out
+    (``list(len=N, [:k]=[...], [-j:]=[...])``). A rendering still longer than
+    ``max_chars`` keeps its first and last halves around ``[... N chars
+    omitted; full output not kept]``. Without ``max_chars`` it is ``pformat``.
     """
     if max_chars is not None and max_chars <= 0:
         raise ValueError(f"truncating_pformat max_chars must be > 0 or None, got {max_chars}")
@@ -70,10 +70,16 @@ def truncating_pformat(
         from io import StringIO
 
         stream = StringIO()
-    else:
-        stream = TruncatingStringIO(limit=max_chars)
-    _pformat(obj, stream, **kwargs)
-    return stream.getvalue()
+        _pformat(obj, stream, **kwargs)
+        return stream.getvalue()
+
+    from nooa._bounded_text import text_stream
+    from nooa.snapshot import render_output
+
+    # A value is captured within max_chars; the rendering streams into a bounded TextStream.
+    bounded = text_stream(max_chars)
+    _pformat(obj, bounded, _max_chars=max_chars, **kwargs)
+    return render_output(bounded.close())
 
 
 def pformat(
@@ -81,9 +87,15 @@ def pformat(
     *,
     console: Any = None,
     indent_guides: bool = True,
-    max_length: Annotated[int | None, "Max elements per container; None = unlimited"] = None,
-    max_string: Annotated[int | None, "Max string chars; None = unlimited"] = None,
-    max_depth: Annotated[int | None, "Max nesting depth; None = unlimited"] = None,
+    max_length: Annotated[
+        int | None, "Max elements per container; None = no caller limit (safety ceilings apply)"
+    ] = None,
+    max_string: Annotated[
+        int | None, "Max string chars; None = no caller limit (safety ceilings apply)"
+    ] = None,
+    max_depth: Annotated[
+        int | None, "Max nesting depth; None = no caller limit (safety ceilings apply)"
+    ] = None,
     expand_all: Annotated[bool, "Always expand containers to multiple lines"] = False,
     concise: Annotated[bool, "Show first-line docstrings only"] = False,
     instance_mode: Annotated[
@@ -95,6 +107,15 @@ def pformat(
 
     Hidden fields are omitted and custom ``__repr__`` methods are honored. Use
     ``doc()`` for an object's API, or ``truncating_pformat()`` for a hard size cap.
+
+    Limits: ``None`` means no caller limit, not unbounded; these safety
+    ceilings always apply (``nooa.snapshot`` bounds every value preview):
+
+    - ``max_depth=None``: nesting is shown 64 levels deep;
+    - a mapping key that is not a plain scalar (a tuple, a frozenset) has
+      a fixed budget: 8 items, 50 chars per string, 2 levels;
+    - one value is read in at most 200,000 nodes (``max_nodes``) and a
+      100,000,000-char capture budget (``max_chars``).
     """
     # console and indent_guides are intentionally ignored for Rich compatibility
     del console, indent_guides
@@ -134,16 +155,27 @@ def pprint(
     *,
     console: Any = None,
     indent_guides: bool = True,
-    max_length: Annotated[int | None, "Max elements per container; None = unlimited"] = None,
-    max_string: Annotated[int | None, "Max string chars; None = unlimited"] = None,
-    max_depth: Annotated[int | None, "Max nesting depth; None = unlimited"] = None,
+    max_length: Annotated[
+        int | None, "Max elements per container; None = no caller limit (safety ceilings apply)"
+    ] = None,
+    max_string: Annotated[
+        int | None, "Max string chars; None = no caller limit (safety ceilings apply)"
+    ] = None,
+    max_depth: Annotated[
+        int | None, "Max nesting depth; None = no caller limit (safety ceilings apply)"
+    ] = None,
     expand_all: Annotated[bool, "Always expand containers to multiple lines"] = False,
     concise: Annotated[bool, "Show first-line docstrings only"] = False,
     instance_mode: Annotated[
         str, "Instance format: 'repr' for repr-style, 'type' for type structure"
     ] = "repr",
 ) -> None:
-    """Print the compact, value-focused representation produced by ``pformat()``."""
+    """Print the compact, value-focused representation produced by ``pformat()``.
+
+    ``None`` limits mean no caller limit; ``pformat``'s safety ceilings
+    apply (64 levels, a fixed budget for non-scalar keys, 200,000 nodes,
+    100,000,000 chars).
+    """
     # console and indent_guides are intentionally ignored for Rich compatibility
     del console, indent_guides
 
@@ -168,8 +200,4 @@ __all__ = [
     "pformat",
     "pprint",
     "truncating_pformat",
-    "FileBackedTruncatingStringIO",
-    "LineSplitter",
-    "TruncatingStringIO",
-    "bounded_lines",
 ]

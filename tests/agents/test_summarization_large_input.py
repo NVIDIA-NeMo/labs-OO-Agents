@@ -84,6 +84,25 @@ def test_assert_param_sizes_still_fires_when_limit_is_set():
         strategy._assert_param_sizes(call)
 
 
+def test_assert_param_sizes_measures_the_repr_of_non_strings():
+    """A non-string parameter is measured by ``len(repr(value))``."""
+    import pytest
+
+    strategy = PredictStrategy(PredictConfig(max_param_chars=1000))
+    call = CurrentCall(
+        id="test-id",
+        method_name="m",
+        decorator="agent",
+        signature="(self, rows: list)",
+        args=(list(range(1000)),),
+        kwargs={},
+    )
+    size = len(repr(list(range(1000))))
+    with pytest.raises(ValueError, match=f"is {size:,} chars \\(repr\\)"):
+        strategy._assert_param_sizes(call)
+    PredictStrategy(PredictConfig(max_param_chars=size))._assert_param_sizes(call)
+
+
 # ---------------------------------------------------------------------------
 # Total-input token cap (session d2a3557e: summarizer's own summarize() call was
 # handed a ~1.09M-token render and 400'd "prompt is too long" in a retry loop).

@@ -104,6 +104,53 @@ def test_dictionary_key_warning_explains_fixed_limit():
     assert "prefill_format" not in message
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        {("a" * 100,): "ok"},  # a long string inside a tuple key
+        {tuple(range(30)): "ok"},  # a tuple key with more items than a key keeps
+        {(((1, 2),),): "ok"},  # a key nested deeper than a key keeps
+    ],
+    ids=["long-string-in-tuple-key", "long-tuple-key", "deep-tuple-key"],
+)
+def test_a_cut_inside_a_node_key_warns_as_a_dictionary_key(value):
+    """A node-valued key (a tuple) is cut by its own fixed cap: reported as dictionary_key."""
+    with observe_truncation() as reasons:
+        text = pformat(value, max_string=2000, max_length=25, max_depth=4)
+    assert reasons == {"dictionary_key"}, text
+    call = CurrentCall(id="test", method_name="analyze", decorator="strategy")
+    with pytest.warns(PrefillTruncationWarning) as caught:
+        with warn_on_prefill_truncation(call):
+            pformat(value, max_string=2000, max_length=25, max_depth=4)
+    assert "50-character preview limit" in str(caught[0].message)
+
+
+def test_a_whole_tuple_key_reports_nothing():
+    with observe_truncation() as reasons:
+        pformat({(1, "a"): "ok"})
+    assert reasons == set()
+
+
+@pytest.mark.asyncio
+async def test_worker_reports_a_cut_tuple_key_as_dictionary_key():
+    from nooa.runtime.pprint import pprint
+    from nooa.runtime.sandbox.cell_core import run_cell_source
+    from nooa.runtime.sandbox.serialization import (
+        dto_from_wire,
+        dto_to_result,
+        dto_to_wire,
+        result_to_dto,
+    )
+    from nooa.runtime.sandbox.wire import Codec
+
+    result = await run_cell_source("pprint(data)", {"pprint": pprint, "data": {("a" * 100,): 1}})
+    assert result.success
+    assert result.truncation_reasons == ["dictionary_key"]
+    codec = Codec()
+    transported = dto_from_wire(codec.loads(codec.dumps(dto_to_wire(result_to_dto(result)))))
+    assert dto_to_result(transported).truncation_reasons == ["dictionary_key"]
+
+
 @pytest.mark.asyncio
 async def test_worker_omissions_survive_transport():
     """A worker reports omissions to its parent rather than warning inside its stderr."""

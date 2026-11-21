@@ -211,3 +211,30 @@ class TestPredictNoInputTruncation:
         output = call.format_parameters_as_code()
 
         assert content in output
+
+
+class TestPredictPromptCarriesParametersWhole:
+    """Predict's own prompt uses placeholder_chars=None: max_param_chars is its only limit."""
+
+    async def test_a_60k_string_parameter_reaches_the_prompt_whole(self):
+        import json
+
+        from nooa import Agent, strategy
+        from nooa.unifiedllm import FakeLLMClient, LLMResponse
+
+        # 60,000 chars: past the default placeholder_chars (50,000), within
+        # max_param_chars (200,000). Head and tail differ so a cut shows.
+        text = "A" * 30_000 + "B" * 30_000
+
+        class Reader(Agent):
+            @strategy(PredictStrategy())
+            async def classify(self, document: str) -> str:
+                """Classify the document."""
+                ...
+
+        llm = FakeLLMClient(
+            [LLMResponse.model_validate({"content": json.dumps({"value": "ok"}), "tool_calls": []})]
+        )
+        agent = Reader(llm=llm)
+        assert await agent.classify(text) == "ok"
+        assert f"document = {text!r}" in json.dumps(llm.last_messages)

@@ -151,9 +151,11 @@ for i in range(100):
         result = await agent.runtime.execute_code(code)
 
         assert result.success
-        # Should be truncated at 1000 chars — prose format shows head+tail split
-        assert "Output too large" in result.stdout
-        assert "500 and last 500 chars" in result.stdout
+        # Cut at 1000 chars: a 500-char head and a 500-char tail around one line
+        head, line, tail = result.stdout.partition(
+            "\n[... 4,100 chars omitted; full output not kept]\n"
+        )
+        assert line and len(head) == 500 and len(tail) == 500
 
     @pytest.mark.asyncio
     async def test_custom_stderr_limit_applied(self):
@@ -200,9 +202,9 @@ for i in range(100):
         result_large = await large_agent.runtime.execute_code(code)
 
         # Small agent should truncate — prose format
-        assert "Output too large" in result_small.stdout
+        assert "chars omitted; full output" in result_small.stdout
         # Large agent should not truncate (2000 < 10000)
-        assert "Output too large" not in result_large.stdout
+        assert "chars omitted; full output" not in result_large.stdout
 
 
 class TestConfigMergeEdgeCases:
@@ -474,7 +476,7 @@ class TestMethodLevelTruncationConfig:
         # The stdout should be truncated at 200 chars (not 100_000)
         assert "stdout" in execution_results
         stdout = execution_results["stdout"]
-        assert "Output too large" in stdout, (
+        assert "chars omitted; full output" in stdout, (
             f"Expected truncation at 200 chars but got: {stdout[:300]!r}"
         )
 

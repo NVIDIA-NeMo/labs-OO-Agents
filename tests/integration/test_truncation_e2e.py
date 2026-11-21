@@ -4,8 +4,9 @@
 
 Tests the interactions between truncation layers:
 
-- **L2** — I/O capture: ``TruncatingStringIO`` head/tail-truncates stdout/stderr
-  during ``execute_code()``, producing ``<truncated-output>`` wrappers.
+- **L2** — I/O capture: a ``nooa.snapshot.TextStream`` head/tail-cuts stdout/stderr
+  during ``execute_code()``, rendered with ``render_output``'s
+  ``[... N chars omitted; ...]`` line.
 - **L3** — Event rendering: ``format_event()`` / ``pformat()`` renders events
   for the LLM context.  ``PythonOutput.stdout`` and ``.stderr`` carry
   ``spec(max_string=None)`` so they pass through verbatim (no re-truncation).
@@ -110,8 +111,20 @@ def _count_tokens(text: str) -> int:
 # ── L2 → L3: stdout/stderr truncation → event rendering ─────────────────
 
 
+def _captured(limit: int, text: str) -> str:
+    """``text`` as a cell's capture stream renders it (``limit`` chars kept)."""
+    from nooa.config.truncation_config import TruncationConfig
+    from nooa.runtime.actor import _make_capture_stream, _render_capture
+
+    config = TruncationConfig()
+    stream = _make_capture_stream(limit, config)
+    stream.write(text)
+    stream.close()
+    return _render_capture(stream, config.capture)
+
+
 class TestL2ToL3Interaction:
-    """L2 (TruncatingStringIO) truncates stdout/stderr at capture time.
+    """L2 (a TextStream) truncates stdout/stderr at capture time.
     L3 (format_event / pformat) must render the result *verbatim* — no
     re-truncation of the already-bounded content.
 
@@ -121,24 +134,16 @@ class TestL2ToL3Interaction:
     ``max_string`` setting.
     """
 
-    def test_truncated_stdout_wrapper_survives_rendering(self):
-        """The <truncated-output> wrapper from L2 must appear verbatim in
-        the L3-rendered event — no str(len=...) marker wrapping it."""
-        # Simulate what L2 produces for large output
-        truncated_stdout = (
-            "<truncated-output>\n"
-            "Output too large (200,000 chars). "
-            "Showing first 25,000 and last 25,000 chars.\n\n"
-            + "x" * 25_000
-            + "\n\n... 150,000 chars not shown ...\n\n"
-            + "y" * 25_000
-            + "\n</truncated-output>"
-        )
-        event = _make_python_output(stdout=truncated_stdout)
+    def test_truncated_stdout_survives_rendering(self):
+        """A cut stdout, as the capture produces it, appears verbatim in the
+        L3-rendered event: no str(len=...) marker wrapping it."""
+        stdout = _captured(50_000, "x" * 100_000 + "y" * 100_000)
+        assert "\n[... 150,000 chars omitted; full output not kept]\n" in stdout
+        event = _make_python_output(stdout=stdout)
         rendered = pformat(event, max_string=500)
 
-        # The full truncated_stdout must be present — L3 must NOT re-truncate
-        assert truncated_stdout in rendered
+        # The whole cut stdout must be present: L3 must NOT re-truncate
+        assert stdout in rendered
         assert "str(len=" not in rendered
 
     def test_small_stdout_passes_through_unchanged(self):
@@ -148,20 +153,13 @@ class TestL2ToL3Interaction:
         rendered = pformat(event, max_string=500)
         assert small_output in rendered
 
-    def test_truncated_stderr_wrapper_survives_rendering(self):
-        """Same invariant for stderr — spec(max_string=None) applies."""
-        truncated_stderr = (
-            "<truncated-output>\n"
-            "Output too large (10,000 chars). "
-            "Showing first 1,000 and last 1,000 chars.\n\n"
-            + "W" * 1_000
-            + "\n\n... 8,000 chars not shown ...\n\n"
-            + "E" * 1_000
-            + "\n</truncated-output>"
-        )
-        event = _make_python_output(stderr=truncated_stderr)
+    def test_truncated_stderr_survives_rendering(self):
+        """Same invariant for stderr: spec(max_string=None) applies."""
+        stderr = _captured(2_000, "W" * 5_000 + "E" * 5_000)
+        assert "\n[... 8,000 chars omitted; full output not kept]\n" in stderr
+        event = _make_python_output(stderr=stderr)
         rendered = pformat(event, max_string=500)
-        assert truncated_stderr in rendered
+        assert stderr in rendered
         assert "str(len=" not in rendered
 
     def test_non_exempt_fields_still_truncated(self):
@@ -196,7 +194,7 @@ class TestL2ToL3Interaction:
 
         assert result.success
         # L2 should have truncated
-        assert "Output too large" in result.stdout or len(result.stdout) <= 1_000
+        assert "chars omitted; full output" in result.stdout or len(result.stdout) <= 1_000
 
         # Now render as L3 would
         event = _make_python_output(stdout=result.stdout)
@@ -598,7 +596,7 @@ class TestCrossLayerPipeline:
         # Execute code that produces large stdout
         result = await agent.runtime.execute_code('print("Z" * 5000)')
         assert result.success
-        assert "Output too large" in result.stdout
+        assert "chars omitted; full output" in result.stdout
 
         # Add as event (simulating what codeact does)
         event = PythonOutput(
@@ -619,9 +617,13 @@ class TestCrossLayerPipeline:
         finally:
             _current_llm_var.reset(token)
 
-        # The L2 truncation wrapper must be present in final context
+        # The cut output itself reaches the context: its own cut line (the
+        # system prompt also mentions the marker text) and its head and tail.
         full_context = str(messages)
-        assert "Output too large" in full_context
+        head, cut_line, tail = result.stdout.rstrip("\n").split("\n")
+        assert cut_line.startswith("[... ") and cut_line in full_context
+        assert head and set(head) == {"Z"} and tail.startswith("Z")
+        assert head + "\\n" + cut_line + "\\n" + tail in full_context
 
     @pytest.mark.asyncio
     async def test_l2_small_output_survives_full_pipeline(self):
@@ -693,38 +695,38 @@ class TestCrossLayerPipeline:
 
     @pytest.mark.asyncio
     async def test_head_tail_structure_preserved_through_pipeline(self):
-        """The head/tail structure from L2's TruncatingStringIO must survive
+        """The head/tail structure from L2's TextStream must survive
         all the way through L3 event rendering into the context."""
-        from nooa.agentdoc import TruncatingStringIO
+        from nooa.snapshot import TextStream, render_output
 
         # Create a head/tail truncated output directly
-        buf = TruncatingStringIO(limit=200)
-        buf.write("HEAD_CONTENT_" * 20)  # 260 chars, exceeds 200
-        buf.write("TAIL_CONTENT_" * 20)  # more tail content
-        truncated = buf.getvalue()
+        stream = TextStream(unit="chars", head=100, tail=100)
+        stream.write("HEAD_CONTENT_" * 20)  # 260 chars, exceeds 200
+        stream.write("TAIL_CONTENT_" * 20)  # more tail content
+        truncated = render_output(stream.close())
 
-        assert "Output too large" in truncated
-        assert "chars not shown" in truncated
+        marker = "[... 320 chars omitted; full output not kept]"
+        assert marker in truncated
 
         # Now render it through L3
         event = _make_python_output(stdout=truncated)
         rendered = pformat(event, max_string=100)
 
-        # The truncation markers must survive
-        assert "Output too large" in rendered
-        assert "chars not shown" in rendered
+        # The truncation marker must survive
+        assert marker in rendered
 
     def test_l3_rendering_preserves_l2_truncation_notice_in_event_format(self):
         """format_event with event_format must preserve the L2 truncation
         notice verbatim, not wrap it in str(len=...) markers."""
-        from nooa.agentdoc import TruncatingStringIO
+        from nooa.snapshot import TextStream, render_output
 
         # Produce realistic L2 output
-        buf = TruncatingStringIO(limit=500)
+        stream = TextStream(unit="chars", head=250, tail=250)
         for i in range(100):
-            buf.write(f"line {i}: " + "x" * 50 + "\n")
-        l2_output = buf.getvalue()
-        assert buf.was_truncated
+            stream.write(f"line {i}: " + "x" * 50 + "\n")
+        text = stream.close()
+        l2_output = render_output(text)
+        assert not text.complete
 
         event = _make_python_output(stdout=l2_output)
         fmt = XMLBlockFormatter()

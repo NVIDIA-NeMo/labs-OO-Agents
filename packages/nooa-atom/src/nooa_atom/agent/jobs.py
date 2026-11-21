@@ -18,6 +18,7 @@ session's one namespace of live names, shared with its open children (see
 
 import asyncio
 import contextlib
+import dataclasses
 import datetime
 import inspect
 import os
@@ -27,21 +28,19 @@ import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from nooa._platform import require_posix
-from nooa.agentdoc import (
-    LineSplitter,
-    TruncatingStringIO,
-    bounded_lines,
-    hidden,
-    spec,
-)
+from nooa.agentdoc import hidden, spec
+from nooa.config.effective import effective
 from nooa.context_blocks import EventBase
 from nooa.skill import Skill
+from nooa.snapshot import Overflow, TextStream, render_output
 from nooa.tools import StreamDone, StreamEvent
+from nooa_atom.agent.lines import LineSplitter, bounded_lines, name_job_log
+from nooa_atom.limits import AtomLimits
 from nooa_atom.session.names import ROOT_PATH, check_name, child_path
 
 if TYPE_CHECKING:
@@ -51,10 +50,15 @@ __all__ = ["JobInfo", "JobUpdate", "JobsApi", "JobsLost", "Throttle"]
 
 JOBS_CHANNEL = "jobs"
 # Characters kept of stdout and, separately, of stderr on a run's done
-# update (the end of each stream); nothing more is kept anywhere.
-_TAIL_CHARS = 20_000
-# Longest delivered line (run progress, tail), in characters; the rest of the
-# line is replaced by a "[... N chars of this line omitted]" marker.
+# update (the end of each stream): AtomLimits.max_job_tail of the config in
+# force when the job starts (nooa.config.effective(AtomLimits)); nothing
+# more is kept anywhere. The tail is of the line-framed output: each line
+# already bounded to _LINE_CHARS.
+# Longest delivered line (run progress, tail), in characters: a longer line is
+# its first _LINE_CHARS characters, then nooa.snapshot's render_output line
+# "[... N chars omitted; full output not kept]" (LineSplitter), or
+# "full output (stdout and stderr together, in arrival order): PATH" when a
+# log_path= log holds it (lines.name_job_log).
 _LINE_CHARS = 8_000
 # Bytes read from a pipe or a tailed file at a time.
 _CHUNK_BYTES = 64 * 1024
@@ -367,6 +371,14 @@ def _text_chars(value: Any) -> int:
     return len(value) if isinstance(value, str) else 0
 
 
+def _file_size(path: str) -> int | None:
+    """The bytes in ``path`` now, or ``None`` when it cannot be read."""
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return None
+
+
 async def _tail_lines(path: Path, offset: int) -> AsyncIterator[str]:
     """Yield complete lines appended to ``path`` after byte ``offset``, polling for more.
 
@@ -635,8 +647,14 @@ class JobsApi(Skill):
         cwd: str | Path | None,
         context: tuple[str, dict],
         job: _Job,
+        log: BinaryIO | None = None,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
-        """Run one command in its own process; yield its lines, then a ``StreamDone``."""
+        """Run one command in its own process; yield its lines, then a ``StreamDone``.
+
+        With ``log`` (an open binary file, from ``log_path=``) every byte the
+        command writes goes there as it is read, stdout and stderr together,
+        and a line cut at ``_LINE_CHARS`` names that file.
+        """
         require_posix("Background shell jobs")
         base, env = context
         directory = Path(base) if cwd is None else (Path(base) / Path(cwd)).resolve()
@@ -651,21 +669,29 @@ class JobsApi(Skill):
             env=env,
             start_new_session=True,
         )
-        queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue(_QUEUE_ITEMS)
+        # A line, ``None`` (a stream ended) or the exception a pump failed with.
+        queue: asyncio.Queue[tuple[str, str] | Exception | None] = asyncio.Queue(_QUEUE_ITEMS)
+
+        def to_log(data: bytes) -> None:
+            if not log.closed:  # the job ended: a pump still stopping writes nothing
+                log.write(data)
 
         async def pump(stream: asyncio.StreamReader, kind: str) -> None:
             # The end marker is put only when the stream ends or fails, never
             # on cancellation: then nobody reads the queue any more, and a put
-            # on a full queue would block the cleanup below forever.
+            # on a full queue would block the cleanup below forever. A failure
+            # puts its exception, which the reader raises: it is not a clean end.
             try:
                 async for line in bounded_lines(
                     stream,
                     max_line_chars=_LINE_CHARS,
                     chunk_bytes=_CHUNK_BYTES,
+                    on_bytes=to_log if log is not None else None,
+                    full_path=job.log_path if log is not None else None,
                 ):
                     await queue.put((kind, line))
-            except Exception:
-                await queue.put(None)
+            except Exception as error:
+                await queue.put(error)
                 raise
             await queue.put(None)
 
@@ -700,6 +726,8 @@ class JobsApi(Skill):
                 if entry is None:
                     open_streams -= 1
                     continue
+                if isinstance(entry, Exception):
+                    raise entry  # a pump failed: the job fails (cleanup below)
                 kind, text = entry
                 yield StreamEvent(kind=kind, text=text)
             if not timed_out:
@@ -713,11 +741,17 @@ class JobsApi(Skill):
             if timed_out:
                 _kill_group(proc)
                 await _stop_pumps(tasks)
-                # Lines the pumps had already queued still go out.
+                # Lines the pumps had already queued still go out; a pump's
+                # failure among them is raised once they are out.
+                failure: Exception | None = None
                 while not queue.empty():
                     entry = queue.get_nowait()
-                    if entry is not None:
+                    if isinstance(entry, Exception):
+                        failure = failure or entry
+                    elif entry is not None:
                         yield StreamEvent(kind=entry[0], text=entry[1])
+                if failure is not None:
+                    raise failure
                 await _reap(proc)
             code = 124 if timed_out else (proc.returncode or 0)
             yield StreamDone(kind="done", returncode=code, timed_out=timed_out)
@@ -736,25 +770,24 @@ class JobsApi(Skill):
         timeout: float | None,
         cwd: str | Path | None,
         context: tuple[str, dict],
-        log: Any = None,
+        log: BinaryIO | None = None,
     ) -> AsyncIterator[JobUpdate]:
         """Run one command; yield progress updates (if throttled), then the done update.
 
-        With ``log`` (an open text file, from ``log_path=``) every line is also
-        written there as it arrives; the file is closed when the job ends.
+        With ``log`` (an open binary file, from ``log_path=``) the whole output
+        is also written there as it arrives; the file is closed when the job
+        ends, and a cut tail names it.
         """
         # Per stream, the kept end of the output (in memory; the full output only with log_path=).
+        tail_chars = effective(AtomLimits).max_job_tail
         tails = {
-            kind: TruncatingStringIO(limit=_TAIL_CHARS, tail_chars=_TAIL_CHARS)
-            for kind in ("stdout", "stderr")
+            kind: TextStream(unit="chars", head=0, tail=tail_chars) for kind in ("stdout", "stderr")
         }
         done = [StreamDone(kind="done", returncode=0, timed_out=False)]
 
         async def source() -> AsyncIterator[Any]:
             try:
-                async for event in self._lines(command, stdin, timeout, cwd, context, job):
-                    if log is not None and isinstance(event, StreamEvent):
-                        log.write(event.text)
+                async for event in self._lines(command, stdin, timeout, cwd, context, job, log):
                     yield event
             finally:
                 if log is not None:
@@ -769,12 +802,22 @@ class JobsApi(Skill):
             line = _strip_newline(event.text)
             return _StderrLine(line) if event.kind == "stderr" else line
 
+        def tail(kind: str) -> str:
+            text = tails[kind].close()
+            if not text.complete and job.log_path is not None:
+                # The log holds the whole output (both streams): the cut line names it.
+                size = _file_size(job.log_path)
+                if size is not None:
+                    text = dataclasses.replace(text, full=Overflow(job.log_path, size, size))
+                return name_job_log(render_output(text), job.log_path)
+            return render_output(text)
+
         def finish() -> dict[str, Any]:
             return {
                 "returncode": done[0].returncode,
                 "timed_out": done[0].timed_out,
-                "stdout": tails["stdout"].getvalue(),
-                "stderr": tails["stderr"].getvalue(),
+                "stdout": tail("stdout"),
+                "stderr": tail("stderr"),
                 "log_path": job.log_path,
             }
 
@@ -952,10 +995,13 @@ class JobsApi(Skill):
         ``notification["jobs"]`` with ``returncode`` (124 on timeout),
         ``timed_out``, ``stdout`` and ``stderr``. ``stdout`` and ``stderr`` are
         each capped at 20,000 chars: only the last 20,000 of each stream are
-        kept, after a ``[... N chars omitted]`` line. For the full output pass
-        ``log_path=``: stdout and stderr are written there as lines arrive
-        (interleaved; relative to the command's directory; overwritten), and
-        the done update and ``JobInfo`` carry the path. In a pipe
+        kept, after a ``[... N chars omitted; full output not kept]`` line.
+        For the full output pass
+        ``log_path=``: stdout and stderr are written there as they arrive
+        (interleaved, as raw bytes; relative to the command's directory;
+        overwritten), the done update and ``JobInfo`` carry the path, and a
+        cut line says ``full output (stdout and stderr together, in arrival
+        order): PATH`` instead. In a pipe
         (``cmd | tail``) the exit code is the last command's, so a failing
         command can look green; use ``log_path=`` instead of piping into
         ``tail``. With ``items``/``seconds`` it also sends progress while
@@ -988,8 +1034,8 @@ class JobsApi(Skill):
             base = Path(context[0]) if cwd is None else (Path(context[0]) / Path(cwd)).resolve()
             resolved = (base / Path(log_path)).resolve()
             resolved.parent.mkdir(parents=True, exist_ok=True)
-            # Line-buffered, so the file can be read while the job runs.
-            log = open(resolved, "w", encoding="utf-8", errors="replace", buffering=1)  # noqa: SIM115
+            # Unbuffered raw bytes, so the file can be read while the job runs.
+            log = open(resolved, "wb", buffering=0)  # noqa: SIM115
         try:
             # Claims again: a child or job may have taken the name during the await.
             job = self._new_job(

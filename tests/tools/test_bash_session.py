@@ -69,7 +69,7 @@ class TestBashSession:
     async def test_output_truncation(self, session):
         """Very long output should be truncated."""
         out, _, _ = await session.run("python3 -c \"print('x' * 50000)\"")
-        assert len(out) <= 31000  # MAX_OUTPUT_CHARS + truncation message
+        assert len(out) <= 31000  # capture.max_shell_output + truncation message
 
     async def test_truncation_keeps_the_head_and_the_tail(self, session):
         """A long output keeps its end too: a failing command usually ends with its error."""
@@ -78,27 +78,36 @@ class TestBashSession:
         out, err, code = await session.run(f'python3 -c "{script}"')
         assert code == 0
         for text, head, middle, tail in ((out, "H", "M", "T"), (err, "h", "m", "t")):
-            # The standard notice of TruncatingStringIO, then the head, then the tail.
-            assert text.startswith("<truncated-output>\nOutput too large (")
-            assert head * 14000 in text
-            assert tail * 14000 in text
-            assert text.index(head * 14000) < text.index(tail * 14000)
-            assert middle * 1000 not in text
-            assert len(text) <= 31000
+            # nooa.snapshot's render_output: 15,000 head chars, one cut line, 15,000 tail chars.
+            whole = head * 20000 + middle * 20000 + tail * 20000 + ("\n" if head == "H" else "")
+            expected = (
+                whole[:15_000]
+                + f"\n[... {len(whole) - 30_000:,} chars omitted; full output not kept]\n"
+                + whole[-15_000:]
+            )
+            assert text == expected.removesuffix("\n")  # run() strips stdout's last newline
 
     def test_bounded_matches_one_write_and_keeps_both_ends(self):
         """Chunked feeding gives the same text as one write, for every size around the limit."""
-        from nooa.agentdoc import TruncatingStringIO
-        from nooa.tools._bash_session import MAX_OUTPUT_CHARS, _bounded
+        from nooa.config import TruncationConfig, effective
+        from nooa.snapshot import TextStream, render_output
+        from nooa.tools._bash_session import _bounded
 
+        MAX_OUTPUT_CHARS = effective(TruncationConfig).capture.max_shell_output
+        assert MAX_OUTPUT_CHARS == 30_000  # the limit is unchanged
         for size in (MAX_OUTPUT_CHARS, MAX_OUTPUT_CHARS + 1, 65_536, 65_537, 300_000):
             text = "".join(chr(ord("a") + i % 26) for i in range(size))
-            reference = TruncatingStringIO(limit=MAX_OUTPUT_CHARS)
+            reference = TextStream(unit="chars", head=15_000, tail=15_000)
             reference.write(text)
-            assert _bounded(text) == reference.getvalue()
+            assert _bounded(text) == render_output(reference.close())
             if size > MAX_OUTPUT_CHARS:
-                assert text[: MAX_OUTPUT_CHARS // 2] in _bounded(text)
-                assert text[-(MAX_OUTPUT_CHARS // 2) :] in _bounded(text)
+                assert _bounded(text) == (
+                    text[:15_000]
+                    + f"\n[... {size - 30_000:,} chars omitted; full output not kept]\n"
+                    + text[-15_000:]
+                )
+            else:
+                assert _bounded(text) == text
 
     async def test_close_and_restart(self, tmp_path):
         """Session should be closeable and re-startable."""
@@ -154,7 +163,7 @@ class TestPublicStateHelpers:
         assert out.splitlines() == [str(tmp_path / "sub"), "a b=c"]
 
     async def test_snapshot_reads_a_large_environment_whole(self, session, tmp_path):
-        # Over 40 KB of env: its base64 is far past MAX_OUTPUT_CHARS, which a
+        # Over 40 KB of env: its base64 is far past capture.max_shell_output, which a
         # capped read would cut (and then decode to garbage or fail).
         (tmp_path / "sub").mkdir()
         await session.run('cd sub; export BIG_VAR="$(head -c 45000 /dev/zero | tr "\\0" x)"')

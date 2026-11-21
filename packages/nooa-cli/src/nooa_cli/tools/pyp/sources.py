@@ -12,12 +12,13 @@ import sys
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 
-from nooa.agentdoc._truncating_stream import TruncatingStringIO
+from nooa._bounded_text import text_stream
+from nooa.snapshot import TextStream, render_output
 from nooa.tools._bash_session import BashSession
 from nooa_cli.tools.pyp.errors import make_pipe_error
 from nooa_cli.tools.pyp.stream import Stream
 
-_STDERR_CAP = 128 * 1024  # 128 KB max stderr buffered
+_STDERR_CAP = 128 * 1024  # 128 KB max stderr buffered (chars)
 
 
 async def _stream_bash_lines(
@@ -38,7 +39,8 @@ async def _stream_bash_lines(
     await bash.start()
     try:
         buffer = ""
-        stderr_buf = ""
+        # The first _STDERR_CAP chars of stderr, then render_output's cut line.
+        stderr_buf = TextStream(unit="chars", head=_STDERR_CAP, tail=0)
         async for stream_name, chunk in bash.run_stream(cmd, timeout=timeout):
             if stream_name == "__done__":
                 parts = chunk.split(",")
@@ -52,7 +54,7 @@ async def _stream_bash_lines(
                         f"{error_prefix}: {cmd}",
                         cmd=cmd,
                         returncode=returncode,
-                        stderr=stderr_buf,
+                        stderr=render_output(stderr_buf.close()),
                     )
                 break
             elif stream_name == "stdout":
@@ -61,8 +63,7 @@ async def _stream_bash_lines(
                     line, buffer = buffer.split("\n", 1)
                     yield line
             elif stream_name == "stderr":
-                if len(stderr_buf) < _STDERR_CAP:
-                    stderr_buf += chunk
+                stderr_buf.write(chunk)
     finally:
         await bash.close()
 
@@ -118,13 +119,14 @@ def run(cmd: str, *, check: bool = True, timeout: float = 30.0, cwd: str | None 
         await bash.start()
         try:
             buffer = ""
-            _stderr_io = TruncatingStringIO(limit=_STDERR_CAP)
+            # Half of _STDERR_CAP from each end, around render_output's cut line.
+            _stderr_io = text_stream(_STDERR_CAP)
             async for stream_name, chunk in bash.run_stream(cmd, timeout=timeout):
                 if stream_name == "__done__":
                     parts = chunk.split(",")
                     returncode = int(parts[0])
                     meta["returncode"] = returncode
-                    meta["stderr"] = _stderr_io.getvalue()
+                    meta["stderr"] = stderr = render_output(_stderr_io.close())
                     # Flush trailing partial line first
                     if buffer:
                         yield buffer
@@ -134,7 +136,7 @@ def run(cmd: str, *, check: bool = True, timeout: float = 30.0, cwd: str | None 
                             f"Command failed: {cmd}",
                             cmd=cmd,
                             returncode=returncode,
-                            stderr=_stderr_io.getvalue(),
+                            stderr=stderr,
                         )
                     break
                 elif stream_name == "stdout":

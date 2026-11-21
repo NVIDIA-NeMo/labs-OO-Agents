@@ -6,6 +6,65 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `truncating_pformat(value, max_chars=N)` captures a non-string value within
+  an `N`-char budget, so its memory and time follow the output, not the
+  input (capture's own work; the time and memory of a value's custom
+  `__repr__`, which this model-facing preview may call, and of a registered
+  shape's accessors are not bounded, only what is kept of their result; see
+  `docs/snapshot-model.md`): the result is a bounded snapshot preview (`list(len=100000,
+  [:27]=[...], [-k:]=[...])`), cut again to `N` chars (head and tail around
+  `[... N chars omitted; full output not kept]`) only if its rendering is
+  still longer. Without `max_chars` it is `pformat`, unchanged.
+- Trace span `input.value` / `output.value` are `nooa.snapshot` previews:
+  `render_trace(capture(value))` JSON (at most 50,000 chars, always
+  `application/json`), with `nooa.{input,output}.preview.*` attributes saying
+  what was cut. Values are read without running their code, so an unknown
+  type shows as `"<opaque: Type>"` instead of its repr. ACP and CLI activity
+  cards cut output with `render_output`'s line instead of `<truncated-output>`.
+- `nooa.agentdoc.TruncatingStringIO` and `FileBackedTruncatingStringIO` (and
+  their `nooa.runtime` re-exports) are removed: use `nooa.snapshot.TextStream`
+  and `render_output`. `LineSplitter` and `bounded_lines` move from
+  `nooa.agentdoc` to `nooa_atom.agent.lines`.
+
+- The output the model reads goes through `nooa.snapshot` (limits unchanged;
+  only the cut markers change, to `render_output`'s one line): `Shell`
+  results (`[... N bytes omitted; full output: PATH]`), `ShellProgress`
+  merges (`[... N bytes omitted; full output not kept]` instead of
+  `[... progress omitted ...]`), cell stdout/stderr
+  (a `nooa.snapshot.SharedTextStream` per stream: `[... N chars omitted; ...]`
+  instead of the `<truncated-output>` envelope; Atom writes them to the
+  session's folder), job output tails and the core bash tool. Prefill string
+  cuts render through `render_python` (same text). Cell errors (and the
+  sandbox's error messages), pyp's stderr and `truncating_pformat(max_chars=)`
+  keep their head and tail around `[... N chars omitted; full output not
+  kept]` instead of `<truncated-output>`; past the sandbox's transport ceiling an
+  error keeps its head before that line instead of ending in `...<truncated>`.
+  A job line longer than 8,000 characters (run progress, `tail`, the done
+  update's tail) is its head, then `[... N chars omitted; full output not
+  kept]` on its own line, instead of `[... N chars of this line omitted]`;
+  a job's done-update tail is the last 20,000 characters of that line-framed
+  output.
+- Two `Shell` result changes besides the markers: (a) the first 256 KiB and
+  last 768 KiB of a stream are kept in memory whatever `max_output` is, so
+  with a small `max_output` (say 1,000) an output up to 1 MiB comes back
+  whole, and a longer one keeps its head and tail (before, the head came from
+  the `max_output`-byte file: a 900,000-byte output came back as 787,582
+  bytes); (b) the cut is UTF-8-safe: the head ends on a code point boundary,
+  so no replacement character appears there (the omitted count then includes
+  the trimmed bytes: 151,425 instead of 151,424 bytes for 400,000 `漢`).
+- Output files are bounded per agent and live in a new standalone package,
+  `nooa.overflow` (`OverflowDir`, `OverflowWriter`; see `docs/overflow.md`): in
+  an Atom session one `OverflowDir` (20 files of up to 64 MiB, newest kept)
+  holds every output file of that agent: its `Shell`s' direct runs, the
+  commands inside its launched jobs and its cell output, each file capped at
+  its `Shell`'s `max_output`. Its files last until the session closes (closing
+  a `Shell` or pruning a job no longer removes them); an evicted path raises
+  `FileNotFoundError`. A `Shell` used outside an agent keeps one private
+  folder for its direct runs and its launched commands, removed when the
+  `Shell` closes (before, every command in a job had its own folder, so the
+  20-file cap never bound). Files are never deleted by garbage collection: a
+  `Shell` dropped unclosed keeps its files until interpreter exit.
+
 - Dependency security update. LiteLLM is now locked at 1.100.5
   (CVE-2026-114612); the `litellm` requirement starts at 1.100.4 and excludes
   the unfixed 1.101-1.103 releases. LiteLLM now requires boto3. Chat

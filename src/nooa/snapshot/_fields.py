@@ -465,6 +465,36 @@ class _Scoped:
         self.limits = limits
 
 
+def _with_own_overrides(raw: dict[Any, Any], storage: dict[str, Any]) -> dict[str, Any]:
+    """``storage`` (a partial copy of ``raw``) plus the instance's own ``spec`` overrides, wherever ``raw`` holds them.
+
+    The overrides (``FIELD_METADATA_ATTR``) may lie past the copied entries;
+    without them a field hidden on the instance would show. One walk over
+    ``dict.items(raw)`` finds them: a key is compared with the attribute name
+    only when its type is exactly ``str``, tested by identity of the type, so
+    no key is hashed and no user ``__eq__`` / ``__hash__`` runs (a ``set`` of
+    the types, or a lookup that meets a key of another type, would call them).
+    A key whose type is not exactly ``str`` is skipped instead of failing
+    closed: it can never supply the overrides or shadow them, and the walk
+    never compares it.
+
+    That walk is one pass over the items view (``len(raw)`` Python-level steps
+    of ``type(key) is str`` and an exact ``str`` compare; only the view is
+    allocated, no key is copied, and no user code runs) and is deliberately
+    **not** charged to
+    ``state.nodes_left``: this function is reached only with the partial copy
+    of a ``__dict__`` larger than a quarter of the work left, whose documented
+    behaviour is to list its first attributes (``_object_like``). Charging the
+    whole dict would fail such an object closed and lose them; the cost is
+    bounded by the dict the value already holds
+    (``test_a_million_attributes_list_the_first_and_say_how_many``).
+    """
+    for key, own in dict.items(raw):
+        if type(key) is str and key == FIELD_METADATA_ATTR:
+            return {**storage, FIELD_METADATA_ATTR: own}
+    return storage
+
+
 def _is_empty(value: Any) -> bool:
     """Whether ``value`` is ``None`` or an empty exact ``str``, ``bytes``, ``list``, ``tuple``, ``dict``, ``set`` or ``frozenset``.
 
@@ -473,7 +503,9 @@ def _is_empty(value: Any) -> bool:
     if value is None:
         return True
     value_type = type(value)
-    if value_type in _EMPTY_TYPES:  # exact built-in types: their own ``__len__``
+    # Exact built-in types (their own ``__len__``), by identity: ``in`` would
+    # run a metaclass's ``__eq__``.
+    if any(value_type is kind for kind in _EMPTY_TYPES):
         return len(value) == 0
     return False
 
@@ -804,7 +836,9 @@ def _plain_entries(
         # A quarter of the work left: the names cost as much again, the fields the rest.
         storage = _copy_storage(raw, state, limit=max(1, state.nodes_left // 4))
         partial = len(storage) < total
-        overrides = _visibility_overrides(storage, mro, state)
+        overrides = _visibility_overrides(
+            _with_own_overrides(raw, storage) if partial else storage, mro, state
+        )
         hide_empty = _class_hide_empty(mro, state)
         found: list[tuple[str, Any]] = []
         for name, default in _class_defaults(mro, state):

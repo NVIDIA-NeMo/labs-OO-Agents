@@ -2039,9 +2039,11 @@ class TestPurePythonSendExecutionError:
         await strat._send_execution_error(rt, SyntaxError("invalid syntax"), "bad code")
 
         event = rt.event_manager.add.call_args.args[0]
-        assert event.error.count("<truncated-output>") == 1
-        assert "Showing first 50 and last 50 chars" in event.error
-        assert event.error.endswith("G" * 50 + "\n</truncated-output>")
+        # One cut (render_output's line) around 50 head and 50 tail chars, no nested notice.
+        whole = "SyntaxError: invalid syntax\n\n" + "G" * 1_000
+        assert event.error == (
+            whole[:50] + "\n[... 929 chars omitted; full output not kept]\n" + whole[-50:]
+        )
 
     @pytest.mark.asyncio
     async def test_send_execution_error_preserves_source_caret_offset_and_both_streams(self):
