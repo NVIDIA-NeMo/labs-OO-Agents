@@ -28,7 +28,7 @@ import uuid
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Annotated, Any, BinaryIO, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -371,12 +371,12 @@ def _text_chars(value: Any) -> int:
     return len(value) if isinstance(value, str) else 0
 
 
-def _file_size(path: str) -> int:
-    """The bytes in ``path`` now (0 when it cannot be read)."""
+def _file_size(path: str) -> int | None:
+    """The bytes in ``path`` now, or ``None`` when it cannot be read."""
     try:
         return os.path.getsize(path)
     except OSError:
-        return 0
+        return None
 
 
 async def _tail_lines(path: Path, offset: int) -> AsyncIterator[str]:
@@ -647,7 +647,7 @@ class JobsApi(Skill):
         cwd: str | Path | None,
         context: tuple[str, dict],
         job: _Job,
-        log: Any = None,
+        log: BinaryIO | None = None,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
         """Run one command in its own process; yield its lines, then a ``StreamDone``.
 
@@ -770,7 +770,7 @@ class JobsApi(Skill):
         timeout: float | None,
         cwd: str | Path | None,
         context: tuple[str, dict],
-        log: Any = None,
+        log: BinaryIO | None = None,
     ) -> AsyncIterator[JobUpdate]:
         """Run one command; yield progress updates (if throttled), then the done update.
 
@@ -807,7 +807,8 @@ class JobsApi(Skill):
             if not text.complete and job.log_path is not None:
                 # The log holds the whole output (both streams): the cut line names it.
                 size = _file_size(job.log_path)
-                text = dataclasses.replace(text, full=Overflow(job.log_path, size, size))
+                if size is not None:
+                    text = dataclasses.replace(text, full=Overflow(job.log_path, size, size))
                 return name_job_log(render_output(text), job.log_path)
             return render_output(text)
 
