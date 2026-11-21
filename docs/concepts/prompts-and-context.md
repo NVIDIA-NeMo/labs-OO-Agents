@@ -108,7 +108,6 @@ method's `@strategy(...)`.
 `nooa.config.merge_config(base, override)` is the field merge all levels use.
 
 | Field | Default | Bounds |
-| Field | Default | Bounds |
 |---|---|---|
 | `max_context_tokens` | `None` | whole-context token budget |
 | `response_reserve_tokens` | 4,096 | planning reserve when no reply cap is known |
