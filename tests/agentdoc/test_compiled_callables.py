@@ -132,6 +132,41 @@ def test_python_subclass_of_builtin_does_not_list_builtin_methods():
         assert f"def {name}" not in result
 
 
+def test_c_heap_type_is_compiled():
+    """C types created with PyType_FromSpec are heap types but still compiled."""
+    import queue
+
+    from nooa.agentdoc._structured import is_compiled_type
+
+    assert is_compiled_type(queue.SimpleQueue)
+    result = doc(queue.SimpleQueue)
+    assert "def put(" in result
+    assert "def get(" in result
+
+
+def test_python_subclass_of_c_heap_type_is_not_compiled():
+    import queue
+
+    from nooa.agentdoc._structured import is_compiled_type
+
+    class MyQueue(queue.SimpleQueue):
+        def extra(self) -> int:
+            """Extra method."""
+            return 1
+
+    assert not is_compiled_type(MyQueue)
+    result = doc(MyQueue)
+    assert "def extra(self) -> int:" in result
+    assert "def put(" not in result
+
+
+def test_derived_non_method_attribute_shadows_compiled_base_method():
+    child = type("Child", (FakeCompiled,), {"__module__": "fake_ext", "GetPoints": None})
+    result = doc(child)
+    assert "def GetPoints" not in result
+    assert "def Define(...):" in result  # not overridden, still inherited
+
+
 def test_doc_of_several_compiled_callables():
     result = doc([len, str.join])
     assert "def len(obj):" in result

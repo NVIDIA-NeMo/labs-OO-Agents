@@ -66,7 +66,22 @@ def is_compiled_type(cls: type) -> bool:
     """
     if getattr(type(cls), "__module__", None) == "Boost.Python":
         return True
-    return not (getattr(cls, "__flags__", 0) & (1 << 9))  # Py_TPFLAGS_HEAPTYPE
+    flags = getattr(cls, "__flags__", 0)
+    if not flags & (1 << 9):  # Py_TPFLAGS_HEAPTYPE: static C types
+        return True
+    if flags & (1 << 8):  # Py_TPFLAGS_IMMUTABLETYPE: C heap types (PyType_FromSpec)
+        return True
+    # A mutable heap type is a Python class unless its own attributes are compiled
+    # callables only (C heap types created without the immutable flag).
+    try:
+        own = list(vars(cls).values())
+    except TypeError:
+        return False
+    if any(
+        inspect.isfunction(v) or isinstance(v, (classmethod, staticmethod, property)) for v in own
+    ):
+        return False
+    return any(is_compiled_callable(v) for v in own)
 
 
 def compiled_callable_owner(obj: Any) -> str | None:
@@ -1620,6 +1635,10 @@ def _extract_methods(obj: type) -> list[CallableInfo]:
 
     methods = []
     seen_names = set()
+    # Names already defined by a more derived class in the MRO. Recorded before any
+    # filtering, so a derived attribute of any kind (``None``, a hidden override, a
+    # property) shadows a base-class method of the same name.
+    defined_names: set[str] = set()
     # Compiled methods are listed only for compiled classes (pxr, C types), so a
     # Python subclass of a C type keeps listing only its own Python methods.
     list_compiled = is_compiled_type(obj)
@@ -1629,6 +1648,9 @@ def _extract_methods(obj: type) -> list[CallableInfo]:
     # descriptors while formatting an object.
     for klass in obj.__mro__:
         for name, raw in vars(klass).items():
+            if name in defined_names:
+                continue
+            defined_names.add(name)
             value = raw
             if isinstance(raw, (classmethod, staticmethod)):
                 value = raw.__func__
