@@ -9,7 +9,9 @@ to follow semantic versioning.
 - `import nooa` no longer redirects faulthandler: when the host already enabled
   it (e.g. to a log file), `install_debug_handler()` leaves it alone, so a
   crash dump still goes to the host's file.
-
+- `ExecutionResult.model_dump(mode="json")` no longer raises: a result without
+  a return value dumps `returned_value` as `None`, and `error` dumps as
+  `"Type: message"`. Python-mode `model_dump()` is unchanged.
 - Dependency security update. LiteLLM is now locked at 1.100.5
   (CVE-2026-114612); the `litellm` requirement starts at 1.100.4 and excludes
   the unfixed 1.101-1.103 releases. LiteLLM now requires boto3. Chat
