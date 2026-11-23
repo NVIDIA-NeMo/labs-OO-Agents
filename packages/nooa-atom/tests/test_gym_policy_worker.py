@@ -29,9 +29,8 @@ class IgnoringHarness:
 
 @pytest.fixture
 async def wire(monkeypatch):
-    # Disable only the optional local-viewer discovery probe. Runtime event
-    # subscriptions, middleware, and _ToolHooks remain live and are asserted.
-    monkeypatch.setattr("nooa.agent._auto_tracing_attempted", True)
+    # conftest disables only the optional local-viewer discovery probe. Runtime
+    # event subscriptions, middleware, and _ToolHooks remain live and are asserted.
     # A prior test may already have installed optional LiteLLM viewer callbacks.
     # Stub only that outbound journal sink, not runtime hooks/middleware or HTTP
     # policy serialization. This fixture exercises the local artifact, not OTLP.

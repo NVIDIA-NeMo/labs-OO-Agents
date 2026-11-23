@@ -336,8 +336,10 @@ async def test_reflection_timeout_is_owned_and_original_receipt_precedes_it(tmp_
 
     entered = asyncio.Event()
     cancelled = asyncio.Event()
+    running = []
 
     async def blocked(self, request):
+        running.append(bool(self.turns.running))
         entered.set()
         try:
             await asyncio.sleep(100)
@@ -345,7 +347,9 @@ async def test_reflection_timeout_is_owned_and_original_receipt_precedes_it(tmp_
             cancelled.set()
 
     monkeypatch.setattr(AtomAgent, "_reflect_done_plan", blocked)
-    monkeypatch.setattr(done_reflection, "REFLECTION_TIMEOUT", 0.05)
+    # The budget also covers gathering evidence before the call; a loaded
+    # machine can spend 50 ms there and skip the call entirely.
+    monkeypatch.setattr(done_reflection, "REFLECTION_TIMEOUT", 1.0)
     registry, root, llm = await make_root(
         tmp_path,
         [
@@ -356,8 +360,8 @@ async def test_reflection_timeout_is_owned_and_original_receipt_precedes_it(tmp_
     try:
         accepted = await root.prompt("go")
         assert accepted == Done(explanation="original")
-        await asyncio.wait_for(entered.wait(), 2)
-        assert root._agent.turns.running  # maintenance, not another user turn
+        await asyncio.wait_for(entered.wait(), 5)
+        assert running == [True]  # maintenance, not another user turn
         await wait_idle(root)
         assert cancelled.is_set()
         assert root.info.reply_count == 2 and len(llm.calls) == 1

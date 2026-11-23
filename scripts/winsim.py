@@ -189,6 +189,11 @@ def install() -> None:
     import ssl
 
     ssl.SSLContext._load_windows_store_certs = lambda self, storename, purpose: None  # type: ignore[attr-defined]
+    # Python 3.13 on glibc >= 2.34 spawns through os.posix_spawn, removed above;
+    # platform.system() (aiohttp calls it on import) runs `ver` as on Windows.
+    import subprocess
+
+    subprocess._USE_POSIX_SPAWN = False  # type: ignore[attr-defined]
     # Simulate a user who opted in to native Windows (see nooa._platform);
     # pass NOOA_SKIP_PLATFORM_CHECK=0 to simulate the default refusal.
     os.environ.setdefault("NOOA_SKIP_PLATFORM_CHECK", "1")

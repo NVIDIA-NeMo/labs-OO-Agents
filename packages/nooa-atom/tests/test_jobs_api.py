@@ -1062,13 +1062,18 @@ async def test_spawn_rejections_close_the_coroutine(agent):
         lambda: agent.jobs.spawn(work(), name="w", seconds=1),
         lambda: agent.jobs.spawn(work(), name="w", description=5),
     ]
+    gc.collect()  # coroutines other tests left behind warn now, not below
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         for reject in rejections:
             with pytest.raises((TypeError, ValueError)):
                 reject()
         gc.collect()
-    never_awaited = [w for w in caught if "was never awaited" in str(w.message)]
+    never_awaited = [
+        w
+        for w in caught
+        if "was never awaited" in str(w.message) and f"{work.__qualname__}'" in str(w.message)
+    ]
     assert never_awaited == []
     assert agent.jobs.get("w") is None
 

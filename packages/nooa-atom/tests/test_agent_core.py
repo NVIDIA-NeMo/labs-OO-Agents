@@ -273,6 +273,8 @@ def test_repository_instructions_allow_a_symlinked_workspace(tmp_path):
 
     root = tmp_path / "real"
     root.mkdir()
+    # Its own repository root, so tmp_path inside a checkout can't widen the boundary.
+    (root / ".git").mkdir()
     (root / "AGENTS.md").write_text("reachable repository instructions")
     alias = tmp_path / "alias"
     alias.symlink_to(root, target_is_directory=True)

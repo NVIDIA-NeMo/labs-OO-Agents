@@ -21,11 +21,6 @@ from nooa.runtime.hooks import hooks_scope
 DONE = "return_result(Done(explanation='done', result=TaskResult(solution_description='s', evidence='e', how_to_verify='v', report='accepted')))"
 
 
-@pytest.fixture(autouse=True)
-def no_optional_viewer_probe(monkeypatch):
-    monkeypatch.setattr("nooa.agent._auto_tracing_attempted", True)
-
-
 class PolicyFake(CellLLM):
     bind_episode_policy = _RecordingClient.bind_episode_policy
     _check_episode_policy = _RecordingClient._check_episode_policy
