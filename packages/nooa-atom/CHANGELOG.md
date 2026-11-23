@@ -7,6 +7,14 @@ based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- `nooa-atom`: `run_task` keeps its result when a job's outcome is delivered
+  after the root returned `Done`. The queued `JobEvent` used to start a late
+  turn, and `TaskRun.events` then held the turn loop's live-payload events
+  (`TurnBegan`, `TurnSettled`, `ChannelItemConsumed`,
+  `ChannelItemsDiscarded`), which do not serialize, so a host dumping the
+  events with `model_dump(mode="json")` failed and lost the `Done`. `run_task`
+  now starts no turn once the root is done and leaves those events out of
+  `TaskRun.events`.
 - `nooa-atom`: reflection. The `nemo.reflection` skill posts a housekeeping
   message on a root session's `system_messages` queue when one is due (20
   turns or 60 minutes since the last, or the context half full; at least 5
