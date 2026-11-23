@@ -15,7 +15,7 @@ bytes. Routing, client to worker:
 - ``initialize``: answered by the router (``initialize_response``); the
   raw params are kept and replayed as each new worker's first request.
 - ``authenticate``: answered by the router (the terminal method's wizard
-  already ran; a worker takes its result on the next request).
+  already ran; the worker serving the session that asked takes its result).
 - ``session/list``: answered from the stores, read-only. Sessions are
   stored per workspace (``sessions_root``): with a ``cwd``, that
   workspace's store; without one, the stores of every workspace the
@@ -446,8 +446,9 @@ class Router:
         """``authenticate`` after the client ran ``nooa atom --connect`` (terminal auth).
 
         Nothing to do here: the wizard left its result in the user's
-        directory, and the worker that serves the next prompt, load or new
-        session takes it and switches that session to the saved model.
+        directory for the session that asked, and the worker that next
+        loads or prompts that session (or starts a new one, after a failed
+        ``session/new``) takes it and switches to the saved model.
         """
         method_id = frame.params.get("methodId")
         if method_id == CONNECT_METHOD_ID:

@@ -259,5 +259,7 @@ def test_run_wizard_returns_the_alias_it_saved(monkeypatch, tmp_path, answer, ex
         input="262144\n262144\nsave\n" + answer,
     )
     assert result.exit_code == 0, result.output
-    assert returned == [expected], result.output
+    assert [saved and saved.alias for saved in returned] == [expected], result.output
+    if expected:
+        assert returned[0].path == path
     assert path.exists() == (expected is not None)

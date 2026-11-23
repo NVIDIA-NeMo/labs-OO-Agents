@@ -436,7 +436,7 @@ def command(
             raise click.UsageError("--catalogue-file requires a plan/check --stage")
         from ._connect_wizard import run_wizard
 
-        # The saved alias (or None); `nooa connect` exits 0 either way, while
+        # What was saved (or None); `nooa connect` exits 0 either way, while
         # `nooa atom --connect` runs this command to learn what was saved.
         return run_wizard(
             model=model,

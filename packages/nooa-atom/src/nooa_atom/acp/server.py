@@ -66,6 +66,7 @@ from nooa.mcp import MCPManager, MCPTool
 from nooa.slash_dispatch import CoercionError
 from nooa.storage.sqlite import SessionAlreadyActiveError
 from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUSTED_MESSAGE
+from nooa_atom.acp import terminal_auth
 from nooa_atom.acp.event_bridge import (
     VERBOSITY_LEVELS,
     ACPEventBridge,
@@ -85,8 +86,6 @@ from nooa_atom.acp.protocol import (
 from nooa_atom.acp.recover import COMMAND as RECOVER
 from nooa_atom.acp.recover import recover
 from nooa_atom.acp.terminal_auth import CONNECT_METHOD_ID, supports_terminal_auth
-from nooa_atom.acp.terminal_auth import consume_result as consume_connect_result
-from nooa_atom.acp.terminal_auth import describe_result as describe_connect_result
 from nooa_atom.agent.slash_commands import RESERVED_COMMAND_NAMES
 from nooa_atom.session.items import (
     CommandInfo,
@@ -225,6 +224,18 @@ def _default_model(workspace: Path) -> str | None:
     except Exception:
         logger.warning("Could not load the model configuration of %s", workspace, exc_info=True)
         return None
+
+
+def _entry_fingerprint(workspace: Path, alias: str) -> str | None:
+    """The fingerprint of the entry ``workspace`` uses for ``alias`` (``terminal_auth``)."""
+    from nooa_atom.workspace.models import workspace_models
+
+    try:
+        entry = workspace_models(workspace).get(alias)
+    except Exception:
+        logger.warning("Could not load the model configuration of %s", workspace, exc_info=True)
+        return None
+    return terminal_auth.entry_fingerprint(entry) if entry is not None else None
 
 
 def model_aliases(workspace: Path) -> list[str]:
@@ -383,10 +394,10 @@ class AtomACPAgent:
     async def authenticate(self, method_id: str, **kwargs: Any) -> AuthenticateResponse:
         """The client ran ``nooa atom --connect`` (the terminal method) and says so.
 
-        A fresh save switches the sessions this connection follows to the
-        saved alias and resends their config options. With no session yet
-        (the client restarted the agent) the result is left for the
-        ``session/load``, ``session/new`` or prompt that follows.
+        A followed session the wizard saved a model for switches to it and
+        is sent its config options. Without one (the client restarted the
+        agent) the result is left for the ``session/load``, prompt or
+        ``session/new`` that follows.
         """
         del kwargs
         if method_id != CONNECT_METHOD_ID:
@@ -398,9 +409,9 @@ class AtomACPAgent:
             for session_id in tuple(self._bridges)
             if (session := self.session(session_id)) is not None
         ]
-        result = self._take_connect_result() if followed else None
         for session, bridge in followed:
             with suppress(RequestError):
+                result = self._take_connect_result(session)
                 notice = await self._use_connect_result(session, bridge, result)
                 if notice:
                     bridge.publish(update_agent_message(text_block(notice)))
@@ -422,13 +433,15 @@ class AtomACPAgent:
         if self._terminal_auth():
             if not (self._model or _default_model(root)):
                 # The client runs `nooa atom --connect` and retries.
+                self._request_connect(None, root)
                 raise RequestError.auth_required(
                     {"reason": "No model is configured; connect one with `nooa connect`."}
                 )
-        # A fresh save (the client ran the wizard and retried, or started a
-        # new session instead of retrying /connect) is the model the user
-        # just chose; it is taken, so a later /connect cannot report it again.
-        connected = self._connected_alias(root, self._take_connect_result())
+        # A save for a new session here (the wizard ran after a session/new
+        # failed) is the model the user just chose. It is taken only once
+        # the session exists, so a failed attempt leaves it for the retry.
+        result_key, result = self._new_session_result(root)
+        connected, _ = self._connected_alias(root, result)
         options = SessionOptions(
             workspace=root,
             agent_spec=self._agent_spec_for(root),
@@ -450,6 +463,8 @@ class AtomACPAgent:
                 self._bridges.pop(bridge.session_id, None)
                 await bridge.close(finish_open=False)
             raise
+        if result_key is not None:
+            self._discard_connect_result(result_key)
         self._defer_bootstrap_updates(session, warnings)
         return NewSessionResponse(
             session_id=session.id,
@@ -478,7 +493,7 @@ class AtomACPAgent:
             bridge = self._bridges.get(session_id) or self._attach(live)
             self._replay(bridge, live, pool=self._pool_client)
             await bridge.flush()
-            await self._use_connect_result(live, bridge, self._take_connect_result())
+            await self._apply_connect_result_on_load(live, bridge)
             self._defer_bootstrap_updates(live, [])
             return LoadSessionResponse(
                 modes=self._modes(live), config_options=self._config_options(live)
@@ -486,6 +501,11 @@ class AtomACPAgent:
 
         warnings: list[str] = []
         attached: list[ACPEventBridge] = []
+        # A model the wizard saved for this session (it asked, then the
+        # client restarted the agent and loads it again): switched to before
+        # the session starts, so re-queued work already runs on it.
+        result = self._peek_connect_result(terminal_auth.session_key(session_id))
+        switched: list[str] = []
 
         async def prepare(session: Session) -> None:
             _trace_as(session)
@@ -493,6 +513,16 @@ class AtomACPAgent:
             attached.append(bridge)
             self._replay(bridge, session, pool=self._pool_client)
             warnings.extend(await self._prepare_tools(session, mcp_servers))
+            alias, _ = self._connected_alias(root, result)
+            if alias is not None:
+                try:
+                    await session.set_model(alias)
+                except Exception:
+                    logger.warning(
+                        "Could not switch session %s to %s", session.id, alias, exc_info=True
+                    )
+                else:
+                    switched.append(alias)
 
         try:
             session = await registry.load(session_id, prepare=prepare, host="acp")
@@ -502,9 +532,9 @@ class AtomACPAgent:
                 await bridge.close(finish_open=False)
             raise _load_error(session_id, exc) from exc
         await self._bridges[session.id].flush()
-        await self._use_connect_result(
-            session, self._bridges[session.id], self._take_connect_result()
-        )
+        if result is not None and switched:
+            # Kept for the retried /connect, which says what was saved.
+            self._mark_connect_result_applied(session.id, result)
         self._defer_bootstrap_updates(session, warnings)
         return LoadSessionResponse(
             modes=self._modes(session), config_options=self._config_options(session)
@@ -766,9 +796,10 @@ class AtomACPAgent:
         try:
             slash = _slash_invocation(text)
             if slash is None or slash[0] != "connect":
-                # The client ran the wizard but did not retry /connect.
+                # The client ran the wizard for this session but did not
+                # retry /connect.
                 notice = await self._use_connect_result(
-                    session, bridge, self._take_connect_result()
+                    session, bridge, self._take_connect_result(session)
                 )
                 if notice:
                     bridge.publish(update_agent_message(text_block(notice + "\n\n")))
@@ -778,6 +809,7 @@ class AtomACPAgent:
                     return handled
             if self._terminal_auth() and not self._has_model(session):
                 self._connecting.add(session.id)
+                self._request_connect(session.id, session.options.workspace)
                 raise RequestError.auth_required(
                     {"reason": "No model is configured; connect one with `nooa connect`."}
                 )
@@ -949,28 +981,116 @@ class AtomACPAgent:
 
         The first ``/connect`` fails with "Authentication required", so the
         client runs ``nooa atom --connect`` (the CLI wizard) in a terminal
-        and reconnects. The wizard leaves a one-shot result on a save; the
-        next ``/connect`` takes it and says what was saved. Without a fresh
-        result (none, cancelled, already taken, or older than
+        and reconnects. The wizard leaves a result for this session on a
+        save; the next ``/connect`` takes it and says what was saved. Without
+        a fresh result (none, cancelled, already taken, or older than
         ``RESULT_MAX_AGE``) it asks for authentication again.
         """
-        result = consume_connect_result()
+        key = terminal_auth.session_key(session.id)
+        try:
+            result = terminal_auth.consume_result(key)
+        except OSError as exc:
+            return await self._say(bridge, f"Could not read the result of `nooa connect`: {exc}")
         if result is None:
             self._connecting.add(session.id)
+            self._request_connect(session.id, session.options.workspace)
             raise RequestError.auth_required(
                 {"reason": "/connect runs `nooa connect` in a terminal."}
             )
         return await self._say(bridge, await self._use_connect_result(session, bridge, result))
 
-    def _take_connect_result(self) -> dict | None:
-        """A fresh wizard save for a terminal-auth client (taken), else ``None``."""
-        return consume_connect_result() if self._terminal_auth() else None
+    def _request_connect(self, session_id: str | None, workspace: Path) -> None:
+        """Leave a request for the wizard the client is about to run (best effort)."""
+        try:
+            terminal_auth.record_request(session_id=session_id, workspace=workspace)
+        except OSError:
+            logger.warning("Could not record the Connect request", exc_info=True)
+
+    def _peek_connect_result(self, key: str) -> dict | None:
+        """The wizard's fresh result for ``key`` (left in place), else ``None``."""
+        if not self._terminal_auth():
+            return None
+        try:
+            return terminal_auth.peek_result(key)
+        except OSError:
+            logger.warning("Could not read the Connect result", exc_info=True)
+            return None
+
+    def _take_connect_result(self, session: Session) -> dict | None:
+        """The wizard's fresh result for ``session`` (taken), else ``None``."""
+        if not self._terminal_auth():
+            return None
+        try:
+            return terminal_auth.consume_result(terminal_auth.session_key(session.id))
+        except OSError:
+            logger.warning("Could not read the Connect result", exc_info=True)
+            return None
+
+    def _new_session_result(self, workspace: Path) -> tuple[str | None, dict | None]:
+        """A result for a new session in ``workspace``, or one saved with no request."""
+        for key in (terminal_auth.workspace_key(workspace), terminal_auth.ANY):
+            result = self._peek_connect_result(key)
+            if result is not None:
+                return key, result
+        return None, None
 
     @staticmethod
-    def _connected_alias(workspace: Path, result: dict | None) -> str | None:
-        """The saved alias when ``workspace`` can use it (the wizard may have saved elsewhere)."""
-        alias = result["alias"] if result is not None else None
-        return alias if alias and alias in model_aliases(workspace) else None
+    def _discard_connect_result(key: str) -> None:
+        try:
+            terminal_auth.discard_result(key)
+        except OSError:
+            logger.warning("Could not remove the Connect result", exc_info=True)
+
+    @staticmethod
+    def _mark_connect_result_applied(session_id: str, result: dict) -> None:
+        try:
+            terminal_auth.mark_applied(terminal_auth.session_key(session_id), result)
+        except OSError:
+            logger.warning("Could not update the Connect result", exc_info=True)
+
+    async def _apply_connect_result_on_load(self, session: Session, bridge: ACPEventBridge) -> None:
+        """Switch a live session the wizard saved a model for, keeping the result for /connect."""
+        result = self._peek_connect_result(terminal_auth.session_key(session.id))
+        if result is None or result["applied"]:
+            return
+        alias, _ = self._connected_alias(session.options.workspace, result)
+        if alias is None:
+            return
+        try:
+            await session.set_model(alias)
+        except SessionClosedError:
+            raise RequestError.resource_not_found(session.id) from None
+        except Exception:
+            logger.warning("Could not switch session %s to %s", session.id, alias, exc_info=True)
+            return
+        self._mark_connect_result_applied(session.id, result)
+        bridge.publish(
+            ConfigOptionUpdate(
+                session_update="config_option_update",
+                config_options=self._config_options(session) or [],
+            )
+        )
+
+    @staticmethod
+    def _connected_alias(workspace: Path, result: dict | None) -> tuple[str | None, str]:
+        """The saved alias when ``workspace`` uses the saved entry, else ``None`` and why not.
+
+        The wizard may have saved to a file this workspace does not read,
+        or the workspace may configure the same alias itself (its entry
+        wins); then the session must not claim to use the saved model.
+        """
+        if result is None:
+            return None, ""
+        alias = result["alias"]
+        if alias not in model_aliases(workspace):
+            return None, f" It is not in the model configuration of {workspace}."
+        fingerprint = result.get("fingerprint")
+        if fingerprint and fingerprint != _entry_fingerprint(workspace, alias):
+            return None, (
+                f" {workspace} configures {alias} differently, and its entry takes"
+                " precedence, so this session does not switch to it."
+            )
+        return alias, ""
 
     async def _use_connect_result(
         self, session: Session, bridge: ACPEventBridge, result: dict | None
@@ -978,17 +1098,25 @@ class AtomACPAgent:
         """Switch ``session`` to the alias the wizard saved and resend the config options.
 
         The user just chose that model, so the session uses it from its next
-        turn on (as if picked in the model menu); the new alias is in the
-        ``model`` option either way. Returns the text that says so (empty
-        without a result).
+        turn on (as if picked in the model menu). The client is rebuilt even
+        when the alias is unchanged: the wizard may have changed its entry.
+        A result already applied when the session was loaded only reports.
+        Returns the text that says so (empty without a result).
         """
         if result is None:
             return ""
-        text = describe_connect_result(result)
-        alias = self._connected_alias(session.options.workspace, result)
+        text = terminal_auth.describe_result(result)
+        alias, problem = self._connected_alias(session.options.workspace, result)
         if alias is None:
-            text += f" It is not in the model configuration of {session.options.workspace}."
-        elif alias != session.info.model:
+            text += problem
+        elif result.get("applied"):
+            # Switched when the session was loaded; a later menu choice stands.
+            text += (
+                " This session uses it."
+                if alias == session.info.model
+                else " This session switched to it when it was loaded."
+            )
+        else:
             try:
                 await session.set_model(alias)
             except SessionClosedError:
@@ -1000,8 +1128,6 @@ class AtomACPAgent:
                 text += f" This session could not switch to it: {exc}"
             else:
                 text += " This session uses it from now on."
-        else:
-            text += " This session uses it."
         bridge.publish(
             ConfigOptionUpdate(
                 session_update="config_option_update",
@@ -1420,7 +1546,9 @@ class AtomACPAgent:
 
         def on_update(update: Any) -> None:
             if isinstance(update, CommandsChangedUpdate):
-                bridge.publish(_available_commands_update(update.commands))
+                bridge.publish(
+                    _available_commands_update(update.commands, terminal=self._terminal_auth())
+                )
             elif getattr(update, "kind", None) == "closed":
                 if self._bridges.get(session.id) is bridge:
                     del self._bridges[session.id]
@@ -1524,7 +1652,9 @@ class AtomACPAgent:
 
         async def publish() -> None:
             await asyncio.sleep(0)
-            bridge.publish_best_effort(_available_commands_update(session.commands()))
+            bridge.publish_best_effort(
+                _available_commands_update(session.commands(), terminal=self._terminal_auth())
+            )
             if warnings:
                 details = "\n".join(f"- {warning}" for warning in warnings)
                 bridge.publish_best_effort(
@@ -1674,13 +1804,17 @@ def _load_error(session_id: str, exc: BaseException) -> BaseException:
     return exc
 
 
-def _available_commands_update(commands: list[CommandInfo]) -> Any:
+def _available_commands_update(commands: list[CommandInfo], *, terminal: bool = False) -> Any:
     """The session's commands, and the ones this adapter runs itself (``/recover``, ``/connect``, ``/verbosity``)."""
     available: list[AvailableCommand] = []
     names = {command.name for command in commands}
     connect = CommandInfo(
         name="connect",
-        description="Set up a model provider (runs nooa connect in a terminal).",
+        description=(
+            "Set up a model provider (runs nooa connect in a terminal)."
+            if terminal
+            else "Set up a model provider (shows how to run nooa connect)."
+        ),
     )
     verbosity = CommandInfo(
         name="verbosity",

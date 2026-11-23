@@ -32,7 +32,7 @@ from contextlib import aclosing
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 import click
 import httpx
@@ -45,6 +45,13 @@ from nooa.unifiedllm import connect
 from . import _connect_prompts as prompts
 from . import _connect_view as view
 from ._connect_registry import credential_names, diagnostic_context, entries, shadowing_source
+
+
+class SavedModel(NamedTuple):
+    """What ``run_wizard`` saved: the alias and the registry file it went to."""
+
+    alias: str
+    path: Path
 
 
 @dataclass
@@ -132,7 +139,7 @@ class WizardState:
     probe: Any = None
     prompt_key: Any = None
     proposal: Any = None
-    saved_alias: Any = None
+    saved: SavedModel | None = None
     provider: Any = None
     reasoning_level: Any = None
     guided_reasoning_choice: Any = None
@@ -3295,7 +3302,7 @@ def save_model(state: WizardState) -> bool:
             connect.write(
                 state.result.entry, state.path, alias=state.alias, expected_alias=expected_alias
             )
-        state.saved_alias = state.alias
+        state.saved = SavedModel(state.alias, Path(state.path))
         view.section("Saved model")
         view.fields(scrub_setup(state, [("Alias", state.alias), ("File", state.path)]))
         view.media_settings(state.result.entry)
@@ -3841,8 +3848,9 @@ def run_wizard(**options):
     such as invalid YAML, file errors or network errors; the message never
     contains the API key.
 
-    Returns the alias written, or ``None`` when nothing was saved (``nooa
-    atom --connect`` reports that as its exit code; ``nooa connect`` ignores it).
+    Returns what was saved (``SavedModel``: the alias and the file), or
+    ``None`` when nothing was (``nooa atom --connect`` reports that as its
+    exit code; ``nooa connect`` ignores it).
     """
     state = new_state(options)
     try:
@@ -3864,7 +3872,7 @@ def run_wizard(**options):
                     "Approved connection test failed or was cancelled. Nothing saved.", err=True
                 )
                 raise click.ClickException("Test failed.")
-            return state.saved_alias
+            return state.saved
         for step in (
             select_connection,
             select_model,
@@ -3912,4 +3920,4 @@ def run_wizard(**options):
                 dim=True,
             )
         raise click.ClickException(detail) from None
-    return state.saved_alias
+    return state.saved
