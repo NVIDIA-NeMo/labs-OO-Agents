@@ -713,3 +713,22 @@ Source/link validation establishes references and structure, not semantic comple
 or product-owner agreement. Remote HTTP link availability and the current contents of
 cross-repository fixtures branch links were not validated; those links remain draft
 navigation, not execution pins.
+
+### Rebase validation — 2026-11-24
+
+The branch was rebased without conflicts onto main at
+`d8b09515fcc35e7a9ce1a711d585890116fc812b`. The three documentation commits retained
+their patches. Evidence links and `source_revision` remain pinned to the reviewed
+`107a65d77e4c2c644bb90553ac404bb4ed8a064c` source snapshot; this rebase is not a new
+source-evidence review.
+
+The schema-v1 validator and `rubric_ethos.check_ethos` at the Eval Author revision
+above passed without warnings or diagnostics. All 193 immutable source URLs, 52
+named-test anchors, local links and index IDs were rechecked. All 31 capabilities
+retained their content. Ruff lint and format checks, SPDX license checks and
+`git diff --check` passed.
+
+After `uv sync --frozen` on Linux with CPython 3.13.15, the regression selection
+above passed again: **370 tests passed in 148.60 seconds**, with the same 24 Gym
+policy RuntimeWarnings about middleware scope. This result covers the rebased
+runtime and dependency lockfile; it does not establish live-model task performance.
