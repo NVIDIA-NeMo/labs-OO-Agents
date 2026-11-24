@@ -27,7 +27,7 @@ separate drainer keeps background output pipes readable. The services remain
 owned by the external harness, which must clean them up after verification or
 on an aborted episode. Scope exit does not itself kill services.
 
-The destructor respects the preservation flag and terminates only Bash rather
+The finalizer respects the preservation flag and terminates only Bash rather
 than its process group. Outside an opted-in scope, default cleanup and timeout
 recovery retain their existing behavior. Creating new shells from an inherited
 scope after it has closed raises an error instead of silently orphaning them.
