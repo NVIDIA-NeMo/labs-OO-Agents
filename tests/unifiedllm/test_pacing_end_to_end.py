@@ -41,6 +41,44 @@ _FAST_RETRY = RetryConfig(
 _MESSAGES = [{"role": "user", "content": "Synthetic local test"}]
 
 
+def _paused_handshake_child(
+    config: BrokerAdmissionConfig, phase: str, resume: Any, reports: Any
+) -> None:
+    """Pause a real controller's event loop so its own finite deadline cannot run."""
+
+    async def run() -> None:
+        """Keep the TCP connection open until the parent explicitly resumes the child."""
+        controller = config.controller()
+        original = controller._readline
+        paused = False
+
+        async def read_then_pause(reader, started):
+            """Stop at a causal pre-commit boundary, without changing the wire protocol."""
+            nonlocal paused
+            raw = await original(reader, started)
+            if not paused and raw and json.loads(raw).get("status") == phase:
+                paused = True
+                reports.put("paused")
+                assert resume.wait(60)
+            return raw
+
+        controller._readline = read_then_pause
+        permit = None
+        try:
+            permit = await controller.acquire(lambda _: None)
+        except Exception as error:
+            reports.put(type(error).__name__)
+        else:
+            reports.put("unexpected-lease")
+        finally:
+            if permit:
+                permit.release()
+            controller.close()
+            await asyncio.sleep(0.02)
+
+    asyncio.run(run())
+
+
 @pytest.fixture(autouse=True)
 def _isolated_groups() -> Any:
     """Prevent one test's rate or cooldown deadline from affecting another."""
@@ -581,3 +619,100 @@ async def test_broker_cooldown_is_shared_across_spawned_http_clients() -> None:
                     await asyncio.to_thread(process.join, 5)
                 reports.close()
                 reports.join_thread()
+
+
+@pytest.mark.parametrize("api", ["chat", "responses"])
+@pytest.mark.parametrize("phase", ["offered", "ready"])
+async def test_broker_handshake_expiry_unblocks_http_while_child_remains_paused(
+    api: str, phase: str
+) -> None:
+    """An expired uncommitted lease never dispatches; the same owner serves real HTTP."""
+
+    async def success(_request: _Request) -> tuple[int, dict[str, str]]:
+        """Accept only requests made by the healthy client."""
+        return 200, {}
+
+    context = multiprocessing.get_context("spawn")
+    resume, reports = context.Event(), context.Queue()
+    async with _gateway(success) as gateway:
+        with AdmissionBroker(max_in_flight=1, max_calls=1, handshake_timeout=0.25) as broker:
+            controller = broker.controller(queue_timeout=5)
+            client = AdmissionControl(
+                _base_client(api, gateway.api_base), AdmissionControlConfig(controller=controller)
+            )
+            process = context.Process(
+                target=_paused_handshake_child,
+                args=(broker.controller_config(queue_timeout=0.2), phase, resume, reports),
+            )
+            try:
+                process.start()
+                assert await asyncio.to_thread(reports.get, timeout=40) == "paused"
+                assert not gateway.requests
+                assert (await client.acall(_MESSAGES)).content == "ok"
+                assert process.is_alive() and not resume.is_set()
+                assert len(gateway.requests) == 1
+                assert gateway.requests[0].path == (
+                    "/v1/chat/completions" if api == "chat" else "/v1/responses"
+                )
+                await _wait_until(lambda: broker.snapshot().active == 0)
+                assert broker.snapshot().admitted_calls == 1
+                resume.set()
+                assert await asyncio.to_thread(reports.get, timeout=10) in {
+                    "AdmissionTimeoutError",
+                    "AdmissionUnavailableError",
+                }
+                await asyncio.to_thread(process.join, 10)
+                assert not process.is_alive() and process.exitcode == 0
+                assert broker.snapshot().admitted_calls == 1
+                assert len(gateway.requests) == 1
+            finally:
+                resume.set()
+                if process.pid is not None:
+                    if process.is_alive():
+                        process.terminate()
+                    await asyncio.to_thread(process.join, 5)
+                    process.close()
+                reports.close()
+                reports.join_thread()
+                await client.aclose()
+                controller.close()
+                await asyncio.sleep(0.02)
+
+
+@pytest.mark.parametrize("api", ["chat", "responses"])
+async def test_handshake_deadline_never_expires_cancelled_callers_live_http_lease(api: str) -> None:
+    """Shielded provider work retains capacity beyond the handshake window."""
+    finish = asyncio.Event()
+
+    async def held_response(_request: _Request) -> tuple[int, dict[str, str]]:
+        """Do not finish remote work merely because the local caller cancels."""
+        await finish.wait()
+        return 200, {}
+
+    async with _gateway(held_response) as gateway:
+        with AdmissionBroker(max_in_flight=1, handshake_timeout=0.05) as broker:
+            controller = broker.controller(queue_timeout=0.15)
+            client = AdmissionControl(
+                _base_client(api, gateway.api_base), AdmissionControlConfig(controller=controller)
+            )
+            call = asyncio.create_task(client.acall(_MESSAGES))
+            try:
+                await _wait_until(lambda: len(gateway.requests) == 1)
+                call.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await call
+                with pytest.raises(AdmissionTimeoutError):
+                    await client.acall(_MESSAGES)
+                assert broker.snapshot().active == 1
+                assert broker.snapshot().admitted_calls == 1
+                assert len(gateway.requests) == 1
+                finish.set()
+                await _wait_until(lambda: broker.snapshot().active == 0)
+            finally:
+                finish.set()
+                if not call.done():
+                    call.cancel()
+                    await asyncio.gather(call, return_exceptions=True)
+                await client.aclose()
+                controller.close()
+                await asyncio.sleep(0.02)

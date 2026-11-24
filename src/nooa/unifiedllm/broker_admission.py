@@ -300,10 +300,13 @@ class _AdmissionBrokerServer:
         *,
         state: _BrokerState,
         auth_token: str,
+        handshake_timeout: float | None = None,
     ):
+        """Serve one owner policy, with an optional pre-commit handshake deadline."""
         self.host, self.port = address
         self.state = state
         self.auth_token = auth_token
+        self._handshake_timeout = handshake_timeout
         self._loop: asyncio.AbstractEventLoop | None = None
         self._server: asyncio.Server | None = None
         self._thread: threading.Thread | None = None
@@ -357,6 +360,7 @@ class _AdmissionBrokerServer:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        """Serve reusable leases, bounding only the uncommitted handshake."""
         task = asyncio.current_task()
         assert task is not None
         self._handlers.add(task)
@@ -386,19 +390,32 @@ class _AdmissionBrokerServer:
                     await self._write(writer, outcome)
                     return
 
-                await self._write(writer, outcome)
-                acknowledgement = await reader.readline()
-                if not acknowledgement or len(acknowledgement) > _MAX_MESSAGE_BYTES:
-                    return
-                if json.loads(acknowledgement).get("status") != "accept":
-                    return
-                await self._write(writer, {"status": "ready"})
-                acquired = await reader.readline()
-                if not acquired or len(acquired) > _MAX_MESSAGE_BYTES:
-                    return
-                if json.loads(acquired).get("status") != "acquired":
-                    return
-                confirmation = self.state.confirm(waiter)
+                # One owner-side window covers the complete uncommitted exchange,
+                # not time spent queued. Client timeouts cannot run if a worker's
+                # event loop is paused while its socket remains connected.
+                async with asyncio.timeout(self._handshake_timeout) as handshake:
+                    await self._write(writer, outcome)
+                    acknowledgement = await reader.readline()
+                    if not acknowledgement or len(acknowledgement) > _MAX_MESSAGE_BYTES:
+                        return
+                    acceptance = json.loads(acknowledgement)
+                    if not isinstance(acceptance, dict) or acceptance.get("status") != "accept":
+                        return
+                    await self._write(writer, {"status": "ready"})
+                    acquired = await reader.readline()
+                    if not acquired or len(acquired) > _MAX_MESSAGE_BYTES:
+                        return
+                    acquisition = json.loads(acquired)
+                    if not isinstance(acquisition, dict) or acquisition.get("status") != "acquired":
+                        return
+                    deadline = handshake.when()
+                    if deadline is not None and asyncio.get_running_loop().time() >= deadline:
+                        # Buffered reads may complete without yielding to the
+                        # timeout callback. Check before committing call budget.
+                        raise TimeoutError("Admission broker handshake expired")
+                    confirmation = self.state.confirm(waiter)
+                # Once committed, do not expire the lease: a confirmed provider
+                # attempt may outlive its caller or take arbitrarily long.
                 await self._write(writer, confirmation)
                 # Explicit release and EOF are equivalent. EOF also covers an abrupt child-process
                 # exit and makes the grant a crash-safe lease. A well-formed release keeps the
@@ -915,7 +932,13 @@ class BrokerAdmissionController:
 
 
 class AdmissionBroker:
-    """Lifecycle owner for one host-local, application-scoped admission group."""
+    """Lifecycle owner for one host-local, application-scoped admission group.
+
+    ``handshake_timeout`` optionally bounds the complete offer/acknowledgement
+    exchange before commitment. It excludes queue waits and confirmed leases;
+    ``None`` preserves unbounded handshakes. The application owns this setting,
+    independently of each controller's acquisition deadline.
+    """
 
     def __init__(
         self,
@@ -927,7 +950,9 @@ class AdmissionBroker:
         port: int = 0,
         requests_per_second: float | None = None,
         max_cooldown: float | None = None,
+        handshake_timeout: float | None = None,
     ):
+        """Validate owner policy without opening sockets or starting threads."""
         limit = _validated_limit(max_in_flight)
         assert limit is not None
         if isinstance(max_calls, bool) or (
@@ -946,6 +971,7 @@ class AdmissionBroker:
         if self.requests_per_second is not None and not math.isfinite(1 / self.requests_per_second):
             raise ValueError("requests_per_second must have a finite admission interval")
         self.max_cooldown = _validated_positive_option(max_cooldown, "max_cooldown")
+        self.handshake_timeout = _validated_positive_option(handshake_timeout, "handshake_timeout")
         self.group = validated_group
         self.host = _validated_loopback_host(host)
         self.port = port
@@ -967,6 +993,7 @@ class AdmissionBroker:
                 max_cooldown=self.max_cooldown,
             ),
             auth_token=auth_token,
+            handshake_timeout=self.handshake_timeout,
         )
         server.start()
         self._auth_token = auth_token
