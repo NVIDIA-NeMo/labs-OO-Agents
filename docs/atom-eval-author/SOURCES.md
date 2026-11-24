@@ -19,21 +19,13 @@ See the [preparation README](README.md) for artifact status and benchmark owners
 The evidence categories and draft status are defined in the
 [ETHOS introduction](ETHOS.md) and
 [matrix legend](capability-evidence-matrix.md#evidence-and-failure-labels). This
-inventory records the source basis and verification history for those artifacts.
+inventory records the source basis and validation results for those artifacts.
 
-Evidence was refreshed on 2026-11-16 against fetched `origin/main`, commit
-`107a65d77e4c2c644bb90553ac404bb4ed8a064c`. The rebase reported the documentation branch
-already up to date. Source review separately compared the previous evidence revision,
-`fd62a602aea69192f1d1a312ba57ab612a014d15`, with this baseline, inspected changed ATOM
-code/tests and shared dependencies, and reconciled every capability row with those
-changes. Current code/test links use the new immutable commit; line anchors were
-remapped to their corresponding declarations/assertions. This is a **source provenance
-record**, not an agreed benchmark pin.
-
-The first pass inspected merge candidate `31c7a4494c49df8649f5e4ea045077cfecedc6b1` on
-2026-11-10, followed by a refresh to `fd62a602` on 2026-11-11. The historical
-unified-work experiment was removed from main; [S23](#s23) deliberately retains its old
-immutable link and does not treat its scores or interfaces as current evidence.
+The reviewed source baseline is NOOA `107a65d77e4c2c644bb90553ac404bb4ed8a064c`
+(2026-11-16). Code/test links use that immutable commit. This is source provenance,
+not an agreed benchmark runtime pin. [S23](#s23) retains the explicitly historical
+unified-work experiment at `31c7a4494c49df8649f5e4ea045077cfecedc6b1`; its scores and
+interfaces are not current evidence.
 
 The inventory follows the public subclass, constructor registration, runtime builtins,
 explicit visibility rules, host wiring and selected test assertions. It does not treat
@@ -61,47 +53,6 @@ component contracts, not the complete current public interface. `test_headless_r
 a generic BatchAgent; it establishes host-loop behavior. Public-agent evidence is also
 linked from `test_unified_agent`, `test_atom_roles`, `test_session_namespace` and the
 public restriction tests.
-
-## Changes incorporated from main
-
-The 2026-11-16 refresh adds:
-
-- **Default APIs (C01/C20/C22):** `self.shell` is absent, not merely hidden. A private
-  workspace shell backs files, repository tools and skill tests. Built-ins are
-  registered/activated through the registry; local skills named `repo` or `todo` cannot
-  displace them ([S03](#s03), [S10](#s10)).
-- **Session reflection (new C31):** factory-registered `nemo.reflection` posts ordinary
-  housekeeping turns for root sessions. It defaults on for ACP and off headlessly, with
-  both a cell-count and elapsed-time gate. This is distinct from optional experimental
-  post-Done maintenance (C29); neither proves useful cleanup by a real model
-  ([S25](#s25)). C01–C30 retain their identities.
-- **Output evidence (C18):** `nooa.snapshot` and `nooa.overflow` now exist, and agentdoc
-  shares their visibility markers. ATOM's shell/cell capture paths have not migrated at
-  this revision; existing cut/file-lifetime claims still follow those paths
-  ([S15](#s15)). Library availability is not automatic integration.
-- **Eval Author contract:** the schema-v1 validator and current confirmation adapter are
-  pinned to fetched Eval Author main `7ba81e6f954c52b3035762a64b11595397cbef2e`
-  ([S24](#s24)). Structural validity does not confirm product intent.
-
-The earlier refresh already incorporated these still-applicable changes:
-
-- **Shell deadlines (C06):** an inline or queued `Shell.run` can continue as a named job
-  at the cell deadline. Retrieve or cancel that job; distinguish this from the command's
-  own timeout and from user cancellation ([S05](#s05)).
-- **State restoration (C15):** cell-defined class instances can restore while their
-  class is resolvable in a live namespace. Unrestorable `self.v` entries are dropped
-  individually with warnings; other entries survive ([S13](#s13)).
-- **Recovery and helpers (C17/C22):** invalid results allow ten retries after the first
-  invalid value. Standalone generated helpers require source-verifiable ellipsis bodies;
-  ordinary helpers do not take `@strategy` ([S10](#s10), [S15](#s15)).
-- **Authentication (C21):** each repeated pasted OAuth sign-in waits for its own
-  callback instead of reusing the earlier code/state ([S16](#s16)).
-- **Host lifecycle (C26):** running cells delay new messages; shared turn-loop and
-  cancellation paths, session-owner probes and ACP worker shutdown have additional
-  regression assertions ([S02](#s02), [S21](#s21)). POSIX import cleanup does not add
-  native Windows execution support.
-- **Telemetry (C30):** shell deadline handovers and completed inline waits longer than
-  60 seconds have separate counters; neither proves task success ([S19](#s19)).
 
 ## Tool inventory
 
@@ -579,11 +530,9 @@ Its source-derived draft status does not assert product-owner confirmation. Sche
 requires an Open Questions heading; the section retains a placeholder while questions
 are omitted from this document.
 
-The refresh inspected a separate temporary checkout of fetched Eval Author main at
-`7ba81e6f954c52b3035762a64b11595397cbef2e` (2026-11-16), leaving the existing Eval
-Author worktree untouched. Its `team-skills/ethos/ethos-orchestrate`, `ethos-explore`
-and `ethos-write` instructions still use schema v1 and the standard-library validator.
-Immutable source links:
+The Eval Author schema and validator are pinned to
+`7ba81e6f954c52b3035762a64b11595397cbef2e`. Its ethos authoring instructions use schema
+v1 and the standard-library validator. Immutable source links:
 
 - [Orchestrate skill](https://github.com/NVIDIA-NeMo/labs-eval-author/blob/7ba81e6f954c52b3035762a64b11595397cbef2e/team-skills/ethos/ethos-orchestrate/SKILL.md)
 - [Explore skill](https://github.com/NVIDIA-NeMo/labs-eval-author/blob/7ba81e6f954c52b3035762a64b11595397cbef2e/team-skills/ethos/ethos-explore/SKILL.md)
@@ -599,22 +548,11 @@ content before downstream authoring. Its
 [file validator integration](https://github.com/NVIDIA-NeMo/labs-eval-author/blob/7ba81e6f954c52b3035762a64b11595397cbef2e/skills/eval-author/scripts/rubric_ethos.py)
 uses the same writer validator and records content/validator digests.
 
-These links establish the current document/confirmation contract, not ATOM behavior. The
-user explicitly requested a source-derived first draft before the intent discussion, so
-the document preserves unconfirmed intent instead of claiming the skills'
-interview/sign-off workflow is complete.
-
-On continuation, the user requested answers from ATOM documentation in place of an
-owner interview. The intent pass reused the pinned package README ([S23](#s23)), public
-agent prompt ([S01](#s01)) and role instructions ([S02](#s02)). They support a coding
-and repository-work role, task completion backed by checks, preservation of unrelated
-work, and different interactive/unattended communication expectations. Principles and
-partial trade-offs in the ETHOS are explicitly labeled as prompt-derived synthesis.
-No product roadmap, overall quality/cost/latency ordering, quantitative success target
-or accountable product owner was established. Operational constraints retain their
-existing source evidence; experiment coverage and the exact comparison task roster
-remain undecided. This substitutes source review for interview collection at the user's
-direction; it does not represent owner confirmation of the resulting intent.
+These links establish the document/confirmation contract. ATOM's intended behavior
+is derived from its package README ([S23](#s23)), public prompt ([S01](#s01)) and role
+instructions ([S02](#s02)). Those sources support the mission, principles and partial
+trade-offs in ETHOS; they do not establish a product roadmap, quantitative success
+targets or product-owner confirmation.
 
 <a id="s25"></a>
 
@@ -654,44 +592,30 @@ test.
 
 ## Validation of this documentation pass
 
-Refresh checks on 2026-11-16, using NOOA source baseline
-`107a65d77e4c2c644bb90553ac404bb4ed8a064c` on the documentation branch:
+- Evidence baseline: NOOA `107a65d77e4c2c644bb90553ac404bb4ed8a064c`.
+- Runtime checked on 2026-11-24: main `d8b09515fcc35e7a9ce1a711d585890116fc812b`
+  with this documentation-only change. Linux, CPython 3.13.15, `uv sync --frozen`:
+  **370 tests passed in 148.60 seconds**, with 24 Gym policy RuntimeWarnings about
+  middleware not wrapping synchronous, unwrapped or otherwise uninstrumented methods.
+  This does not establish universal middleware enforcement or a filesystem sandbox.
+- The schema-v1 validator and `rubric_ethos.check_ethos` at Eval Author
+  `7ba81e6f954c52b3035762a64b11595397cbef2e` passed without warnings or diagnostics.
+  Validator SHA-256: `11880291767d815b2a22891ee291f255e4cbda347318fc4ac1927fc801065d4b`.
+- All 193 immutable source URLs were checked against Git objects for file existence
+  and line bounds; 52 named-test anchors were checked against definitions. Local links,
+  T01–T21, S01–S25, C01–C31, Markdown table widths and whitespace were checked.
+- Ruff lint/format and SPDX license checks passed on the rebased branch. Subsequent
+  prose-only changes were checked for schema validity, links and whitespace.
 
-- `git fetch origin main` followed by `git rebase origin/main` reported the branch
-  already up to date. Runtime source and tests match that baseline; changes in this PR
-  are documentation only.
-- All 193 unique immutable NOOA/Eval Author source URLs were checked against their Git
-  objects for file existence and line bounds. Existing NOOA anchors were mapped to
-  matching source lines; the removed shell-visibility declaration was replaced with the
-  new declaration and its changed meaning reviewed. Named test links were checked
-  against their definitions. S23 alone retains its explicitly historical NOOA revision.
-- Local file/section links, T01–T21, S01–S25, C01–C31, Markdown table widths and
-  `git diff --check` were checked. C01–C30 retain their original IDs.
-- Eval Author main `7ba81e6f954c52b3035762a64b11595397cbef2e`'s writer validator passed
-  with no warnings. Its existing `rubric_ethos.check_ethos` integration also returned
-  `valid: true`, `status: pass`, with no diagnostics or warnings. The validator SHA-256
-  was `11880291767d815b2a22891ee291f255e4cbda347318fc4ac1927fc801065d4b`. Neither result
-  confirms intent or starts an authoring workflow.
-- Linux, CPython 3.13.15, dependencies installed with `uv sync --frozen`: **370 tests
-  passed in 148.15 seconds**. The run emitted 24 RuntimeWarnings from Gym policy tests
-  about `agent_call` middleware not wrapping synchronous, unwrapped or otherwise
-  uninstrumented methods. Passing these tests does not establish universal middleware
-  enforcement or a filesystem sandbox.
-
-With `EVAL_AUTHOR_CHECKOUT` pointing at the exact Eval Author revision above, run its
-existing validator from this repository root:
+With `EVAL_AUTHOR_CHECKOUT` at the pinned Eval Author revision, validate from this
+repository root:
 
 ```sh
 uv run --frozen python "$EVAL_AUTHOR_CHECKOUT/team-skills/ethos/ethos-write/scripts/validate_ethos.py" docs/atom-eval-author/ETHOS.md
 ```
 
-The subsequent readability edit preserved all four content fields of each of the
-31 capabilities while moving them into anchored subsections. Schema validation,
-source/local links, index targets and Markdown rendering were rechecked after that
-edit. The runtime regression result above is from the source refresh; prose and
-layout changes did not require rerunning those tests.
-
-The executed regression selection was:
+To reproduce the runtime selection, use the runtime revision above and run
+`uv sync --frozen`, then:
 
 ```sh
 uv run --frozen pytest \
@@ -711,36 +635,7 @@ uv run --frozen pytest \
   tests/tools/test_library_writing_lib.py
 ```
 
-This was a targeted regression selection, not the entire suite. Tests use scripted/fake
-models and local fixtures; no live-model evaluation, task generation, mutant work or
-benchmark execution was performed. Other linked tests remain source evidence only.
-Source/link validation establishes references and structure, not semantic completeness
-or product-owner agreement. Remote HTTP link availability and the current contents of
-cross-repository fixtures branch links were not validated; those links remain draft
-navigation, not execution pins.
-
-### Rebase validation — 2026-11-24
-
-The branch was rebased without conflicts onto main at
-`d8b09515fcc35e7a9ce1a711d585890116fc812b`. The three documentation commits retained
-their patches. Evidence links and `source_revision` remain pinned to the reviewed
-`107a65d77e4c2c644bb90553ac404bb4ed8a064c` source snapshot; this rebase is not a new
-source-evidence review.
-
-The schema-v1 validator and `rubric_ethos.check_ethos` at the Eval Author revision
-above passed without warnings or diagnostics. All 193 immutable source URLs, 52
-named-test anchors, local links and index IDs were rechecked. All 31 capabilities
-retained their content. Ruff lint and format checks, SPDX license checks and
-`git diff --check` passed.
-
-After `uv sync --frozen` on Linux with CPython 3.13.15, the regression selection
-above passed again: **370 tests passed in 148.60 seconds**, with the same 24 Gym
-policy RuntimeWarnings about middleware scope. This result covers the rebased
-runtime and dependency lockfile; it does not establish live-model task performance.
-
-The subsequent ETHOS editorial pass shortened repeated explanations and linked to
-existing capability contracts for implementation details. All 31 capability entries
-and 193 immutable source URLs were retained. Schema validation, the confirmation
-adapter, source/local links, named-test anchors and whitespace checks passed again.
-The regression result above remains the runtime check; this prose-only edit did not
-rerun it.
+This selection uses scripted/fake models and local fixtures. Other linked tests remain
+source evidence only; no live-model evaluation or benchmark execution was performed.
+Remote HTTP availability and the contents of cross-repository fixtures branch links
+were not checked; those links are navigation, not execution pins.

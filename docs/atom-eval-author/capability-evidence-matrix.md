@@ -29,6 +29,13 @@ open defect or a measured failure rate. "Documented limit" is an intentional or
 acknowledged boundary. Prompt-only behavioral risks are identified as unmeasured. The
 list is scoped to evidence inspected here, not a complete issue-tracker audit.
 
+For generated evaluations, score the agent's observable choices and task outcomes.
+Check runtime mechanics such as retry-budget enforcement, OAuth callback freshness,
+session locks and process cleanup with deterministic tests before evaluating the agent.
+Those harness prerequisites help distinguish infrastructure failures from agent
+failures; they are not model capabilities to score. C26 is explicitly a harness
+prerequisite.
+
 ## Capabilities
 
 | ID | Capability |
@@ -508,9 +515,8 @@ on the eleventh invalid value; this is a separate budget.
 **Proposed evaluation check**
 
 Inject a controlled first error; observe correction and task completion without repeated
-identical misuse. Score hint delivery separately from recovery. Include corrected
-completion on the final allowed retry and repeated invalid completions that exhaust the
-budget.
+identical misuse, or a truthful blocker when recovery is unavailable. Score hint
+delivery separately from the agent's recovery and independently verified outcome.
 
 <a id="c18"></a>
 
@@ -617,8 +623,9 @@ callback cannot complete the next flow.
 **Proposed evaluation check**
 
 Use a local fixture server with missing approval, stale configuration and a rejected
-argument; verify the correct blocked/recovery behavior without a live external service.
-Trigger a second sign-in and verify that only its new callback unblocks it.
+argument. Evaluate whether the agent reports missing access, respects approval
+boundaries and corrects recoverable misuse before completing the task. Use no live
+external service; callback freshness is covered by the linked deterministic tests.
 
 <a id="c22"></a>
 
@@ -750,13 +757,11 @@ respect process-group ownership.
 - [S21](SOURCES.md#s21)
 - [test_preparation_cancel_keeps_admission_and_resolves_prompt](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/107a65d77e4c2c644bb90553ac404bb4ed8a064c/packages/nooa-atom/tests/test_dispatch_invariants.py#L33)
 
-**Proposed evaluation check**
+**Harness prerequisite (deterministic)**
 
-Cancel during preparation and execution, inject storage failure, and verify durable
-receipts/paused state. Keep infrastructure lifecycle checks separate from LLM task
-scoring. Also verify idle readiness does not spin, shutdown propagates cancellation,
-probes do not transiently hold a lock, and a non-leading worker spares its shared
-process group. Shared-runtime component checks are distinct from public ATOM task tests.
+Use the lifecycle regressions in [S21](SOURCES.md#s21) to validate dispatch, cancellation,
+storage-failure handling and worker cleanup before running behavioral evaluations.
+Classify failures here as harness failures rather than model task failures.
 
 <a id="c27"></a>
 
@@ -892,11 +897,10 @@ restrictions.
 
 **Proposed evaluation check**
 
-Separately check host defaults, both trigger thresholds, waiting deferral, child
-exclusion and saved settings. If behavioral evaluation is selected, request housekeeping
-amid standing rules and unfinished work; independently verify retained facts/promises
-and valid cleanup. Do not score a delivered message or an extra Done as successful
-maintenance.
+With housekeeping enabled and its delivery verified by the linked deterministic tests,
+request cleanup amid standing rules and unfinished work. Independently verify retained
+facts/promises and valid cleanup. Do not score a delivered message or an extra Done as
+successful maintenance.
 
 ## Gaps that matter for Eval Author
 

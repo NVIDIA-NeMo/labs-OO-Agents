@@ -18,17 +18,11 @@ the one we currently use.
 - [Source inventory](SOURCES.md): 21 tool families and 25 evidence groups with immutable
   source links.
 
-Evidence targets NOOA `107a65d77e4c2c644bb90553ac404bb4ed8a064c`, fetched main on
-2026-11-16. The documentation branch was already based on that commit; the refresh
-reconciles source changes since the prior evidence revision,
-`fd62a602aea69192f1d1a312ba57ab612a014d15`, rather than treating the rebase as review.
-It covers removal of the legacy shell attribute, built-in skill installation, and
-session reflection separately from experimental post-Done maintenance. This is the
-documentation's source baseline, not an agreed benchmark runtime pin. See
-[validation](SOURCES.md#validation-of-this-documentation-pass) for the current Eval
-Author contract, checks run and their limits. Schema/link checks and scripted regression
-tests are not ATOM task-performance evidence. No runtime changes, generated evaluation
-tasks or mutations are included here.
+Evidence targets NOOA `107a65d77e4c2c644bb90553ac404bb4ed8a064c`, reviewed on
+2026-11-16. This is the documentation's source baseline, not an agreed benchmark
+runtime pin. See [validation](SOURCES.md#validation-of-this-documentation-pass) for
+checked revisions, reproduction commands and results. No runtime changes, generated
+evaluation tasks or mutations are included here.
 
 ## Benchmark ownership
 
