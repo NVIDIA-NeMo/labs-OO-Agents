@@ -13,7 +13,8 @@ to follow semantic versioning.
   `docs/context.md`.
   - Views own their blocks (system prompt, `self`, events API, state, strategy
     instructions). `self.context` only adds blocks: a `None` value suppresses
-    user, skill and decorator/scoped blocks, never a view's own.
+    user, skill and decorator/scoped blocks, never a view's own; `None` on a
+    view's own block warns.
     `remove_protected()`, `set_static_protected()`, `set_dynamic_protected()`,
     `ProtectedBlockError` and `DynamicNotResolvedError` are removed.
   - View options are constructor arguments, such as `CodeActView(state=False)`;
@@ -31,6 +32,8 @@ to follow semantic versioning.
     use `Context(..., prefix=True)` to place it in the cached prefix.
   - `Skill.context_block` is `(key, Context(...))`, evaluated with `self`
     bound to the skill; the `(key, "expression")` form raises `TypeError`.
+  - A skill that a `SkillRegistry` registers or loads stays hidden, from
+    `doc(self)` and from context, until it is activated.
   - Errors that escape a view's `assemble()` raise `ContextAssemblyError`
     and are not retried. `RequestRecovery.before_request()` is replaced by
     `before_send()`, called after the messages are built.
