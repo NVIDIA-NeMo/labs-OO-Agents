@@ -347,9 +347,24 @@ async def test_reflection_timeout_is_owned_and_original_receipt_precedes_it(tmp_
             cancelled.set()
 
     monkeypatch.setattr(AtomAgent, "_reflect_done_plan", blocked)
-    # The budget also covers gathering evidence before the call; a loaded
-    # machine can spend 50 ms there and skip the call entirely.
-    monkeypatch.setattr(done_reflection, "REFLECTION_TIMEOUT", 1.0)
+
+    class _TimeoutAtTheCall:
+        """asyncio for done_reflection, but its timeout starts at the call.
+
+        The real budget also covers gathering evidence before the call, so on
+        a loaded machine the call could be skipped. Keep that budget generous
+        and give the call itself 50 ms.
+        """
+
+        def __getattr__(self, name):
+            return getattr(asyncio, name)
+
+        @staticmethod
+        def timeout_at(deadline):
+            return asyncio.timeout(0.05)
+
+    monkeypatch.setattr(done_reflection, "REFLECTION_TIMEOUT", 60.0)
+    monkeypatch.setattr(done_reflection, "asyncio", _TimeoutAtTheCall())
     registry, root, llm = await make_root(
         tmp_path,
         [
