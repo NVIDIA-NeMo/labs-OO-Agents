@@ -145,7 +145,7 @@ class ContextApi(Skill):
 
     def keys(self) -> Set[str]:
         """Return the stored block keys."""
-        return self._context.keys()
+        return set(self._context.keys())
 
     def disable(self, *keys: str) -> None:
         """Suppress named blocks from future prompts without deleting them.

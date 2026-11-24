@@ -136,6 +136,15 @@ def test_keys():
     assert set(ctx.keys()) == {"a", "b"}
 
 
+def test_blocks_can_be_deleted_while_looping_over_keys():
+    ctx = _ctx()
+    ctx["a"] = 1
+    ctx["b"] = 2
+    for key in ctx.keys():
+        del ctx[key]
+    assert len(ctx) == 0
+
+
 # ── get ────────────────────────────────────────────────────────────────────────
 
 
