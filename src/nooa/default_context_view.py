@@ -5,8 +5,9 @@
 import ast
 import inspect
 import logging
+import warnings
 from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from nooa.context_blocks import BlockMetadata, Context, DynamicContext, Role
 from nooa.context_blocks.events import EventBase
@@ -31,33 +32,18 @@ logger = logging.getLogger(__name__)
 
 
 def active_skills(agent: "Agent") -> tuple["Skill", ...]:
-    """Return visible attached skills in stable attribute order."""
+    """Return the agent's visible skills in stable attribute order.
+
+    A registry hides the skills it loads until they are activated, so the
+    visible skills are exactly the attached and the activated ones.
+    """
     from nooa.skill import Skill
 
-    values = tuple(agent.__instance_values__().values())
-    visible_ids = {id(value) for value in values}
-    managed_ids = {
-        id(skill)
-        for value in values
-        if isinstance(value, Skill)
-        for skill in getattr(value, "_managed_skills", lambda: ())()
-    }
-    skills: list[Skill] = []
-    seen: set[int] = set()
-    for value in values:
-        if not isinstance(value, Skill) or id(value) in seen:
-            continue
-        if id(value) in managed_ids:
-            continue
-        seen.add(id(value))
-        skills.append(value)
-        active = getattr(value, "active_skills", None)
-        if callable(active):
-            for nested in cast("tuple[Skill, ...]", active()):
-                if id(nested) in visible_ids and id(nested) not in seen:
-                    seen.add(id(nested))
-                    skills.append(nested)
-    return tuple(skills)
+    skills: dict[int, Skill] = {}
+    for value in agent.__instance_values__().values():
+        if isinstance(value, Skill):
+            skills.setdefault(id(value), value)
+    return tuple(skills.values())
 
 
 def _block(
@@ -371,6 +357,20 @@ async def collect_skill_blocks(
     return blocks
 
 
+def _warn_unremovable(agent: "Agent", call: "CurrentCall", own_keys: set[str]) -> None:
+    """Warn when ``None`` targets a block the view builds: it removes nothing."""
+    suppressed = set(agent.context_manager.disabled())
+    for overrides in (call.decorator_context, call.scoped_context):
+        suppressed.update(key for key, value in (overrides or {}).items() if value is None)
+    for key in sorted(suppressed & own_keys):
+        warnings.warn(
+            f"context[{key!r}] = None does not remove the {key!r} block: the context view "
+            f"builds it. Use a view option, such as CodeActView(state=False), or a custom view.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+
 class ManagedContextView(ContextView["Agent"]):
     """Reusable assembly for the built-in manager-backed context policies.
 
@@ -443,7 +443,9 @@ class ManagedContextView(ContextView["Agent"]):
         return blocks
 
     async def assemble(self, owner: "Agent", call: "CurrentCall") -> AsyncIterator[ContextItem]:
-        blocks = (*await self.view_blocks(owner, call), *await self.context_blocks(owner, call))
+        own = await self.view_blocks(owner, call)
+        _warn_unremovable(owner, call, {block.key for block in own})
+        blocks = (*own, *await self.context_blocks(owner, call))
         blocks = order_blocks(blocks, self.block_order)
         prefix, trailing = partition_blocks(blocks)
 

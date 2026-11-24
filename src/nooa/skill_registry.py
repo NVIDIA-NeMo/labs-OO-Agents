@@ -587,6 +587,7 @@ class SkillRegistry(Skill):
                 self._loaded.add(name)
                 self._attr_map[name] = attr_name
                 self._load_order.append(name)
+                self._hide_skill(name)
                 changed = True
                 logger.info("Loaded skill %s as self.%s", name, attr_name)
             except Exception:
@@ -703,6 +704,8 @@ class SkillRegistry(Skill):
         self._loaded.add(name)
         self._name_conflicts.pop(name, None)
         self._attr_map[name] = attr
+        if name not in self._activated:
+            self._hide_skill(name)
         if newly_loaded:
             self._load_order.append(name)
         if name not in self._discovered:
@@ -739,16 +742,6 @@ class SkillRegistry(Skill):
             if isinstance(skill, Skill):
                 active.append(skill)
         return tuple(active)
-
-    def _managed_skills(self) -> tuple[Skill, ...]:
-        """Return every loaded skill instance, including inactive ones."""
-        managed: list[Skill] = []
-        for name in self._load_order:
-            attr = self._attr_map.get(name)
-            skill = getattr(self._agent, attr, None) if attr is not None else None
-            if isinstance(skill, Skill):
-                managed.append(skill)
-        return tuple(managed)
 
     def activate(self, patterns: "list[str] | Mapping[str, Any]") -> None:
         """Make loaded skills matching patterns visible to the LLM.

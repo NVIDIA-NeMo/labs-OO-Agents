@@ -92,7 +92,6 @@ class TestRegistration:
         with pytest.raises(ValueError, match="already provided by 'research"):
             registry.register(second, rejected)
         assert registry.loaded() == [first_name]
-        assert registry._managed_skills() == (first,)
         assert registry.active_skills() == (first,)
         assert getattr(agent, first_name.split(".")[-1]) is first
         assert rejected._agent is None
@@ -104,7 +103,6 @@ class TestRegistration:
         registry.register(first_name, first)
         registry.register(second, replacement)
         assert registry.loaded() == [second]
-        assert registry._managed_skills() == (replacement,)
         assert getattr(agent, first_name.split(".")[-1]) is replacement
         assert first._agent is None
         assert f"replaces inactive skill {first_name}" in caplog.text
@@ -117,7 +115,6 @@ class TestRegistration:
         replacement = FakeSkill()
         registry.register("research.search", replacement)
         assert registry.active_skills() == (replacement,)
-        assert registry._managed_skills() == (replacement,)
 
     def test_register_adds_to_loaded(self, registry):
         skill = FakeSkill()

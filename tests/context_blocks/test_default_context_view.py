@@ -139,11 +139,24 @@ async def test_self_context_cannot_replace_or_hide_view_blocks():
     agent.context["state"] = None
     call = _call(agent, scoped={"self": None})
 
-    items = await collect_context_items(ManagedContextView(), agent, call)
+    with pytest.warns(UserWarning) as warned:
+        items = await collect_context_items(ManagedContextView(), agent, call)
     keys = [item.key for item in items if hasattr(item, "key")]
     prompts = [item.content for item in items if getattr(item, "key", None) == "system_prompt"]
     assert prompts == ["Real prompt.", "pirate"]
     assert {"self", "state"} <= set(keys)
+    # None on a view's own block removes nothing, so each one is reported.
+    assert sorted(str(w.message).split("'")[1] for w in warned) == ["self", "state"]
+
+
+async def test_none_on_a_user_block_removes_it_without_a_warning(recwarn):
+    agent = ExampleAgent()
+    agent.context["notes"] = "draft"
+    agent.context["notes"] = None
+
+    items = await collect_context_items(ManagedContextView(), agent, _call(agent))
+    assert "notes" not in [getattr(item, "key", None) for item in items]
+    assert not [w for w in recwarn if issubclass(w.category, UserWarning)]
 
 
 async def test_state_option_omits_the_state_block():
@@ -207,7 +220,8 @@ async def test_default_source_precedence_and_removal_are_visible_policy():
         scoped={"shared": "scoped", "removed": None, "strategy_prompt": None},
     )
 
-    blocks = await collect_context_items(view, agent, call)
+    with pytest.warns(UserWarning, match="'strategy_prompt' block"):
+        blocks = await collect_context_items(view, agent, call)
     by_key = {block.key: block for block in blocks if hasattr(block, "key")}
     assert by_key["shared"].content == "scoped"
     assert "removed" not in by_key
@@ -368,3 +382,33 @@ async def test_history_override_still_passes_through_replayable():
     agent = ExampleAgent()
     items = await collect_context_items(GivenHistory(), agent, _call(agent))
     assert incomplete not in items
+
+
+async def test_a_loaded_skill_adds_its_block_only_once_activated():
+    from typing import Annotated
+
+    from nooa import hidden
+    from nooa.skill import Skill
+    from nooa.skill_registry import SkillRegistry
+
+    class Notes(Skill):
+        """Notes."""
+
+        context_block = ("notes_status", Context("open notes"))
+
+    class SkillAgent(ExampleAgent):
+        registry: Annotated[SkillRegistry, hidden]
+
+    agent = SkillAgent()
+    agent.registry = SkillRegistry(agent)
+    agent.registry.register("notes", Notes())
+
+    async def keys():
+        items = await collect_context_items(ManagedContextView(), agent, _call(agent))
+        return [getattr(item, "key", None) for item in items]
+
+    assert "notes_status" not in await keys()
+    agent.registry.activate(["notes"])
+    assert "notes_status" in await keys()
+    agent.registry.deactivate(["notes"])
+    assert "notes_status" not in await keys()
