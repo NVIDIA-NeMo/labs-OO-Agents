@@ -58,6 +58,7 @@ from nooa.events import (
     DebugTrace,
     Error,
     ExecutionSignal,
+    Feedback,
     LoopGuardTriggered,
     PythonOutput,
     Task,
@@ -131,11 +132,21 @@ MAX_LENGTH_RECOVERIES = 2
 """Cut-off replies per call that get a recovery nudge before the call fails."""
 
 OUTPUT_LIMIT_NUDGE = (
-    "Your last reply was cut off at the output-token limit before it finished, so "
-    "nothing ran. Reply again more briefly: keep reasoning short and call the "
-    "tool with the next step now."
+    "Your last reply was cut off at the output-token limit while you were still "
+    "writing the tool call, so none of its code ran. Write it again in smaller "
+    "steps: keep reasoning short and split long code, or a long result, over "
+    "several cells (for example, build the result in a variable first, then "
+    "return it)."
 )
-"""Feedback after a reply stopped at its output-token limit (finish_reason=length)."""
+"""Feedback after a tool call (code cell or ``return_result``) was cut off at its
+output-token limit (finish_reason=length). The half-written call never runs."""
+
+LENGTH_CONTINUATION_NUDGE = (
+    "Your last reply was cut off at the output-token limit. Continue exactly "
+    "where you left off; do not restart or repeat what you already wrote."
+)
+"""Feedback after plain text or reasoning (no tool call) was cut off at its
+output-token limit. The partial reply stays in history and the model continues it."""
 
 MAX_ITERATIONS_MESSAGE = (
     "Generation failed after {iterations} iterations (max_iterations={max_iterations}). "
@@ -201,7 +212,15 @@ type TextOnlyResponseHandler = Callable[
 
 
 def return_text_as_result(context: TextOnlyResponseContext) -> TextOnlyResponseAction:
-    """Opt-in handler that validates non-empty text (or ``None``) as the result."""
+    """Opt-in handler that validates non-empty text (or ``None``) as the result.
+
+    A reply that finishes text cut off at the output-token limit is only the
+    tail of the answer (the earlier parts are in history, not joined), so it is
+    not accepted: the model is asked to return the whole answer with
+    ``return_result`` instead (CONTINUED_TEXT_NOTE).
+    """
+    if (getattr(context.response, "metadata", None) or {}).get("output_continued"):
+        return TextOnlyResponseAction.retry(_text_only_correction(context))
     value = context.content if context.content.strip() else None
     return TextOnlyResponseAction.return_result(value)
 
@@ -330,17 +349,28 @@ def _text_only_correction(
     function inside it), as in CodeActV2; else the two-tool form.
     """
     method = context.call.method_name
+    continued = bool((getattr(context.response, "metadata", None) or {}).get("output_continued"))
     if python_tool is None:
         how = (
             f"To finish `{method}`, call `return_result(value)`. "
             "To do more work, call `execute_python(code)`. "
             "Re-issue your response now as one of those tool calls."
         )
+        if continued:
+            # The text was cut off and continued (CONTINUED_TEXT_NOTE): asking
+            # for it again in one call would hit the same output limit.
+            how = (
+                f"To finish `{method}`, call `return_result(value)`. "
+                "To do more work, call `execute_python(code)`. "
+                f"{CONTINUED_TEXT_NOTE}"
+            )
     else:
         how = (
             f"To finish `{method}`, call `{python_tool}` with `return_result(value)` inside "
             f"the cell. To continue working, call `{python_tool}` with the next computation."
         )
+        if continued:
+            how = f"{how} {CONTINUED_TEXT_NOTE}"
     validation_feedback = (
         f"\n\nThe attempted result was invalid:\n{validation_error}" if validation_error else ""
     )
@@ -352,6 +382,15 @@ def _text_only_correction(
             f"{how}{validation_feedback}"
         )
     )
+
+
+CONTINUED_TEXT_NOTE = (
+    "Your reply was cut off at the output-token limit and then continued; all of "
+    "its parts are kept above. Do not re-send it in a single call: build a long "
+    "value over several cells (for example, append the parts to a variable), then "
+    "return it."
+)
+"""Added to the text-only correction when the plain-text reply was continued."""
 
 
 def _handler_name(handler: TextOnlyResponseHandler) -> str:
@@ -444,6 +483,9 @@ class CodeActSession:
     consecutive_api_errors: int = 0
     consecutive_text_only: int = 0
     length_recoveries: int = 0  # Cut-off (finish_reason=length) replies nudged so far
+    # A cut-off text-only reply is being continued; the reply that finishes it is
+    # marked output_continued for the text-only handler (all parts stay in history).
+    length_text_continued: bool = False
     session_locals: dict[str, Any] = field(default_factory=dict)
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
     sandbox_executor: Any = field(default=None)  # SandboxedExecutor when backend="sandbox"
@@ -1290,11 +1332,13 @@ Standard Python builtins and agent instance (`self`) are available."""
                 session.reset_api_errors()
 
                 # Output-limit responses are incomplete even when they carry
-                # partial text. Preserve the exact LLMResponse for diagnostics,
-                # but never let a text-only handler accept it as a successful
-                # result. Empty turns are filtered from provider projection.
+                # partial text. Preserve the exact LLMResponse in history, but
+                # never run a cut-off tool call or let a text-only handler
+                # accept cut-off text as a result. Empty turns are filtered
+                # from provider projection.
                 if response.finish_reason == "length":
                     session.record_error()
+                    get_harness_metrics().length_continuation(response.model_name)
                     if not response.content and not response.tool_calls:
                         get_harness_metrics().empty_response()
                     runtime.event_manager.add(
@@ -1302,15 +1346,22 @@ Standard Python builtins and agent instance (`self`) are available."""
                             content=f"Truncated response: {_response_debug_details(response)}"
                         )
                     )
-                    # A cut-off reply ran nothing. Give the model a bounded number
-                    # of chances to answer briefly before failing the call.
+                    # A cut-off tool call (code cell or return_result) is never
+                    # executed: ask for it again in smaller steps. Cut-off text
+                    # or reasoning stays in history and the model continues it.
+                    cut_off_call = bool(response.tool_calls)
+                    if cut_off_call:
+                        session.length_text_continued = False
+                    elif response.content.strip():
+                        session.length_text_continued = True
                     if (
                         session.length_recoveries < MAX_LENGTH_RECOVERIES
                         and not session.is_exhausted()
                     ):
                         session.length_recoveries += 1
                         session.record_iteration()
-                        runtime.event_manager.add(Error(content=OUTPUT_LIMIT_NUDGE))
+                        nudge = OUTPUT_LIMIT_NUDGE if cut_off_call else LENGTH_CONTINUATION_NUDGE
+                        runtime.event_manager.add(Feedback(content=nudge))
                         continue
                     turn_state.is_final = True
                     raise GenerationError(OUTPUT_TOKENS_EXHAUSTED_MESSAGE)
@@ -1327,6 +1378,17 @@ Standard Python builtins and agent instance (`self`) are available."""
                     )
                     turn_state.is_final = True
                     raise GenerationError("The model returned an incomplete response.")
+
+                # A plain-text reply that finishes cut-off text is marked, so the
+                # text-only handler knows the earlier parts are in history (they
+                # are not joined). A tool call moves on: the text stays in history.
+                if session.length_text_continued:
+                    session.length_text_continued = False
+                    if not response.tool_calls:
+                        metadata = {"output_continued": True}
+                        response.metadata.update(metadata)
+                        if event_id:
+                            runtime.event_manager.update(event_id, metadata=metadata)
 
                 # ── Post-response cleanup (CodeAct) ──────────────────────
                 # Intercept point: strategy-specific response transforms.
