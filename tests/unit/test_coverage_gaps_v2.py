@@ -653,11 +653,14 @@ class TestPlainFormatterNoOutput:
     """format_event() returns '(no output)' when all fields are empty (line 50)."""
 
     def test_empty_event_returns_no_output(self):
-        from nooa.events import LLMResponse
+        from nooa.context_blocks.events import EventBase
         from nooa.plain_formatter import PlainBlockFormatter
 
-        # LLMResponse with empty content and no reasoning → all repr fields are empty/None
-        event = LLMResponse(content="", reasoning=None)
+        class EmptyEvent(EventBase):
+            pass
+
+        # Ordinary events with no printable fields still receive a placeholder.
+        event = EmptyEvent()
         formatter = PlainBlockFormatter()
         result = formatter.format_event(event)
         assert result == "(no output)"

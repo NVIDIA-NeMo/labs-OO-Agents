@@ -63,6 +63,25 @@ class TestImmutableMetadata:
 
 
 class TestXMLBlockFormatterPartition:
+    def test_cached_formatter_legacy_import_delegates_to_xml(self):
+        from nooa.context_blocks import CachedBlockFormatter as ExportedFormatter
+        from nooa.context_blocks.formatter import XMLBlockFormatter
+        from nooa.context_blocks.models import ResolvedBlock
+        from nooa.context_blocks.renderers.cached import CachedBlockFormatter
+
+        block = ResolvedBlock(
+            key="notes",
+            content="remember this",
+            metadata=BlockMetadata(expr="self.context['notes']"),
+        )
+        cached = CachedBlockFormatter()
+        xml = XMLBlockFormatter()
+
+        assert ExportedFormatter is CachedBlockFormatter
+        assert cached.format_type == xml.format_type
+        assert cached.format_description() == xml.format_description()
+        assert cached.format([block]) == xml.format([block])
+
     def test_renderer_preserves_explicit_boundary_between_same_role_blocks(self):
         output = render_context(
             [

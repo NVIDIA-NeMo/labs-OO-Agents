@@ -420,9 +420,28 @@ class ManagedContextView(ContextView["Agent"]):
             if self.state:
                 builders.append(agent_state_block)
         blocks = [block for build in builders if (block := await build(owner, call)) is not None]
-        return await apply_block_overrides(
+        default_prompt = next((block for block in blocks if block.key == "system_prompt"), None)
+        blocks = await apply_block_overrides(
             blocks, await self.instruction_blocks(owner, call), agent=owner, call=call
         )
+        # User blocks are assembled separately and cannot replace view-owned blocks.
+        prompt_class = next((cls for cls in type(owner).__mro__ if cls.__doc__), None)
+        if (
+            prompt_class is Agent
+            and default_prompt is not None
+            and any(block is default_prompt for block in blocks)
+        ):
+            guidance = owner.render_config.block_formatter.format_description().strip()
+            if guidance:
+                guided = default_prompt.model_copy(
+                    update={
+                        "content": context_text(default_prompt.content, call=call)
+                        + "\n\n## Context format\n"
+                        + guidance
+                    }
+                )
+                blocks = tuple(guided if block is default_prompt else block for block in blocks)
+        return blocks
 
     async def context_blocks(self, owner: "Agent", call: "CurrentCall") -> tuple[Block, ...]:
         """Materialize user, skill, and decorator/scoped blocks."""

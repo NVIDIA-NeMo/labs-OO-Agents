@@ -150,6 +150,24 @@ class TestPlainBlockFormatterFormatEvent:
         assert result == "Hello there"
         assert "UserEvent(" not in result
 
+    def test_structured_assistant_content_uses_field_serialization(self):
+        """Structured assistant content keeps the plain field serialization."""
+        from typing import ClassVar
+
+        from nooa.context_blocks.events import EventBase
+        from nooa.context_blocks.roles import Role
+        from nooa.plain_formatter import PlainBlockFormatter
+
+        class StructuredAssistantEvent(EventBase):
+            _role: ClassVar[Role] = Role.ASSISTANT
+            content: dict[str, int]
+
+        event = StructuredAssistantEvent(content={"answer": 42})
+        result = PlainBlockFormatter().format_event(event)
+
+        assert result == "{'answer': 42}"
+        assert "StructuredAssistantEvent(" not in result
+
     def test_python_output_captured_locals_not_shown(self):
         """captured_locals is infrastructure — must never appear in plain output."""
         from nooa.context_blocks.events import ResultStatus
@@ -168,3 +186,43 @@ class TestPlainBlockFormatterFormatEvent:
         assert "captured_locals" not in result
         assert "DataFrame" not in result
         assert "hello" in result  # stdout still shown
+
+
+def test_empty_canonical_response_does_not_invent_output():
+    from nooa.context_blocks import OpenAIProviderFormatter, render_context
+    from nooa.llm_types import LLMResponse
+    from nooa.plain_formatter import PlainBlockFormatter
+
+    response = LLMResponse(content="", reasoning=None)
+    formatter = PlainBlockFormatter()
+    assert formatter.format_event(response) == ""
+    assert (
+        render_context(
+            [response], block_formatter=formatter, provider_formatter=OpenAIProviderFormatter()
+        ).output
+        == []
+    )
+
+
+def test_native_only_response_preserves_original_carrier_without_text():
+    from nooa.context_blocks import OpenAIProviderFormatter, render_context
+    from nooa.llm_types import AssistantReasoning, LLMResponse
+    from nooa.plain_formatter import PlainBlockFormatter
+
+    response = LLMResponse(
+        parts=(
+            AssistantReasoning(
+                text="", native={"encrypted_content": "opaque", "signature": "signed"}
+            ),
+        ),
+        replay_scope="responses:openai:test",
+    )
+    before = response.model_dump()
+    formatter = PlainBlockFormatter()
+    assert formatter.format_event(response) == ""
+    rendered = render_context(
+        [response], block_formatter=formatter, provider_formatter=OpenAIProviderFormatter()
+    )
+    assert len(rendered.output) == 1
+    assert rendered.output[0] is response
+    assert response.model_dump() == before

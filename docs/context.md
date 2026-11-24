@@ -150,6 +150,78 @@ class DecisionContextView(ContextView[Agent]):
 
 Registry skills participate when active; directly attached public skills are active by default. Hidden and inactive skills contribute nothing in the default views.
 
+## Formatting independently of views
+
+Use `RenderConfig` to select presentation without implementing another view:
+
+```python
+from nooa.context_blocks import MarkdownBlockFormatter, RenderConfig
+
+agent = MyAgent(
+    render_config=RenderConfig(block_formatter=MarkdownBlockFormatter()),
+)
+```
+
+`XMLBlockFormatter` is the XML alternative. Neither XML nor Markdown enables
+caching: both preserve the boundary chosen by the view. `RenderConfig` chooses
+serialization and client message shape; it does not choose context sources,
+history membership, order, or eviction. `CachedBlockFormatter` remains as a
+compatibility wrapper with XML-equivalent serialization; cache placement stays
+view-owned, so use explicit view cache boundaries.
+
+`Agent`'s base instructions are format-neutral. Built-in context views include
+the selected formatter's `format_description()` in the built-in Agent prompt.
+Custom class docstrings own their instructions. A view that replaces or removes
+its own `system_prompt` does not evaluate default format guidance. User, skill,
+decorator, and scoped context blocks are separate additions; a same-name block
+or suppression does not replace or disable the view-owned prompt or guidance.
+Custom views may explicitly select formatter guidance. Rendering itself never
+injects instructions.
+
+`context_text(value, call=call)` is separate Python-value serialization. It
+applies the call's structural bounds to **non-string** values. Existing strings
+pass through unchanged, even when longer than `max_string`; budget or shorten
+such content explicitly in the view.
+
+For plain event-field serialization, select
+`RenderConfig(block_formatter=PlainBlockFormatter())`, importing
+`PlainBlockFormatter` from `nooa.plain_formatter`. This retains XML wrappers for
+materialized blocks and optional event role/tag metadata. It is not a tag-free
+format; canonical assistant responses retain their original text and replay data.
+
+Block formatters receive one ordered resolved segment at a time, with non-tool
+event text already serialized. They may coalesce adjacent materialized blocks of
+the same role, without partitioning all system blocks ahead of history. The
+renderer handles boundary markers between segments; it does not truncate inputs.
+
+### Atomic tool replay exception
+
+A canonical `LLMResponse` tool-call batch and its linked `ToolCallEvent` results
+form one replay group. Stock formatters emit the response at its original
+position, followed by all results in tool-call order; linked execution sidecars
+emit nothing at their stored positions. Thus a result stored later than an
+unrelated block can move into its response's group. A cache boundary cannot
+split a response from its linked results.
+
+At the formatter level, incomplete canonical groups and orphan linked executions
+raise `UnsupportedContextLayout`. The renderer also rejects a supplied
+`ToolCallEvent` with `result=None`. Select history through `replayable()` before
+rendering: it repairs missing outcomes and omits separated groups on copies,
+without mutating stored events. Cache boundaries must still keep each batch
+intact. Wrapper-style customizations can override
+`wrap_system_block()` and `wrap_message_block()` on `BlockFormatter` while
+inheriting `format()` to preserve these rules. The first hook formats materialized
+blocks of any role; the second formats ordinary events. Canonical assistant
+replay bypasses the event wrapper.
+
+`RenderedMessage` is the neutral intermediate representation, including a
+private replay carrier. `OpenAIProviderFormatter.format()` returns client input
+containing ordinary dictionaries, original `LLMResponse` objects, and
+`CacheBoundary` markers. It is not final provider wire JSON. UnifiedLLM owns
+provider-specific encoding, native reasoning replay, exact tool argument data,
+and cache annotation mapping. Do not flatten a retained response into a
+mapping merely to satisfy an annotation or change XML/Markdown wrapping.
+
 ## Model-specific content
 
 Model-specific prompt content remains view policy, not formatter policy. A custom view may collect items, run any application-defined adapter, apply its budget, then yield the final sequence. No framework-level prompt-adapter stage is required.
@@ -184,7 +256,7 @@ Keep `agent.context`, context managers, event creation, strategy/scoped override
 
 These are the default application's context APIs, not requirements of `ContextView`. A custom view may use an independent state API. Native iterative strategies still use NOOA events unless replaced together with the strategy.
 
-Legacy implicit policy is removed: `cache_control_injection_points` raises `ValueError`; `CachedBlockFormatter` is removed (views choose placement; `XMLBlockFormatter` is the default); and `render_context()` takes no context limit: it counts blocks the view marked evicted and never evicts.
+Legacy implicit policy is removed: `cache_control_injection_points` raises `ValueError`; `CachedBlockFormatter` remains only as an XML-serialization compatibility wrapper and does not choose cache placement; and `render_context()` takes no context limit: it counts blocks the view marked evicted and never evicts.
 
 Direct UnifiedLLM callers place boundaries explicitly; without one, NOOA adds no explicit cache marker:
 
