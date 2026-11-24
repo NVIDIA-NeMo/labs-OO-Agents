@@ -53,6 +53,7 @@ from nooa.context_blocks.renderer import (
     format_message_content,
     render_context,
 )
+from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.context_blocks.scoped import ScopedContext
 
 __all__ = [
@@ -76,6 +77,7 @@ __all__ = [
     # BlockFormatter (system prompt blocks -> string)
     "BlockFormatter",
     "XMLBlockFormatter",
+    "CachedBlockFormatter",
     "MarkdownBlockFormatter",
     # ProviderFormatter (system prompt + messages -> provider output)
     "ProviderFormatter",
