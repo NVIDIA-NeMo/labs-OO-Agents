@@ -677,7 +677,7 @@ With `EVAL_AUTHOR_CHECKOUT` pointing at the exact Eval Author revision above, ru
 existing validator from this repository root:
 
 ```sh
-uv run --frozen python "$EVAL_AUTHOR_CHECKOUT/team-skills/ethos/ethos-write/scripts/validate_ethos.py" docs/atom-evaluation/ETHOS.md
+uv run --frozen python "$EVAL_AUTHOR_CHECKOUT/team-skills/ethos/ethos-write/scripts/validate_ethos.py" docs/atom-eval-author/ETHOS.md
 ```
 
 The subsequent readability edit preserved all four content fields of each of the
