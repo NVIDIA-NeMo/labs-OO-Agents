@@ -4,7 +4,7 @@ name: nooa-atom
 created_timestamp: 2026-11-10T20:41:10Z
 author: Codex
 status: source-derived-draft
-updated_timestamp: 2026-11-16T18:44:31Z
+updated_timestamp: 2026-11-24T10:32:57Z
 source_revision: 107a65d77e4c2c644bb90553ac404bb4ed8a064c
 ---
 
@@ -13,21 +13,10 @@ source_revision: 107a65d77e4c2c644bb90553ac404bb4ed8a064c
 
 # ETHOS.md: NOOA ATOM
 
-> **Source-derived draft; product intent awaits confirmation.** This document
-> derives expected behavior from the pinned source revision. The
-> [capability evidence](capability-evidence-matrix.md#evidence-and-failure-labels)
-> distinguishes prompt expectations (P), documented contracts (D), implementation
-> (I), and inspected test assertions (T). Executed scripted tests establish runtime
-> contracts, not real-model reliability; proposed checks are future evaluation
-> ideas. Unconfirmed principles, priorities, targets and ownership are collected
-> in Open Questions. `author` records who created this draft; SPDX records
-> copyright ownership. The [source index](SOURCES.md#source-index) provides evidence
-> and the [preparation README](README.md) explains benchmark ownership.
-
-The intent topics were reviewed against the package documentation and public agent
-prompts at the user's request, in place of an owner interview. Mission, principles and
-partial trade-offs below summarize those sources; they are not owner-confirmed answers.
-The sources do not establish a product roadmap or quantitative acceptance targets.
+> **Source-derived draft; product intent awaits confirmation.** Expected behavior
+> derives from the pinned documentation and prompts. See the
+> [capability evidence and its limits](capability-evidence-matrix.md#evidence-and-failure-labels),
+> [source index](SOURCES.md#source-index) and [benchmark ownership](README.md#benchmark-ownership).
 
 ## Role
 
@@ -94,11 +83,8 @@ The model executes Python cells, receives tool results/errors and commits a type
 Waiting or NeedInput outcome. Jobs can deliver later turns. Live handle globals persist
 within the session; other generated methods and child sessions have separate namespaces.
 Serializable facts and session history can be restored, but Python globals and running
-work are not restored as live execution. Restoring `self.v` also requires resolvable
-value classes: unavailable cell-defined classes cause affected entries to be dropped
-with warnings while other entries survive. A fresh-agent restore in the same process may
-resolve a still-live class; this does not make the class definition durable across
-process restart.
+work are not restored as live execution. Stored values also depend on their classes
+being available at restore time; see [restart boundaries](capability-evidence-matrix.md#c15).
 
 ACP hosts interactive use; `open_tree`/`run_task` support headless execution; Harbor
 and Gym adapters exist. Host limits and benchmark policies affect execution and
@@ -109,11 +95,10 @@ experiment runner, model or benchmark runtime pin is selected here. Sources:
 
 Factory-created root sessions also have session reflection: ordinary housekeeping
 messages, enabled by default for ACP and disabled by default for other hosts. Workspace
-settings and a session override can change that. Messages become due after both the
-configured cell count and elapsed time, and wait while a prompt is waiting on work; an
-idle session does not wake on time alone. This is separate from the opt-in experimental
-post-Done maintenance planner. Message delivery is implemented/tested; useful model
-cleanup remains unmeasured ([S25](SOURCES.md#s25)).
+settings and a session override can change that. This is separate from the opt-in
+experimental post-Done maintenance planner. Message delivery is implemented/tested;
+useful model cleanup remains unmeasured. See
+[housekeeping scheduling and persistence](capability-evidence-matrix.md#c31).
 
 ## Behavior
 
@@ -143,21 +128,18 @@ cleanup remains unmeasured ([S25](SOURCES.md#s25)).
   shell command or child is handed over to a named job, retrieve or cancel that original
   work instead of repeating its side effects. A command timeout reports its own result;
   user cancellation still stops an awaited command.
-- Correct invalid completion values using runtime feedback. The current ATOM budget
-  allows ten retries after the first invalid result, and then fails the turn if the
-  eleventh value is still invalid. Do not treat acceptance as proof.
-- Define deterministic helpers as ordinary Python. Standalone generated helpers use
-  async functions with source-verifiable ellipsis bodies and automatically rendered
-  arguments; inspect and correct decorator errors rather than assuming a sub-call
-  executed.
+- Correct invalid completion values using runtime feedback within the
+  [bounded retry contract](capability-evidence-matrix.md#c17).
+- Distinguish deterministic helpers from generated sub-calls. Inspect and correct
+  definition errors rather than assuming a sub-call executed; see
+  [helper contracts](capability-evidence-matrix.md#c22).
 - Discover MCP/skills before invoking them and respect actual configuration, approval
-  and authentication boundaries. Each repeated pasted OAuth flow needs its own callback.
-  Do not claim deactivation revoked access.
+  and authentication boundaries. Do not claim deactivation revoked access; see
+  [connection and sign-in contracts](capability-evidence-matrix.md#c21).
 - When the session requests housekeeping, distinguish it from a new user task. Its
   compaction instructions call for retaining standing rules, open promises, decisions
   and references needed to continue. Cleanup remains subject to the current task and
-  host constraints; a housekeeping turn is not proof of useful compaction or completed
-  user work.
+  host constraints.
 
 Sources: [source index](SOURCES.md#source-index) (S01–S02, S05–S10, S13–S17, S25);
 capability index C01–C25 and [C31](capability-evidence-matrix.md#c31).
@@ -166,14 +148,11 @@ capability index C01–C25 and [C31](capability-evidence-matrix.md#c31).
 
 These principles summarize the public prompt and role instructions:
 
-- **Preserve the user's work and scope.** Favor a focused change over incidental
-  cleanup; follow current authorized steering and preserve unrelated edits.
-- **Require evidence for completion.** Inspect results and run relevant checks even
-  when a tool or child reports success. Report an unchecked claim or blocker honestly
-  instead of presenting it as completed work.
-- **Match autonomy to the role.** In interactive work, ask only when an answer is
-  needed. In unattended work, return the result or a useful blocker report without
-  depending on an absent person to answer.
+- **Preserve the user's work and scope.** Authorized task requirements guide changes.
+- **Require evidence for completion.** Confidence and reported success do not replace
+  independently checked results.
+- **Match autonomy to the role.** Decisions should account for whether a person is
+  available to answer and who owns unfinished work.
 
 Sources: [S01](SOURCES.md#s01), [S02](SOURCES.md#s02). These are prompt-derived
 judgment rules, not additional product requirements inferred from runtime mechanics.
@@ -220,8 +199,7 @@ post-Done reflection, titles and alternate model lookup. Session reflection is
 separately configurable; its housekeeping messages do not override those restrictions
 ([S25](SOURCES.md#s25)).
 
-Organizational policies and quantitative targets remain open questions. Run-specific
-budgets belong in experiment configuration. Sources: [S05](SOURCES.md#s05),
+Run-specific budgets belong in experiment configuration. Sources: [S05](SOURCES.md#s05),
 [S14](SOURCES.md#s14), [S16](SOURCES.md#s16), [S17](SOURCES.md#s17),
 [S18](SOURCES.md#s18), [S20](SOURCES.md#s20), repository
 [platform support](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/107a65d77e4c2c644bb90553ac404bb4ed8a064c/CONTRIBUTING.md#L82).
@@ -229,29 +207,18 @@ budgets belong in experiment configuration. Sources: [S05](SOURCES.md#s05),
 ## Evaluation Setup
 
 Existing evidence consists of ATOM deterministic/scripted-model tests, shared runtime
-tests, framework capability cases and benchmark adapters. The matrix links the relevant
-assertions and identifies behavioral gaps. The refresh ran a targeted regression subset;
-exact commands and results are recorded in
-[source validation](SOURCES.md#validation-of-this-documentation-pass). No live-model
+tests, framework capability cases and benchmark adapters. These establish runtime
+contracts, not real-model task performance. The
+[capability matrix](capability-evidence-matrix.md#capabilities)
+links assertions and proposed behavioral checks. For reproducible checks, use the
+checkout, dependencies and commands in the
+[validation record](SOURCES.md#validation-of-this-documentation-pass),
+which distinguishes the reviewed source snapshot from the rebased runtime. No live-model
 evaluations were run.
 
-At a compatible checkout of the cited source with its development dependencies,
-representative source-linked checks can be invoked with:
-
-```sh
-uv run pytest packages/nooa-atom/tests/test_doc_contracts.py packages/nooa-atom/tests/test_unified_agent.py
-uv run pytest packages/nooa-atom/tests/test_session_namespace.py tests/runtime/test_execution_namespace.py
-```
-
-These are representative test entrypoints; the validation record identifies what was
-actually executed. The checkout targets the exact source revision above. Relevant
-additional regression sources are `test_cell_deadline_detach.py`,
-`test_cell_class_restore.py`, `test_return_result_fixups.py` and
-`test_mcp_signin_lifetime.py` under `packages/nooa-atom/tests` ([S05](SOURCES.md#s05),
-[S13](SOURCES.md#s13), [S15](SOURCES.md#s15), [S16](SOURCES.md#s16)). A later Eval
-Author suite should map tasks to matrix IDs, prove environments/graders and distinguish
-outcome verification from tool-use evidence. Existing benchmark selection, compute, task
-generation and mutation execution remain preparation items in the
+An Eval Author suite should map tasks to capability IDs, validate environments and
+graders, and distinguish outcome verification from tool-use evidence. Benchmark
+selection, compute, task generation and mutation execution belong in the
 [fixtures benchmark plan](https://github.com/NVIDIA-dev/nemo-eval-author-fixtures/blob/docs/atom-benchmark-preparation/benchmark-dev/experiments/nooa-atom/README.md)
 (internal). This NOOA package supplies agent intent and evidence; benchmark definitions,
 mutation design and experiment results belong in fixtures. Sources:
@@ -263,10 +230,9 @@ mutation design and experiment results belong in fixtures. Sources:
   task pass. `evidence` is agent-reported and needs independent checking.
 - **Hint/rejection counters:** occurrences of particular runtime diagnostics, such as
   undefined-name hints or invalid waits; not success, recovery or coverage rates.
-- **Shell counters:** `shell_detached_at_deadline.count` records handovers to jobs;
-  `shell_long_await.count` records inline runs that return after more than 60 seconds.
-  Already-managed jobs and detached runs do not use that return path. Neither count is a
-  command timeout, verified completion or recovery score.
+- **Shell counters:** job handovers and long inline waits are execution diagnostics;
+  neither establishes a command timeout, verified completion or recovery. Exact
+  counter names, thresholds and exclusions are in [metric definitions](SOURCES.md#s19).
 - **Trace evidence:** observed recorded execution under the selected host and
   instrumentation. Absence of a trace event is not proof of capability absence. Parent
   and child evidence must be accounted for explicitly.
@@ -289,23 +255,4 @@ _(none)_
 
 ## Open Questions
 
-- Does the source-derived coding/repository role and mission capture the full intended
-  product scope, including any work beyond repositories?
-- Who owns the agent's intent and success criteria, and should be recorded as `owner`?
-- Are the prompt-derived principles and partial priorities sufficient, or are there
-  additional product-level judgment rules and hard gates?
-- How should quality, reliability, latency and cost be ordered beyond those partial
-  priorities?
-- What future use cases belong in Vision? The inspected sources establish current
-  session, delegation and persistence mechanisms, but no agreed product roadmap.
-- Which organizational policies and owners apply: model/provider allowlists, data
-  residency, production cost limits and latency targets?
-- Which ATOM roles, optional skills/MCP services, media and experimental features should
-  the eventual evaluation suite cover?
-- What exact existing task roster, graders, revision and settings should the generated
-  evaluation set be compared with? Framework cases and historical experiments do not
-  identify that suite.
-- What evidence should be required to claim successful recovery, reference preservation,
-  useful library execution and independent verification of delegated work?
-- Which quantitative acceptance thresholds should apply once behavioral evaluations are
-  available?
+_(not tracked in this document)_

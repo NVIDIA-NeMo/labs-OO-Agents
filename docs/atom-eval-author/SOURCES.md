@@ -574,6 +574,11 @@ revision and supplies current architecture/reflection documentation.
 
 ### S24 — Ethos schema and authoring procedure
 
+The ETHOS `author` field records document authorship; SPDX records copyright ownership.
+Its source-derived draft status does not assert product-owner confirmation. Schema v1
+requires an Open Questions heading; the section retains a placeholder while questions
+are omitted from this document.
+
 The refresh inspected a separate temporary checkout of fetched Eval Author main at
 `7ba81e6f954c52b3035762a64b11595397cbef2e` (2026-11-16), leaving the existing Eval
 Author worktree untouched. Its `team-skills/ethos/ethos-orchestrate`, `ethos-explore`
@@ -732,3 +737,10 @@ After `uv sync --frozen` on Linux with CPython 3.13.15, the regression selection
 above passed again: **370 tests passed in 148.60 seconds**, with the same 24 Gym
 policy RuntimeWarnings about middleware scope. This result covers the rebased
 runtime and dependency lockfile; it does not establish live-model task performance.
+
+The subsequent ETHOS editorial pass shortened repeated explanations and linked to
+existing capability contracts for implementation details. All 31 capability entries
+and 193 immutable source URLs were retained. Schema validation, the confirmation
+adapter, source/local links, named-test anchors and whitespace checks passed again.
+The regression result above remains the runtime check; this prose-only edit did not
+rerun it.

@@ -55,9 +55,8 @@ exact artifact commits/digests before experiment execution.
 ## Next iteration
 
 Review the source-derived mission, principles and partial priorities in the ETHOS.
-These answers were gathered from ATOM's documentation and prompts in place of an owner
-interview; unresolved product intent remains in Open Questions. Keep capability IDs
-stable while refining the evidence. Use the fixtures plan to resolve the benchmark
+These statements derive from ATOM's documentation and prompts. Keep capability IDs
+stable while refining the evidence. Use the fixtures plan to define the benchmark
 roster, mutation families, runtime integration and budgets. A confirmed Ethos is
 necessary for Eval Author authoring; it does not replace runtime, environment, verifier
 or evidence checks.
