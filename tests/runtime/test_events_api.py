@@ -298,3 +298,53 @@ def test_collapse_hint_names_the_real_parameters():
     call = hint.replace("start_tag", '"2"').replace("end_tag", '"40"').replace("...", '"recap"')
     result = eval(call, {"self": agent})  # noqa: S307 - fixed, test-owned string
     assert result == "2..40"
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_recollapse_of_a_summary_range_rewrites_its_text_in_place(backend, tmp_path):
+    """Collapsing a summary's own range again keeps the summary (SQLite used to raise
+    IntegrityError after archiving it)."""
+    from nooa.storage.sqlite import SQLiteStorageManager
+
+    agent = _TestAgent()
+    storage = SQLiteStorageManager(tmp_path / "events.db") if backend == "sqlite" else None
+    if storage is not None:
+        agent.event_manager.set_backend(storage.event_backend)
+    try:
+        tags = [agent.event_manager.add(Task(prompt=f"original {i}")) for i in range(5)]
+        assert agent.events.collapse("2", "4", summary_text="first") == "2..4"
+        children = agent.events["2..4"].children_tags
+
+        assert agent.events.collapse("2", "4", summary_text="second") == "2..4"
+
+        assert agent.events.keys() == ["1", "2..4", "5"]
+        assert agent.events["2..4"].summary_text == "second"
+        assert agent.events["2..4"].children_tags == children
+        assert all(agent.events.get(tag) is not None for tag in tags)
+    finally:
+        if storage is not None:
+            storage.close()
+
+
+@pytest.mark.parametrize("backend", ["memory", "sqlite"])
+def test_collapse_inside_a_summary_raises_without_changing_history(backend, tmp_path):
+    from nooa.storage.sqlite import SQLiteStorageManager
+
+    agent = _TestAgent()
+    storage = SQLiteStorageManager(tmp_path / "events.db") if backend == "sqlite" else None
+    if storage is not None:
+        agent.event_manager.set_backend(storage.event_backend)
+    try:
+        for i in range(5):
+            agent.event_manager.add(Task(prompt=f"original {i}"))
+        agent.events.collapse("2", "4", summary_text="first")
+        before = agent.events.keys()
+
+        with pytest.raises(ValueError, match="already collapsed into summary '2..4'"):
+            agent.events.collapse("3", "3", summary_text="part of it")
+
+        assert agent.events.keys() == before
+        assert agent.events["2..4"].summary_text == "first"
+    finally:
+        if storage is not None:
+            storage.close()
