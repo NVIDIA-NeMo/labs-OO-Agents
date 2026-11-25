@@ -165,7 +165,7 @@ def _add_tracing_header(
 
 
 # Use global registrations so rules also apply to nested and concurrent calls.
-# Scope-local rules do not transfer to child method scopes.
+# Same-task methods retain scope-local rules; child tasks do not inherit them.
 nemo_relay.intercepts.register_llm_request(
     "add-tracing-header",
     1,

@@ -475,7 +475,9 @@ async def test_callback_exception_preserves_original_without_exporting_text(kind
         relay.subscribers.deregister("review-callback-error")
 
 
-@pytest.mark.parametrize("installed", ["0.0.6", "0.10.0", "0.11.0", "0.12.0", "0.11.1rc1"])
+@pytest.mark.parametrize(
+    "installed", ["0.0.6", "0.10.0", "0.11.0", "0.11.1", "0.12.0", "0.11.2rc1"]
+)
 def test_incompatible_relay_version_fails_before_install(monkeypatch, installed):
     import nooa.nemo_relay_middleware as middleware
 
@@ -560,7 +562,7 @@ def test_supported_relay_version_is_checked_once(monkeypatch):
 
     calls = []
     middleware._check_relay_version.cache_clear()
-    monkeypatch.setattr(middleware, "version", lambda name: calls.append(name) or "0.11.1")
+    monkeypatch.setattr(middleware, "version", lambda name: calls.append(name) or "0.11.2")
     try:
         for _ in range(10):
             middleware._require_relay()

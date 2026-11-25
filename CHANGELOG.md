@@ -6,11 +6,12 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
-- The optional NeMo Relay integration now supports and checks `>=0.11.1,<0.12`,
-  within the project dependency cutoff. Roots and traced methods automatically
-  use independent stacks, preserving parent trace links
-  during nested and concurrent calls. Global rules apply throughout; scope-local
-  rules do not transfer to child methods. Tool telemetry uses bounded
+- The optional NeMo Relay integration now supports and checks `>=0.11.2,<0.12`,
+  with a package-specific dependency cutoff. Same-task nesting preserves
+  scope-local rules and subscribers; concurrent calls use independent stacks
+  carrying the caller's propagation root and parent trace links. Global rules
+  and exporters apply throughout; ancestor scope-local registrations do not
+  cross task boundaries. Tool telemetry uses bounded
   `nooa.snapshot` inspection instead of full codec/pickle serialization, leaving
   original caller results unchanged. The new `export_nemo_relay_atif()` helper
   formats sanitized ATIF-v1.7 exports with readable observations and unique

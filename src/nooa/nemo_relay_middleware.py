@@ -118,9 +118,12 @@ except ImportError:
     nemo_relay = None  # type: ignore[assignment]
     LLMRequest = None  # type: ignore[assignment,misc]
 
-# Immutable parent identity is copied into child asyncio contexts. Every
-# NOOA scope has an independent native stack, so no task-owner registry is needed.
+# Immutable parent identity and stack ownership are copied into child contexts.
+# Only the owning task may reuse a mutable stack; children must isolate theirs.
 _current_relay_scope: ContextVar[Any] = ContextVar("_nooa_relay_scope", default=None)
+_relay_stack_owner: ContextVar[asyncio.Task[Any] | None] = ContextVar(
+    "_nooa_relay_stack_owner", default=None
+)
 
 
 def _reset_scope(token, previous) -> None:
@@ -137,12 +140,23 @@ def _reset_scope(token, previous) -> None:
 @contextmanager
 def _relay_stack() -> Iterator[None]:
     assert nemo_relay is not None
+    task = asyncio.current_task()
+    if task is not None and _relay_stack_owner.get() is task:
+        # Sequential nesting keeps ancestor scope-local policies and subscribers.
+        yield
+        return
     stack = nemo_relay.create_scope_stack_from_propagation(nemo_relay.capture_propagation_context())
     binding = nemo_relay.use_scope_stack(stack)
     binding.__enter__()
+    previous_owner = _relay_stack_owner.get()
+    owner_token = _relay_stack_owner.set(task)
     try:
         yield
     finally:
+        try:
+            _relay_stack_owner.reset(owner_token)
+        except ValueError:
+            _relay_stack_owner.set(previous_owner)
         try:
             binding.__exit__(None, None, None)
         except Exception:
@@ -195,9 +209,9 @@ def _check_relay_version() -> None:
     except PackageNotFoundError:
         raise ImportError(_INSTALL_MSG) from None
     match = re.fullmatch(r"0\.11\.([0-9]+)(?:\.post[0-9]+)?(?:\+[^ ]+)?", installed)
-    if match is None or int(match[1]) < 1:
+    if match is None or int(match[1]) < 2:
         raise ImportError(
-            f"NOOA requires nemo-relay >=0.11.1,<0.12; found {installed}. " + _INSTALL_MSG
+            f"NOOA requires nemo-relay >=0.11.2,<0.12; found {installed}. " + _INSTALL_MSG
         )
 
 
@@ -435,9 +449,11 @@ async def nemo_relay_agent_call_middleware(
     before the method executes and pops it after, giving ATIF per-method
     granularity.
 
-    Every call has an independent native stack, including nested and concurrent
-    calls. Trace parentage survives; scope-local registrations are not inherited.
-    Register guardrails/redactors globally when they must cover the call tree.
+    Same-task calls reuse the managed stack, preserving ancestor scope-local
+    guardrails, redactors and subscribers. Calls dispatched to child tasks get
+    independent stacks with the caller's propagation root and parent identity.
+    Scope-local registrations do not cross that task boundary; register shared
+    policies and application-wide telemetry exporters globally.
     """
     _require_relay()
     assert nemo_relay is not None
@@ -537,9 +553,11 @@ async def nemo_relay_scope(
         agent: The Agent instance whose event_manager will get middleware.
         scope_name: Human-readable name for the NeMo Relay scope.
 
-    Runs and agent methods have independent stacks automatically. Enclosing
-    scope-local guardrails, redactors and subscribers do not transfer to isolated
-    children; register shared policies globally. Trace parentage is preserved.
+    The outermost managed scope adopts ambient propagation on an isolated stack.
+    Nested scopes and methods in the same task retain scope-local registrations.
+    Child tasks isolate their stacks and preserve trace roots and parent links,
+    but do not inherit ancestor scope-local rules or subscribers. Register
+    application-wide telemetry exporters and shared policies globally.
 
     Yields:
         The NeMo Relay scope handle (has ``.uuid`` for ATIF correlation).
