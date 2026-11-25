@@ -121,6 +121,31 @@ def test_debug_handler_is_installed_at_import():
     assert _run(code) == "True True"
 
 
+_REPLACE_MEDIA = (
+    "import nooa.runtime.namespace_providers as ns\n"
+    "media = object()\n"
+    "ns.register_namespace_provider('media', lambda: {'Image': media}, prompt_note=('mine',))\n"
+    "print(ns.cell_namespace_names()['Image'] is media,"
+    " ns.namespace_prompt_notes().count('mine'))\n"
+)
+_CUSTOM_SHOW = (
+    "import nooa.runtime.namespace_providers as ns\n"
+    "show = object()\n"
+    "ns.register_namespace_provider('custom', lambda: {'show': show})\n"
+    "print(ns.cell_namespace_names()['show'] is show)\n"
+)
+
+
+@pytest.mark.parametrize("preamble", ["", "import nooa.media\n"])
+def test_registered_provider_replaces_a_builtin_one_however_it_loads(preamble):
+    assert _run(preamble + _REPLACE_MEDIA) == "True 1"
+
+
+@pytest.mark.parametrize("preamble", ["", "import nooa.media\n"])
+def test_registered_provider_names_win_over_builtins_however_they_load(preamble):
+    assert _run(preamble + _CUSTOM_SHOW) == "True"
+
+
 def test_cell_namespace_has_builtin_providers_without_importing_them_first():
     code = (
         "from nooa.runtime.namespace_providers import cell_namespace_names\n"

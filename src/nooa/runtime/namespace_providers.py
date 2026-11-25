@@ -58,7 +58,23 @@ def register_namespace_provider(
     *,
     prompt_note: tuple[str, ...] = (),
 ) -> NamespaceProvider:
-    """Register (or replace) provider ``name``; ``names()`` returns its cell names."""
+    """Register (or replace) provider ``name``; ``names()`` returns its cell names.
+
+    The built-in providers are registered first, so a provider registered here
+    replaces a built-in one of the same name and its names take precedence over
+    the built-in names, whether or not the built-in modules were imported yet.
+    """
+    _load_builtin_providers()
+    return _register_builtin_provider(name, names, prompt_note=prompt_note)
+
+
+def _register_builtin_provider(
+    name: str,
+    names: Callable[[], Mapping[str, Any]],
+    *,
+    prompt_note: tuple[str, ...] = (),
+) -> NamespaceProvider:
+    """Register a provider without loading the built-in ones (for their own modules)."""
     provider = NamespaceProvider(name, names, tuple(prompt_note))
     _PROVIDERS[name] = provider
     return provider
@@ -104,4 +120,4 @@ def _core_names() -> dict[str, Any]:
     }
 
 
-register_namespace_provider("core", _core_names)
+_register_builtin_provider("core", _core_names)
