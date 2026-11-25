@@ -80,7 +80,7 @@ def _nemo_relay_patched():
         nm = sys.modules["nooa.nemo_relay_middleware"]
         importlib.reload(nm)
         try:
-            with patch.object(nm, "version", return_value="0.11.1"):
+            with patch.object(nm, "version", return_value="0.11.2"):
                 yield nm, fake_nemo_relay, fake_handle
         finally:
             pass  # Don't reload here — still inside patch.dict so nemo_relay is present
