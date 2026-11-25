@@ -514,7 +514,7 @@ class AtomACPAgent:
             self._replay(bridge, session, pool=self._pool_client)
             warnings.extend(await self._prepare_tools(session, mcp_servers))
             alias, _ = self._connected_alias(root, result)
-            if alias is not None:
+            if alias is not None and not (result and result.get("applied")):
                 try:
                     await session.set_model(alias)
                 except Exception:
