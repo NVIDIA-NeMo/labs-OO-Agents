@@ -232,6 +232,14 @@ def effective_config_snapshot(entry: dict, check: str = "routing") -> dict:
         "drop_params": entry.get("drop_params", True),
         "retry_policy": _retry_policy(entry),
     }
+    # Adapter selection is independent of the historical transport label.
+    # Keep absent fields absent so existing legacy snapshots remain usable;
+    # adding, changing or removing an explicit selector needs fresh checks.
+    # Do not infer an adapter here: the loader owns selection, and a declared
+    # adapter does not establish that any probe used it.
+    for selector in ("adapter", "direct"):
+        if selector in entry:
+            snapshot[selector] = entry[selector]
     if decision and check.startswith("media:"):
         snapshot["decision_media"] = {
             "decision_image_transport": entry.get("decision_image_transport", "json"),

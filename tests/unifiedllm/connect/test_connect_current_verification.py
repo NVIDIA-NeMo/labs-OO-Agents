@@ -77,6 +77,8 @@ MUTATIONS = [
     {"api_style": "anthropic"},
     {"client_type": "responses", "api_style": "responses"},
     {"transport": "litellm"},
+    {"adapter": "openai_chat"},
+    {"direct": True},
     {"drop_params": False},
     {"allowed_openai_params": ["thinking"]},
     {"additional_drop_params": ["temperature"]},
@@ -629,3 +631,30 @@ def test_unresolved_provider_snapshot_keeps_extra_body_nested():
         params = connect.effective_config_snapshot(entry)["params"]
         assert params["extra_body"] == {"temperature": 0.5}
         assert params["temperature"] == 0.1
+
+
+@pytest.mark.parametrize("selector", ["adapter", "direct"])
+@pytest.mark.parametrize("check", ["routing", "tools", "media:image", "level:high", "session"])
+def test_explicit_adapter_selector_changes_invalidate_each_check(selector, check):
+    entry = plan().entry
+    entry["reasoning_levels"] = {"high": {"reasoning_effort": "high"}}
+    entry[selector] = "openai_chat" if selector == "adapter" else True
+    record = {"outcome": "passed"}
+    connect.stamp_verification(record, entry, check)
+    original = deepcopy(record)
+    assert connect.verification_is_current(record, entry, check)
+    changed = deepcopy(entry)
+    changed[selector] = "openai_responses" if selector == "adapter" else False
+    assert not connect.verification_is_current(record, changed, check)
+    del changed[selector]
+    assert not connect.verification_is_current(record, changed, check)
+    assert record == original
+
+
+def test_legacy_snapshot_does_not_gain_an_inferred_adapter():
+    entry = plan().entry
+    record = {}
+    connect.stamp_verification(record, entry, "routing")
+    assert "adapter" not in record["verification_config"]
+    assert "direct" not in record["verification_config"]
+    assert connect.verification_is_current(record, entry)
