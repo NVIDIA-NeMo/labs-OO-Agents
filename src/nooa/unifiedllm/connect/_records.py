@@ -193,6 +193,9 @@ def check_status(
             return "passed" if text_baseline_passed(baseline) else "attention"
     if name.startswith("media:") and outcome == "passed":
         return "passed"
+    if name.startswith(("format:", "role:")) and outcome == "unsupported":
+        # A clear "unsupported" answer is a completed detection, not a failure.
+        return "passed"
     if outcome == "not_probed" and not record.get("error"):
         return "skipped"
     if outcome not in {"accepted", "confirmed", "completed", "warning"}:

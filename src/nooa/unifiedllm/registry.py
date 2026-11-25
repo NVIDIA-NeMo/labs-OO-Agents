@@ -63,6 +63,8 @@ from typing import TYPE_CHECKING, Any, cast
 
 import yaml
 
+from .capability_settings import CAPABILITY_KEYS
+
 if TYPE_CHECKING:
     from nooa.decisions import UnifiedDecisionModel
     from nooa.unifiedllm import UnifiedLLM
@@ -709,6 +711,7 @@ def _resolve_client_config(
         "structured_output_mode",
         "output_config",
         "media_inputs",
+        *CAPABILITY_KEYS,
     ):
         if key == "base_url" and endpoint_override is not None:
             continue
@@ -756,6 +759,7 @@ def _resolve_client_config(
             "reasoning_level",
             "media_inputs",
             "structured_output_mode",
+            *CAPABILITY_KEYS,
         ):
             if params.pop(key, None) and key in (
                 "reasoning_levels",

@@ -232,6 +232,10 @@ def effective_config_snapshot(entry: dict, check: str = "routing") -> dict:
         "drop_params": entry.get("drop_params", True),
         "retry_policy": _retry_policy(entry),
     }
+    # Request-shaping choices; recorded only when set, so older snapshots match.
+    for key in ("structured_output_format", "instruction_role"):
+        if key in entry and not decision:
+            snapshot[key] = entry[key]
     if decision and check.startswith("media:"):
         snapshot["decision_media"] = {
             "decision_image_transport": entry.get("decision_image_transport", "json"),

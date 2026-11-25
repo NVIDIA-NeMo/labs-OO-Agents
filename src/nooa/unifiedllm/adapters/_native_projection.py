@@ -15,6 +15,7 @@ from nooa.unifiedllm.cache_policy import (
     enable_openai_explicit_cache,
     reject_boundary_dict,
 )
+from nooa.unifiedllm.capability_settings import json_object_instruction, map_instruction_roles
 from nooa.unifiedllm.errors import FailureKind, LLMFailure
 from nooa.unifiedllm.structured_output import anthropic_output_format
 
@@ -486,6 +487,14 @@ def _tools(request, family):
     return {"tools": tools, "tool_choice": wire_choice}
 
 
+def _json_object_message(request, settings, family):
+    """JSON mode's final schema instruction, in this route's instruction role."""
+    message = {**json_object_instruction(request.output_type), "role": settings.instruction_role}
+    if family == "openai-responses":
+        message["content"] = _content(message["content"], message["role"], family, frozenset())
+    return message
+
+
 def _project_request(request, settings):
     family = settings.family
     params = _thaw(settings.selected)
@@ -505,8 +514,15 @@ def _project_request(request, settings):
     ):
         raise LLMFailure(FailureKind.CONFIG, "Native thinking cannot force a tool choice")
     history = _history(request, settings)
+    json_object = request.output_type is not None and settings.output_format == "json_object"
+    if family in {"openai-chat", "openai-responses"}:
+        history = map_instruction_roles(
+            history, settings.instruction_role, settings.capabilities.developer_role
+        )
     if family == "openai-chat":
         history, _, _ = apply_cache_policy(history, None, responses=False)
+        if json_object:
+            history = [*history, _json_object_message(request, settings, family)]
         if settings.cache_breakpoint is not None:
             raise LLMFailure(
                 FailureKind.CONFIG, "Native Chat has no explicit cache-boundary extension"
@@ -520,6 +536,8 @@ def _project_request(request, settings):
         )
         if explicit:
             enable_openai_explicit_cache(params)
+        if json_object:
+            history = [*history, _json_object_message(request, settings, family)]
         params["input"] = history
     else:
         history, _, _ = apply_cache_policy(history, settings.cache_breakpoint, responses=False)
@@ -547,6 +565,11 @@ def _project_request(request, settings):
                 **params.get("output_config", {}),
                 "format": anthropic_output_format(request.output_type),
             }
+        elif json_object:
+            if family == "openai-chat":
+                params["response_format"] = {"type": "json_object"}
+            else:
+                params["text"] = {**params.get("text", {}), "format": {"type": "json_object"}}
         else:
             strict_schema = _clean_schema(request.output_type.model_json_schema(), strict=True)
             strict = _strict_schema_valid(strict_schema)

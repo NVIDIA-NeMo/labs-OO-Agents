@@ -6,6 +6,15 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Model entries can record detected `structured_output_formats`
+  (`json_schema`, `json_object`) and `developer_role`, exposed on
+  `Capabilities`. Connect detects them with
+  `plan(..., capability_checks=True)` (stage `capabilities`) on Chat and
+  Responses routes. New settings `structured_output_format: auto | json_schema
+  | json_object` and `instruction_role: auto | system | developer` choose how
+  requests use them; `json_object` sends JSON mode with the schema as a final
+  instruction message. A choice that contradicts a detected fact fails at load
+  with a CONFIG error. Entries without these keys send unchanged requests.
 - `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
   publishes a runtime event when a job finishes (the job's handle state and
   result say it ended).
