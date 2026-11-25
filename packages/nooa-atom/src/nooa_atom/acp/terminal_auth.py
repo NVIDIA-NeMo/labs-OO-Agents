@@ -171,12 +171,17 @@ def record_request(
 
 
 def claim_request(*, now: float | None = None) -> str:
-    """Take the newest fresh request and return its key (``ANY`` without one); drop stale ones."""
-    newest: tuple[float, str, Path] | None = None
+    """Take the newest fresh request and return its key (``ANY`` without one); drop stale ones.
+
+    Reserves the file with ``os.replace`` before returning its key, the way
+    :func:`consume_result` reserves a result, so two terminal processes can
+    never both claim the same request.
+    """
     try:
         paths = sorted(handoff_dir().glob("request-*.json"))
     except OSError:
         return ANY
+    candidates: list[tuple[float, str, Path]] = []
     for path in paths:
         data = _read(path)
         stamp = data.get("requested_at") if data else None
@@ -184,12 +189,17 @@ def claim_request(*, now: float | None = None) -> str:
         if not isinstance(key, str) or not _fresh(stamp, now=now):
             path.unlink(missing_ok=True)
             continue
-        if newest is None or stamp > newest[0]:
-            newest = (stamp, key, path)
-    if newest is None:
-        return ANY
-    newest[2].unlink(missing_ok=True)
-    return newest[1]
+        candidates.append((stamp, key, path))
+    candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+    for _, key, path in candidates:
+        claimed = path.with_name(f".{path.name}.claimed.{os.getpid()}.{time.monotonic_ns()}")
+        try:
+            os.replace(path, claimed)
+        except FileNotFoundError:
+            continue  # another process already claimed it
+        claimed.unlink(missing_ok=True)
+        return key
+    return ANY
 
 
 # ---- results (written by the wizard) -----------------------------------------------
