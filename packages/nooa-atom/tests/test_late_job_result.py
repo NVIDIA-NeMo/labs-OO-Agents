@@ -43,6 +43,19 @@ def test_an_execution_result_without_a_return_value_dumps_to_json():
     assert ExecutionResult(returned_value=3).model_dump(mode="json")["returned_value"] == 3
 
 
+def test_an_execution_result_with_an_unencodable_return_value_dumps_to_json():
+    class Opaque:
+        def __repr__(self) -> str:
+            return "Opaque()"
+
+    dumped = ExecutionResult(returned_value=Opaque()).model_dump(mode="json")
+
+    assert dumped["returned_value"] == "Opaque()"
+    assert isinstance(
+        ExecutionResult(returned_value=Opaque()).model_dump()["returned_value"], Opaque
+    )
+
+
 async def test_a_job_delivered_after_done_leaves_the_done_and_json_events(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

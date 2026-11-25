@@ -7,8 +7,10 @@ to follow semantic versioning.
 ## [Unreleased]
 
 - `ExecutionResult.model_dump(mode="json")` no longer raises: a result without
-  a return value dumps `returned_value` as `None`, and `error` dumps as
-  `"Type: message"`. Python-mode `model_dump()` is unchanged.
+  a return value dumps `returned_value` as `None`, a return value JSON cannot
+  encode (such as a user class instance) dumps as a bounded `pformat` string,
+  as `PythonOutput.value` does, and `error` dumps as `"Type: message"`.
+  Python-mode `model_dump()` is unchanged.
 - Dependency security update. LiteLLM is now locked at 1.100.5
   (CVE-2026-114612); the `litellm` requirement starts at 1.100.4 and excludes
   the unfixed 1.101-1.103 releases. LiteLLM now requires boto3. Chat

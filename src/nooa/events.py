@@ -782,7 +782,9 @@ class ExecutionResult(BaseModel):
     def _serialize_returned_value(self, value: Any) -> Any:
         # The no-return sentinel is a bare object(): dump it as None so a
         # result without a return value serializes (a job's JobEvent.output).
-        return None if value is _NO_RETURN else value
+        # Any other value goes through _json_safe, so an object JSON cannot
+        # encode (a user class instance) dumps as a bounded pformat string.
+        return None if value is _NO_RETURN else _json_safe(value)
 
     @field_serializer("error", when_used="json")
     def _serialize_error(self, value: Exception | None) -> str | None:
