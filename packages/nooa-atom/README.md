@@ -234,6 +234,25 @@ level, the adapter shows `Usage: /verbosity silent|concise|verbose`. If Pool
 fails the request, the picker falls back to that text for the rest of the
 connection. Stop cancels an open picker.
 
+### Capturing ACP sessions with NeMo Relay
+
+With `NEMO_RELAY_PLUGIN_CONFIG_PATH` naming a NeMo Relay `plugins.toml` (the
+variable the `nemo-relay` CLI reads), `nooa atom` holds Relay's plugin host
+while it serves and sends each ACP session's turns through NOOA's Relay
+middleware (`nooa[nemo-relay]`). A session is one trace: an `invoke_agent
+atom` span from the session's start to its close, over a `chat` span (with
+the model's output and usage) for each model call of its turns and an
+`execute_tool execute_python` span for each cell. A child that a turn
+delegates to is an `invoke_agent atom` span inside that turn's trace; a child
+that ACP loads directly is a trace of its own. Every event carries
+`session_id`, `agent_kind: "atom"` and the flat JSON object in
+`NEMO_RELAY_SESSION_METADATA`, which cannot override those two; its keys are
+dot-separated segments of ASCII letters, digits, `_` or `-`, as Relay requires,
+or the server does not start. The rest is
+exported as the server stops, on end of input or SIGTERM; a host that kills
+the server with SIGKILL loses what was not exported yet. Unset, Relay is not
+imported (`nooa_atom/session/relay.py`).
+
 ## Todo lookup and cell inspection
 
 `self.todo.get(id_or_title)` looks up an exact ID or a unique exact current title;

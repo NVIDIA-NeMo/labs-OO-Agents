@@ -7,6 +7,12 @@ based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- `nooa-atom`: with `NEMO_RELAY_PLUGIN_CONFIG_PATH` naming a NeMo Relay
+  `plugins.toml`, each ACP session is one Relay trace (`invoke_agent atom`
+  over `chat` and `execute_tool` spans, children inside it) with
+  `session_id`, `agent_kind` and `NEMO_RELAY_SESSION_METADATA` on every event,
+  exported as the server stops on end of input or SIGTERM; see the README.
+  Unset, nothing changes.
 - `nooa-atom`: reflection. The `nemo.reflection` skill posts a housekeeping
   message on a root session's `system_messages` queue when one is due (20
   turns or 60 minutes since the last, or the context half full; at least 5
