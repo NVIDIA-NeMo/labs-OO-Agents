@@ -61,7 +61,7 @@ def main() -> int:
         for lg in (_vdir(RUN_ROOT / g) / "_harness").glob("*.log"):
             m = re.search(
                 rf"resolved game {re.escape(g)} -> ({re.escape(g)}-[0-9a-f]+)",
-                lg.read_text(errors="ignore"),
+                lg.read_text(errors="ignore", encoding="utf-8"),
                 re.I,
             )
             if m:
@@ -115,7 +115,7 @@ def main() -> int:
         "verdict": "LEAK" if confirmed else "REVIEW" if weak else "CLEAN",
     }
     EVID.mkdir(exist_ok=True)
-    (EVID / "name_leak.json").write_text(json.dumps(result, indent=2))
+    (EVID / "name_leak.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
 
     print(
         f"scanned {len(codes)} games' contexts for all {len(codes)} real names (case-insensitive)"

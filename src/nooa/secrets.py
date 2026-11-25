@@ -114,7 +114,7 @@ def _write_secret_env(path, name: str, value: str, *, create_only=False) -> byte
     if not isinstance(value, str) or not value:
         raise ValueError("Secret value cannot be empty")
     path = Path(path).resolve()
-    original = path.read_text() if path.exists() else None
+    original = path.read_text(encoding="utf-8") if path.exists() else None
     try:
         with path.open() as source:
             data = yaml.safe_load(source) or {}
@@ -143,7 +143,7 @@ def _write_secret_env(path, name: str, value: str, *, create_only=False) -> byte
             stream.flush()
             os.fsync(stream.fileno())
         owned = temporary.read_bytes()
-        if (path.read_text() if path.exists() else None) != original:
+        if (path.read_text(encoding="utf-8") if path.exists() else None) != original:
             raise ValueError(f"Secrets file {path} changed during write; retry after reloading")
         os.replace(temporary, path)
         return owned

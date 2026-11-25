@@ -1088,7 +1088,7 @@ class Shell:
         """The pid of the bash running the current command, checked against pid reuse."""
         pidfile = self._pidfile
         try:
-            pid = int(pidfile.read_text().strip()) if pidfile is not None else None
+            pid = int(pidfile.read_text(encoding="utf-8").strip()) if pidfile is not None else None
         except (OSError, ValueError):
             pid = None
         if pid is not None and self._bash is not None and pid == self._bash[0]:

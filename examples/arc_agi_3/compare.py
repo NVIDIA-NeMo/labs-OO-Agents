@@ -35,7 +35,7 @@ def load_runs(results_root: Path, groups: list[str] | None) -> list[dict]:
         if groups and group not in groups:
             continue
         try:
-            r = json.loads(result_path.read_text())
+            r = json.loads(result_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
         if r.get("solver") != "nemo_single_agent":
@@ -104,10 +104,11 @@ def main() -> None:
         "runs": [dict(r.items()) for r in runs],
         "summary": {f"{g}/{v}": len(rs) for (g, v), rs in by_key.items()},
     }
-    (root / "comparison.json").write_text(json.dumps(out, indent=2))
+    (root / "comparison.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
     (root / "comparison.md").write_text(
         "# ARC-AGI-3 nemo solver — variant comparison\n\n" + table + "\n\n"
-        "Per-run details in comparison.json.\n"
+        "Per-run details in comparison.json.\n",
+        encoding="utf-8",
     )
     print(f"\nwrote {root}/comparison.json and comparison.md ({len(runs)} runs)")
 

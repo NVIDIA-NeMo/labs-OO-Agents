@@ -50,7 +50,7 @@ def _load_dotenv() -> None:
     f = REPO_ROOT / ".env"
     if not f.exists():
         return
-    for line in f.read_text().splitlines():
+    for line in f.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -277,7 +277,8 @@ class MultiRunner:
                     },
                 },
                 indent=2,
-            )
+            ),
+            encoding="utf-8",
         )
 
     def _key(self, game: str, variant: str) -> str:
@@ -304,7 +305,8 @@ class MultiRunner:
                         "runs": self.status,
                     },
                     indent=2,
-                )
+                ),
+                encoding="utf-8",
             )
 
     def _sync_once(self) -> None:
@@ -318,7 +320,7 @@ class MultiRunner:
                 res = rd / "result.json"
                 if res.exists():
                     try:
-                        r = json.loads(res.read_text())
+                        r = json.loads(res.read_text(encoding="utf-8"))
                         info.update(
                             status="completed",
                             levels=r["levels_completed"],
@@ -332,7 +334,9 @@ class MultiRunner:
                 elif info.get("status") == "running":
                     sf = rd / "ipc" / "states.jsonl"
                     try:
-                        last = [ln for ln in sf.read_text().splitlines() if ln.strip()][-1]
+                        last = [
+                            ln for ln in sf.read_text(encoding="utf-8").splitlines() if ln.strip()
+                        ][-1]
                         s = json.loads(last)
                         info.update(levels=s.get("levels_completed"), steps=s.get("step"))
                     except (OSError, IndexError, json.JSONDecodeError):
@@ -523,7 +527,9 @@ class MultiRunner:
                 pass
         summary = holder.get("summary")
         if summary:
-            (self.container / "scorecard.json").write_text(json.dumps(summary, indent=2))
+            (self.container / "scorecard.json").write_text(
+                json.dumps(summary, indent=2), encoding="utf-8"
+            )
             print(f"[multi] competition scorecard closed -> {self.container / 'scorecard.json'}")
         try:
             self._broker_err.close()
@@ -752,7 +758,9 @@ class MultiRunner:
         }
         if getattr(self, "_deadline_hit", False):
             payload["shutdown_reason"] = "wall_clock_deadline"
-        (self.container / "summary.json").write_text(json.dumps(payload, indent=2))
+        (self.container / "summary.json").write_text(
+            json.dumps(payload, indent=2), encoding="utf-8"
+        )
 
 
 def main() -> None:

@@ -75,7 +75,7 @@ def main() -> int:
         model_lines, defs = 0, []
         for p in helpers:
             try:
-                src = p.read_text(errors="ignore")
+                src = p.read_text(errors="ignore", encoding="utf-8")
             except OSError:
                 continue
             model_lines += src.count("\n")
@@ -161,7 +161,7 @@ def main() -> int:
         reverse=True,
     )
 
-    (OUT / "world_model_usage.json").write_text(json.dumps(rows, indent=2))
+    (OUT / "world_model_usage.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
 
     def yn(b):
         return "✓" if b else "·"
@@ -210,7 +210,7 @@ def main() -> int:
         "> Note: predict-rollout **search** is both the deepest world-model use AND the failure mode —",
         "> the STUCK games hung in non-terminating search cells (see red_team analysis).",
     ]
-    (OUT / "world_model_usage.md").write_text("\n".join(lines) + "\n")
+    (OUT / "world_model_usage.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     print("\n".join(lines))
     print(f"\nwrote world_model_usage.md + .json -> {OUT}")

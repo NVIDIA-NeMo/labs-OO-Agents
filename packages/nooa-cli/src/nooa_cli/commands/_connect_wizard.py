@@ -3235,7 +3235,7 @@ def save_model(state: WizardState) -> bool:
             # so they alone must not keep the new key after a failed save. If
             # the file cannot be read now, assume there were none (keeps the key).
             try:
-                before_document = yaml.safe_load(state.path.read_text())
+                before_document = yaml.safe_load(state.path.read_text(encoding="utf-8"))
                 earlier_references = (
                     key_references(before_document)
                     if isinstance(before_document, dict)
@@ -3250,7 +3250,7 @@ def save_model(state: WizardState) -> bool:
                 # unreadable file must not count as "model not saved", so read
                 # it directly and let errors other than a missing file propagate.
                 try:
-                    saved_document = yaml.safe_load(state.path.read_text())
+                    saved_document = yaml.safe_load(state.path.read_text(encoding="utf-8"))
                 except FileNotFoundError:
                     return False
                 if not isinstance(saved_document, dict) or not isinstance(

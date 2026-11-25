@@ -327,7 +327,7 @@ async def main(input_path: Path, output_path: Path) -> None:
             **({"stop_signal": stop["signal"]} if stop["signal"] else {}),
         )
         tmp = output_path.with_suffix(".tmp")
-        tmp.write_text(episode.to_json())
+        tmp.write_text(episode.to_json(), encoding="utf-8")
         tmp.replace(output_path)
 
     def on_sigterm() -> None:

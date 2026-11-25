@@ -292,7 +292,7 @@ class MemoryMonitor:
         # -- Write file --------------------------------------------------- #
         try:
             self.trace_dir.mkdir(parents=True, exist_ok=True)
-            diag_path.write_text("\n".join(lines))
+            diag_path.write_text("\n".join(lines), encoding="utf-8")
             self.diag_file = str(diag_path)
         except Exception:
             # Last resort: write to stderr

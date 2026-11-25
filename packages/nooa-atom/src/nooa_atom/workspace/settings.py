@@ -246,7 +246,7 @@ def _invalid_settings_files(workspace: str | Path) -> list[str]:
         project_dir=project,
     ):
         try:
-            data = yaml.safe_load(path.read_text())
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, yaml.YAMLError):
             continue  # load_layered_yaml already skipped and reported it
         if not isinstance(data, dict):
@@ -340,7 +340,7 @@ def write_settings_updates(
         _copy_coding_section(path)
     data: dict[str, Any] = {}
     if path.exists():
-        loaded = yaml.safe_load(path.read_text())
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
         if isinstance(loaded, dict):
             data = loaded
 
@@ -358,7 +358,7 @@ def write_settings_updates(
 
     if not dry_run:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(yaml.safe_dump(data, sort_keys=False))
+        path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return path, data
 
 

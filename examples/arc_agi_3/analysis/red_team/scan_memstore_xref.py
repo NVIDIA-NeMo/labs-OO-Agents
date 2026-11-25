@@ -79,7 +79,7 @@ def main() -> int:
         "verdict": "ISOLATED" if not cross else "LEAK",
     }
     EVID.mkdir(exist_ok=True)
-    (EVID / "memstore_xref.json").write_text(json.dumps(result, indent=2))
+    (EVID / "memstore_xref.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
 
     print(f"scanned {len(logs)} log files; {len(canon)} games have a store alias")
     if cross:

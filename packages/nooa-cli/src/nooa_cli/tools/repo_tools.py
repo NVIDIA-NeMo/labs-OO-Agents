@@ -842,7 +842,7 @@ class RepoTools(Skill):
             raw_lines = []
             for fpath in self._iter_source_files(resolved, max_files=200):
                 try:
-                    text = fpath.read_text(errors="replace")
+                    text = fpath.read_text(errors="replace", encoding="utf-8")
                     for i, line in enumerate(text.splitlines(), 1):
                         if re.search(rf"\b{re.escape(name)}\b", line):
                             rel = fpath.relative_to(self._root)

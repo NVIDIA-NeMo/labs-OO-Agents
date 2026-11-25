@@ -268,7 +268,9 @@ def main() -> int:
     summary = {"window_minutes": round(mins, 1), "this_run": _final(b)}
     if a:
         summary["baseline"] = _final(a)
-    (ANALYSIS_DIR / "comparison_summary.json").write_text(json.dumps(summary, indent=2))
+    (ANALYSIS_DIR / "comparison_summary.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
     tr = summary["this_run"]
     base = f"  base_RHAE_L={summary['baseline']['rhae_l_final']}" if a else ""
     print(

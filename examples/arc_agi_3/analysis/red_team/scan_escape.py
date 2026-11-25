@@ -67,7 +67,7 @@ def collect_escape_cells(mdir: Path):
         if not sr:
             continue
         step, rnd, _ = sr
-        text = f.read_text(errors="replace")
+        text = f.read_text(errors="replace", encoding="utf-8")
         for name, code in rt.iter_code_cells(text):
             native = name not in ("execute_python", "return_result")
             if not native and not ATTR_RE.search(code):
@@ -104,7 +104,7 @@ def attach_results(mdir: Path, cells: dict[str, dict]):
     for f in sorted(mdir.glob("step_*_round_*_user.md")):
         if not remaining:
             break
-        text = f.read_text(errors="replace")
+        text = f.read_text(errors="replace", encoding="utf-8")
         for k in list(remaining):
             needle = needles[k]
             pos = text.find(needle)
@@ -151,9 +151,9 @@ def main() -> int:
                 f"targets={dict(rules_ct)} with_output={got_data}"
             )
     out["totals"] = dict(out["totals"])
-    (ev / "escape_calls.json").write_text(json.dumps(out, indent=2))
+    (ev / "escape_calls.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
     # Also a flat list for the workflow agents.
-    (ev / "escape_calls_flat.json").write_text(json.dumps(grand, indent=2))
+    (ev / "escape_calls_flat.json").write_text(json.dumps(grand, indent=2), encoding="utf-8")
     print("\nESCAPE TARGET TOTALS:", json.dumps(out["totals"]))
     print("total distinct escape cells:", len(grand))
     return 0

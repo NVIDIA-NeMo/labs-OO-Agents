@@ -202,13 +202,15 @@ class RunRecorder:
             + "\n"
             + outcome
         )
-        (msgs / f"step_{env_step:03d}_round_00_user.md").write_text(user)
-        (msgs / f"step_{env_step:03d}_round_00_assistant.md").write_text(assistant)
+        (msgs / f"step_{env_step:03d}_round_00_user.md").write_text(user, encoding="utf-8")
+        (msgs / f"step_{env_step:03d}_round_00_assistant.md").write_text(
+            assistant, encoding="utf-8"
+        )
 
     # -------------------------------------------------------------- steps/
 
     def step_json(self, step: int, obs: dict) -> None:
-        (self.steps_dir / f"step_{step:04d}.json").write_text(json.dumps(obs))
+        (self.steps_dir / f"step_{step:04d}.json").write_text(json.dumps(obs), encoding="utf-8")
 
     def fallback_observation(
         self,
@@ -271,4 +273,4 @@ class RunRecorder:
             "termination_reason": termination_reason,
             **(extras or {}),
         }
-        (self.run_dir / "result.json").write_text(json.dumps(payload, indent=2))
+        (self.run_dir / "result.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")

@@ -65,7 +65,7 @@ class ViewerMessageExporter(SpanExporter):
         if not self.events_path.exists():
             return cur
         try:
-            for line in self.events_path.read_text().splitlines():
+            for line in self.events_path.read_text(encoding="utf-8").splitlines():
                 e = json.loads(line)
                 if e.get("event") == "env_step":
                     t = float(e.get("unix_time_s", 0))
@@ -105,8 +105,10 @@ class ViewerMessageExporter(SpanExporter):
             )
             base = self.msgs_dir / f"step_{step:03d}_round_{rnd:02d}"
             try:
-                (base.with_name(base.name + "_user.md")).write_text(hdr + user)
-                (base.with_name(base.name + "_assistant.md")).write_text(hdr + asst)
+                (base.with_name(base.name + "_user.md")).write_text(hdr + user, encoding="utf-8")
+                (base.with_name(base.name + "_assistant.md")).write_text(
+                    hdr + asst, encoding="utf-8"
+                )
             except OSError:
                 return SpanExportResult.FAILURE
         return SpanExportResult.SUCCESS

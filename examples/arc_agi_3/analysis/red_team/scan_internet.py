@@ -76,7 +76,7 @@ def scan_game(alias: str, run_dir: Path) -> list[dict]:
         if not sr:
             continue
         step, rnd, _ = sr
-        text = f.read_text(errors="replace")
+        text = f.read_text(errors="replace", encoding="utf-8")
         for _name, code in rt.iter_code_cells(text):
             for rx, kind in (
                 (NET_CODE, "py_net"),
@@ -123,7 +123,7 @@ def main() -> int:
             for h in hits[:20]:
                 print(f"   step{h['step']} [{h['kind']}] {h['line'][:140]}")
     out["n_total"] = total
-    (ev / "internet_scan.json").write_text(json.dumps(out, indent=2))
+    (ev / "internet_scan.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
     print(f"\nTOTAL candidate real network invocations in agent code: {total}")
     if total == 0:
         print("=> No direct internet-egress call found in any agent code cell.")

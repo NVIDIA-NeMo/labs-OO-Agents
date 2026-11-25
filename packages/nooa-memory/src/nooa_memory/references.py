@@ -108,7 +108,7 @@ def _lookup(agent: object, store: MemoryStore, kind: str, key: str) -> str | Non
         if not path.is_file():
             return None
         try:
-            return _clip(path.read_text(errors="replace")[:_MAX_FILE_CHARS])
+            return _clip(path.read_text(errors="replace", encoding="utf-8")[:_MAX_FILE_CHARS])
         except OSError:
             return None
     if kind == "todo":

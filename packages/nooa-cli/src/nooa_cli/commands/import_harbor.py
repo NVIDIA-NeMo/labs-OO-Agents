@@ -95,7 +95,7 @@ def _read_score(trial_dir: Path, trial_result: dict) -> float | None:
 
     reward_txt = trial_dir / "verifier" / "reward.txt"
     if reward_txt.exists():
-        return _coerce_float(reward_txt.read_text().strip())
+        return _coerce_float(reward_txt.read_text(encoding="utf-8").strip())
 
     return None
 

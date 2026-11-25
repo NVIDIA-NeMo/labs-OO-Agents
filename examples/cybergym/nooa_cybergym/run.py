@@ -325,7 +325,9 @@ def main(argv: list[str] | None = None) -> int:
         "max_concurrent_expanders": args.max_concurrent_expanders,
         "reasoning_effort": args.reasoning_effort,
     }
-    (log_dir / "args.json").write_text(json.dumps(args_record, indent=2, default=str) + "\n")
+    (log_dir / "args.json").write_text(
+        json.dumps(args_record, indent=2, default=str) + "\n", encoding="utf-8"
+    )
 
     try:
         exit_code = run_container(args, task_dir, log_dir, env, network)

@@ -124,7 +124,7 @@ def main() -> int:
             rows.append({"game": name, **stats})
     rows.sort(key=lambda r: r["total"], reverse=True)
 
-    (out / "memory_usage.json").write_text(json.dumps(rows, indent=2))
+    (out / "memory_usage.json").write_text(json.dumps(rows, indent=2), encoding="utf-8")
 
     lines = [
         f"# Memory usage per game — `{run.name}`",
@@ -150,7 +150,7 @@ def main() -> int:
         f"- **{n} games** with a persisted memory store.",
         f"- **{total_mem} memories** total; mean {round(total_mem / n, 1) if n else 0} per game.",
     ]
-    (out / "memory_usage.md").write_text("\n".join(lines) + "\n")
+    (out / "memory_usage.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(f"analyzed {n} store(s), {total_mem} memories -> {out}")
     return 0
 
