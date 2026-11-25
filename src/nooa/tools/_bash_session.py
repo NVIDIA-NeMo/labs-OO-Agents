@@ -204,7 +204,7 @@ class BashSession:
                 parts.append(f"  killed_by={sig_name}")
             # Try to read /proc/<pid>/status before it disappears
             try:
-                with open(f"/proc/{proc.pid}/status", encoding="utf-8") as f:
+                with open(f"/proc/{proc.pid}/status", encoding="utf-8", errors="replace") as f:
                     for line in f:
                         if any(k in line for k in ("State:", "SigPnd:", "SigCgt:")):
                             parts.append(f"  /proc/status: {line.strip()}")
