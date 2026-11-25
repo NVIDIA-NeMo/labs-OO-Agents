@@ -205,6 +205,33 @@ def test_connect_binds_the_save_to_the_newest_request(wizard, no_server, user_di
     assert [path.name for path in requests] == [f"request-{session_key('older')}.json"]
 
 
+def test_claim_request_skips_one_another_process_already_claimed(no_server, user_dir, monkeypatch):
+    # Two terminals list the same fresh request before either reserves it; only
+    # one may win. Simulate the loser by moving the file away first, then let
+    # the real ``os.replace`` raise ``FileNotFoundError`` as it would for them.
+    import os as os_module
+
+    terminal_auth.record_request(session_id="only", workspace="/w")
+    path = next((user_dir / terminal_auth.HANDOFF_DIR).glob("request-*.json"))
+    real_replace = os_module.replace
+    raced = path.with_name(".raced-away")
+
+    def racing_replace(src, dst):
+        real_replace(src, raced)
+        raise FileNotFoundError
+
+    monkeypatch.setattr(terminal_auth.os, "replace", racing_replace)
+    assert terminal_auth.claim_request() == ANY
+    # The file is gone from the handoff dir (the "other process" has it); no crash.
+    assert not list((user_dir / terminal_auth.HANDOFF_DIR).glob("request-*.json"))
+
+
+def test_claim_request_reserves_the_key_so_a_second_claim_gets_none(no_server, user_dir):
+    terminal_auth.record_request(session_id="only", workspace="/w")
+    assert terminal_auth.claim_request() == session_key("only")
+    assert terminal_auth.claim_request() == ANY
+
+
 def test_connect_exits_0_when_only_the_note_cannot_be_written(
     wizard, no_server, user_dir, monkeypatch
 ):
@@ -499,6 +526,27 @@ async def test_the_saved_alias_is_used_without_a_second_connect(
         # The save was taken: a later /connect runs the wizard again.
         with pytest.raises(RequestError):
             await _connect_prompt(adapter, session_id)
+
+
+async def test_a_second_cold_restore_does_not_reapply_an_already_applied_alias(
+    make_adapter, workspace, client, user_dir, saving_wizard, no_server
+):
+    factory = WorkspaceDefault({"second": [[reply("From the saved model.")]]})
+    adapter, session_id = await _connected_session(make_adapter, workspace, user_dir, factory)
+    # First cold restore: applies "second" and marks the result applied.
+    await adapter.close_session(session_id)
+    loaded = await adapter.load_session(str(workspace), session_id)
+    assert _model_option(loaded.config_options) == ("second", ["first", "second"])
+    assert adapter.session(session_id).info.model == "second"
+    # The user then picks a different model from the menu.
+    await adapter.session(session_id).set_model("first")
+    assert adapter.session(session_id).info.model == "first"
+    # A second cold restore (new process, same 15-minute window) must not
+    # re-apply the already-applied save and override that later choice.
+    await adapter.close_session(session_id)
+    reloaded = await adapter.load_session(str(workspace), session_id)
+    assert _model_option(reloaded.config_options) == ("first", ["first", "second"])
+    assert adapter.session(session_id).info.model == "first"
 
 
 async def test_another_window_does_not_take_the_save(
