@@ -601,3 +601,26 @@ def test_import_reports_non_utf8_line_and_keeps_going(
 
     assert "legacy.nooa.jsonl:2: not valid UTF-8" in result.output
     assert len(posted) == 2
+
+
+def test_import_keeps_cr_only_record_boundaries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    trace_file = tmp_path / "cr.nooa.jsonl"
+    trace_file.write_bytes(
+        json.dumps(_otlp_body(1)).encode() + b"\r" + json.dumps(_otlp_body(2)).encode() + b"\r"
+    )
+    _patch_viewer_preflight(monkeypatch, stored_span_count=2)
+    posted: list[dict] = []
+
+    def post_batch(_endpoint, bodies, *, max_retries):
+        posted.extend(bodies)
+
+    monkeypatch.setattr(import_traces, "post_traces_batch_with_retry", post_batch)
+    monkeypatch.setattr(import_traces, "sync_ingest", lambda _endpoint: None)
+
+    result = CliRunner().invoke(import_traces.command, [str(trace_file), "--batch-id", "b"])
+
+    assert result.exit_code == 0, result.output
+    assert len(posted) == 2

@@ -28,6 +28,7 @@ from ._otlp_helpers import (
     check_endpoint_reachable,
     get_journal_record,
     inject_resource_attrs,
+    is_valid_utf8,
     post_journal_record,
     post_traces_batch,
     session_exists,
@@ -341,13 +342,14 @@ def _import_trace_file(
         batch = []
         batch_input_bytes = 0
 
-    with open(jsonl_path, "rb") as f:
-        for line_num, raw_bytes in enumerate(f, 1):
-            try:
-                raw_line = raw_bytes.decode("utf-8").strip()
-            except UnicodeDecodeError as error:
-                errors.append(f"{jsonl_path.name}:{line_num}: not valid UTF-8: {error.reason}")
+    # surrogateescape keeps universal-newline splitting and lets one line
+    # that is not valid UTF-8 be reported instead of aborting the file.
+    with open(jsonl_path, encoding="utf-8", errors="surrogateescape") as f:
+        for line_num, raw_line in enumerate(f, 1):
+            if not is_valid_utf8(raw_line):
+                errors.append(f"{jsonl_path.name}:{line_num}: not valid UTF-8")
                 continue
+            raw_line = raw_line.strip()
             if not raw_line:
                 continue
             try:

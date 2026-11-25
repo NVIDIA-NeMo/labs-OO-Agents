@@ -530,7 +530,7 @@ class ShellTools(Skill):
                 try:
                     lines = resolved.read_text(encoding="utf-8").splitlines(keepends=True)
                     file_cache[mpath] = (resolved, lines)
-                except OSError:
+                except (OSError, UnicodeDecodeError):
                     return None
             resolved, lines = file_cache[mpath]
             if not (1 <= line_no <= len(lines)):

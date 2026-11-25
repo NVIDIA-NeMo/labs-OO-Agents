@@ -33,6 +33,15 @@ class OtlpRequestError(RuntimeError):
         self.retry_after = retry_after
 
 
+def is_valid_utf8(line: str) -> bool:
+    """False if ``line`` (read with ``errors="surrogateescape"``) held bytes that are not UTF-8."""
+    try:
+        line.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def validate_endpoint(endpoint: str) -> None:
     """Validate that the endpoint uses an HTTP(S) scheme."""
     parsed = urllib.parse.urlparse(endpoint)
