@@ -6,6 +6,51 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Media (#597): more ways one attachment could fail every later request are
+  fixed. More provider refusals count as media rejections (image size and
+  dimension limits, a 413 about the attachment, Anthropic's `media_type`
+  error, "Could not process image" also as HTTP 500, OpenAI's
+  `input_audio.format` error, "unsupported MIME type", PDF page limits and
+  invalid, corrupt or password-protected PDFs, and a remote image URL that
+  cannot be downloaded, `litellm.ImageFetchError`). Wording that sounds
+  transient (timeouts, connection resets, "unavailable", "overloaded",
+  "temporarily", "try again later") never counts, and a 5xx counts for a
+  PDF only when it says "PDF". The endpoint retry layer and the media
+  recovery share one predicate; a media-worded 5xx is not retried only when
+  the request really sent that kind of media. Plain 5xx, 429, timeouts and
+  network errors are unchanged. Recovery no longer drops every attachment
+  of a kind on its second try: it tries the newest attachment, then bisects
+  to find the bad one(s), also across kinds (a bad image and a bad PDF). It
+  keeps exclusions only when the final request succeeds, tries them only
+  inside its own requests (a concurrent call on the same client is not
+  affected), never sends the same request twice, and sends at most
+  `min(12, 4 * max_retries)` requests, each without endpoint retries. When
+  no rule matches, a non-transient 400/415/422 on a request with media that
+  is not about tools, parameters, the model or a schema is re-sent once
+  unchanged; only if it fails again does one probe go out without media,
+  and if the probe fails too the original error is raised and nothing
+  changes. `Image.from_url` no longer sends an invented `image/jpeg` type
+  (it guesses from the URL or sends none), and a remote SVG, BMP, TIFF or
+  HEIC URL gets the same note as an inline one. On OpenAI-style audio routes
+  (OpenAI, Azure, OpenAI-compatible chat) audio formats are sent as
+  `mp3`/`wav` (`audio/mpeg`, `audio/x-wav`) and other formats get a note;
+  other routes such as Gemini receive the audio unchanged. `Audio.from_url`
+  clips (a URL is not base64 audio) are replaced by a note on every route.
+  Images of unknown type are recognised from their first bytes; the note
+  for one that is still unknown says it is an image. Images inside
+  Anthropic `tool_result` blocks are filtered and recoverable, an unsendable
+  image in replayed native assistant content falls back to the portable
+  replay, and the image-limit recovery counts only images that are sent.
+  `show()` says at once when an attachment cannot be sent. New harness
+  counters: `media.unsendable_replaced`, `media.recovery_probes` (one per
+  recovery request); `media.rejected_retry` now counts only exclusions that
+  were kept.
+- API change: `Image.from_url(url)` without `media_type` now leaves
+  `media_type` as `""` when the URL is not a `data:` URL and has no known
+  image file extension (it used to claim `image/jpeg`). Code that reads
+  `.media_type` must accept `""`. `nooa.decisions` accepts an image without
+  a type only for an `http://` or `https://` URL.
+
 - Dependency security update. LiteLLM is now locked at 1.100.5
   (CVE-2026-114612); the `litellm` requirement starts at 1.100.4 and excludes
   the unfixed 1.101-1.103 releases. LiteLLM now requires boto3. Chat

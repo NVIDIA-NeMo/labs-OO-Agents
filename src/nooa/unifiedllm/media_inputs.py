@@ -6,10 +6,17 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping
+from contextvars import ContextVar
 from typing import Any
 
 from nooa.llm_types import CacheBoundary, LLMResponse
-from nooa.media_inputs import MediaInput, _mime_hints, attachment_kind
+from nooa.media_inputs import (
+    INPUT_AUDIO_FORMATS,
+    MediaInput,
+    _mime_hints,
+    attachment_kind,
+    audio_format_name,
+)
 from nooa.media_inputs import MediaInputs as MediaInputs
 from nooa.media_inputs import validate_media_inputs as validate_media_inputs
 from nooa.unifiedllm.errors import ReasoningReplayError
@@ -32,7 +39,9 @@ def removed_media_notice(kind: str) -> str:
 
 # Inline image formats the common model APIs accept (OpenAI, Anthropic and
 # Bedrock). This is a common floor, not a per-provider list (there is none
-# yet): Gemini does not take GIF and OpenAI refuses animated GIF. Other types,
+# yet), and not universal: Gemini does not take GIF but does take HEIC/HEIF,
+# and OpenAI refuses animated GIF. A provider that refuses one of these
+# still triggers the media recovery in the client. Other types,
 # such as SVG, BMP or TIFF, are refused by some providers; kept in history,
 # such an image would fail every later request.
 SENDABLE_IMAGE_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
@@ -45,22 +54,72 @@ def _canonical_image_type(media_type: str) -> str:
     return _IMAGE_TYPE_ALIASES.get(media_type, media_type)
 
 
-def unsendable_image_type(block: Mapping[str, Any]) -> str | None:
-    """The MIME type of an inline image block models do not accept, else None.
+# Remote image types that no common model API accepts. A remote URL with one
+# of these (by its file extension or an explicit type) gets the same note as
+# an inline image; any other or unknown remote type is sent unchanged, since
+# the provider reads the real type when it downloads the image.
+CLEARLY_UNSENDABLE_IMAGE_TYPES = frozenset(
+    {"image/svg+xml", "image/bmp", "image/x-ms-bmp", "image/tiff", "image/heic", "image/heif"}
+)
+_REMOTE_EXTENSION_TYPES = {
+    "svg": "image/svg+xml",
+    "svgz": "image/svg+xml",
+    "bmp": "image/bmp",
+    "tif": "image/tiff",
+    "tiff": "image/tiff",
+    "heic": "image/heic",
+    "heif": "image/heif",
+}
 
-    Every MIME hint of the block is checked (data URL, ``format``,
-    ``media_type``, ``mime_type``; see ``nooa.media_inputs._mime_hints``),
-    after lower-casing and dropping parameters. One hint outside
-    ``SENDABLE_IMAGE_TYPES`` makes the image unsendable; two accepted hints
-    that disagree do not. Only inline images are checked: for a remote URL the
-    provider reads the real type from the server it downloads from, so a
-    ``format`` hint next to it is not trusted to be wrong.
-    """
-    if attachment_kind(block) != "image" or not _is_inline(block):
+
+def _remote_url(block: Mapping[str, Any]) -> str | None:
+    """The http(s) URL a remote image block points at, else None."""
+    candidates = [block.get("image_url"), block.get("url")]
+    for key in ("image_url", "source"):
+        if isinstance(block.get(key), Mapping):
+            candidates.extend([block[key].get("url"), block[key].get("image_url")])
+    for value in candidates:
+        if isinstance(value, str) and value[:5].lower() != "data:" and "://" in value:
+            return value
+    return None
+
+
+def remote_url_image_type(url: str) -> str | None:
+    """The image type a URL's file extension names (``.svg`` -> ``image/svg+xml``), else None."""
+    from urllib.parse import urlsplit
+
+    path = urlsplit(url).path
+    name = path.rsplit("/", 1)[-1]
+    if "." not in name:
         return None
-    refused = sorted(
-        {_canonical_image_type(hint) for hint in _mime_hints(block)} - SENDABLE_IMAGE_TYPES
-    )
+    return _REMOTE_EXTENSION_TYPES.get(name.rsplit(".", 1)[-1].lower())
+
+
+def unsendable_image_type(block: Mapping[str, Any]) -> str | None:
+    """The MIME type of an image block models do not accept, else None.
+
+    Inline images (a data URL or base64 ``source``): every MIME hint of the
+    block is checked (data URL, ``format``, ``media_type``, ``mime_type``; see
+    ``nooa.media_inputs._mime_hints``), after lower-casing and dropping
+    parameters. One hint outside ``SENDABLE_IMAGE_TYPES`` makes the image
+    unsendable; two accepted hints that disagree do not.
+
+    Remote images (an http(s) URL): only a type that is clearly unsendable
+    (``CLEARLY_UNSENDABLE_IMAGE_TYPES``: SVG, BMP, TIFF, HEIC/HEIF), named by
+    an explicit hint or by the URL's file extension, counts. A remote URL with
+    a sendable or unknown type is sent unchanged: the provider reads the real
+    type from the server.
+    """
+    if attachment_kind(block) != "image":
+        return None
+    hints = {_canonical_image_type(hint) for hint in _mime_hints(block)}
+    if _is_inline(block):
+        refused = sorted(hints - SENDABLE_IMAGE_TYPES)
+        return refused[0] if refused else None
+    url = _remote_url(block)
+    if url is not None and (by_extension := remote_url_image_type(url)):
+        hints.add(by_extension)
+    refused = sorted(hints & CLEARLY_UNSENDABLE_IMAGE_TYPES)
     return refused[0] if refused else None
 
 
@@ -112,12 +171,66 @@ def _sendable_image_block(block: Mapping[str, Any]) -> Mapping[str, Any]:
     return result
 
 
+def unsendable_audio(
+    block: Mapping[str, Any], formats: frozenset[str] | None = INPUT_AUDIO_FORMATS
+) -> str | None:
+    """Why an ``input_audio`` block cannot be sent, else None.
+
+    ``"url"``: its ``data`` is a URL, not base64 (``Audio.from_url``); a URL
+    must never be sent as base64 audio, on any route. Otherwise its format
+    name, if it is not in ``formats``: the route's accepted formats, by
+    default those of OpenAI ``input_audio`` (``wav``, ``mp3``; aliases such as
+    ``mpeg`` and ``x-wav`` count as those). ``formats=None``: a route without
+    that restriction (Gemini takes ``ogg`` or ``flac`` inline). Other audio
+    blocks are not checked.
+    """
+    if block.get("type") != "input_audio" or not isinstance(block.get("input_audio"), Mapping):
+        return None
+    node = block["input_audio"]
+    data = node.get("data")
+    if isinstance(data, str) and re.match(r"\s*[a-z][a-z0-9+.-]*://", data, re.I):
+        return "url"
+    fmt = node.get("format")
+    if (
+        formats is not None
+        and isinstance(fmt, str)
+        and fmt
+        and audio_format_name(fmt) not in formats
+    ):
+        return audio_format_name(fmt)
+    return None
+
+
+def _sendable_audio_block(block: Mapping[str, Any]) -> Mapping[str, Any]:
+    """``block`` with its ``input_audio`` format as the provider name (``mpeg`` -> ``mp3``)."""
+    node = block.get("input_audio")
+    if block.get("type") != "input_audio" or not isinstance(node, Mapping):
+        return block
+    fmt = node.get("format")
+    if not isinstance(fmt, str) or audio_format_name(fmt) == fmt:
+        return block
+    return {**block, "input_audio": {**node, "format": audio_format_name(fmt)}}
+
+
+def unsendable_audio_notice(reason: str) -> str:
+    """The text the model sees in place of audio it cannot be sent."""
+    if reason == "url":
+        return (
+            "[An audio clip was removed here: audio given as a URL cannot be sent to a model. "
+            "Load it with Audio.from_file or Audio.from_bytes and show it again.]"
+        )
+    return (
+        f"[An audio clip was removed here: {reason} audio cannot be sent to a model. "
+        "Only WAV and MP3 are accepted; convert it and show it again.]"
+    )
+
+
 def unsendable_image_notice(media_type: str) -> str:
     """The text the model sees in place of an image in a format models do not accept."""
     return (
         f"[An image was removed here: {media_type} images cannot be sent to a model. "
-        "Only PNG, JPEG, GIF and WebP are accepted; convert it (for example render "
-        "an SVG to PNG) and show it again.]"
+        "Convert it to PNG, JPEG, GIF or WebP (for example render an SVG to PNG) "
+        "and show it again.]"
     )
 
 
@@ -180,6 +293,36 @@ _FORMAT_NOUN = {
     "pdf": "(?:pdf|file|document)",
 }
 
+# The words that name each kind of attachment in a provider's error message.
+_KIND_NAMES = {
+    "image": r"images?|vision inputs?",
+    "audio": r"audio|wav",
+    "video": r"videos?",
+    "pdf": r"pdfs?|documents?|files?",
+}
+
+# The wire part (or its field) that carries each kind; an error ``param`` such
+# as ``messages[0].content[1].input_audio.format`` names it.
+_KIND_PARTS = {
+    "image": {"image_url", "input_image"},
+    "audio": {"input_audio", "audio_url"},
+    "video": {"video_url"},
+    "pdf": {"file", "input_file", "document"},
+}
+
+MEDIA_KINDS: tuple[str, ...] = ("image", "audio", "video", "pdf")
+
+
+def _kind_names(kind, narrow: bool = False) -> str:
+    """The ``_KIND_NAMES`` pattern of ``kind``; ``narrow`` (HTTP 5xx): a PDF only as "PDF".
+
+    A server error about "the file" or "the document" is usually about the
+    server's own files (model weights, caches), not an attachment.
+    """
+    if narrow and kind == "pdf":
+        return r"pdfs?"
+    return _KIND_NAMES.get(kind, r"files?")
+
 
 def _error_message(exc) -> str:
     """The provider's error message in lower case: ``body.error.message`` if set, else ``str(exc)``."""
@@ -188,6 +331,27 @@ def _error_message(exc) -> str:
     if isinstance(error, dict):
         return str(error.get("message", str(exc))).lower()
     return str(exc).lower()
+
+
+def _error_texts(exc) -> str:
+    """``str(exc)`` and the body's message, lower case, for pattern matching."""
+    texts = [str(exc).lower()]
+    message = _error_message(exc)
+    if message not in texts[0]:
+        texts.append(message)
+    return "\n".join(texts)
+
+
+def _error_param(exc) -> str | None:
+    body = getattr(exc, "body", None)
+    error = body.get("error", body) if isinstance(body, dict) else {}
+    param = error.get("param") if isinstance(error, dict) else None
+    return param if isinstance(param, str) else None
+
+
+def _http_status(exc) -> int | None:
+    status = getattr(exc, "_connect_http_status", getattr(exc, "status_code", None))
+    return status if isinstance(status, int) and not isinstance(status, bool) else None
 
 
 def _unsupported_format(exc, kind) -> bool:
@@ -200,63 +364,214 @@ def _unsupported_format(exc, kind) -> bool:
     followed by the formats that are supported, so "unsupported image format
     conversion plugin" does not count.
     """
+    return _unsupported_format_text(_error_texts(exc), kind)
+
+
+def _unsupported_format_text(text: str, kind, narrow: bool = False) -> bool:
+    """ "Unsupported <kind> format: X" (see ``_unsupported_format``).
+
+    ``narrow`` (HTTP 5xx): for a PDF the message must say "PDF". "Unsupported
+    file format: safetensors" is about the server's own files. A "file" or
+    "document" wording counts only when the supported formats it lists name
+    PDF (the Hub's "Unsupported document format: docx. Supported formats:
+    ['pdf']").
+    """
     noun = _FORMAT_NOUN.get(kind, "file")
+    if narrow and kind == "pdf":
+        if re.search(
+            r"\bunsupported (?:file|document) (?:format|type)s?\b[^\n]{0,120}?"
+            r"\b(?:supported|allowed|accepted) (?:formats|types)\b[^\n]{0,40}?\bpdf\b",
+            text,
+        ):
+            return True
+        noun = "pdf"
     return bool(
         re.search(
             rf"\bunsupported {noun} (?:format|type)s?"
             r"(?:\s*[:=]|\s+['\"`]|\b[^.]{0,80}\b(?:supported|allowed|accepted) (?:formats|types)\b)",
-            _error_message(exc),
+            text,
         )
     )
 
 
-def unsupported_attachment_format(exc) -> bool:
-    """True if ``exc`` is an HTTP 500 that says an attachment's format is unsupported.
+# The request as a whole is too long: never one attachment's fault.
+_CONTEXT_LENGTH_RE = re.compile(
+    r"context[ _](?:length|window)|maximum context|too many (?:input )?tokens|prompt is too long"
+    r"|tokens? (?:exceed|limit)|reduce the length of the messages"
+)
+# A server or network problem, not the attachment, at any status: such an
+# error is never a media rejection, even when it names one ("Could not
+# process image: upstream request timed out"). Checked before any media rule.
+_TRANSIENT_RE = re.compile(
+    r"\btime ?outs?\b|\btimed out\b|\bconnection (?:reset|refused|aborted|closed)\b"
+    # "try again later" / "in a few seconds", but not OpenAI's "The image data
+    # you provided does not represent a valid image. Please check your input
+    # and try again.", which is a real rejection.
+    r"|\bunavailable\b|\boverloaded\b|\btemporar(?:y|ily)\b|\brate.?limit"
+    r"|\btry again (?:later|shortly|soon|in\b)|\b(?:retry|try) (?:the request )?later\b"
+    r"|\bcapacity\b"
+)
 
-    Such an error is about the request, not the server: the retry layer must
-    not resend it unchanged, so the client's media recovery can replace the
-    attachment with a note at once.
+
+def _size_rejected(text: str, kind, narrow: bool = False) -> bool:
+    """The attachment is too big: per-item byte, pixel or page limits.
+
+    Wording examples from Anthropic's documentation and the #597 reviews (not
+    checked against a live provider): "image exceeds 5 MB maximum", "image
+    dimensions exceed max allowed size: 8000 pixels", "A maximum of 100 PDF
+    pages may be provided". Request-wide limits (context length, too many
+    images) are handled elsewhere and are not matched here.
     """
-    status = getattr(exc, "_connect_http_status", getattr(exc, "status_code", None))
-    return status == 500 and any(_unsupported_format(exc, kind) for kind in _FORMAT_NOUN)
+    names = _kind_names(kind, narrow)
+    if re.search(
+        rf"\b(?:{names})(?: (?:size|dimensions?|file|data|payload|resolution|width|height))?\b"
+        r".{0,60}?\b(?:exceeds?|exceeded|exceeding|too large|too big|larger than)\b",
+        text,
+    ):
+        return True
+    return kind == "pdf" and bool(
+        re.search(
+            r"\bpdf (?:pages?|page count)\b.{0,40}?\b(?:exceed|maximum|limit|too many)"
+            r"|\bmaximum of \d+ pdf pages\b|\btoo many (?:pdf )?pages\b",
+            text,
+        )
+    )
 
 
-def explicitly_rejected(exc, kind):
-    """Return True if ``exc`` is the provider refusing this kind of media.
+def _media_type_enum_kind(text: str) -> str | None:
+    """Anthropic's schema error for a ``media_type`` it does not take.
 
-    Requires HTTP 400/415/422 and an error message that is specifically about
-    the media (or the content part used to send it), for example "image input
-    is not supported" or "Unsupported content part type: 'file'". A generic
-    400, or an error about another parameter (model, max_tokens, ...), does
-    not count. A per-request image limit (``image_limit``) is not a rejection
-    of one image: the runtime collapses the oldest images instead.
+    "messages.0.content.1.image.source.base64.media_type: Input should be
+    'image/jpeg', 'image/png', 'image/gif' or 'image/webp'" (wording from the
+    #597 issue; not captured from a live provider).
     """
-    status = getattr(exc, "_connect_http_status", getattr(exc, "status_code", None))
-    if status not in {400, 415, 422} and not (status == 500 and _unsupported_format(exc, kind)):
+    match = re.search(
+        r"\bmedia_type\b.{0,20}?input should be\s*['\"]?(image|application|audio|video)/", text
+    )
+    if not match:
+        return None
+    return {"application": "pdf"}.get(match.group(1), match.group(1))
+
+
+def _mime_type_kind(text: str) -> str | None:
+    """'Unsupported MIME type: image/gif' (Gemini-style wording from the #597 review, unverified)."""
+    match = re.search(
+        r"\bunsupported mime[ _-]?type\s*:?\s*['\"`]?(image|audio|video|application/pdf)\b", text
+    )
+    if not match:
+        return None
+    return "pdf" if match.group(1) == "application/pdf" else match.group(1)
+
+
+def _processing_failed(text: str, kind, narrow: bool = False) -> bool:
+    """The server could not read the attachment's bytes ("Could not process image")."""
+    names = _kind_names(kind, narrow)
+    docs = "pdf" if narrow else "(?:pdf|document|file)"
+    noun = rf"(?:{names}|media)(?: (?:input|content|format|type|data|url|attachment|file)s?)?"
+    return bool(
+        re.search(
+            r"\b(?:does not|doesn't|cannot|can't|could not|couldn't|unable to|failed to) "
+            rf"(?:process|decode|load|read|parse) (?:the )?{noun}\b",
+            text,
+        )
+        # OpenAI: "The image data you provided does not represent a valid image."
+        or re.search(rf"\bnot (?:\w+ ){{0,2}}an? valid {noun}\b", text)
+        # Anthropic (docs/review wording): "The PDF specified was not valid."
+        or re.search(rf"\b{noun}(?: \w+)? (?:is|was) not valid\b", text)
+        # Bedrock: "Could not process image"; gateways: "Media could not be processed".
+        or re.search(
+            rf"\b{noun} (?:could not|couldn't|cannot|can't) be (?:processed|decoded|loaded|read|parsed)\b",
+            text,
+        )
+        or re.search(rf"\b(?:corrupt(?:ed)?|malformed|truncated) {noun}\b", text)
+        or re.search(rf"\b{noun}\b (?:is |was )?(?:corrupt(?:ed)?|truncated|malformed)\b", text)
+        or (
+            kind == "pdf"
+            and re.search(
+                rf"\b(?:password[- ]protected|encrypted) {docs}s?\b"
+                rf"|\b{docs}s?\b.{{0,40}}?\b(?:password[- ]protected|encrypted)\b",
+                text,
+            )
+        )
+    )
+
+
+def _fetch_failed(text: str) -> bool:
+    """A remote image URL could not be downloaded (dead link, expired presigned URL).
+
+    LiteLLM downloads image URLs itself for Bedrock and Anthropic routes and
+    raises ``ImageFetchError`` ("Error: Unable to fetch image from URL. Status
+    code: 404, url=..."). OpenAI's server-side fetch says "Error while
+    downloading https://..." (wording from the #597 review, not captured
+    live). The image stays in history, so every later request would fail the
+    same way. A download error must name an image or a URL: "Error while
+    downloading model weights" is the server's own problem. A timeout is
+    transient (``_TRANSIENT_RE``), never a rejection.
+    """
+    return bool(
+        re.search(
+            r"\bunable to (?:fetch|download|retrieve) (?:the )?image\b"
+            r"|\berror while downloading (?:the )?(?:image\b|https?://|url\b)"
+            r"|\bfailed to (?:fetch|download) (?:the )?image\b",
+            text,
+        )
+    )
+
+
+def _is_image_fetch_error(exc) -> bool:
+    """``litellm.ImageFetchError`` (a 400 ``BadRequestError``), without importing LiteLLM."""
+    return any(cls.__name__ == "ImageFetchError" for cls in type(exc).__mro__)
+
+
+def _param_root(param: str) -> str:
+    """The top-level request field a ``param`` path names: ``tools[0].function`` -> ``tools``."""
+    return re.split(r"[.\[\]]", param.strip().lower(), maxsplit=1)[0]
+
+
+# Request fields that hold the conversation (and so the attachments).
+_CONTENT_ROOTS = frozenset({"messages", "input", "contents", "content", "system", "prompt"})
+# A media field inside a content path of the message text, such as
+# "messages[0].content[1].input_audio.format"; a bare "image_url" (a function
+# name, say) does not count.
+_MEDIA_FIELD_PATH_RE = re.compile(
+    r"\b(?:messages|input|contents?)\b[\w\[\].]*?[.\]]"
+    r"(?:input_audio|audio_url|image_url|input_image|video_url|input_file|file_data)\b[\w\[\].]*"
+)
+
+
+def _param_names_other_field(param: str | None) -> bool:
+    """True if a structured error ``param`` names a request field that is not an attachment.
+
+    A path whose root is not a conversation field (``tools[0].function.parameters
+    .properties.image_url``, ``response_format``, ``max_tokens``) never points at
+    an attachment, whatever its descendants are called. A content path
+    (``messages[0].content[1].image_url``) or a bare media part name
+    (``image_url``) may.
+    """
+    if not param:
         return False
-    if image_limit(exc) is not None:
+    if _param_root(param) in _CONTENT_ROOTS:
         return False
-    body = getattr(exc, "body", None)
-    error = body.get("error", body) if isinstance(body, dict) else {}
-    param = error.get("param") if isinstance(error, dict) else None
-    text = _error_message(exc)
-    if isinstance(param, str) and param.split(".")[0] in {
-        "model",
-        "include",
-        "store",
-        "max_tokens",
-        "max_output_tokens",
-        "api_key",
-    }:
-        return False
-    # Match a statement about the media/input itself. A media-looking model
-    # name plus an unrelated 'invalid' parameter is not explicit rejection.
-    names = {
-        "image": r"images?|vision inputs?",
-        "audio": r"audio|wav",
-        "video": r"videos?",
-        "pdf": r"pdfs?|documents?|files?",
-    }.get(kind, r"files?")
+    bare = re.fullmatch(r"\s*\w+\s*", param) is not None
+    return not (bare and _param_kind(param) is not None)
+
+
+def _param_kind(param: str | None) -> str | None:
+    """The kind of the wire part a structured error ``param`` points at, if any."""
+    if not param:
+        return None
+    fields = set(re.split(r"[.\[\]]+", param.lower()))
+    for kind in MEDIA_KINDS:
+        if fields & (_KIND_PARTS[kind] - {"file", "document"}) or (
+            kind == "pdf" and "file_data" in fields
+        ):
+            return kind
+    return None
+
+
+def _strict_media_statement(text: str, kind) -> bool:
+    """Wording a provider uses only when it refuses this kind of media (HTTP 4xx)."""
+    names = _KIND_NAMES.get(kind, r"files?")
     # "media" names whichever attachment the request carries (one gateway
     # says "Media could not be processed ... Failed to load image").
     noun = rf"(?:{names}|media)(?: (?:input|content|format|type|data|url|attachment|processing|file)s?)?"
@@ -267,40 +582,151 @@ def explicitly_rejected(exc, kind):
     part = re.search(
         r"unsupported (?:chat )?(?:content(?: part)?|media) type:?\s*[\\'\"]*([a-z_]+)", text
     )
-    parts = {
-        "image": {"image_url", "input_image"},
-        "audio": {"input_audio", "audio_url"},
-        "video": {"video_url"},
-        "pdf": {"file", "input_file", "document"},
-    }.get(kind, set())
-    if part and part.group(1) in parts:
+    if part and part.group(1) in _KIND_PARTS.get(kind, set()):
         return True
     # A strict server whose message schema has no variant for this media part.
     if "did not match any variant of untagged enum" in text and "messagecontent" in text:
         return True
     return bool(
         re.search(
-            rf"\b{noun}\b (?:is |are |was |were )?(?:not supported|unsupported|not allowed|rejected|invalid"
-            r"|corrupt(?:ed)?|truncated|malformed)\b",
+            rf"\b{noun}\b (?:is |are |was |were )?(?:not supported|unsupported|not allowed|rejected|invalid)\b",
             text,
         )
         or re.search(rf"\b(?:unsupported|invalid|rejected) {noun}\b(?![-\w])", text)
         or re.search(
             r"\b(?:does not|doesn't|cannot|can't|could not|couldn't|unable to|failed to) "
-            rf"(?:support|accept|process|decode|load|read) {noun}\b",
+            rf"(?:support|accept) {noun}\b",
             text,
         )
-        # OpenAI: "The image data you provided does not represent a valid image."
-        or re.search(rf"\bnot (?:\w+ ){{0,2}}an? valid {noun}\b", text)
-        # Bedrock: "Could not process image"; gateways: "Media could not be processed".
-        or re.search(
-            rf"\b{noun} (?:could not|couldn't|cannot|can't) be (?:processed|decoded|loaded|read)\b",
-            text,
+        # OpenAI audio (wording from the #597 review): "audio format mpeg is not supported".
+        or (
+            kind == "audio"
+            and re.search(r"\baudio format\b.{0,40}?\b(?:not supported|unsupported)\b", text)
         )
     )
 
 
-def _occurrences(messages, enabled: tuple[MediaInput, ...]):
+def rejected_media_kinds(exc) -> frozenset[str]:
+    """The media kinds ``exc`` says the provider refused; empty if it is not a media rejection.
+
+    The one predicate both the endpoint retry layer (``retry.py``: never resend
+    a refused attachment unchanged) and the client's media recovery (replace it
+    with a note) use. It is narrow and depends on the HTTP status:
+
+    - 400/415/422: any wording that is specifically about the media (or the
+      content part that carries it), its size, its format, or a structured
+      ``param`` that points at a media part.
+    - 413: only when the message says the attachment itself is too large.
+    - 500: only wording that says the server could not read this attachment
+      (unsupported format, "Could not process image", a size limit, a failed
+      image download). A PDF counts only when the message says "PDF" (or an
+      unsupported-format message lists PDF among the supported formats): a
+      500 about "the file" or "the document" is usually the server's own file.
+      Other 5xx statuses (502/503/504: gateways, outages) never count.
+
+    Wording that sounds transient (a timeout, a connection reset, "unavailable",
+    "overloaded", "temporarily", "try again"; ``_TRANSIENT_RE``) never counts,
+    at any status: a later identical request may succeed. A structured
+    ``param`` outside the conversation (``tools[0].function.parameters``,
+    ``max_tokens``) wins over media words in the text, and a media field name
+    in the text counts only inside a content path
+    (``messages[0].content[1].image_url``), not as a function name.
+    - No status: only a local ``ValueError`` (LiteLLM's Bedrock adapter raises
+      ``ValueError("Unsupported image format: ...")`` before sending).
+
+    ``litellm.ImageFetchError`` (a remote image URL LiteLLM could not
+    download) is always an image rejection. A generic error, one about another parameter (model, max_tokens, ...),
+    a per-request image limit (``image_limit``) or a context-length error does
+    not count.
+    """
+    status = _http_status(exc)
+    text = _error_texts(exc)
+    if _TRANSIENT_RE.search(text):
+        return frozenset()  # a server or network problem, even if it names an image
+    if image_limit(exc) is not None or _CONTEXT_LENGTH_RE.search(text):
+        return frozenset()
+    if _is_image_fetch_error(exc):
+        return frozenset({"image"})
+    param = _error_param(exc)
+    if _param_names_other_field(param):
+        # The provider named another parameter (tools[0].function.parameters,
+        # max_tokens, model, ...): that wins over media words in the text,
+        # even when a descendant is called ``image_url`` (a tool schema).
+        return frozenset()
+    if status in {400, 415, 422}:
+        strict, server = True, True
+    elif status == 413:
+        strict, server = False, False
+    elif status == 500:
+        strict, server = False, True
+    elif status is None and isinstance(exc, ValueError):
+        return frozenset(k for k in MEDIA_KINDS if _unsupported_format_text(text, k))
+    else:
+        return frozenset()
+    kinds = set()
+    if status != 413:
+        for found in (_media_type_enum_kind(text), _mime_type_kind(text)):
+            if found:
+                kinds.add(found)
+        if strict:
+            # A structured ``param`` or a field path in the message, e.g. OpenAI's
+            # "Invalid value: 'mpeg'. Supported values are: 'wav' and 'mp3'." with
+            # param ``messages[0].content[1].input_audio.format``.
+            for path in (param, *_MEDIA_FIELD_PATH_RE.findall(text)):
+                if found := _param_kind(path):
+                    kinds.add(found)
+    narrow = status is not None and status >= 500  # a PDF only as "PDF" (_kind_names)
+    for kind in MEDIA_KINDS:
+        if (
+            _size_rejected(text, kind, narrow)
+            or (
+                server
+                and (
+                    # Names the refused format value: specific even as a 500.
+                    _unsupported_format_text(text, kind, narrow)
+                    or _processing_failed(text, kind, narrow)
+                )
+            )
+            or (server and kind == "image" and _fetch_failed(text))
+            or (strict and _strict_media_statement(text, kind))
+        ):
+            kinds.add(kind)
+    return frozenset(kinds)
+
+
+# The media kinds the request being sent carries after filtering, set by the
+# client for each request it prepares. The retry layer stops retrying a
+# media-worded 5xx only if the request really sent that kind of media.
+sent_media_kinds: ContextVar[frozenset[str]] = ContextVar("sent_media_kinds", default=frozenset())
+
+
+def is_media_rejection(exc) -> bool:
+    """True if ``exc`` is a provider refusing an attachment (see ``rejected_media_kinds``).
+
+    Such an error is about the request, not the server: the retry layer must
+    not resend it unchanged, so the client's media recovery can replace the
+    attachment with a note at once.
+    """
+    return bool(rejected_media_kinds(exc))
+
+
+def unsupported_attachment_format(exc) -> bool:
+    """True if ``exc`` is an HTTP 5xx media rejection (kept for callers of the #595 API)."""
+    status = _http_status(exc)
+    return status is not None and status >= 500 and is_media_rejection(exc)
+
+
+def explicitly_rejected(exc, kind):
+    """Return True if ``exc`` is the provider refusing this kind of media.
+
+    ``kind in rejected_media_kinds(exc)``; see there for the status rules. A
+    per-request image limit (``image_limit``) is not a rejection of one image:
+    the runtime collapses the oldest images instead.
+    """
+    return kind in rejected_media_kinds(exc)
+
+
+def _occurrences(messages, enabled: tuple[MediaInput, ...], audio_formats=INPUT_AUDIO_FORMATS):
     """Yield (message index, block index, kind, key) for each attachment a request sends.
 
     A message that is itself an attachment item has block index None.
@@ -314,7 +740,11 @@ def _occurrences(messages, enabled: tuple[MediaInput, ...]):
 
     def occurrence(index, position, block):
         kind = attachment_kind(block)
-        if kind is None or kind not in enabled or unsendable_image_type(block) is not None:
+        if (
+            kind is None
+            or kind not in enabled
+            or _unsendable(kind, block, audio_formats) is not None
+        ):
             return None
         payload = {k: v for k, v in block.items() if k != "cache_control"}
         digest = hashlib.sha256(
@@ -337,39 +767,171 @@ def _occurrences(messages, enabled: tuple[MediaInput, ...]):
         if not isinstance(content, (list, tuple)):
             continue
         for position, block in enumerate(content):
-            found = occurrence(index, position, block) if isinstance(block, Mapping) else None
+            if not isinstance(block, Mapping):
+                continue
+            nested = _tool_result_blocks(block)
+            if nested is not None:
+                # Anthropic's user ``tool_result`` block carries its own content list.
+                for inner, nested_block in enumerate(nested):
+                    found = (
+                        occurrence(index, (position, inner), nested_block)
+                        if isinstance(nested_block, Mapping)
+                        else None
+                    )
+                    if found:
+                        yield found
+                continue
+            found = occurrence(index, position, block)
             if found:
                 yield found
 
 
-def media_occurrences(messages, enabled: tuple[MediaInput, ...]):
+def _tool_result_blocks(block: Mapping[str, Any]):
+    """The content list of an Anthropic ``tool_result`` block, else None.
+
+    Documented shape: ``{"type": "tool_result", "tool_use_id": ..., "content":
+    [{"type": "text", ...}, {"type": "image", "source": {...}}]}``. Only this
+    shape is looked into; tool arguments are never scanned.
+    """
+    if block.get("type") != "tool_result":
+        return None
+    content = block.get("content")
+    return content if isinstance(content, (list, tuple)) else None
+
+
+def unsendable_occurrences(
+    messages, enabled: tuple[MediaInput, ...], audio_formats=INPUT_AUDIO_FORMATS
+):
+    """The enabled attachments the filter replaces before sending, as (reason, key).
+
+    ``reason`` is the refused MIME type of an image (``image/svg+xml``) or the
+    audio problem (``url``, a format name). ``key`` identifies the occurrence
+    like ``media_occurrences`` keys do, so a caller can count each one once
+    although the filter runs on every request.
+    """
+    found = []
+    seen: dict[tuple[str, str], int] = {}
+    for message in messages:
+        if isinstance(message, (LLMResponse, CacheBoundary)) or not isinstance(message, Mapping):
+            continue
+        blocks = [message] if attachment_kind(message) is not None else []
+        if not blocks:
+            slot = "output" if message.get("type") == "function_call_output" else "content"
+            content = message.get(slot)
+            for block in content if isinstance(content, (list, tuple)) else ():
+                if isinstance(block, Mapping):
+                    nested = _tool_result_blocks(block)
+                    blocks.extend(nested if nested is not None else [block])
+        for block in blocks:
+            if not isinstance(block, Mapping):
+                continue
+            kind = attachment_kind(block)
+            if kind not in enabled:
+                continue
+            reason = (
+                unsendable_image_type(block)
+                if kind == "image"
+                else unsendable_audio(block, audio_formats)
+                if kind == "audio"
+                else None
+            )
+            if reason is None:
+                continue
+            digest = hashlib.sha256(
+                json.dumps(dict(block), sort_keys=True, default=repr).encode()
+            ).hexdigest()
+            count = seen.get((kind, digest), 0)
+            seen[(kind, digest)] = count + 1
+            found.append((f"{kind}:{reason}", (kind, digest, count)))
+    return found
+
+
+def media_occurrences(messages, enabled: tuple[MediaInput, ...], audio_formats=INPUT_AUDIO_FORMATS):
     """The attachment occurrences a request sends, oldest first, as (kind, key)."""
-    return [(kind, key) for *_, kind, key in _occurrences(messages, enabled)]
+    return [(kind, key) for *_, kind, key in _occurrences(messages, enabled, audio_formats)]
 
 
-def _replacement(kind, block, rejected: bool, enabled) -> str | None:
+def unknown_type_notice(part_kind: str, media_type: str) -> str:
+    """The text the model sees in place of an image (audio, video) whose type is unknown."""
+    subject = _NOTICE_SUBJECT[part_kind][0]
+    described = f" ({media_type})" if media_type else ""
+    advice = " Save it as PNG, JPEG, GIF or WebP and show it again." if part_kind == "image" else ""
+    return f"[{subject} of unknown type{described} was removed here.{advice}]"
+
+
+def _part_kind(block: Mapping[str, Any]) -> str | None:
+    """The kind the block's wire part carries (``image_url`` -> image), ignoring MIME hints."""
+    from nooa.media_inputs import _KINDS
+
+    kind = _KINDS.get(block.get("type"))
+    return kind if kind in _NOTICE_SUBJECT else None
+
+
+def _replacement(
+    kind, block, rejected: bool, enabled, audio_formats=INPUT_AUDIO_FORMATS
+) -> str | None:
     """The notice that replaces an attachment block on the wire, or None to send it."""
     if kind not in enabled:
+        part = _part_kind(block)
+        if kind == "file" and part is not None:
+            # An image part whose MIME type is not an image type (for example
+            # application/octet-stream): say so instead of "Only PDF files".
+            hints = sorted(_mime_hints(block))
+            return unknown_type_notice(part, hints[0] if hints else "")
         return removed_media_notice(kind)
-    bad_type = unsendable_image_type(block) if kind == "image" else None
-    if bad_type is not None:
-        return unsendable_image_notice(bad_type)
+    notice = _unsendable(kind, block, audio_formats)
+    if notice is not None:
+        return notice
     return rejected_media_notice(kind) if rejected else None
 
 
-def filter_media_messages(messages, enabled: tuple[MediaInput, ...], excluded=frozenset()):
+def _unsendable(kind, block, audio_formats=INPUT_AUDIO_FORMATS) -> str | None:
+    """The notice for an enabled attachment the route cannot be sent in this form, else None.
+
+    ``audio_formats``: see ``unsendable_audio``.
+    """
+    if kind == "image" and (bad_type := unsendable_image_type(block)) is not None:
+        return unsendable_image_notice(bad_type)
+    if kind == "audio" and (reason := unsendable_audio(block, audio_formats)) is not None:
+        return unsendable_audio_notice(reason)
+    return None
+
+
+def _sendable_block(kind, block, audio_formats=INPUT_AUDIO_FORMATS):
+    """An accepted attachment block in canonical wire form (MIME type, audio format name).
+
+    Audio format names are only rewritten (``mpeg`` -> ``mp3``) for routes
+    with OpenAI ``input_audio`` formats; other routes get the block unchanged.
+    """
+    if kind == "image":
+        return _sendable_image_block(block)
+    if kind == "audio" and audio_formats is not None:
+        return _sendable_audio_block(block)
+    return block
+
+
+def filter_media_messages(
+    messages,
+    enabled: tuple[MediaInput, ...],
+    excluded=frozenset(),
+    audio_formats: frozenset[str] | None = INPUT_AUDIO_FORMATS,
+):
     """Return a copy of ``messages`` with media that is not ``enabled`` replaced.
 
     Each disabled attachment is replaced by a short text notice (see
     ``removed_media_notice``) so the model knows something was removed. Three
     places are checked: a message that is itself an attachment item (Responses
     input allows these at the top level), an assistant ``audio`` field, and the
-    blocks of a ``content`` list (``output`` for ``function_call_output`` items).
+    blocks of a ``content`` list (``output`` for ``function_call_output`` items),
+    including the content list of an Anthropic ``tool_result`` block.
     ``excluded`` holds keys from ``media_occurrences`` that the current
     connection rejected; each such attachment becomes a ``rejected_media_notice``.
     An enabled inline image in a format models do not accept (such as SVG)
     becomes an ``unsendable_image_notice``; an accepted one is sent with its
     MIME type in canonical form (``image/jpg`` as ``image/jpeg``).
+    ``audio_formats`` are the ``input_audio`` formats the route accepts
+    (OpenAI's WAV and MP3 by default); None for a route without that
+    restriction (Gemini). URL audio is replaced on every route.
     Tool arguments, reasoning and vendor extensions are not inspected.
     ``LLMResponse`` and ``CacheBoundary`` objects are passed through unchanged;
     their native content is checked later by ``check_replayed_native_media``. The input
@@ -377,7 +939,7 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...], excluded=fr
     """
     rejected = {
         (index, position)
-        for index, position, _, key in _occurrences(messages, enabled)
+        for index, position, _, key in _occurrences(messages, enabled, audio_formats)
         if key in excluded
     }
     result = []
@@ -390,13 +952,13 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...], excluded=fr
         if kind is not None:
             # The whole message is an attachment item, so there is no content
             # list to filter: replace the item with a user notice.
-            notice = _replacement(kind, item, (message_index, None) in rejected, enabled)
+            notice = _replacement(
+                kind, item, (message_index, None) in rejected, enabled, audio_formats
+            )
             result.append(
                 {"role": "user", "content": notice}
                 if notice is not None
-                else _sendable_image_block(item)
-                if kind == "image"
-                else item
+                else _sendable_block(kind, item, audio_formats)
             )
             continue
         slot = "output" if item.get("type") == "function_call_output" else "content"
@@ -419,18 +981,31 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...], excluded=fr
         content = item.get(slot)
         if isinstance(content, list):
             blocks = []
-            for position, block in enumerate(content):
+            text_type = "input_text" if slot == "output" else "text"
+
+            def filtered(block, where, message_index=message_index, text_type=text_type):
                 kind = attachment_kind(block) if isinstance(block, Mapping) else None
                 notice = (
                     None
                     if kind is None
-                    else _replacement(kind, block, (message_index, position) in rejected, enabled)
+                    else _replacement(
+                        kind, block, (message_index, where) in rejected, enabled, audio_formats
+                    )
                 )
                 if notice is not None:
-                    text_type = "input_text" if slot == "output" else "text"
-                    blocks.append({"type": text_type, "text": notice})
-                else:
-                    blocks.append(_sendable_image_block(block) if kind == "image" else block)
+                    return {"type": text_type, "text": notice}
+                return _sendable_block(kind, block, audio_formats) if kind is not None else block
+
+            for position, block in enumerate(content):
+                nested = _tool_result_blocks(block) if isinstance(block, Mapping) else None
+                if nested is not None:
+                    inner_blocks = [
+                        filtered(inner, (position, index)) for index, inner in enumerate(nested)
+                    ]
+                    changed = any(a is not b for a, b in zip(inner_blocks, nested, strict=True))
+                    blocks.append({**block, "content": inner_blocks} if changed else block)
+                    continue
+                blocks.append(filtered(block, position))
             item[slot] = blocks
         result.append(item)
     return result
@@ -449,9 +1024,10 @@ def check_replayed_native_media(
     apply media permissions keep their existing contract. Otherwise two checks
     run in order:
 
-    1. If ``native`` contains a media kind that is not in ``enabled``, raise
-       ``ReasoningReplayError``. The caller must replay a portable version of the
-       turn instead.
+    1. If ``native`` contains a media kind that is not in ``enabled``, or an
+       attachment in a form models do not accept (an SVG image, URL audio; see
+       ``_unsendable``), raise ``ReasoningReplayError``. The caller must replay
+       a portable version of the turn instead.
     2. Raise ``ValueError`` if ``native`` contains media that ``interface`` cannot
        send (see ``nooa.media_policy``).
     """
@@ -464,6 +1040,19 @@ def check_replayed_native_media(
     if any(kind is not None and kind not in enabled for kind in kinds):
         raise ReasoningReplayError(
             "Cannot remove disabled media from opaque assistant state; "
+            "supply a portable assistant turn instead."
+        )
+    if isinstance(content, (list, tuple)) and any(
+        isinstance(block, Mapping)
+        and (kind := attachment_kind(block)) is not None
+        and _unsendable(kind, block) is not None
+        for block in content
+    ):
+        # An SVG (or URL audio) inside opaque state cannot be replaced by a
+        # note either: the caller falls back to the portable replay, whose
+        # media the filter can replace.
+        raise ReasoningReplayError(
+            "Opaque assistant state holds media in a form models do not accept; "
             "supply a portable assistant turn instead."
         )
     from nooa.media_policy import reject_unsupported_media

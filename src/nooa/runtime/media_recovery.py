@@ -10,7 +10,8 @@ asks for a retry; later requests of the session stay under the limit.
 The counters live in the ``media`` extension of :class:`HarnessMetrics`
 (span keys ``harness.media.<name>``), not on every agent's core metrics.
 Importing this module (``nooa.runtime`` does) registers the recovery, the
-extension and the unifiedllm metric event ``media_rejected_retry``.
+extension and the unifiedllm metric events ``media_rejected_retry``,
+``media_recovery_probe`` and ``media_unsendable``.
 """
 
 from __future__ import annotations
@@ -41,8 +42,13 @@ class MediaHarnessMetrics(HarnessMetricsExtension):
 
     namespace: ClassVar[str] = "media"
 
-    # A provider rejected an attachment; retried with a note in its place (kind)
+    # A provider rejected an attachment; it stays replaced by a note (kind).
+    # Counted only when the request finally succeeded without it.
     rejected_retries: list[str] = Field(default_factory=list)
+    # Attachments the filter replaced before sending (kind:reason), once each
+    unsendable_replaced: list[str] = Field(default_factory=list)
+    # Requests media recovery added to find a bad attachment (mode: rejected/fallback)
+    recovery_probes: list[str] = Field(default_factory=list)
     image_limit_collapses: list[int] = Field(default_factory=list)  # limit M per recovery
     image_limit_events_collapsed: int = 0
 
@@ -73,6 +79,25 @@ class MediaHarnessMetrics(HarnessMetricsExtension):
             lambda m: len(m.rejected_retries),
         ),
         SchemaEntry(
+            "unsendable_replaced.count",
+            "Attachments replaced by a note before sending (format)",
+            "Media Recovery",
+            lambda m: len(m.unsendable_replaced),
+        ),
+        SchemaEntry(
+            "unsendable_replaced.reasons",
+            "Formats replaced before sending",
+            "Media Recovery",
+            lambda m: m.unsendable_replaced,
+            True,
+        ),
+        SchemaEntry(
+            "recovery_probes.count",
+            "Requests media recovery added to find a bad attachment",
+            "Media Recovery",
+            lambda m: len(m.recovery_probes),
+        ),
+        SchemaEntry(
             "rejected_retry.kinds",
             "Rejected attachment kinds",
             "Media Recovery",
@@ -90,21 +115,53 @@ class MediaHarnessMetrics(HarnessMetricsExtension):
         """The provider rejected an attachment; the request was retried without it."""
         self._append(self.rejected_retries, str(kind or "unknown"))
 
+    def unsendable(self, reason: Any) -> None:
+        """The filter replaced an attachment it cannot send (``image:image/svg+xml``)."""
+        self._append(self.unsendable_replaced, str(reason or "unknown"))
+
+    def recovery_probe(self, mode: Any) -> None:
+        """Media recovery sent one more request to find the attachment at fault."""
+        self._append(self.recovery_probes, str(mode or "unknown"))
+
+
+def _record_unsendable(metrics: HarnessMetrics, reason: Any) -> None:
+    metrics.extension(MediaHarnessMetrics).unsendable(reason)
+
 
 def _record_rejected_retry(metrics: HarnessMetrics, kind: Any) -> None:
     metrics.extension(MediaHarnessMetrics).rejected_retry(kind)
 
 
+def _record_recovery_probe(metrics: HarnessMetrics, mode: Any) -> None:
+    metrics.extension(MediaHarnessMetrics).recovery_probe(mode)
+
+
 register_llm_metric_event("media_rejected_retry", _record_rejected_retry)
+register_llm_metric_event("media_recovery_probe", _record_recovery_probe)
+register_llm_metric_event("media_unsendable", _record_unsendable)
 
 
 def image_block_count(event: Any) -> int:
-    """The image content blocks (``image_url``) an event sends to the model."""
+    """The image blocks an event actually sends to the model.
+
+    Counts ``image_url``, ``input_image`` and native ``image`` blocks that are
+    images (``attachment_kind``) the request filter does not replace anyway: an
+    SVG or an image of unknown type becomes a note, so it does not use the
+    provider's per-request image budget. Images a connection rejected are not
+    known here and still count.
+    """
+    from nooa.media_inputs import attachment_kind
+    from nooa.unifiedllm.media_inputs import unsendable_image_type
+
     images = getattr(event, "images", None)
     if not isinstance(images, list):
         return 0
     return sum(
-        1 for block in images if isinstance(block, dict) and block.get("type") == "image_url"
+        1
+        for block in images
+        if isinstance(block, dict)
+        and attachment_kind(block) == "image"
+        and unsendable_image_type(block) is None
     )
 
 

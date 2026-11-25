@@ -116,39 +116,42 @@ def test_an_image_format_models_refuse_becomes_a_notice(media_type):
     assert messages[0]["content"][0] is block  # the stored history is unchanged
 
 
-def test_remote_image_urls_are_not_checked_for_format():
-    from nooa.unifiedllm.media_inputs import filter_media_messages
+@pytest.mark.parametrize(
+    "block",
+    [
+        {"type": "image_url", "image_url": {"url": "https://example.com/a.svg"}},
+        {
+            "type": "image_url",
+            "image_url": {"url": "https://example.com/a", "format": "image/svg+xml"},
+        },
+        {"type": "input_image", "image_url": "https://example.com/scan.TIFF?sig=1"},
+        {
+            "type": "image",
+            "source": {"type": "url", "url": "https://example.com/photo.heic"},
+        },
+        {"type": "image_url", "image_url": {"url": "https://example.com/b.bmp"}},
+    ],
+)
+def test_remote_images_of_a_clearly_unsendable_type_become_a_note(block):
+    """#597 item 5: by extension or explicit type, like an inline image (common floor)."""
+    from nooa.unifiedllm.media_inputs import filter_media_messages, unsendable_image_type
 
-    block = {"type": "image_url", "image_url": {"url": "https://example.com/a.svg"}}
-    assert filter_media_messages([{"role": "user", "content": [block]}], ALL)[0]["content"] == [
-        block
-    ]
+    assert unsendable_image_type(block) is not None
+    (sent,) = filter_media_messages([{"role": "user", "content": [block]}], ALL)[0]["content"]
+    assert sent["type"] in {"text", "input_text"} and "cannot be sent" in sent["text"]
 
 
 @pytest.mark.parametrize(
     "block",
     [
-        {
-            "type": "image_url",
-            "image_url": {"url": "https://example.com/a.svg", "format": "image/svg+xml"},
-        },
-        {
-            "type": "input_image",
-            "image_url": "https://example.com/a.svg",
-            "format": "image/svg+xml",
-        },
-        {
-            "type": "image",
-            "source": {
-                "type": "url",
-                "url": "https://example.com/a.svg",
-                "media_type": "image/svg+xml",
-            },
-        },
+        {"type": "image_url", "image_url": {"url": "https://example.com/a.png"}},
+        {"type": "image_url", "image_url": {"url": "https://example.com/render?id=7"}},
+        {"type": "image_url", "image_url": {"url": "https://example.com/a", "format": "image/png"}},
+        # An unknown-but-not-clearly-refused type: the provider decides.
+        {"type": "image_url", "image_url": {"url": "https://example.com/a.avif"}},
     ],
 )
-def test_remote_images_with_a_format_hint_are_sent_unchanged(block):
-    """Image.from_url(url, media_type="image/svg+xml"): the provider fetches it (Severin, #595)."""
+def test_remote_images_of_a_sendable_or_unknown_type_are_sent_unchanged(block):
     from nooa.unifiedllm.media_inputs import filter_media_messages, unsendable_image_type
 
     assert unsendable_image_type(block) is None
@@ -157,16 +160,41 @@ def test_remote_images_with_a_format_hint_are_sent_unchanged(block):
     ]
 
 
-def test_image_from_url_with_an_svg_type_is_not_replaced():
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("https://example.com/a.png", "image/png"),
+        ("https://example.com/a.JPG?x=1#y", "image/jpeg"),
+        ("https://example.com/a.svg", "image/svg+xml"),
+        ("https://example.com/render?id=7", ""),
+        ("https://example.com/notes.txt", ""),
+        ("data:image/png;base64,iVBO", "image/png"),
+        ("data:image/svg+xml;base64,PHN2Zy8+", "image/svg+xml"),
+        ("data:text/plain;base64,aGk=", ""),
+    ],
+)
+def test_image_from_url_guesses_its_type_and_never_invents_jpeg(url, expected):
+    from nooa.runtime.media_capture import media_to_content_block
+
+    image = Image.from_url(url)
+    assert image.media_type == expected
+    block = media_to_content_block(image)
+    assert block["image_url"].get("format", "") == expected
+
+
+def test_image_from_url_keeps_an_explicit_type():
+    assert Image.from_url("https://example.com/a", media_type="image/webp").media_type == (
+        "image/webp"
+    )
+
+
+def test_image_from_url_svg_is_replaced_by_a_note():
     from nooa.runtime.media_capture import media_to_content_block
     from nooa.unifiedllm.media_inputs import filter_media_messages
 
-    block = media_to_content_block(
-        Image.from_url("https://example.com/a.svg", media_type="image/svg+xml")
-    )
-    assert filter_media_messages([{"role": "user", "content": [block]}], ALL)[0]["content"] == [
-        block
-    ]
+    block = media_to_content_block(Image.from_url("https://example.com/a.svg"))
+    (sent,) = filter_media_messages([{"role": "user", "content": [block]}], ALL)[0]["content"]
+    assert sent["type"] == "text" and "image/svg+xml" in sent["text"]
 
 
 def test_a_base64_anthropic_svg_source_is_still_replaced():
