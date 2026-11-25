@@ -42,6 +42,14 @@ def test_unknown_attribute_still_raises():
         nooa.does_not_exist  # noqa: B018
 
 
+@pytest.mark.parametrize("name", ["agent.Agent", "does_not_exist.x", ".agent", "a..b"])
+def test_non_identifier_attribute_returns_the_getattr_default(name):
+    """Only plain names fall back to a submodule import; others raise AttributeError."""
+    import nooa
+
+    assert getattr(nooa, name, None) is None
+
+
 def _run(code: str) -> str:
     return subprocess.run(
         [sys.executable, "-c", code], capture_output=True, text=True, check=True

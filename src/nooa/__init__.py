@@ -204,7 +204,8 @@ def __getattr__(name):
         return getattr(experimental, name)
     # ``import nooa`` used to load most submodules eagerly, so code may rely
     # on ``nooa.<submodule>`` without importing it. Import it on access.
-    if not name.startswith("__"):
+    # Only plain names: ``getattr(nooa, "a.b", default)`` must get AttributeError.
+    if name.isidentifier() and not name.startswith("__"):
         import importlib.util
 
         if importlib.util.find_spec(f"{__name__}.{name}") is not None:
