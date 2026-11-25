@@ -234,3 +234,77 @@ async def test_setup_failure_restores_ambient_stack(relay_events, monkeypatch, f
     ) == ["end", "start"]
     assert {event["propagation_root_uuid"] for event in events} == {root}
     assert {event["parent_uuid"] for event in events} == {str(request.uuid)}
+
+
+async def test_distinct_concurrent_sessions_do_not_share_roots(relay_events):
+    agent = Agent(llm=MagicMock())
+    roots = [str(uuid4()), str(uuid4())]
+    ready = [asyncio.Event(), asyncio.Event()]
+    parents = {}
+
+    async def session(index):
+        # Each request owns its stack, as in an incoming request boundary.
+        with relay.use_scope_stack(relay.create_scope_stack()):
+            with _session(roots[index]) as request:
+                parents[index] = str(request.uuid)
+
+                async def body(ctx):
+                    ready[index].set()
+                    await ready[1 - index].wait()
+                    assert relay.capture_propagation_context().root_uuid == roots[index]
+                    return ctx
+
+                await _call(agent, f"session_{index}", body)
+                assert relay.scope.get_handle().uuid == request.uuid
+                assert relay.capture_propagation_context().root_uuid == roots[index]
+
+    with _installed(agent):
+        await asyncio.gather(session(0), session(1))
+    events = await _function_events(relay_events)
+    assert len(events) == 4
+    for index, root in enumerate(roots):
+        own = [event for event in events if event["name"] == f"Agent.session_{index}"]
+        assert {event["scope_category"] for event in own} == {"start", "end"}
+        assert {event["propagation_root_uuid"] for event in own} == {root}
+        assert {event["parent_uuid"] for event in own} == {parents[index]}
+
+
+async def test_external_cancellation_restores_child_and_parent_context(relay_events):
+    agent = Agent(llm=MagicMock())
+    root = str(uuid4())
+    started = asyncio.Event()
+
+    async def blocked(ctx):
+        started.set()
+        await asyncio.Future()
+
+    async def succeed(ctx):
+        return ctx
+
+    with _session(root) as request, _installed(agent):
+
+        async def child():
+            try:
+                await _call(agent, "cancelled", blocked)
+            except asyncio.CancelledError:
+                assert relay.scope.get_handle().uuid == request.uuid
+                assert relay.capture_propagation_context().root_uuid == root
+                await _call(agent, "recovered", succeed)
+                raise
+
+        task = asyncio.create_task(child())
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert relay.scope.get_handle().uuid == request.uuid
+        assert relay.capture_propagation_context().root_uuid == root
+        await _call(agent, "parent_after", succeed)
+    events = await _function_events(relay_events)
+    assert len(events) == 6
+    assert {event["propagation_root_uuid"] for event in events} == {root}
+    assert {event["parent_uuid"] for event in events} == {str(request.uuid)}
+    for name in ("cancelled", "recovered", "parent_after"):
+        assert {
+            event["scope_category"] for event in events if event["name"] == f"Agent.{name}"
+        } == {"start", "end"}

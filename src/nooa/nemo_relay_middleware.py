@@ -24,6 +24,14 @@ Or use ``nemo_relay_scope()`` which handles install/uninstall automatically::
     async with nemo_relay_scope(agent, "my-agent"):
         result = await agent.my_method()
 
+Compatibility:
+    Relay 0.6 is the supported full integration. Relay 0.11's public stack
+    APIs preserve propagation for agent calls, but this does not imply full
+    LLM/tool compatibility: modern tool callbacks require ToolExecutionResult
+    instead of raw payloads. Upgrading also requires two-argument sanitizer
+    callbacks and flush_async() inside async subscriber tests. Keep the 0.6
+    dependency bound until the full integration is migrated and validated.
+
 Requirements:
     ``nemo_relay`` must be installed (``uv sync --extra nemo-relay``).
     If not installed, ``install_nemo_relay()`` and ``nemo_relay_scope()`` raise
