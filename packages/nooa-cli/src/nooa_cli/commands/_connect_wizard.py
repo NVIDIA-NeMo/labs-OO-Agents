@@ -3303,6 +3303,9 @@ def save_model(state: WizardState) -> bool:
                 state.result.entry, state.path, alias=state.alias, expected_alias=expected_alias
             )
         state.saved = SavedModel(state.alias, Path(state.path))
+        from nooa.secrets import load_secrets_into_env
+
+        load_secrets_into_env()
         view.section("Saved model")
         view.fields(scrub_setup(state, [("Alias", state.alias), ("File", state.path)]))
         view.media_settings(state.result.entry)
