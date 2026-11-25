@@ -109,12 +109,15 @@ def test_submodules_resolve_as_attributes_after_bare_import():
 
 
 def test_debug_handler_is_installed_at_import():
+    # Read the handler before importing the public module, so the test fails
+    # if that import, rather than ``import nooa``, installs it.
     code = (
         "import signal\n"
         "import nooa\n"
+        "installed = signal.getsignal(signal.SIGUSR2)\n"
         "from nooa.runtime import debug_handler\n"
         "print(debug_handler._handler_installed,"
-        " signal.getsignal(signal.SIGUSR2) is debug_handler._debug_signal_handler)\n"
+        " installed is debug_handler._debug_signal_handler)\n"
     )
     if not hasattr(__import__("signal"), "SIGUSR2"):
         pytest.skip("SIGUSR2 is POSIX-only")
