@@ -221,9 +221,9 @@ def _cell_names() -> dict[str, Any]:
 
 
 def _register_cell_names() -> None:
-    from nooa.runtime.namespace_providers import register_namespace_provider
+    from nooa.runtime.namespace_providers import _register_builtin_provider
 
-    register_namespace_provider("strategies", _cell_names)
+    _register_builtin_provider("strategies", _cell_names)
 
 
 _register_cell_names()

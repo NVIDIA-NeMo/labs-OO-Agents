@@ -214,9 +214,9 @@ def _cell_names() -> dict[str, object]:
 
 
 def _register_cell_names() -> None:
-    from nooa.runtime.namespace_providers import register_namespace_provider
+    from nooa.runtime.namespace_providers import _register_builtin_provider
 
-    register_namespace_provider(
+    _register_builtin_provider(
         "media",
         _cell_names,
         prompt_note=(

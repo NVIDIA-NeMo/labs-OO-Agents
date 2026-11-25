@@ -6,6 +6,14 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `import nooa` no longer loads the framework: every name in `nooa.__all__`
+  now loads on first use, and `nooa.<submodule>` is imported on attribute
+  access. Importing a light subpackage such as `nooa.overflow` now loads 6
+  `nooa` modules instead of 102 (about 25 ms instead of 150 ms);
+  `from nooa import Agent` is unchanged in what it gives you. The SIGUSR2
+  debug handler is still installed at `import nooa`; its implementation moved
+  to `nooa._debug_handler`, and `nooa.runtime.debug_handler` remains its
+  public path. (#590)
 - Dependency security update. LiteLLM is now locked at 1.100.5
   (CVE-2026-114612); the `litellm` requirement starts at 1.100.4 and excludes
   the unfixed 1.101-1.103 releases. LiteLLM now requires boto3. Chat
