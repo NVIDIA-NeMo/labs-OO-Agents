@@ -78,7 +78,7 @@ def _bounded(text: str) -> str:
 def _process_start_time(pid: int) -> str | None:
     """Linux process identity, so escalation cannot signal a reused PID."""
     try:
-        return Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[19]
+        return Path(f"/proc/{pid}/stat").read_bytes().rsplit(b")", 1)[1].split()[19].decode("ascii")
     except (OSError, IndexError):
         return None
 

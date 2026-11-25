@@ -341,9 +341,13 @@ def _import_trace_file(
         batch = []
         batch_input_bytes = 0
 
-    with open(jsonl_path, encoding="utf-8") as f:
-        for raw_line in f:
-            raw_line = raw_line.strip()
+    with open(jsonl_path, "rb") as f:
+        for line_num, raw_bytes in enumerate(f, 1):
+            try:
+                raw_line = raw_bytes.decode("utf-8").strip()
+            except UnicodeDecodeError as error:
+                errors.append(f"{jsonl_path.name}:{line_num}: not valid UTF-8: {error.reason}")
+                continue
             if not raw_line:
                 continue
             try:

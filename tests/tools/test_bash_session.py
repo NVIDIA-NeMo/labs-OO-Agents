@@ -189,3 +189,13 @@ class TestPublicStateHelpers:
         await running
         assert session.is_busy() is False
         assert await session.snapshot_cwd_env() is not None
+
+
+def test_process_start_time_ignores_non_utf8_comm(monkeypatch):
+    """A child may set a non-UTF-8 ``comm``; only the numeric field is decoded."""
+    from nooa.tools import _bash_session
+
+    fields = " ".join(str(n) for n in range(3, 25))  # field N holds "N"; 22 is start time
+    record = b"123 (\xff\xfename) " + fields.encode()
+    monkeypatch.setattr(_bash_session.Path, "read_bytes", lambda self: record)
+    assert _bash_session._process_start_time(123) == "22"

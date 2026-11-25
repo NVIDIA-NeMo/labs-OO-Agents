@@ -233,7 +233,7 @@ def _release(_directory: object) -> None:
 def _start_time(pid: int) -> str | None:
     """A process's start time (Linux), so a reused pid is never mistaken for it."""
     try:
-        return Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[19]
+        return Path(f"/proc/{pid}/stat").read_bytes().rsplit(b")", 1)[1].split()[19].decode("ascii")
     except (OSError, IndexError):
         return None
 

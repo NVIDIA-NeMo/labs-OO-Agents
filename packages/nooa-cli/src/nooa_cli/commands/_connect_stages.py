@@ -840,5 +840,5 @@ def run_stage(
     # error messages, so remove both from the report.
     report = scrub_report(report, api_key=key, api_key_env=api_key_env)
     report = scrub_report(report, api_key=discovery_key, api_key_env=discovery_api_key_env)
-    click.echo(json.dumps(report, ensure_ascii=False))
+    click.echo(json.dumps(report))
     return 0 if ok else failure_code

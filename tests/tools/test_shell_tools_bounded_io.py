@@ -150,7 +150,7 @@ async def test_ranged_read_matches_legacy_slice(sh, tmp_path, start, end):
 async def test_exotic_line_breaks_keep_legacy_numbering(sh, tmp_path, breaker):
     """str.splitlines() boundaries are preserved, not \\n-only file iteration."""
     path = tmp_path / "f.txt"
-    path.write_text(f"one{breaker}two\nthree{breaker}four\nfive\n")
+    path.write_text(f"one{breaker}two\nthree{breaker}four\nfive\n", encoding="utf-8")
 
     for start, end in ((1, 1), (1, 3), (2, 4), (3, 6)):
         want_text, want_start, want_end = _legacy_read(path, start, end)
@@ -163,10 +163,10 @@ async def test_exotic_line_breaks_keep_legacy_numbering(sh, tmp_path, breaker):
 def test_iter_lines_matches_splitlines_exactly(tmp_path):
     path = tmp_path / "f.txt"
     body = f"a{EXOTIC_BREAKS}b\nc\r\nd\re\nlast-no-newline"
-    path.write_text(body)
+    path.write_text(body, encoding="utf-8")
 
     assert list(iter_lines_keepends(path, max_line_chars=DEFAULT_MAX_FILE_BYTES)) == (
-        path.read_text().splitlines(keepends=True)
+        path.read_text(encoding="utf-8").splitlines(keepends=True)
     )
 
 

@@ -204,7 +204,9 @@ def install():
                     break
         if stale_indices:
             cleaned = line_ending.join(ln for i, ln in enumerate(lines) if i not in stale_indices)
-            profile.write_text(cleaned + (line_ending if cleaned else ""))
+            profile.write_text(
+                cleaned + (line_ending if cleaned else ""), encoding="utf-8", newline=""
+            )
             existing = cleaned
             click.secho(
                 f"Removed stale _NEMO_COMPLETE completion line(s) from {profile}",
@@ -218,7 +220,7 @@ def install():
         # Fish: write completions file
         profile.parent.mkdir(parents=True, exist_ok=True)
         script = _render_script(_FISH_SCRIPT)
-        profile.write_text(script + "\n")
+        profile.write_text(script + "\n", encoding="utf-8")
         click.secho(f"Completions written to {profile}", fg="green")
     else:
         # Bash/zsh: append eval one-liner to profile
