@@ -226,8 +226,8 @@ class SkillManager(Skill):
             attr = _leaf(entry.key)
             return (
                 f"{entry.name} (text skill): {entry.description}\n"
-                f"Source: {entry.source}; its files: self.{attr}.read_file(path), "
-                f"its scripts: self.{attr}.run_script(name)\n\n"
+                f"Source: {entry.source}; its files: self.{attr}.files; read or run them "
+                f"with self.{attr}.shell, which starts in the skill's folder\n\n"
                 f"Instructions:\n{self.read(entry.name)}"
             )
         header = entry.line()

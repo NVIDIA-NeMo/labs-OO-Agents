@@ -16,13 +16,15 @@ ASSETS = Path(__file__).parent.parent / "assets"
 
 
 class FrontendAgent(Agent, llm=llm):
-    """Agent with a single file-based skill."""
+    """Frontend assistant with a file-based design skill."""
 
     frontend_design: TextSkill
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.frontend_design = TextSkill(path=ASSETS / "frontend-design")
+        # The model can inspect self.frontend_design.files and use
+        # self.frontend_design.shell for file access or script execution.
 
     async def respond(self, prompt: str) -> str:
         """Respond to a user message."""

@@ -436,7 +436,7 @@ Active: methodwriting, repo, shell, skill_writing, todo, workspace_settings, git
 `SkillManager.source_dir` is an inherited implementation directory, not a discovery
 root, so it is hidden from model-facing docs. Discovery still accepts a list of
 skill directories. Individual skills retain their own `source_dir`, and text
-skills retain `read_file(path)` for their files.
+skills list their files in `files` and read or run them with their own `shell`.
 
 `/skills list` shows every skill with its kind and state; `/skills activate`
 and `/skills deactivate` save the choice for code skills in the workspace

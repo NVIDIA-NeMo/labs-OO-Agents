@@ -6,6 +6,15 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Text skills (`TextSkill(path=...)`) now have a `files: list[SkillFile]`
+  manifest and a skill-local `ShellTools` that starts in the skill root. The
+  `read_file()` / `run_script()` helpers are removed; use `skill.shell.read()` /
+  `skill.shell.run()` instead. Unlike `read_file()`, the shell does not restrict
+  paths to the skill directory, and it keeps its state between calls,
+  including `cd`. Its `detach()` is now async and closes the shell, so a text
+  skill you construct yourself needs `await skill.detach()`, and
+  `SkillRegistry.register()` refuses an instance that is still attached to
+  another agent.
 - Dependency security update. LiteLLM is now locked at 1.100.5
   (CVE-2026-114612); the `litellm` requirement starts at 1.100.4 and excludes
   the unfixed 1.101-1.103 releases. LiteLLM now requires boto3. Chat
