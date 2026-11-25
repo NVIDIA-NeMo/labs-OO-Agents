@@ -245,6 +245,8 @@ class HarnessMetrics(BaseModel):
     tool_call_skipped_count: int = 0
     text_only_tool_markup_count: int = 0
     empty_response_count: int = 0
+    length_continuation_count: int = 0
+    length_continuation_models: list[str] = Field(default_factory=list)
     gpt4o_double_quote_fix_count: int = 0
     gpt4o_double_quote_fix_previews: list[str] = Field(default_factory=list)
     variable_refs_resolved: list[str] = Field(default_factory=list)
@@ -422,6 +424,10 @@ class HarnessMetrics(BaseModel):
 
     def empty_response(self) -> None:
         self.empty_response_count += 1
+
+    def length_continuation(self, model_name: str = "") -> None:
+        self.length_continuation_count += 1
+        self._append(self.length_continuation_models, model_name or "unknown")
 
     def gpt4o_double_quote_fix(self, original_preview: str = "") -> None:
         self.gpt4o_double_quote_fix_count += 1
@@ -846,6 +852,19 @@ _SPAN_SCHEMA: tuple[SchemaEntry, ...] = (
         "Empty responses",
         "Response Format Fixups",
         lambda m: m.empty_response_count,
+    ),
+    SchemaEntry(
+        "harness.length_continuation.count",
+        "Length continuations",
+        "Response Format Fixups",
+        lambda m: m.length_continuation_count,
+    ),
+    SchemaEntry(
+        "harness.length_continuation.models",
+        "Length continuation models",
+        "Response Format Fixups",
+        lambda m: m.length_continuation_models,
+        True,
     ),
     SchemaEntry(
         "harness.gpt4o_double_quote_fix.count",
