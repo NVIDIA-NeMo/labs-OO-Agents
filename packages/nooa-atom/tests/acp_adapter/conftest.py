@@ -121,11 +121,17 @@ async def make_adapter(client):
         model: str | None = None,
         client_: Any = None,
         client_info: Any = None,
+        end_turn_on_waiting: bool = False,
     ) -> Any:
         def new_registry(store: Any) -> SessionRegistry:
             return SessionRegistry(store, agent_factory=models, llm_factory=llm_factory)
 
-        adapter = AtomACPAgent(new_registry, agent_spec=agent_spec, model=model)
+        adapter = AtomACPAgent(
+            new_registry,
+            agent_spec=agent_spec,
+            model=model,
+            end_turn_on_waiting=end_turn_on_waiting,
+        )
         adapter.on_connect(client_ or client)
         await adapter.initialize(
             PROTOCOL_VERSION, client_capabilities=capabilities, client_info=client_info

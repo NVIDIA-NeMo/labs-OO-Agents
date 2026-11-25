@@ -163,6 +163,15 @@ def _resolve_agent_spec(_ctx: click.Context, _param: click.Parameter, value: str
     is_flag=True,
     help=f"With --http on a loopback address, accept connections without the {TOKEN_ENV} token.",
 )
+@click.option(
+    "--end-turn-on-waiting",
+    is_flag=True,
+    envvar="NOOA_ATOM_END_TURN_ON_WAITING",
+    help=(
+        "End a session/prompt with end_turn when the turn ends Waiting, instead of keeping "
+        "it open until a later turn ends. Or set NOOA_ATOM_END_TURN_ON_WAITING=1."
+    ),
+)
 @click.option("--worker-fd", type=int, default=None, hidden=True)
 @click.option("--id-base", type=int, default=None, hidden=True)
 @click.pass_context
@@ -178,6 +187,7 @@ def command(
     port: int,
     allowed_origins: tuple[str, ...],
     no_auth: bool,
+    end_turn_on_waiting: bool,
     worker_fd: int | None,
     id_base: int | None,
 ) -> None:
@@ -250,6 +260,7 @@ def command(
         sessions_dir=sessions_dir,
         tee=tee,
         single_process=single_process,
+        end_turn_on_waiting=end_turn_on_waiting,
         worker_fd=worker_fd,
         id_base=id_base,
         http=HttpOptions(
@@ -285,6 +296,7 @@ def run(
     worker_fd: int | None = None,
     id_base: int | None = None,
     http: HttpOptions | None = None,
+    end_turn_on_waiting: bool = False,
 ) -> None:
     """Serve ACP until the client leaves, in the role the options select.
 
@@ -308,6 +320,7 @@ def run(
             agent_spec=agent_spec,
             sessions_dir=sessions_dir,
             agent_factory=agent_factory,
+            end_turn_on_waiting=end_turn_on_waiting,
         )
     elif single_process:
         asyncio.run(
@@ -318,6 +331,7 @@ def run(
                 sessions_dir=sessions_dir,
                 tee=tee,
                 agent_factory=agent_factory,
+                end_turn_on_waiting=end_turn_on_waiting,
                 acp_stdin=acp_stdin,
                 acp_stdout=acp_stdout,
             )
@@ -431,6 +445,7 @@ def _run_worker(
     agent_spec: str | None,
     sessions_dir: Path | None,
     agent_factory: Any,
+    end_turn_on_waiting: bool = False,
 ) -> None:
     # --tee and NOOA_ACP_MCP_TRACE are ignored here: the router records the
     # client's side. The server logs each workspace's model configuration
@@ -450,7 +465,11 @@ def _run_worker(
 
     def make_agent() -> AtomACPAgent:
         return AtomACPAgent(
-            new_registry, sessions_dir=sessions_dir, agent_spec=agent_spec, model=model
+            new_registry,
+            sessions_dir=sessions_dir,
+            agent_spec=agent_spec,
+            model=model,
+            end_turn_on_waiting=end_turn_on_waiting,
         )
 
     run_worker(
@@ -483,6 +502,7 @@ async def _serve(
     tee: Path | None,
     agent_factory: Any,
     acp_stdin: int,
+    end_turn_on_waiting: bool = False,
     acp_stdout: int,
 ) -> None:
     from nooa_atom.acp._mcp_trace import MCPHandoffTrace
@@ -510,6 +530,7 @@ async def _serve(
             sessions_dir=sessions_dir,
             agent_spec=agent_spec,
             model=model,
+            end_turn_on_waiting=end_turn_on_waiting,
             observers=observers,
             input_fd=acp_stdin,
             output_fd=acp_stdout,

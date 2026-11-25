@@ -311,6 +311,9 @@ class Session:
         self._finished: OrderedDict[str, Any] = OrderedDict()
         self._consumed: list[str] = []  # consumed since the last turn settled
         self._waiting: list[str] = []  # items whose prompt stays open over a Waiting
+        # True: a Waiting outcome resolves the items its turn consumed, as Done
+        # does, so nothing stays in _waiting (the ACP --end-turn-on-waiting).
+        self.waiting_ends_outcome = False
         self._recording_error: BaseException | None = None
         self._started = False
         self._usage_before: Usage = self.info.usage.model_copy()
@@ -708,7 +711,7 @@ class Session:
         Works for items from ``submit()`` and for steers: a steer a model
         call saw resolves with that turn; one admitted again as a message
         resolves with the turn that consumed it. ``Waiting`` outcomes keep
-        it open; a cancelled turn resolves it with ``TurnCancelledOutcome``;
+        it open (with ``waiting_ends_outcome`` they resolve it); a cancelled turn resolves it with ``TurnCancelledOutcome``;
         a failed turn raises ``TurnFailedError``. The outcomes of the last
         256 finished items are kept, so a recently finished item still
         answers; ``KeyError`` for an unknown item or an older one.
@@ -1023,7 +1026,7 @@ class Session:
         )
         self.info.reply_count += 1  # as the store counts it, with each agent message
         waiting = self._waiting + consumed
-        if kind != "waiting":
+        if kind != "waiting" or self.waiting_ends_outcome:
             for item_id in waiting:
                 self._resolve(item_id, outcome)
                 self._user_items.discard(item_id)

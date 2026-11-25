@@ -32,7 +32,7 @@ from nooa_atom.session.store import SessionStore
 
 from nooa.context_blocks.roles import Role
 from nooa.events import Notification, PythonOutput, ResultStatus
-from nooa.interactive import Done, NeedInput
+from nooa.interactive import Done, NeedInput, Waiting
 from nooa.llm_types import LLMUsage
 from nooa.storage.json_snapshot import snapshot_to_json
 
@@ -107,6 +107,24 @@ async def test_waiting_keeps_prompt_open_until_a_later_turn_ends(make_session):
 
     jobs.put("job output")
     assert await asyncio.wait_for(pending, TIMEOUT) == Done(explanation="job finished")
+
+
+async def test_waiting_ends_outcome_resolves_the_prompt_with_the_waiting(make_session):
+    session, _ = make_session(wait_on("jobs"), done("job finished"), start=False)
+    session.waiting_ends_outcome = True
+    jobs = session._agent.queue_manager.queue("jobs")  # a host-declared channel
+    session.start()
+    ended = []
+    session.subscribe(lambda e: ended.append(e) if isinstance(e, TurnEndedUpdate) else None)
+
+    outcome = await asyncio.wait_for(session.prompt("run the job"), TIMEOUT)
+    assert outcome == Waiting(explanation="waiting", on=["jobs"])
+    assert (session._waiting, session._futures) == ([], {})
+    assert await session.cancel() is False  # nothing left open to cancel
+
+    jobs.put("job output")
+    await until(lambda: len(ended) == 2)
+    assert [e.outcome_kind for e in ended] == ["waiting", "done"]
 
 
 async def test_prompt_for_an_item_taken_mid_turn_resolves_with_that_turn(make_session):
