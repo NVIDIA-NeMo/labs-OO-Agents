@@ -18,6 +18,7 @@ Reference: "Executable Code Actions Elicit Better LLM Agents" (Wang et al.)
 
 import ast
 import asyncio
+import contextlib
 import contextvars
 import inspect
 import json
@@ -58,12 +59,17 @@ from nooa.events import (
     DebugTrace,
     Error,
     ExecutionSignal,
+    Feedback,
     LoopGuardTriggered,
     PythonOutput,
     Task,
     TextOnlyReply,
 )
-from nooa.runtime.execution_namespace import ExecutionNamespace
+from nooa.runtime.execution_namespace import (
+    ExecutionNamespace,
+    enter_call_namespace,
+    write_back_session_locals,
+)
 from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.runtime.hooks import call_after_hook, call_before_hook
 from nooa.runtime.sandbox.errors import SandboxExecutionError
@@ -79,9 +85,7 @@ from nooa.strategies.codeact_errors import (
 )
 from nooa.strategies.composite import CompositeStrategy
 from nooa.strategies.generated_code import (
-    ExecutionNamespaceBuilder,
     GeneratedCodeValidator,
-    HelperFunctionManager,
 )
 from nooa.strategies.loop_guard import LoopGuard, action_fingerprint, mentions_return_result
 from nooa.strategies.template import TemplateStrategy
@@ -131,11 +135,21 @@ MAX_LENGTH_RECOVERIES = 2
 """Cut-off replies per call that get a recovery nudge before the call fails."""
 
 OUTPUT_LIMIT_NUDGE = (
-    "Your last reply was cut off at the output-token limit before it finished, so "
-    "nothing ran. Reply again more briefly: keep reasoning short and call the "
-    "tool with the next step now."
+    "Your last reply was cut off at the output-token limit while you were still "
+    "writing the tool call, so none of its code ran. Write it again in smaller "
+    "steps: keep reasoning short and split long code, or a long result, over "
+    "several cells (for example, build the result in a variable first, then "
+    "return it)."
 )
-"""Feedback after a reply stopped at its output-token limit (finish_reason=length)."""
+"""Feedback after a tool call (code cell or ``return_result``) was cut off at its
+output-token limit (finish_reason=length). The half-written call never runs."""
+
+LENGTH_CONTINUATION_NUDGE = (
+    "Your last reply was cut off at the output-token limit. Continue exactly "
+    "where you left off; do not restart or repeat what you already wrote."
+)
+"""Feedback after plain text or reasoning (no tool call) was cut off at its
+output-token limit. The partial reply stays in history and the model continues it."""
 
 MAX_ITERATIONS_MESSAGE = (
     "Generation failed after {iterations} iterations (max_iterations={max_iterations}). "
@@ -201,7 +215,15 @@ type TextOnlyResponseHandler = Callable[
 
 
 def return_text_as_result(context: TextOnlyResponseContext) -> TextOnlyResponseAction:
-    """Opt-in handler that validates non-empty text (or ``None``) as the result."""
+    """Opt-in handler that validates non-empty text (or ``None``) as the result.
+
+    A reply that finishes text cut off at the output-token limit is only the
+    tail of the answer (the earlier parts are in history, not joined), so it is
+    not accepted: the model is asked to return the whole answer with
+    ``return_result`` instead (CONTINUED_TEXT_NOTE).
+    """
+    if (getattr(context.response, "metadata", None) or {}).get("output_continued"):
+        return TextOnlyResponseAction.retry(_text_only_correction(context))
     value = context.content if context.content.strip() else None
     return TextOnlyResponseAction.return_result(value)
 
@@ -330,17 +352,28 @@ def _text_only_correction(
     function inside it), as in CodeActV2; else the two-tool form.
     """
     method = context.call.method_name
+    continued = bool((getattr(context.response, "metadata", None) or {}).get("output_continued"))
     if python_tool is None:
         how = (
             f"To finish `{method}`, call `return_result(value)`. "
             "To do more work, call `execute_python(code)`. "
             "Re-issue your response now as one of those tool calls."
         )
+        if continued:
+            # The text was cut off and continued (CONTINUED_TEXT_NOTE): asking
+            # for it again in one call would hit the same output limit.
+            how = (
+                f"To finish `{method}`, call `return_result(value)`. "
+                "To do more work, call `execute_python(code)`. "
+                f"{CONTINUED_TEXT_NOTE}"
+            )
     else:
         how = (
             f"To finish `{method}`, call `{python_tool}` with `return_result(value)` inside "
             f"the cell. To continue working, call `{python_tool}` with the next computation."
         )
+        if continued:
+            how = f"{how} {CONTINUED_TEXT_NOTE}"
     validation_feedback = (
         f"\n\nThe attempted result was invalid:\n{validation_error}" if validation_error else ""
     )
@@ -352,6 +385,15 @@ def _text_only_correction(
             f"{how}{validation_feedback}"
         )
     )
+
+
+CONTINUED_TEXT_NOTE = (
+    "Your reply was cut off at the output-token limit and then continued; all of "
+    "its parts are kept above. Do not re-send it in a single call: build a long "
+    "value over several cells (for example, append the parts to a variable), then "
+    "return it."
+)
+"""Added to the text-only correction when the plain-text reply was continued."""
 
 
 def _handler_name(handler: TextOnlyResponseHandler) -> str:
@@ -444,6 +486,9 @@ class CodeActSession:
     consecutive_api_errors: int = 0
     consecutive_text_only: int = 0
     length_recoveries: int = 0  # Cut-off (finish_reason=length) replies nudged so far
+    # A cut-off text-only reply is being continued; the reply that finishes it is
+    # marked output_continued for the text-only handler (all parts stay in history).
+    length_text_continued: bool = False
     session_locals: dict[str, Any] = field(default_factory=dict)
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
     sandbox_executor: Any = field(default=None)  # SandboxedExecutor when backend="sandbox"
@@ -1023,31 +1068,6 @@ Standard Python builtins and agent instance (`self`) are available."""
         """
         ...
 
-    # Keys added by the session itself that should not leak to the caller.
-    _SESSION_INTERNAL_KEYS = frozenset({"Out", "__repl_captured_locals__"})
-
-    @staticmethod
-    def _sync_session_locals(call: "CurrentCall", session: "CodeActSession") -> None:
-        """Write back session_locals to caller's dict, filtering session internals."""
-        if call.session_locals is None:
-            return
-        namespace = session.execution_namespace
-        if namespace is not None:
-            # Only names cells (or the caller's seed) bound, not the seeded runtime.
-            filtered = {
-                k: namespace.globals[k]
-                for k in namespace.user_names
-                if k in namespace.globals and k not in CodeActStrategy._SESSION_INTERNAL_KEYS
-            }
-        else:
-            filtered = {
-                k: v
-                for k, v in session.session_locals.items()
-                if k not in CodeActStrategy._SESSION_INTERNAL_KEYS
-            }
-        call.session_locals.clear()
-        call.session_locals.update(filtered)
-
     def _create_sandbox_executor(
         self, runtime: RuntimeServices, call: "CurrentCall", builtins: dict[str, Any]
     ) -> Any:
@@ -1111,19 +1131,14 @@ Standard Python builtins and agent instance (`self`) are available."""
         # Guarantee the sandbox worker is torn down on EVERY exit — including the
         # GenerationError paths inside the loop — not just the success returns.
         session_holder: dict[str, Any] = {}
-        namespace = None  # The sandbox backend keeps its worker's namespace.
-        if self.config.execution_backend == "inprocess":
-            from nooa.runtime.execution_namespace import default_execution_namespace
-
-            selector = getattr(runtime.agent, "execution_namespace_for", None)  # None: not an Agent
-            namespace = selector(call) if selector is not None else None
-            if namespace is None:
-                namespace = default_execution_namespace(call)
-        call.execution_namespace = namespace
+        # The sandbox backend keeps its worker's namespace.
+        inprocess = self.config.execution_backend == "inprocess"
+        call.execution_namespace = None
         try:
-            if namespace is None:
-                return await self._run_generation(runtime, call, session_holder)
-            with namespace.enter({}):
+            with (
+                enter_call_namespace(runtime.agent, call) if inprocess else contextlib.nullcontext()
+            ) as namespace:
+                call.execution_namespace = namespace
                 return await self._run_generation(runtime, call, session_holder)
         finally:
             session = session_holder.get("session")
@@ -1160,17 +1175,11 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         session.execution_namespace = call.execution_namespace
         if session.execution_namespace is not None:
-            namespace = session.execution_namespace
-            session.session_locals = namespace.globals
-            # Caller-provided locals (persistent stack) seed the owned namespace
-            # as user globals; _sync_session_locals writes them back.
-            if call.session_locals is not None:
-                for name, value in call.session_locals.items():
-                    if name not in namespace.reserved:
-                        namespace.globals[name] = value
-                        namespace.user_names.add(name)
+            # The cells' globals (seeded with the caller's session_locals).
+            session.session_locals = session.execution_namespace.globals
         elif call.session_locals is not None:
-            # Seed session_locals from caller-provided dict (persistent stack)
+            # Sandbox: the worker owns the cells' namespace; the parent-side
+            # lookups (tool names, a return_result variable name) read the seed.
             session.session_locals.update(call.session_locals)
         # Expose this live dictionary to dynamic context renderers. Unlike
         # call.session_locals, this also receives names defined by model cells.
@@ -1264,6 +1273,8 @@ Standard Python builtins and agent instance (`self`) are available."""
                     # Raised while building the prompt, before any LLM request,
                     # so it neither counts as nor clears an API error.
                     self._handle_block_syntax_error(e, session, runtime)
+                    # The model answers the correction, not the cut-off text.
+                    session.length_text_continued = False
                     continue
 
                 except Exception as e:
@@ -1310,11 +1321,13 @@ Standard Python builtins and agent instance (`self`) are available."""
                 session.reset_api_errors()
 
                 # Output-limit responses are incomplete even when they carry
-                # partial text. Preserve the exact LLMResponse for diagnostics,
-                # but never let a text-only handler accept it as a successful
-                # result. Empty turns are filtered from provider projection.
+                # partial text. Preserve the exact LLMResponse in history, but
+                # never run a cut-off tool call or let a text-only handler
+                # accept cut-off text as a result. Empty turns are filtered
+                # from provider projection.
                 if response.finish_reason == "length":
                     session.record_error()
+                    get_harness_metrics().length_continuation(response.model_name)
                     if not response.content and not response.tool_calls:
                         get_harness_metrics().empty_response()
                     runtime.event_manager.add(
@@ -1322,15 +1335,22 @@ Standard Python builtins and agent instance (`self`) are available."""
                             content=f"Truncated response: {_response_debug_details(response)}"
                         )
                     )
-                    # A cut-off reply ran nothing. Give the model a bounded number
-                    # of chances to answer briefly before failing the call.
+                    # A cut-off tool call (code cell or return_result) is never
+                    # executed: ask for it again in smaller steps. Cut-off text
+                    # or reasoning stays in history and the model continues it.
+                    cut_off_call = bool(response.tool_calls)
+                    if cut_off_call:
+                        session.length_text_continued = False
+                    elif response.content.strip():
+                        session.length_text_continued = True
                     if (
                         session.length_recoveries < MAX_LENGTH_RECOVERIES
                         and not session.is_exhausted()
                     ):
                         session.length_recoveries += 1
                         session.record_iteration()
-                        runtime.event_manager.add(Error(content=OUTPUT_LIMIT_NUDGE))
+                        nudge = OUTPUT_LIMIT_NUDGE if cut_off_call else LENGTH_CONTINUATION_NUDGE
+                        runtime.event_manager.add(Feedback(content=nudge))
                         continue
                     turn_state.is_final = True
                     raise GenerationError(OUTPUT_TOKENS_EXHAUSTED_MESSAGE)
@@ -1347,6 +1367,17 @@ Standard Python builtins and agent instance (`self`) are available."""
                     )
                     turn_state.is_final = True
                     raise GenerationError("The model returned an incomplete response.")
+
+                # A plain-text reply that finishes cut-off text is marked, so the
+                # text-only handler knows the earlier parts are in history (they
+                # are not joined). A tool call moves on: the text stays in history.
+                if session.length_text_continued:
+                    session.length_text_continued = False
+                    if not response.tool_calls:
+                        metadata = {"output_continued": True}
+                        response.metadata.update(metadata)
+                        if event_id:
+                            runtime.event_manager.update(event_id, metadata=metadata)
 
                 # ── Post-response cleanup (CodeAct) ──────────────────────
                 # Intercept point: strategy-specific response transforms.
@@ -1370,7 +1401,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     if result.completed:
                         turn_state.success = True
                         turn_state.is_final = True
-                        self._sync_session_locals(call, session)
+                        write_back_session_locals(call)
                         return result.final_value
                     continue
 
@@ -1425,7 +1456,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         if validation_error is None:
                             turn_state.success = True
                             turn_state.is_final = True
-                            self._sync_session_locals(call, session)
+                            write_back_session_locals(call)
                             return validated
                         runtime.event_manager.add(_text_only_correction(context, validation_error))
                     elif action.kind == "retry":
@@ -1447,7 +1478,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         if result.completed:
                             turn_state.success = True
                             turn_state.is_final = True
-                            self._sync_session_locals(call, session)
+                            write_back_session_locals(call)
                             return result.final_value
                     else:
                         raise ValueError(f"Unknown text-only action: {action.kind!r}")
@@ -1494,7 +1525,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             ),
             record=False,
         )
-        self._sync_session_locals(call, session)
+        write_back_session_locals(call)
         raise session.build_failure_error()
 
     def _translate_tool_call_to_code(
@@ -2305,25 +2336,6 @@ Standard Python builtins and agent instance (`self`) are available."""
                 result_status=final_status,
             ),
         )
-
-        # Merge captured locals into session for REPL-style persistence
-        if result.captured_locals:
-            session.session_locals.update(result.captured_locals)
-            logger.debug(f"[CODEACT] Captured locals: {list(result.captured_locals.keys())}")
-
-        # Re-inject return type names into session_locals if the model clobbered them.
-        # Defense-in-depth: even if the E501 validator misses an assignment that
-        # shadows the return type, this ensures they're always fresh for the next cell.
-        # Handles complex types like Optional[Answer], list[Answer] by extracting
-        # all protected names and re-injecting from the execution builtins.
-        if return_type is not None and session.execution_namespace is None:
-            from nooa.runtime.code_validator import _collect_type_names
-
-            protected_names = _collect_type_names(return_type, builtins)
-            for name in protected_names:
-                original = builtins.get(name)
-                if original is not None and session.session_locals.get(name) is not original:
-                    session.session_locals[name] = original
 
         # Check if return_result() was called inline (signals task completion)
         if result.signal and isinstance(result.signal, _ReturnResultSignal):
@@ -3470,14 +3482,6 @@ Standard Python builtins and agent instance (`self`) are available."""
         finally:
             _current_cell.reset(token)
 
-        # Merge captured locals into session (persists for next steps and LLM turns)
-        if result.captured_locals:
-            session.session_locals.update(result.captured_locals)
-            logger.debug(
-                f"[CODEACT] Prefill ({prefill_type}) captured locals: "
-                f"{list(result.captured_locals.keys())}"
-            )
-
         # Preserve the receipt text; only observability status changes.
         final_status = ResultStatus.ERROR if result.error else ResultStatus.COMPLETE
         runtime.event_manager.update(
@@ -3567,60 +3571,20 @@ Standard Python builtins and agent instance (`self`) are available."""
             return ExecutionResult(stdout="", error=Exception(error_msg), defined_methods={})
 
         # Sandbox backend: the worker owns the persistent namespace and compiles
-        # its own helpers, so we skip the parent-side namespace/helper build and
-        # delegate the cell to the guarded worker process. Routing through
-        # execute_code (rather than the executor directly) keeps the execute_python
-        # middleware, before/after_code_execution hooks and events firing.
+        # its own helpers, so the cell goes to the guarded worker process. Routing
+        # through execute_code (rather than the executor directly) keeps the
+        # execute_python middleware, before/after_code_execution hooks and events.
         run_kwargs: dict[str, Any]
-        if session.execution_namespace is not None:
-            # One compiler executes definitions once. No predefinition, copying,
-            # captured-local merge or helper-global repair on this engine.
+        if session.sandbox_executor is not None:
+            # Validation of restrictions and the cell guard still runs on the parent.
+            run_kwargs = {"sandbox_executor": session.sandbox_executor}
+        else:
+            # One compiler executes definitions once in the owned namespace.
             run_kwargs = {
                 "builtins": builtins,
                 "execution_namespace": session.execution_namespace,
                 "framework_bindings": self._framework_bindings(runtime),
             }
-        elif session.sandbox_executor is not None:
-            # Validation of restrictions and the cell guard still runs on the parent.
-            run_kwargs = {"sandbox_executor": session.sandbox_executor}
-        else:
-            # Build execution namespace
-            strategy_extras: dict[str, Any] = {
-                "CodeActStrategy": type(self),
-            }
-            try:
-                from nooa.strategies.predict import PredictStrategy
-
-                strategy_extras["PredictStrategy"] = PredictStrategy
-            except ImportError:
-                pass
-
-            namespace = ExecutionNamespaceBuilder.build(
-                runtime.agent, extra={**builtins, **session.session_locals, **strategy_extras}
-            )
-
-            # Pre-compile helper function defs so @strategy decorators can see
-            # _generated_source at decoration time. Helpers are never attached to the agent.
-            helper_compiler = HelperFunctionManager()
-            helper_result = helper_compiler.apply(
-                code,
-                runtime.agent,
-                session.session_locals,
-                namespace=namespace,
-            )
-
-            if helper_result.errors:
-                error_msg = "Failed to define helper function(s):\n" + "\n".join(
-                    f"- {e}" for e in helper_result.errors
-                )
-                logger.warning(f"[CODEACT] Helper compile errors: {helper_result.errors}")
-                return ExecutionResult(stdout="", error=Exception(error_msg), defined_methods={})
-
-            if helper_result.installed:
-                logger.debug(f"[CODEACT] Compiled helpers: {helper_result.installed}")
-
-            # Execute with session locals
-            run_kwargs = {"builtins": {**builtins, **session.session_locals}}
 
         # Track this execution so the /activity slash command can report that
         # the agent is currently running a code cell (vs blocked on an LLM call).

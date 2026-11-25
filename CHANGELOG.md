@@ -18,6 +18,33 @@ to follow semantic versioning.
   codec on such a machine is now decoded as UTF-8. Ruff rule `PLW1514`
   (unspecified-encoding) is on, so new text I/O must name its encoding.
 
+- Dependency security update. LiteLLM is now locked at 1.100.5
+  (CVE-2026-114612); the `litellm` requirement starts at 1.100.4 and excludes
+  the unfixed 1.101-1.103 releases. LiteLLM now requires boto3. Chat
+  Completions requests still leave out `prompt_cache_key`, as LiteLLM 1.97
+  did: LiteLLM 1.100 would send it to OpenAI-compatible endpoints and reject it
+  for Anthropic, Bedrock, and Gemini unless `drop_params` is set. List it in
+  `allowed_openai_params` to send it. The session-affinity header is still
+  sent. OpenTelemetry is locked at 1.45.2 (CVE-2026-126360), and the nooa-atom
+  `benchmark` profile pins Soup Sieve 4.1 (CVE-2026-126190 to
+  CVE-2026-126193), whose 4.0 release no longer matches inside `template`
+  contents. The viewer frontend uses React 19.3.1. The `exclude-newer` cutoff
+  moves to 2026-11-11 for the root project and the cybergym example, which is
+  also locked at LiteLLM 1.100.5.
+- `SandboxConfig.env_allowlist` keeps only the listed environment variables in
+  the sandbox worker. The worker is a fork, so it inherited every variable of the
+  parent, model API keys included, and a cell could print them. Removing them
+  from `os.environ` alone is not enough: `/proc/self/environ` still shows the
+  block the kernel copied in at `exec`, so the worker also zeroes that block,
+  and fails to start if it is still readable afterwards. Only the environment
+  is cleaned: a key the parent already holds in memory, such as an LLM client's,
+  is still in the forked worker. Zeroing and checking the block is Linux-only;
+  on other hosts (reachable with `require=False`) the worker only clears
+  `os.environ`, so variables set directly through libc may remain readable.
+  The parent's own environment is still at `/proc/<parent-pid>/environ`; with
+  `filesystem=True` (the default) Landlock denies the worker that read, but with
+  `filesystem=False` a cell can still read the parent's variables there.
+  The default (`None`) keeps the current behaviour, inheriting everything.
 - An inline image in a format models do not accept (anything but PNG, JPEG,
   GIF or WebP, for example SVG from `show(Image.from_file("chart.svg"))`) is now
   replaced by a note before each request, instead of being sent. Every MIME
@@ -30,6 +57,46 @@ to follow semantic versioning.
   rejection: it is not retried unchanged, and the existing retry-with-a-note
   recovery handles it at once. That recovery no longer blames an image that
   was already replaced by a note.
+- In-process cells have one execution path: `PurePythonStrategy` now runs its
+  cells in the call's owned `ExecutionNamespace` like CodeAct
+  (`enter_call_namespace`), and `ActorRuntime.execute_code` no longer copies
+  session state into and out of every cell (locals wrapper, helper
+  pre-compilation). PurePython gets a fresh namespace per call, as before:
+  `Agent.execution_namespace_for` stays CodeAct-only. A direct `execute_code`
+  call without a namespace runs in a fresh one (pass an `ExecutionNamespace`
+  to keep what a cell binds). In-process, `ExecutionResult.captured_locals` is
+  no longer filled (read the namespace's globals) and `wrapper_line_offset` is
+  0. A cell always runs as an async body, so
+  `execute_code(wrap_in_function=False)` now accepts a top-level `return`; the
+  flag only adds the implicit return of a final expression. PurePython method
+  arguments are ordinary names a cell can rebind or delete (seeded each call;
+  `del arg` stays deleted in later cells); CodeAct keeps reserving them. A
+  helper that outlives its cell (in a thread or executor, another call's cell,
+  or with no cell running) keeps `print`, `pprint`, `show` and `self` instead
+  of raising: output goes to the cell running in the caller's context, else to
+  the process's stdout. Other runtime names (`return_result`, `_call`,
+  CodeAct's arguments) raise there (an asyncio task created in a cell keeps
+  its originating call's names), and once a call ends the namespace keeps only
+  those four of its runtime names. Tracebacks shown to the model name
+  in-process cells `Cell In[N], line L, in <module>` (no internal wrapper name
+  or namespace id), for CodeAct too. The sandbox backend is unchanged: its
+  worker keeps one owned namespace per session, seeded from `_session_locals`
+  and never written back.
+- `_session_locals` still seeds the call's namespace and is written back when
+  the call ends, with these changes (rules: "session_locals seeding and
+  write-back" in `src/nooa/runtime/README.md`):
+  - Write-back merges instead of replacing the caller's dict: it takes only
+    what the call changed (rebinds, new names, deletions of its seeds). Keys
+    others added or changed while the call ran keep their current value, and
+    a reused namespace's older names no longer reach later callers.
+  - The call's arguments never reach `_session_locals`, and a caller key named
+    like an argument keeps its value. Inside a PurePython call the argument
+    beats a same-named seed (before, the seed won).
+  - Changes are detected by object identity against the call's entry state,
+    not by binding syntax: a rebound environment name (`asyncio = 5`) writes
+    back, an unchanged re-import (`import json`) does not, and a rebound
+    seeded dunder (`__version__`) writes back.
+
 - `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
   publishes a runtime event when a job finishes (the job's handle state and
   result say it ended).

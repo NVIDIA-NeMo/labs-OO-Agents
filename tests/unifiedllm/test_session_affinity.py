@@ -7,7 +7,11 @@ from litellm.types.llms.openai import ResponsesAPIResponse
 from litellm.types.utils import Choices, Message, ModelResponse
 
 from nooa.unifiedllm import CompletionClient, ResponsesClient
-from nooa.unifiedllm.cache_policy import SESSION_AFFINITY_HEADER, add_session_affinity_header
+from nooa.unifiedllm.cache_policy import (
+    SESSION_AFFINITY_HEADER,
+    add_session_affinity_header,
+    drop_chat_prompt_cache_key,
+)
 
 
 def test_header_mirrors_prompt_cache_key():
@@ -156,3 +160,35 @@ def test_responses_client_sync_call_sends_the_header(monkeypatch):
     finally:
         client.close()
     assert sent["extra_headers"] == {"x-other": "1", SESSION_AFFINITY_HEADER: "s-9"}
+
+
+def test_chat_request_leaves_out_prompt_cache_key():
+    """LiteLLM 1.97 never sent it on Chat Completions; 1.100 would send or reject it."""
+    params = {"prompt_cache_key": "k"}
+    drop_chat_prompt_cache_key(params)
+    assert params == {}
+
+
+def test_allowed_openai_params_keeps_prompt_cache_key():
+    params = {"prompt_cache_key": "k", "allowed_openai_params": ["prompt_cache_key"]}
+    drop_chat_prompt_cache_key(params)
+    assert params["prompt_cache_key"] == "k"
+
+
+@pytest.mark.parametrize("model", ["anthropic/claude-opus-5-5", "openai/gpt-5.6"])
+def test_completion_keeps_affinity_header_without_key(monkeypatch, model):
+    """The header is still derived from the key that is left out of the request."""
+    sent = {}
+
+    def fake_completion(**kwargs):
+        sent.update(kwargs)
+        return ModelResponse(choices=[Choices(message=Message(content="ok"))])
+
+    monkeypatch.setattr("litellm.completion", fake_completion)
+    client = CompletionClient(model, api_key="fake")
+    try:
+        client.call([{"role": "user", "content": "hi"}], prompt_cache_key="s-1")
+    finally:
+        client.close()
+    assert "prompt_cache_key" not in sent
+    assert sent["extra_headers"] == {SESSION_AFFINITY_HEADER: "s-1"}
