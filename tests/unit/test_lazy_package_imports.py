@@ -98,7 +98,8 @@ def test_reflexion_strategy_still_routes_through_experimental():
     import nooa.experimental
 
     with pytest.warns(FutureWarning):
-        nooa.ReflexionStrategy()
+        # Deprecated name, resolved only by nooa.__getattr__ (not typed).
+        nooa.ReflexionStrategy()  # pyright: ignore[reportCallIssue]
     assert nooa.ReflexionStrategy is nooa.experimental.ReflexionStrategy
 
 
