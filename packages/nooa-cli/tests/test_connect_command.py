@@ -366,7 +366,10 @@ def test_enabled_reasoning_without_evidence_warns_once_before_save(
     assert result.output.count(warning) == (1 if mode in {"missing", "usage"} else 0)
     assert "returned for: none" not in result.output
     assert "private reasoning" not in result.output
-    assert len(sent) == (0 if mode == "unprobed" else 7)
+    # Chat and Responses add two capability checks (json_schema, developer
+    # role) by default; json_object is skipped once json_schema passes.
+    # Anthropic records developer_role: false without a call.
+    assert len(sent) == (0 if mode == "unprobed" else 7 if style == "anthropic" else 9)
     if mode == "missing":
         assert result.output.index(warning) < result.output.index("Write model entry")
         assert "Try another API format or review the server settings" in result.output
@@ -883,7 +886,8 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
     # now actually runs (3 more than before). check_interfaces now also
     # probes reasoning by default for the one accepted (chat) interface.
     # Keeping the model-default reasoning choice adds no separate level check.
-    assert [r.method for r in requests] == ["GET"] + ["POST"] * 9
+    # Capability checks (json_schema and developer role) add two more.
+    assert [r.method for r in requests] == ["GET"] + ["POST"] * 11
     entry = yaml.safe_load((tmp_path / "llm_config.yaml").read_text())["models"]["my-model"]
     assert entry["model_name"] == "openai/example-model"
     assert "temporary-secret" not in result.output + yaml.safe_dump(entry)
@@ -1360,7 +1364,8 @@ def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monk
     # to recommend which interface actually surfaces reasoning. Routing is then
     # rechecked at the configured cap; tools and all six levels run for real.
     # Model default does not select max for the session; all three base-setting turns run.
-    assert len(bodies) == 14
+    # Plus two capability checks (json_schema and developer role).
+    assert len(bodies) == 16
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert "provenance" not in entry  # outcomes were checked on the wire; see bodies
 

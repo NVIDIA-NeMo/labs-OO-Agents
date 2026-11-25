@@ -227,3 +227,24 @@ def test_capabilities_stage_requires_planned_checks():
         import asyncio
 
         asyncio.run(connect.check_stage(plan(), "capabilities", api_key="fake"))
+
+
+@pytest.mark.parametrize(
+    "record,status",
+    [
+        ({"outcome": "unsupported"}, "passed"),
+        # The endpoint answered but did not settle the fact: unknown, not a failure.
+        ({"outcome": "not_confirmed", "settings_sent": False}, "passed"),
+        ({"outcome": "rejected", "status_code": 400}, "passed"),
+        # No answer at all (for example HTTP 503) still needs attention.
+        ({"outcome": "not_probed", "error": "ServiceUnavailableError"}, "attention"),
+        ({"outcome": "not_probed", "reason": "budget exhausted"}, "skipped"),
+    ],
+)
+@pytest.mark.parametrize("name", ["format:json_schema", "role:developer"])
+def test_inconclusive_capability_check_is_not_a_failure(name, record, status):
+    from nooa.unifiedllm.connect._records import check_status
+
+    if record["outcome"] != "not_probed":
+        record = {**record, "verification_fingerprint": "f", "verification_current": True}
+    assert check_status(name, record) == status

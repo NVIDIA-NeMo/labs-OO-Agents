@@ -9,7 +9,9 @@ setup and the library reference.
 `nooa connect` configures a model so your agents can run smoothly. It suggests
 and saves a reply/output token limit, records the context window when known
 (or supplied by you), and lists your chosen media formats. It tests the route,
-tools, reasoning, and caching, then saves a named entry (an *alias*) in
+tools, reasoning, caching, and (on Chat and Responses routes) which
+structured-output formats and `developer` instructions the endpoint accepts,
+then saves a named entry (an *alias*) in
 `llm_config.yaml`. Your agents use the model by that alias.
 
 The checks send real requests and may incur provider charges.
@@ -708,7 +710,8 @@ a masked credential on endpoint checks; use `--api-key-env` for unattended use.
 | `media` | Run the text baseline and selected media tests; native decisions run the typed decision baseline first. |
 | `decision` | Native decisions only: fresh routing and three bounded typed decision smoke cases. |
 | `session` | Chat-family routes only: check caching and reasoning across turns. |
-| `all` | Chat: baseline, tools, declared reasoning, conversation and optional media. Native decisions: routing, fresh typed smoke cases and optional image checks. |
+| `capabilities` | Chat and Responses only: baseline, then detect accepted structured-output formats (`json_schema`, `json_object`) and `developer` role support. |
+| `all` | Chat: baseline, tools, declared reasoning, capability checks (Chat and Responses), conversation and optional media. Native decisions: routing, fresh typed smoke cases and optional image checks. |
 | `save` | Write an entry from a plan or result file. |
 
 Minimal approved routing example (not an automatic save pipeline):

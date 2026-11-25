@@ -77,7 +77,15 @@ def test_explicit_prompt_key_keeps_stage_json_clean(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "stage,count", [("routing", 1), ("tools", 1), ("reasoning", 2), ("session", 3), ("all", 7)]
+    "stage,count",
+    [
+        ("routing", 1),
+        ("tools", 1),
+        ("reasoning", 2),
+        ("session", 3),
+        ("capabilities", 3),
+        ("all", 9),
+    ],
 )
 def test_each_check_stage_is_independent_json(monkeypatch, tmp_path, stage, count):
     monkeypatch.setenv("STAGE_TEST_KEY", "test-secret")

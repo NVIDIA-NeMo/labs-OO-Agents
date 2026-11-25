@@ -477,6 +477,9 @@ def check_label(name):
         "decision:positive": "Decision positive case",
         "decision:negative": "Decision negative case",
         "tools": "Tool use",
+        "format:json_schema": "Structured output (JSON schema)",
+        "format:json_object": "Structured output (JSON mode)",
+        "role:developer": "Developer instructions",
         "session:seed": "Conversation (1/3)",
         "session:replay": "Conversation (2/3)",
         "session:repeat": "Conversation (3/3)",
@@ -503,6 +506,14 @@ def check_outcome(name, record, status):
         return "Not available"
     if name.startswith("media:") and outcome == "rejected":
         return "Not available"  # The model does not accept this media kind; it stays off.
+    if name.startswith(("format:", "role:")) and outcome in {
+        "unsupported",
+        "not_confirmed",
+        "rejected",
+    }:
+        # Detected as unsupported (saved as a fact), or not shown to be
+        # supported (the fact stays unknown). Neither is a connection failure.
+        return "Not available"
     if (
         name == "reasoning_retention"
         and outcome == "not_confirmed"
@@ -626,6 +637,8 @@ class CheckProgress:
         detail = check_failure(record) or check_reason(record.get("reason"))
         if name.startswith("media:"):
             detail = media_test_detail(name[6:], record, media_inputs=media_inputs)
+        if name.startswith(("format:", "role:")) and outcome in {"not_confirmed", "rejected"}:
+            detail = (detail + "; " if detail else "") + "support stays unknown"
         if outcome == "accepted":
             detail = ""
             if name == "tools" and not record.get("tool_observed"):

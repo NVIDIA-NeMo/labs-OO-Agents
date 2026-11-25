@@ -80,7 +80,8 @@ Capture stderr separately if needed. A stage report has `version`, `stage`, `ok`
 | `session` | Chat-family continuation/cache/reasoning replay checks. |
 | `decision` | Native decisions: fresh routing and three typed decision smoke requests. |
 | `media` | Baseline followed by the selected media samples. Native decisions include their typed smoke baseline. |
-| `all` | All applicable checks: chat tools/reasoning/conversation, or native decision smoke cases, plus selected media. |
+| `capabilities` | Chat/Responses only: detect structured-output formats (`json_schema`, `json_object`) and `developer` role support. |
+| `all` | All applicable checks: chat tools/reasoning/capabilities/conversation, or native decision smoke cases, plus selected media. |
 | `save` | Write one alias from a plan/result JSON file. No model requests. |
 
 ### Selected server facts (explicit metadata permission)

@@ -8,9 +8,12 @@ to follow semantic versioning.
 
 - Model entries can record detected `structured_output_formats`
   (`json_schema`, `json_object`) and `developer_role`, exposed on
-  `Capabilities`. Connect detects them with
-  `plan(..., capability_checks=True)` (stage `capabilities`) on Chat and
-  Responses routes. New settings `structured_output_format: auto | json_schema
+  `Capabilities`. `nooa connect` detects them by default on Chat and
+  Responses routes (the wizard's tests, `--stage all`, and the new
+  `--stage capabilities`); a result that does not settle a fact (for example
+  LiteLLM sending the developer message as system) leaves it unknown and is
+  not a failure. Library callers opt in with
+  `plan(..., capability_checks=True)` (stage `capabilities`). New settings `structured_output_format: auto | json_schema
   | json_object` and `instruction_role: auto | system | developer` choose how
   requests use them; `json_object` sends JSON mode with the schema as a final
   instruction message. A choice that contradicts a detected fact fails at load
