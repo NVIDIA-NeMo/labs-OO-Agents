@@ -441,7 +441,7 @@ class AtomACPAgent:
         # failed) is the model the user just chose. It is taken only once
         # the session exists, so a failed attempt leaves it for the retry.
         result_key, result = self._new_session_result(root)
-        connected, _ = self._connected_alias(root, result)
+        connected, problem = self._connected_alias(root, result)
         options = SessionOptions(
             workspace=root,
             agent_spec=self._agent_spec_for(root),
@@ -449,6 +449,8 @@ class AtomACPAgent:
             host="acp",
         )
         warnings: list[str] = []
+        if result is not None and connected is None and problem:
+            warnings.append(terminal_auth.describe_result(result) + problem)
         attached: list[ACPEventBridge] = []
 
         async def prepare(session: Session) -> None:
@@ -513,7 +515,7 @@ class AtomACPAgent:
             attached.append(bridge)
             self._replay(bridge, session, pool=self._pool_client)
             warnings.extend(await self._prepare_tools(session, mcp_servers))
-            alias, _ = self._connected_alias(root, result)
+            alias, _ = self._connected_alias(session.options.workspace, result)
             if alias is not None and not (result and result.get("applied")):
                 try:
                     await session.set_model(alias)
