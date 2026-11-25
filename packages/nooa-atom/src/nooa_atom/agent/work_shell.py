@@ -247,8 +247,11 @@ def _descendants(pid: int) -> dict[int, str]:
         if not entry.name.isdecimal():
             continue
         try:
-            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
-            children.setdefault(int(fields[1]), []).append((int(entry.name), fields[19]))
+            # Bytes: a process name (comm) may hold bytes that are not UTF-8.
+            fields = (entry / "stat").read_bytes().rsplit(b")", 1)[1].split()
+            children.setdefault(int(fields[1]), []).append(
+                (int(entry.name), fields[19].decode("ascii"))
+            )
         except (OSError, IndexError, ValueError):
             continue
     found: dict[int, str] = {}

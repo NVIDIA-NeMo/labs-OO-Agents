@@ -787,8 +787,10 @@ class BashSession:
                         if not entry.name.isdecimal():
                             continue
                         try:
-                            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
-                            parent, identity = int(fields[1]), fields[19]
+                            # Bytes: a process name may hold non-UTF-8 bytes.
+                            stat = (entry / "stat").read_bytes()
+                            fields = stat.rsplit(b")", 1)[1].split()
+                            parent, identity = int(fields[1]), fields[19].decode("ascii")
                         except (OSError, IndexError, ValueError):
                             # Processes may exit between enumeration and read.
                             continue
