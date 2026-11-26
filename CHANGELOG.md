@@ -17,6 +17,31 @@ to follow semantic versioning.
   `usage.prompt_tokens_details.cached_tokens` and reasoning tokens at
   `usage.completion_tokens_details.reasoning_tokens`, and a zero `cost_usd`
   is left out.
+- **Behaviour change:** the live `<context>` (state, todo status, context usage,
+  `set_dynamic` blocks) is now **appended to the history at least every 5 turns**
+  (exactly every 5 when nothing is archived) instead of being regenerated on
+  every request. `RenderConfig(live_context=...)` takes one of
+  three policy classes: `AppendedLiveContext(every_n_turns=5)` (`kind: append`,
+  default: right before a due request the runtime records the live context as
+  a `LiveContextSnapshot` event, a prefaced `<context>` envelope that stays in
+  the history, so requests are append-only and prefix-stable; a snapshot is due
+  when no snapshot is visible or five or more responses follow the last one,
+  and is skipped only when no live block changed), `DynamicLiveContext()` (`kind: dynamic`, the
+  previous trailing message on every request) or `NoLiveContext()` (`kind:
+  off`, static prefix and history only). `RenderConfig` is the only place the
+  policy lives: a policy object, its dict form or a bare kind name, and
+  `Agent(render_config=...)` also accepts the mapping form
+  (`{"live_context": "off"}`); Atom reads the `render_config` key under `atom` in
+  `settings.yaml` (overridden by `SessionOptions.render_config`, which
+  `AtomHarness` forwards; Atom's `workspace_settings.set_live_context(...)` and
+  the `/live-context` command save it and switch the running agent), and NeMo
+  Gym sets
+  `init_kwargs.render_config.live_context.kind=off`. In `off` and
+  `append` the cache boundary follows the last event. The `dynamic_context` stamp on
+  responses is unchanged (observability only). `RenderConfig(live_context=...)`
+  configures its formatter and refuses an explicit `block_formatter` alongside;
+  `render_config.live_context` reads the formatter's policy back. Without static blocks, fixed text
+  stays in the system message while expression-backed blocks follow the policy.
 - Dependency security update. Pydantic is now locked at 2.14.3 with
   pydantic-core 2.50.4, and the `pydantic` requirement starts at 2.14.2, the
   first release that fixes CVE-2026-133276, CVE-2026-133421 and

@@ -11,6 +11,7 @@ from nooa.context_blocks.events import (
     UserEvent,
 )
 from nooa.context_blocks.formatter import OpenAIProviderFormatter
+from nooa.context_blocks.live_context import DynamicLiveContext
 from nooa.context_blocks.models import (
     BlockMetadata,
     DynamicContext,
@@ -21,6 +22,14 @@ from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.events import LLMResponse
 from nooa.unifiedllm import CacheBoundary
+
+# These tests describe the ``dynamic`` layout (the pre-append default); the
+# default policy is ``append`` and is covered by test_live_context.py.
+DYNAMIC = DynamicLiveContext()
+
+
+def _dynamic_formatter() -> CachedBlockFormatter:
+    return CachedBlockFormatter(live_context=DYNAMIC)
 
 
 def _static_block(key: str, content: str, expr: str | None = None) -> ResolvedBlock:
@@ -61,7 +70,7 @@ class TestImmutableMetadata:
 
 class TestCachedBlockFormatterPartition:
     def test_all_static_single_system_message(self):
-        fmt = CachedBlockFormatter()
+        fmt = _dynamic_formatter()
         messages = fmt.format([_static_block("a", "A"), _static_block("b", "B")])
         assert len(messages) == 1
         assert messages[0].role == Role.SYSTEM
@@ -69,7 +78,7 @@ class TestCachedBlockFormatterPartition:
 
     def test_all_volatile_falls_back_to_system(self):
         """When no blocks are static, all go to SYSTEM (XMLBlockFormatter-compatible)."""
-        fmt = CachedBlockFormatter()
+        fmt = _dynamic_formatter()
         messages = fmt.format([_dynamic_block("plan", "do stuff")])
         assert len(messages) == 1
         assert messages[0].role == Role.SYSTEM
@@ -77,7 +86,7 @@ class TestCachedBlockFormatterPartition:
         assert "</plan>" in messages[0].content
 
     def test_mixed_preserves_order_within_halves(self):
-        fmt = CachedBlockFormatter()
+        fmt = _dynamic_formatter()
         messages = fmt.format(
             [
                 _static_block("sys", "S"),
@@ -100,7 +109,7 @@ class TestCachedRendererEndToEndOpenAI:
         # in metadata. Only ``self.context.set_dynamic()`` blocks render it.
         result = render_context(
             [_static_block("sys", "You are X.", expr="self._system_prompt()")],
-            block_formatter=CachedBlockFormatter(),
+            block_formatter=_dynamic_formatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         assert result == [{"role": "system", "content": "<sys>\nYou are X.\n</sys>"}]
@@ -111,7 +120,7 @@ class TestCachedRendererEndToEndOpenAI:
                 _static_block("sys", "S"),
                 _dynamic_block("plan", "P", expr="self.context['plan']"),
             ],
-            block_formatter=CachedBlockFormatter(),
+            block_formatter=_dynamic_formatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         assert len(result) == 3
@@ -143,7 +152,7 @@ class TestCachedRendererEndToEndOpenAI:
         ]
         result = render_context(
             blocks,
-            block_formatter=CachedBlockFormatter(),
+            block_formatter=_dynamic_formatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         roles = [m["role"] for m in result]
@@ -185,7 +194,7 @@ class TestCachedRendererEndToEndOpenAI:
             ]
             return render_context(
                 blocks,
-                block_formatter=CachedBlockFormatter(),
+                block_formatter=_dynamic_formatter(),
                 provider_formatter=OpenAIProviderFormatter(),
             ).output
 
@@ -243,7 +252,7 @@ class TestCachedRendererEndToEndOpenAI:
                 user_block,
                 _dynamic_block("live_state", "version one"),
             ],
-            block_formatter=CachedBlockFormatter(),
+            block_formatter=_dynamic_formatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
 
@@ -270,7 +279,7 @@ class TestCachedRendererEndToEndOpenAI:
                 ),
                 _dynamic_block("live_state", "version two"),
             ],
-            block_formatter=CachedBlockFormatter(),
+            block_formatter=_dynamic_formatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
 
@@ -299,7 +308,7 @@ class TestCachedRendererEndToEndOpenAI:
         ]
         result = render_context(
             blocks,
-            block_formatter=CachedBlockFormatter(),
+            block_formatter=_dynamic_formatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         roles = [m["role"] for m in result]
@@ -309,7 +318,7 @@ class TestCachedRendererEndToEndOpenAI:
     def test_no_volatile_no_trailing_message(self):
         result = render_context(
             [_static_block("sys", "S")],
-            block_formatter=CachedBlockFormatter(),
+            block_formatter=_dynamic_formatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         assert len(result) == 1 and result[0]["role"] == "system"
@@ -317,7 +326,7 @@ class TestCachedRendererEndToEndOpenAI:
     def test_empty_input(self):
         result = render_context(
             [],
-            block_formatter=CachedBlockFormatter(),
+            block_formatter=_dynamic_formatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
         assert result == []
@@ -332,7 +341,7 @@ class TestCachedRendererLoneSurrogates:
                 _static_block("sys", "Stable prefix 🎉"),
                 _dynamic_block("todo_status", status, expr="self.todo.status()"),
             ],
-            block_formatter=CachedBlockFormatter(),
+            block_formatter=_dynamic_formatter(),
             provider_formatter=OpenAIProviderFormatter(),
         ).output
 

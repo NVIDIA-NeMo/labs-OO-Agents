@@ -9,6 +9,7 @@ import pytest
 from litellm.types.utils import Choices, Message, ModelResponse
 
 from nooa import Agent, Context
+from nooa.context_blocks import DynamicLiveContext, RenderConfig
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
 from nooa.llm_types import LLMResponse
 from nooa.runtime.actor import _current_llm_var, _current_method_var
@@ -75,7 +76,9 @@ async def test_collapse_keeps_only_complete_active_native_turns(
             """Continue after the earlier work."""
             ...
 
-    agent = TestAgent()
+    # These checks read the live context of every request: the ``dynamic`` policy
+    # (the default appends a snapshot every few turns).
+    agent = TestAgent(render_config=RenderConfig(live_context=DynamicLiveContext()))
     agent.context["live"] = Context(expr="'trailing live state'")
     storage = (
         SQLiteStorageManager(tmp_path / "collapsed.db") if backend == "sqlite_resume" else None
