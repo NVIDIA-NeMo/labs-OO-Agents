@@ -1402,9 +1402,11 @@ class TestFormatterReviewRegressions:
     def test_explicit_error_budget_overrides_default(self):
         result = format_error_for_llm(RuntimeError("X" * 1_000), max_error=100)
 
-        assert "<truncated-output>" in result
-        assert "Showing first 50 and last 50 chars" in result
-        assert result.endswith("X" * 50 + "\n</truncated-output>")
+        # nooa.snapshot's render_output: 50 head chars, one cut line, 50 tail chars.
+        whole = "RuntimeError: " + "X" * 1_000
+        assert result == (
+            whole[:50] + "\n[... 914 chars omitted; full output not kept]\n" + whole[-50:]
+        )
 
     def test_very_large_diagnostic_is_bounded_with_tail_preserved(self):
         result = format_error_for_llm(RuntimeError("X" * 5_000_000))
@@ -1415,6 +1417,21 @@ class TestFormatterReviewRegressions:
         configured_tail = DEFAULT_TRUNCATION_CONFIG.capture.tail
         tail = max_error // 2 if configured_tail is None else configured_tail
         head = max_error - tail
-        assert "<truncated-output>" in result
-        assert f"Showing first {head:,} and last {tail:,} chars" in result
-        assert result.endswith("X" * tail + "\n</truncated-output>")
+        whole = "RuntimeError: " + "X" * 5_000_000
+        assert result == (
+            whole[:head]
+            + f"\n[... {len(whole) - max_error:,} chars omitted; full output not kept]\n"
+            + whole[-tail:]
+        )
+
+
+def test_docs_name_the_cut_line_cell_errors_emit():
+    """The Agent prompt and CaptureConfig describe the line a cut cell error really has."""
+    from nooa.agent import Agent
+    from nooa.config.truncation_config import CaptureConfig
+    from nooa.errors.formatting import format_error_for_llm
+
+    value = format_error_for_llm(RuntimeError("x" * 500), max_error=50, tail_chars=10)
+    assert "\n[... 464 chars omitted; full output not kept]\n" in value
+    for text in (Agent.__doc__, CaptureConfig.__doc__):
+        assert "full output not kept]" in text

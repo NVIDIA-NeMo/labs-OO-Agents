@@ -6,7 +6,7 @@ This is the foundational strategy that all other strategies build upon.
 No LLM call, just template rendering with Python expression evaluation.
 """
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from nooa.strategies.base import GenerationStrategy
 
@@ -48,7 +48,15 @@ class TemplateStrategy(GenerationStrategy):
         - No LLM call (requires_lock = False)
         - Fast rendering (<1ms typically)
         - Appears in traces as [TEMPLATE] strategy
+
+    Args:
+        placeholder_chars: Most characters one placeholder inserts (``None``:
+            whole); ``"config"`` (the default): the agent's effective
+            ``TruncationConfig.placeholder_chars``.
     """
+
+    def __init__(self, *, placeholder_chars: int | None | Literal["config"] = "config") -> None:
+        self.placeholder_chars: int | None | Literal["config"] = placeholder_chars
 
     @property
     def name(self) -> str:
@@ -113,8 +121,16 @@ class TemplateStrategy(GenerationStrategy):
 
         # Expand using runtime's powerful expand_variables
         # This supports Python expressions like {len(self.tools)}, {self.doc.show()}, etc.
+        placeholder_chars = self.placeholder_chars
+        if placeholder_chars == "config":
+            return await runtime.expand_variables(
+                template,
+                extra_context=context,
+                error_mode="raise",
+            )
         return await runtime.expand_variables(
             template,
             extra_context=context,
             error_mode="raise",
+            placeholder_chars=placeholder_chars,
         )

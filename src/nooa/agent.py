@@ -14,6 +14,10 @@ from nooa.runtime.context_vars import _parent_agent_var
 from nooa.storage.markers import nosnapshot
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from pydantic import BaseModel
+
     from nooa.agentdoc.ext import TypeInfo
     from nooa.config.execution_config import ExecutionConfig
     from nooa.config.truncation_config import TruncationConfig
@@ -94,7 +98,7 @@ class Agent(metaclass=AgentMeta):
     - Structured instances (dataclasses, Pydantic, custom classes) render as `ClassName(field=value, ...)`; a trailing `...` means fields were elided:
         Config(name='foo', enabled=True, ...)
     - The variable itself is **not** truncated — index/iterate it directly to operate on the full data.
-    - Output cut to fit is wrapped in `<truncated-output>`...`</truncated-output>`: it says the cut part is **not recoverable**, or, when file-backed capture is on, names the file with the full output.
+    - Cut output keeps its head and tail around one `[... N chars omitted; full output: PATH]` line (or `full output not kept]`; a PATH may be gone later).
     """
 
     # Agent instances should never be serialized as nested values inside other objects.
@@ -111,6 +115,8 @@ class Agent(metaclass=AgentMeta):
     _llm: Annotated["UnifiedLLM | None", hidden, nosnapshot]
     _decision_model: Annotated["UnifiedDecisionModel | None", hidden, nosnapshot]
     _truncation: Annotated["TruncationConfig", hidden, nosnapshot]
+    # Resolved configs=[...] of other config models, by type (nooa.config.effective).
+    _configs: Annotated["dict[type[BaseModel], BaseModel]", hidden, nosnapshot]
     context: Annotated["ContextApi", hidden, nosnapshot]
     events: Annotated["EventsApi", hidden, nosnapshot]
 
@@ -135,6 +141,7 @@ class Agent(metaclass=AgentMeta):
     # Per-class cache of clients resolved from agent-level decision_model aliases.
     _agent_decision_alias_cache: Annotated["dict[str, UnifiedDecisionModel]", hidden, nosnapshot]
     _agent_truncation: Annotated["TruncationConfig", hidden]
+    _agent_configs: Annotated["dict[type[BaseModel], BaseModel]", hidden]
     _agent_context_blocks: Annotated["dict[str, str | DynamicContext | None]", hidden]
     _agent_event_query: Annotated["EventQuery | None", hidden]
 
@@ -149,6 +156,7 @@ class Agent(metaclass=AgentMeta):
         execution: "ExecutionConfig | None" = None,
         context: "dict[str, str | DynamicContext | None] | None" = None,
         event_query: "EventQuery | None" = None,
+        configs: "Iterable[BaseModel] | None" = None,
         **kwargs: Any,
     ):
         """Configure agent class with metaclass.
@@ -166,6 +174,11 @@ class Agent(metaclass=AgentMeta):
                 - DynamicContext("expr"): DynamicContext expression, re-evaluated each turn
                 - None: Remove block
             event_query: Default EventQuery for filtering events in context.
+            configs: Overrides of other config models (a package's own limits
+                model), one instance per model;
+                read with ``nooa.config.effective(Model)``. Like
+                ``truncation=``, a class's overrides are partial: the fields
+                it sets win over its base classes', the rest are inherited.
             **kwargs: Additional arguments for multiple inheritance support.
         """
         _validate_llm_param(llm, cls.__name__)
@@ -182,6 +195,12 @@ class Agent(metaclass=AgentMeta):
             cls._agent_context_blocks = context  # type: ignore[attr-defined]
         if event_query is not None:
             cls._agent_event_query = event_query  # type: ignore[attr-defined]
+        if configs is not None:
+            from nooa.config.effective import config_overrides
+
+            # Only this class's own overrides; _resolve_configs merges them
+            # along the MRO, base classes first.
+            cls._agent_configs = config_overrides(configs, f"class {cls.__name__}")  # type: ignore[attr-defined]
 
         from nooa.config.execution_config import ExecutionConfig as _EC
 
@@ -197,6 +216,7 @@ class Agent(metaclass=AgentMeta):
         context: "dict[str, str | DynamicContext | None] | None" = None,
         event_query: "EventQuery | None" = None,
         storage: "StorageManager | None" = None,
+        configs: "Iterable[BaseModel] | None" = None,
     ):
         """Initialize agent with its own runtime.
 
@@ -215,6 +235,9 @@ class Agent(metaclass=AgentMeta):
             event_query: Instance-level EventQuery for filtering events in context.
             storage: Optional StorageManager for persistence. Defaults to
                 InMemoryStorageManager (no persistence, same as current behavior).
+            configs: Instance-level overrides of other config models, one
+                instance per model, merged over the class level's
+                (``nooa.config.effective``).
 
         Core attributes (all hidden from LLM):
         - context_manager: ContextManager — raw context block state
@@ -253,6 +276,7 @@ class Agent(metaclass=AgentMeta):
 
         # Resolve and store truncation config (with merge semantics)
         self._truncation = self._resolve_truncation(truncation)
+        self._configs = self._resolve_configs(configs)
 
         # Resolve render config (instance overrides class default)
         from nooa.context_blocks.render_config import RenderConfig as _RC
@@ -273,10 +297,10 @@ class Agent(metaclass=AgentMeta):
         cm.set_static_protected("system_prompt", expr="self._resolve_system_prompt()")
         cm.set_static_protected("self", expr="doc(type(self))")
         cm.set_static_protected("events_api", expr="self._events_api_prompt()")
-        cm.set_dynamic_protected(
-            "state",
-            "pformat(self, max_length=50, max_string=500, max_depth=4)",
-        )
+        # The expression is shown in the prompt, so it carries the limits as
+        # literals: the agent's TruncationConfig.state_format (class and
+        # instance level), fixed when the agent is built.
+        cm.set_dynamic_protected("state", self._state_block_expr())
 
         # Apply class-level context blocks (from __init_subclass__)
         class_context = getattr(self.__class__, "_agent_context_blocks", None)
@@ -431,7 +455,8 @@ class Agent(metaclass=AgentMeta):
 
         Resolution order (earlier merged with later, later takes precedence):
         1. Default config (DEFAULT_TRUNCATION_CONFIG)
-        2. Class-level: class MyAgent(Agent, truncation=...)
+        2. Class-level: each class's own ``truncation=``, base classes first
+           (a subclass overrides only the fields it sets)
         3. Instance-level: MyAgent(truncation=...)
 
         Args:
@@ -446,16 +471,35 @@ class Agent(metaclass=AgentMeta):
         # Start with default config
         config = DEFAULT_TRUNCATION_CONFIG
 
-        # Merge class-level config if present
-        class_truncation = getattr(self.__class__, "_agent_truncation", None)
-        if class_truncation is not None:
-            config = config.merge_with(class_truncation)
+        # Merge each class's own truncation=, base classes first, so a
+        # subclass overrides only the fields it sets.
+        for klass in reversed(type(self).__mro__):
+            class_truncation = klass.__dict__.get("_agent_truncation")
+            if class_truncation is not None:
+                config = config.merge_with(class_truncation)
 
         # Merge instance-level config if present
         if instance_truncation is not None:
             config = config.merge_with(instance_truncation)
 
         return config
+
+    @no_trace
+    @hidden
+    def _resolve_configs(
+        self, instance_configs: "Iterable[BaseModel] | None"
+    ) -> "dict[type[BaseModel], BaseModel]":
+        """Resolve ``configs=`` by type: the defaults, the class level, then the instance level."""
+        from nooa.config.effective import config_overrides, layer_configs
+
+        resolved: dict[type[BaseModel], BaseModel] = {}
+        for klass in reversed(type(self).__mro__):  # base classes first
+            class_configs = klass.__dict__.get("_agent_configs")
+            if class_configs:
+                resolved = layer_configs(resolved, class_configs)
+        return layer_configs(
+            resolved, config_overrides(instance_configs, type(self).__name__ + "()")
+        )
 
     @no_trace
     @hidden
@@ -570,6 +614,26 @@ Inspect in REPL: print(doc(self.events))
 
     @no_trace
     @hidden
+    def _state_block_expr(self) -> str:
+        """The ``state`` context block's expression: ``pformat(self, ...)`` under ``state_format``.
+
+        The limits are the agent's own ``TruncationConfig.state_format``
+        (``self._truncation``: the instance's ``truncation=`` merged over the
+        classes' and the defaults), by default ``max_length=50,
+        max_string=500, max_depth=4``. The prompt shows the expression, so it
+        is built once with the values as literals; a method-level
+        ``@strategy(truncation=...)`` does not change it, not even the one of
+        a running parent method that constructs this agent (which
+        ``effective()`` would return first).
+        """
+        limits = self._truncation.state_format
+        return (
+            f"pformat(self, max_length={limits.max_length}, "
+            f"max_string={limits.max_string}, max_depth={limits.max_depth})"
+        )
+
+    @no_trace
+    @hidden
     def _resolve_system_prompt(self) -> str:
         """Resolve the system prompt from the class docstring.
 
@@ -580,6 +644,10 @@ Inspect in REPL: print(doc(self.events))
         Subclasses customize by writing a class docstring — no method override needed.
         """
         import string
+
+        from nooa.config.effective import effective
+        from nooa.config.truncation_config import TruncationConfig
+        from nooa.runtime.placeholders import render_placeholder
 
         # Walk MRO to find nearest docstring (Python doesn't inherit __doc__).
         # cleandoc: Python 3.13+ strips docstring indentation at compile time
@@ -593,6 +661,7 @@ Inspect in REPL: print(doc(self.events))
         if not doc or "{" not in doc:
             return doc
         # Resolve {expr} placeholders using the agent's namespace
+        truncation = effective(TruncationConfig, self)
         formatter = string.Formatter()
         parts = []
         for literal, field, fmt_spec, conversion in formatter.parse(doc):
@@ -600,13 +669,16 @@ Inspect in REPL: print(doc(self.events))
             if field is not None:
                 try:
                     value = eval(field, {"self": self, "type": type})  # noqa: S307
-                    if conversion == "r":
-                        value = repr(value)
-                    elif conversion == "s":
-                        value = str(value)
-                    if fmt_spec:
-                        value = format(value, fmt_spec)
-                    parts.append(str(value))
+                    # Bounded, through the snapshot (nooa.runtime.placeholders).
+                    parts.append(
+                        render_placeholder(
+                            value,
+                            conversion,
+                            fmt_spec or "",
+                            max_chars=truncation.placeholder_chars,
+                            prefill=truncation.prefill_format,
+                        )
+                    )
                 except Exception:
                     logger.debug("Prompt template eval failed for %r", field, exc_info=True)
                     placeholder = field

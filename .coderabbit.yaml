@@ -10,18 +10,68 @@ reviews:
       instructions: |
         NOOA has one way to shorten values and output for a reader: `nooa.snapshot`
         (see docs/snapshot-model.md). Values: `capture` + `render_python` /
-        `render_json` / `render_trace`. Output streams: `TextStream` + `merge` +
-        `render_output`. Full copies on disk: `SpillTarget`.
+        `render_json` / `render_trace`. A whole string or bytes: `cut` +
+        `render_output`. Output streams: `TextStream` (one writer) or
+        `SharedTextStream` (several threads) + `merge` + `render_output`.
+        Files with the whole output: `nooa.overflow.OverflowDir` (a session's,
+        or `OverflowDir.default()`), written only through a `TextStream` /
+        `SharedTextStream` and only while `TruncationConfig.overflow_files` is on.
         Flag NEW code that truncates, previews, caps or elides a value or output
         that a model prompt, trace, UI or log will show: slicing text, bytes or
         lists to a size limit; joining a head and a tail; "...", "…",
         "<truncated" or "N more" markers; new max_chars / max_string / max_items
-        style parameters; new uses of TruncatingStringIO, truncating_pformat,
-        textwrap.shorten or reprlib. Ask the author to use `nooa.snapshot`
-        instead, or, when the limit is not a preview (rejecting an oversized
-        request, pagination, a protocol limit), to add
-        `# snapshot: allow <reason>` with a concrete reason.
+        style parameters; new uses of textwrap.shorten or reprlib; new temporary
+        files for command or cell output outside `nooa.overflow`; a cut line
+        that claims "full output not kept" while a file holds it (or the reverse).
+        Ask the author to use `nooa.snapshot` instead, or, when the limit is not a
+        preview (rejecting an oversized request, pagination, a protocol limit), to
+        add `# snapshot: allow <reason>` with a concrete reason.
         Only flag cuts the pull request adds or changes, not existing code it
-        merely moves: the existing sites are being moved onto `nooa.snapshot`
-        in follow-up pull requests. Do not flag code inside src/nooa/snapshot/.
+        merely moves. The remaining older sites are tracked for PR 2d (issue #96);
+        new code must not add more. Do not flag code inside src/nooa/snapshot/ or
+        src/nooa/overflow/.
+        Comment only; do not request changes for this rule alone.
+    - path: "{src,packages/*/src}/**/*.py"
+      instructions: |
+        Configurable limits are config fields. Core limits are fields of
+        `nooa.config.TruncationConfig` and its sub-configs
+        (docs/concepts/prompts-and-context.md lists them); a package's limits
+        are fields of that package's own config model (for example nooa-atom's
+        `nooa_atom.limits.AtomLimits`). Both are read through
+        `nooa.config.effective(ConfigType)` (`effective(TruncationConfig)`,
+        `effective(AtomLimits)`) when the limit is applied, not once at import
+        or construction time.
+        Flag a NEW hard-coded size, length or count limit, as a module constant
+        or a literal, that bounds text a model or user reads: prompts and
+        docstring placeholders, tool results, cell, shell or job output, context
+        blocks, previews or listings shown to the model. Ask the author to add a
+        field to the config model of the package that applies it, with the
+        current value as its default.
+        Also flag: core code (src/nooa/) that imports or names a package's
+        config model, or a package limit added to `TruncationConfig`;
+        `effective_truncation` (removed; use `effective(TruncationConfig)`);
+        consumer code that reads `DEFAULT_TRUNCATION_CONFIG` or builds a
+        default config model directly (it skips agent- and method-level
+        overrides); and code that re-implements the precedence rule (method
+        `@strategy(truncation=..., configs=[...])` > agent instance > class >
+        the model's defaults) or the field-merge rule instead of calling
+        `effective()` / `nooa.config.merge_config()`.
+        Internal protocol, safety or performance bounds are fine as constants:
+        frame and queue sizes, IPC ceilings, work or retry caps, timeouts,
+        memory and file sizes nobody reads.
+        Only flag code the pull request adds or changes. Do not flag code inside
+        src/nooa/config/.
+        Comment only; do not request changes for this rule alone.
+    - path: "src/nooa/viewer/frontend-react/src/**/*.{ts,tsx,js,jsx}"
+      instructions: |
+        Text a user reads in the viewer must not be shortened by hand in
+        JavaScript. Flag NEW code that cuts text or lists for display: `slice` /
+        `substring` / `substr` of a string or array to a size limit, joining a
+        head and a tail, or adding "...", "…", "N more" or "truncated" markers.
+        The backend already bounds what it sends (`nooa.snapshot`); show what it
+        sent, and say what was cut the way the data says it. Do not flag pure
+        visual CSS clipping (`text-overflow: ellipsis`, `line-clamp`, `overflow:
+        hidden`, a scroll area) of content that is fully available on demand
+        (expand, hover, copy, a detail view).
+        Only flag code the pull request adds or changes.
         Comment only; do not request changes for this rule alone.

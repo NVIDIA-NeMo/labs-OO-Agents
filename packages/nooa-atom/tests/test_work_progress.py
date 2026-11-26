@@ -18,7 +18,6 @@ from nooa_atom.agent.work_progress import (
     MAX_BYTES_LIMIT,
     ShellProgress,
     Throttle,
-    _keep,
     _ShellProgress,
 )
 from nooa_atom.agent.work_shell import Shell
@@ -270,18 +269,24 @@ def test_terminal_close_discards_tail_and_detaches_timers_and_sink():
 
 
 def test_merge_keeps_head_and_tail_bounded_and_counts_omitted():
+    """Unread batches merge through nooa.snapshot.merge: a quarter head, the rest tail (bytes)."""
     first = ShellProgress(stdout="A" * 6000)
     merged, cut = first._merge(ShellProgress(stdout="B" * 6000, stderr="e"), 8192)
     assert cut == 1 and merged.batches == 2 and merged.stderr == "e"
     assert merged.omitted == 12000 - 8192
-    head, tail = merged.stdout.split("progress omitted", 1)
-    assert head.startswith("A" * 2048) and tail.endswith("B" * 6000)
-    again, _ = merged._merge(ShellProgress(stdout="C" * 3000), 8192)
-    assert again.omitted == merged.omitted + 3000
-    assert again.stdout.count("progress omitted") == 1
-    assert len(again.stdout.encode()) < 8192 + 40
-    text, omitted = _keep("漢" * 5000, 100)
-    assert omitted > 0 and "\ufffd" not in text
+    assert merged.stdout == (
+        "A" * 2048 + "\n[... 3,808 bytes omitted; full output not kept]\n" + "A" * 144 + "B" * 6000
+    )
+    again, cut = merged._merge(ShellProgress(stdout="C" * 3000), 8192)
+    assert cut == 1 and again.omitted == merged.omitted + 3000
+    assert again.stdout == (
+        "A" * 2048 + "\n[... 6,808 bytes omitted; full output not kept]\n" + "B" * 3144 + "C" * 3000
+    )
+    assert again.stdout.count("bytes omitted") == 1
+    small, cut = ShellProgress(stdout="x")._merge(ShellProgress(stdout="y"), 8192)
+    assert (small.stdout, small.omitted, cut) == ("xy", 0, 0)
+    wide, _ = ShellProgress(stdout="漢" * 2500)._merge(ShellProgress(stdout="漢" * 2500), 100)
+    assert wide.omitted > 0 and "\ufffd" not in wide.stdout  # cut on code points
 
 
 # ---- managed jobs -------------------------------------------------------------

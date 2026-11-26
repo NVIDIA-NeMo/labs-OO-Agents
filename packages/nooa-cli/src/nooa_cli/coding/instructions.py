@@ -7,6 +7,9 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from nooa.config.effective import effective
+from nooa_cli.coding.limits import CodingLimits
+
 logger = logging.getLogger(__name__)
 
 
@@ -28,16 +31,20 @@ def discover_agent_instruction_files(working_directory: str | Path) -> tuple[Pat
     return tuple(path for directory in directories if (path := directory / "AGENTS.md").is_file())
 
 
-#: Per-file and combined caps on repository instructions. The content is
-#: workspace-controlled and lands in a prefix context block on every turn, so an
-#: unbounded read is a memory and context-window risk at session setup.
-_MAX_INSTRUCTION_FILE_CHARS = 100_000
-_MAX_INSTRUCTION_TOTAL_CHARS = 200_000
 _SECTION_SEPARATOR = "\n\n---\n\n"
+_TRUNCATED_MARKER = "\n\n[... truncated ...]"
 
 
-def render_agent_instructions(working_directory: str | Path) -> str:
+def render_agent_instructions(
+    working_directory: str | Path, limits: CodingLimits | None = None
+) -> str:
     """Render applicable repository instructions as one bounded context block.
+
+    The caps are ``instructions_file_chars`` per file and
+    ``instructions_total_chars`` in all of ``limits`` (``None``: the
+    config in force, ``nooa.config.effective(CodingLimits)``). The content is
+    workspace-controlled and lands in a prefix context block on every turn, so
+    an unbounded read is a memory and context-window risk at session setup.
 
     Reads are bounded rather than truncated after the fact: the content is
     workspace-controlled and lands in a prefix context block on every turn, so
@@ -45,13 +52,18 @@ def render_agent_instructions(working_directory: str | Path) -> str:
     the memory. The budget covers the rendered text — headers, separators and
     truncation markers included — not just the retained file content.
     """
+    config = limits if limits is not None else effective(CodingLimits)
     sections: list[str] = []
-    remaining = _MAX_INSTRUCTION_TOTAL_CHARS
+    remaining = config.instructions_total_chars
     for path in discover_agent_instruction_files(working_directory):
-        if remaining <= 0:
+        header = f"Instructions from {path}:\n\n"
+        # The header and the separator before this section (none before the
+        # first) come out of the total first; what is left bounds the content.
+        available = remaining - len(header) - (len(_SECTION_SEPARATOR) if sections else 0)
+        if available <= 0:
             logger.warning("Skipping repository instructions from %s: total limit reached", path)
             continue
-        budget = min(_MAX_INSTRUCTION_FILE_CHARS, remaining)
+        budget = min(config.instructions_file_chars, available)
         try:
             with path.open("r", encoding="utf-8") as stream:
                 # One char past the budget is enough to know it was cut.
@@ -60,15 +72,22 @@ def render_agent_instructions(working_directory: str | Path) -> str:
             continue
         truncated = len(content) > budget
         if truncated:
+            # A cut file also carries the marker, which must fit in the total.
+            budget = min(budget, available - len(_TRUNCATED_MARKER))
+            if budget <= 0:
+                logger.warning(
+                    "Skipping repository instructions from %s: total limit reached", path
+                )
+                continue
             content = content[:budget]
             logger.warning("Truncating repository instructions from %s at %d chars", path, budget)
         content = content.strip()
         if not content:
             continue
         if truncated:
-            content += "\n\n[... truncated ...]"
-        section = f"Instructions from {path}:\n\n{content}"
-        remaining -= len(section) + len(_SECTION_SEPARATOR)
+            content += _TRUNCATED_MARKER
+        section = header + content
+        remaining -= len(section) + (len(_SECTION_SEPARATOR) if sections else 0)
         sections.append(section)
     return _SECTION_SEPARATOR.join(sections)
 

@@ -53,6 +53,11 @@ Contract:
   folder and writer inert in a forked child (no writes, deletes or exit
   cleanup; fresh locks, so the child never waits on a lock held at the
   fork). A child's own ``OverflowDir`` works normally.
+- **A process default.** ``OverflowDir.default()`` is one folder per
+  process for output with no owner of its own, made on first use (a forked
+  child makes its own, never using its parent's). When it cannot be
+  created it returns ``None`` (memory only; logged once) and a later call
+  tries again.
 - **Threads.** ``open()``, ``close()`` and writers finishing may run in any
   threads; the bookkeeping is locked. One writer is used by one thread at
   a time.

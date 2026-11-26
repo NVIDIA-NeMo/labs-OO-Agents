@@ -39,8 +39,9 @@ class _TextLease:
             if self.scope.accepts_write():
                 self.buffer.flush()
 
-    def getvalue(self):
-        return self.buffer.getvalue()
+    def snapshot(self):
+        """The leased stream so far, as a ``Text``."""
+        return self.buffer.snapshot()
 
 
 class CaptureScope:
@@ -62,12 +63,12 @@ class CaptureScope:
         return self.active
 
     def __enter__(self):
-        from nooa.runtime.actor import _make_capture_buffer, _stderr_buffer_var, _stdout_buffer_var
+        from nooa.runtime.actor import _make_capture_stream, _stderr_buffer_var, _stdout_buffer_var
 
         self.active = True
         capture = self.config.capture
-        self.stdout = _TextLease(self, _make_capture_buffer(capture.max_stdout, capture))
-        self.stderr = _TextLease(self, _make_capture_buffer(capture.max_stderr, capture))
+        self.stdout = _TextLease(self, _make_capture_stream(capture.max_stdout, self.config))
+        self.stderr = _TextLease(self, _make_capture_stream(capture.max_stderr, self.config))
         self.media = _MediaBuffer(
             max_attachments=self.config.media_capture.max_attachments_per_execution,
             accepts_write=self.accepts_write,
@@ -91,13 +92,15 @@ class CaptureScope:
     def finish(self):
         """Freeze once before publishing completion. Does not reset task tokens."""
         from nooa.events import ExecutionResult
+        from nooa.runtime.actor import _render_capture
 
         with self.lock:
             if self._finished is None:
                 self.active = False
+                capture = self.config.capture
                 self._finished = ExecutionResult(
-                    stdout=self.stdout.getvalue(),
-                    stderr=self.stderr.getvalue(),
+                    stdout=_render_capture(self.stdout, capture),
+                    stderr=_render_capture(self.stderr, capture),
                     images=list(self.media.blocks),
                 )
             return self._finished

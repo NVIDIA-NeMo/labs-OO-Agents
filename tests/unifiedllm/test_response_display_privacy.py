@@ -10,7 +10,7 @@ from nooa.context_blocks import MarkdownBlockFormatter, XMLBlockFormatter
 from nooa.events import PythonOutput, ResultStatus
 from nooa.llm_types import AssistantReasoning, AssistantText, LLMResponse, ToolCall
 from nooa.runtime.event_manager import EventManager
-from nooa.tracing._hooks_impl import OpenInferenceHooks
+from nooa.snapshot import capture, render_json
 from nooa.tracing._secret_scrubber import scrub_value
 
 SECRET = "private-provider-state-12345"
@@ -37,7 +37,7 @@ def python_output(value):
 )
 def test_nested_display_keeps_public_text_only(wrap):
     value = wrap(response())
-    for rendered in (pformat(value), OpenInferenceHooks._safe_serialize(value)):
+    for rendered in (pformat(value), render_json(capture(value), max_chars=50_000)):
         assert SECRET not in rendered
         assert "readable answer" in rendered
         assert "readable reasoning" in rendered

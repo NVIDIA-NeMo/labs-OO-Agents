@@ -384,14 +384,14 @@ async def test_every_exit_path_finishes_scope_before_reading_output(monkeypatch,
             events.append("exit")
             return super().__exit__(*exc)
 
-    real_getvalue = capture_module._TextLease.getvalue
+    real_snapshot = capture_module._TextLease.snapshot
 
-    def recording_getvalue(lease):
+    def recording_snapshot(lease):
         events.append("read")
-        return real_getvalue(lease)
+        return real_snapshot(lease)
 
     monkeypatch.setattr(capture_module, "CaptureScope", RecordingScope)
-    monkeypatch.setattr(capture_module._TextLease, "getvalue", recording_getvalue)
+    monkeypatch.setattr(capture_module._TextLease, "snapshot", recording_snapshot)
     agent, ns = CellAgent(), namespace()
     call = CurrentCall(id="one", method_name="answer", decorator="agent", return_type=int)
     builtins = CodeActStrategy()._build_builtins(agent.runtime, call)

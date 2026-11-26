@@ -4,7 +4,7 @@
 
 Block-level head/tail string truncation has been removed. ``format_event``
 uses structural bounds from ``event_format`` only; it must not rely on
-``max_chars`` / ``TruncatingStringIO`` for event internals.
+``max_chars`` for event internals.
 """
 
 from nooa.context_blocks.events import EventBase

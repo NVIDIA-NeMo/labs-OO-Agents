@@ -17,6 +17,7 @@ snapshot).
 
 from __future__ import annotations
 
+import codecs
 import json
 import math
 from typing import Any
@@ -343,7 +344,25 @@ def encode_text(text: str) -> bytes:
     is how a bytes ``TextStream`` and ``cut(unit="bytes")`` encode a
     ``str``, and how a chars stream writes its overflow file.
     """
-    try:
-        return text.encode("utf-8", errors="surrogateescape")
-    except UnicodeEncodeError:
-        return text.encode("utf-8", errors="backslashreplace")
+    return text.encode("utf-8", errors=_SURROGATES)
+
+
+_SURROGATES = "nooa.snapshot.surrogates"
+"""``encode_text``'s error handler: both policies in one pass, so one kind never changes the other."""
+
+
+def _encode_surrogates(error: UnicodeError) -> tuple[bytes, int]:
+    """A ``surrogateescape`` character as its original byte, any other lone surrogate as ``\\udXXX``."""
+    if not isinstance(error, UnicodeEncodeError):
+        raise error
+    out = bytearray()
+    for char in error.object[error.start : error.end]:
+        point = ord(char)
+        if 0xDC80 <= point <= 0xDCFF:
+            out.append(point - 0xDC00)
+        else:
+            out += f"\\u{point:04x}".encode("ascii")
+    return bytes(out), error.end
+
+
+codecs.register_error(_SURROGATES, _encode_surrogates)

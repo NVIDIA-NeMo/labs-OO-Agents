@@ -22,14 +22,19 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
-from nooa.agentdoc import FileBackedTruncatingStringIO, TruncatingStringIO
 from nooa.agentdoc.introspect import methods, variables
+from nooa.config.effective import (
+    _current_configs_var,
+    _current_truncation_config_var,
+    layer_configs,
+)
 from nooa.context_blocks import (
     DynamicContext,
     ResolvedBlock,
     render_context,
 )
 from nooa.context_blocks.scoped import _scoped_blocks_var, _scoped_events_var
+from nooa.snapshot import SharedTextStream, render_output
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import CaptureConfig, TruncationConfig
@@ -60,6 +65,7 @@ from nooa.runtime.context_vars import (
     _in_exec_middleware,
     _in_generation_session,
     _parent_agent_var,
+    capture_overflow,
 )
 from nooa.runtime.execution_namespace import RUNTIME_NAMES, ExecutionNamespace
 from nooa.runtime.harness_metrics import (
@@ -429,10 +435,10 @@ _current_llm_selection_source_var: contextvars.ContextVar[str | None] = contextv
 
 # Context variable for the resolved truncation config for the current generation call.
 # Set by _execute_with_generation() so that method-level @strategy(truncation=...)
-# overrides are visible to runtime.truncation_config throughout strategy execution.
-_current_truncation_config_var: contextvars.ContextVar[Any] = contextvars.ContextVar(
-    "current_truncation_config", default=None
-)
+# overrides are visible to nooa.config.effective(TruncationConfig) (and so to
+# runtime.truncation_config) throughout strategy execution. Defined in
+# nooa.config.effective, the one place that encodes the override rule
+# (imported above as _current_truncation_config_var).
 
 # Context variable for current strategy being executed
 _current_strategy_var: contextvars.ContextVar[Any] = contextvars.ContextVar(
@@ -457,10 +463,10 @@ _decorator_events_var: contextvars.ContextVar["EventQuery | None"] = contextvars
 
 # Task-local stdout/stderr buffers for async-safe capture
 # Contextvars are per-task, so parallel async executions get isolated buffers
-_stdout_buffer_var: contextvars.ContextVar[io.StringIO | TruncatingStringIO | None] = (
+_stdout_buffer_var: contextvars.ContextVar[io.StringIO | SharedTextStream | Any | None] = (
     contextvars.ContextVar("stdout_buffer", default=None)
 )
-_stderr_buffer_var: contextvars.ContextVar[io.StringIO | TruncatingStringIO | None] = (
+_stderr_buffer_var: contextvars.ContextVar[io.StringIO | SharedTextStream | Any | None] = (
     contextvars.ContextVar("stderr_buffer", default=None)
 )
 
@@ -509,10 +515,33 @@ def _pop_generation_id() -> str | None:
     return popped
 
 
-def _make_capture_buffer(limit: int, capture: "CaptureConfig") -> TruncatingStringIO:
-    """Create a stdout/stderr capture buffer, file-backed if ``capture`` says so."""
-    kind = FileBackedTruncatingStringIO if capture.file_backed else TruncatingStringIO
-    return kind(limit=limit, tail_chars=capture.tail, unrecoverable_hint=capture.unrecoverable_hint)
+def _make_capture_stream(limit: int, config: "TruncationConfig") -> SharedTextStream:
+    """A cell's stdout or stderr capture: ``limit`` chars kept (head and tail), several writers.
+
+    ``config``: the agent's resolved ``TruncationConfig``. The tail is
+    ``config.capture.tail`` chars (``None``: half). The whole stream also
+    goes to an overflow file only when ``config.overflow_files`` (the off
+    switch) and ``config.capture.file_backed`` are both on: in the folder
+    the session set in ``capture_overflow``, else ``OverflowDir.default()``
+    (none, memory only, when that cannot be created). With
+    ``overflow_files`` off it never touches ``nooa.overflow``.
+    Read it with ``_render_capture``.
+    """
+    capture = config.capture
+    tail = capture.tail if capture.tail is not None else limit // 2
+    folder = None
+    if config.overflow_files and capture.file_backed:
+        from nooa.overflow import OverflowDir
+
+        folder = capture_overflow.get()
+        if folder is None:
+            folder = OverflowDir.default()
+    return SharedTextStream(unit="chars", head=limit - tail, tail=tail, overflow=folder)
+
+
+def _render_capture(stream: Any, capture: "CaptureConfig") -> str:
+    """A capture stream (or a lease of one) in ``render_output``'s notation, with the config's note."""
+    return render_output(stream.snapshot(), note=capture.unrecoverable_hint)
 
 
 class _TopLevelReturnFinder(ast.NodeVisitor):
@@ -897,13 +926,14 @@ class ActorRuntime:
     def truncation_config(self) -> "TruncationConfig":
         """Truncation configuration for the current generation call (RuntimeServices protocol).
 
-        Returns the method-level override (set by @strategy(truncation=...)) if active,
-        otherwise falls back to the agent-level config.
+        ``nooa.config.effective(TruncationConfig, self.agent)``: the method-level
+        override (set by @strategy(truncation=...)) if active, otherwise the
+        agent-level config.
         """
-        override = _current_truncation_config_var.get()
-        if override is not None:
-            return override
-        return self.agent._truncation
+        from nooa.config.effective import effective
+        from nooa.config.truncation_config import TruncationConfig
+
+        return effective(TruncationConfig, self.agent)
 
     async def decision_state_inputs(
         self,
@@ -1728,11 +1758,12 @@ class ActorRuntime:
             # leaking to the terminal as "<unknown>:N: SyntaxWarning: ..."
             #
             # Each async task gets its own buffers via contextvars, so parallel
-            # executions are isolated. TruncatingStringIO prevents LLMs from
-            # filling the context window.
+            # executions are isolated. The bounded capture streams keep LLMs
+            # from filling the context window.
+            truncation_config = self.truncation_config
             from nooa.runtime.capture_scope import CaptureScope
 
-            capture_scope = CaptureScope(self.truncation_config)
+            capture_scope = CaptureScope(truncation_config)
             capture_scope.__enter__()
             stdout_buffer, stderr_buffer = capture_scope.stdout, capture_scope.stderr
             media_buffer = capture_scope.media
@@ -1805,8 +1836,8 @@ class ActorRuntime:
                 if capture_scope is not None:
                     capture_scope.finish()
                 return {
-                    "stdout": stdout_buffer.getvalue(),
-                    "stderr": stderr_buffer.getvalue(),
+                    "stdout": _render_capture(stdout_buffer, truncation_config.capture),
+                    "stderr": _render_capture(stderr_buffer, truncation_config.capture),
                     "images": media_buffer.blocks if media_buffer is not None else [],
                 }
 
@@ -1919,7 +1950,7 @@ class ActorRuntime:
             # A capture scope leases the buffer: check the buffer it wraps.
             if capture_scope is not None:
                 captured = capture_scope.stdout.buffer
-                if isinstance(captured, TruncatingStringIO) and captured.was_truncated:
+                if isinstance(captured, SharedTextStream) and not captured.snapshot().complete:
                     from nooa.agentdoc._format_observation import record_truncation
 
                     record_truncation("capture.max_stdout")
@@ -2227,7 +2258,10 @@ class ActorRuntime:
             if error_mode == "raise":
                 raise
             elif error_mode == "show":
-                return f"{{ERROR: {e}}}"
+                from nooa.runtime.placeholders import bound_placeholder_text
+
+                limit = self.truncation_config.placeholder_chars
+                return f"{{ERROR: {bound_placeholder_text(str(e), limit)}}}"
             else:  # silent
                 return None
 
@@ -2236,6 +2270,8 @@ class ActorRuntime:
         text: str,
         extra_context: dict[str, Any] | None = None,
         error_mode: str = "show",
+        *,
+        placeholder_chars: int | None | Literal["config"] = "config",
     ) -> str:
         """
         Expand {expression} placeholders in text using runtime context.
@@ -2244,6 +2280,10 @@ class ActorRuntime:
             text: Text with {expression} placeholders
             extra_context: Additional variables for evaluation
             error_mode: How to handle errors ("show", "silent", "raise")
+            placeholder_chars: Most characters one placeholder inserts
+                (``None``: whole); ``"config"``: the agent's effective
+                ``TruncationConfig.placeholder_chars``. The ``{ERROR: ...}``
+                text of a failed expression always uses the config.
 
         Returns:
             Text with expressions evaluated and substituted
@@ -2256,8 +2296,13 @@ class ActorRuntime:
         """
         import string
 
+        from nooa.runtime.placeholders import render_placeholder
+
         if not text or "{" not in text:
             return text
+        prefill = self.truncation_config.prefill_format  # the agent's limits for values
+        if placeholder_chars == "config":
+            placeholder_chars = self.truncation_config.placeholder_chars
 
         # Use Python's built-in formatter to parse the template
         # This handles format specs, conversions (!r, !s, !a), and escaped braces
@@ -2285,18 +2330,26 @@ class ActorRuntime:
                     result_parts.append(placeholder)
                     continue
 
-                # Apply conversion (!r, !s, !a)
-                if conversion == "r":
-                    value = repr(value)
-                elif conversion == "s":
-                    value = str(value)
-                elif conversion == "a":
-                    value = ascii(value)
-
-                # Apply format spec
+                # The value as bounded text (nooa.runtime.placeholders): a
+                # str whole up to the cut, any other value through the
+                # snapshot; a conversion or format spec as written, then cut.
                 if format_spec:
+                    if conversion in ("r", "s", "a"):
+                        # Converted before the format try: a failing repr/str/ascii
+                        # raises in every mode, like {v!s} without a spec.
+                        # The whole converted text: the spec applies to it, and
+                        # render_placeholder cuts only its result, once.
+                        value = formatter.convert_field(value, conversion)
                     try:
-                        result_parts.append(format(value, format_spec))
+                        result_parts.append(
+                            render_placeholder(
+                                value,
+                                None,
+                                format_spec,
+                                max_chars=placeholder_chars,
+                                prefill=prefill,
+                            )
+                        )
                     except Exception:
                         if error_mode == "silent":
                             # Keep original placeholder on format error
@@ -2308,7 +2361,11 @@ class ActorRuntime:
                         else:
                             result_parts.append(f"{{{field_name}:{format_spec} | FORMAT ERROR}}")
                 else:
-                    result_parts.append(str(value))
+                    result_parts.append(
+                        render_placeholder(
+                            value, conversion, max_chars=placeholder_chars, prefill=prefill
+                        )
+                    )
 
         return "".join(result_parts)
 
@@ -2720,6 +2777,11 @@ class ActorRuntime:
         # Resolve truncation config: method-level @strategy(truncation=...) > agent-level
         method_truncation = getattr(base_method, "_strategy_truncation", None)
         resolved_truncation = self.agent._truncation.merge_with(method_truncation)
+        # The same for other config models: @strategy(configs=...) > the agent's configs=.
+        resolved_configs = layer_configs(
+            getattr(self.agent, "_configs", None) or {},
+            getattr(base_method, "_strategy_configs", None) or {},
+        )
 
         # Mark that we're in a generation session
         # This allows nested ellipsis method calls to execute inline without deadlocking
@@ -2808,9 +2870,17 @@ class ActorRuntime:
                 raw_docstring = getattr(method, "__doc__", None)
                 expanded_docstring = None
                 if raw_docstring:
-                    expanded_docstring = await self.expand_variables(
-                        raw_docstring, extra_context=merged_kwargs, error_mode="silent"
-                    )
+                    # Under this method's limits (its @strategy(truncation=...)),
+                    # as everything else the call renders.
+                    docstring_token = _current_truncation_config_var.set(resolved_truncation)
+                    docstring_configs_token = _current_configs_var.set(resolved_configs)
+                    try:
+                        expanded_docstring = await self.expand_variables(
+                            raw_docstring, extra_context=merged_kwargs, error_mode="silent"
+                        )
+                    finally:
+                        _current_configs_var.reset(docstring_configs_token)
+                        _current_truncation_config_var.reset(docstring_token)
 
                 # Use the shared builder so Annotated parameter specs reach
                 # prefill rendering on agent calls as well as nested strategy calls.
@@ -2841,6 +2911,7 @@ class ActorRuntime:
                     llm_selection_source
                 )
                 truncation_token = _current_truncation_config_var.set(resolved_truncation)
+                configs_token = _current_configs_var.set(resolved_configs)
                 event_format_token = _current_event_format_var.set(
                     resolved_truncation.event_format.model_dump()
                 )
@@ -2884,6 +2955,7 @@ class ActorRuntime:
                     _current_llm_model_name_var.reset(llm_model_name_token)
                     _current_llm_selection_source_var.reset(llm_selection_source_token)
                     _current_truncation_config_var.reset(truncation_token)
+                    _current_configs_var.reset(configs_token)
                     _current_event_format_var.reset(event_format_token)
                     _decorator_context_var.reset(decorator_ctx_token)
                     _decorator_events_var.reset(decorator_evt_token)

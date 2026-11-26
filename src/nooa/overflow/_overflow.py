@@ -23,6 +23,13 @@ it). A folder whose lock a thread holds for more than a second is marked
 for cleanup and that thread removes it when it lets go (an ``open()`` in
 progress then returns ``None``). An ``OverflowDir`` made after the exit
 cleanup started gets no folder at all.
+
+Warnings: nothing here logs, or hands a warning to a caller's ``warn``, while
+it holds a lock. A logging handler may write back into what the lock protects
+-- a ``SharedTextStream`` opens its first overflow file from ``write()``,
+under the stream's own lock -- and the logging thread would then wait for a
+lock it holds itself. A lock-holder collects its warnings in a ``_Held``
+sink and emits them once the lock is released.
 """
 
 from __future__ import annotations
@@ -36,7 +43,7 @@ import secrets
 import shutil
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 __all__ = ["OverflowDir", "OverflowWriter"]
 
@@ -49,11 +56,63 @@ _DIR_PREFIX = "nooa-overflow-"  # private folders: nooa-overflow-*
 _NOFOLLOW: int | None = getattr(os, "O_NOFOLLOW", None)  # None: overflow files are off
 _CREATE = os.O_WRONLY | os.O_CREAT | os.O_EXCL | (_NOFOLLOW or 0) | getattr(os, "O_CLOEXEC", 0)
 
+# Where a warning goes: logged here, or handed to the caller's ``warn``, which
+# logs it once it has let go of whatever lock it holds. A caller does that when
+# a logging handler could write back into what the lock protects: the handler
+# would wait on that same lock, held by the thread doing the logging. A ``warn``
+# handed in while this module holds a lock is called once that lock is released
+# (see ``_Held``).
+_Warn = Callable[[Callable[[], None]], None]
 
-@functools.cache
-def _unsupported() -> None:
-    """Log, once per process, that this platform has no overflow files."""
-    _log.warning("no os.O_NOFOLLOW on this platform: overflow files are off, keeping memory only")
+_unsupported_warned = False  # the platform warning is made once per process
+
+
+def _warn(
+    warn: _Warn | None, message: str, *args: object, exc: BaseException | None = None
+) -> None:
+    """Log ``message`` (``%``-formatted with ``args``), or hand ``warn`` a callable that logs it."""
+    if warn is None:
+        _log.warning(message, *args, exc_info=exc)
+    else:
+        warn(functools.partial(_log.warning, message, *args, exc_info=exc))
+
+
+def _unsupported(warn: _Warn | None = None) -> None:
+    """Warn, once per process, that this platform has no overflow files."""
+    global _unsupported_warned
+    if _unsupported_warned:
+        return
+    _unsupported_warned = True
+    _warn(warn, "no os.O_NOFOLLOW on this platform: overflow files are off, keeping memory only")
+
+
+class _Held:
+    """A sink (``_Warn``) for the warnings raised under a lock, emitted once it is released.
+
+    Nothing in this module logs while it holds a lock: a logging handler may
+    write back into a ``SharedTextStream``, whose first overflow file is opened
+    from ``write()`` under the stream's own lock, and the logging thread would
+    then wait for a lock it holds itself. Every lock-holder here hands its
+    warnings to one of these, then calls ``emit`` after letting go.
+    """
+
+    __slots__ = ("_entries",)
+
+    def __init__(self) -> None:
+        self._entries: list[Callable[[], None]] = []
+
+    def __call__(self, entry: Callable[[], None]) -> None:
+        """Collect one warning's logging call: it runs at ``emit``, no lock held."""
+        self._entries.append(entry)
+
+    def emit(self, warn: _Warn | None = None) -> None:
+        """Emit what was collected: hand each entry to ``warn``, or log it here."""
+        entries, self._entries = self._entries, []
+        for entry in entries:
+            if warn is None:
+                entry()
+            else:
+                warn(entry)
 
 
 class OverflowWriter:
@@ -127,16 +186,19 @@ class OverflowWriter:
             self._written += n
         return done
 
-    def finish(self, *, delete: bool) -> bool:
+    def finish(self, *, delete: bool, warn: _Warn | None = None) -> bool:
         """Close the file and, with ``delete``, remove it; else it becomes the folder's newest closed file.
 
         Returns whether the file is kept: ``True`` after ``delete=False``
         when the file closed cleanly. Never raises: a failed close is
-        logged and the file, which may not hold ``written`` bytes, is
+        warned and the file, which may not hold ``written`` bytes, is
         deleted (``False``). A later ``finish(delete=True)`` deletes a kept
         file; any other later call returns the same answer. In a forked
         child it only closes the child's copy of the descriptor
         (``False``).
+
+        ``warn``: as ``OverflowDir.open`` takes it, for a caller that holds a
+        lock a logging handler could re-enter. ``None``: log here.
         """
         fd, self._fd = self._fd, None
         if os.getpid() != self._pid:
@@ -147,19 +209,17 @@ class OverflowWriter:
         if fd is not None:
             try:
                 os.close(fd)
-            except OSError:
-                _log.warning(
-                    "could not close overflow file %r; deleting it", self._path, exc_info=True
-                )
+            except OSError as error:
+                _warn(warn, "could not close overflow file %r; deleting it", self._path, exc=error)
                 delete = True
             if not delete:
                 self._kept = True
-                self._folder.finished(os.path.basename(self._path), delete=False)
+                self._folder.finished(os.path.basename(self._path), delete=False, warn=warn)
                 return True
         elif not (delete and self._kept):
             return self._kept  # finished before: the same answer
         self._kept = False
-        self._folder.finished(os.path.basename(self._path), delete=True)
+        self._folder.finished(os.path.basename(self._path), delete=True, warn=warn)
         return False
 
 
@@ -190,29 +250,41 @@ class _Folder:
         return os.getpid() == self.pid
 
     @contextlib.contextmanager
-    def locked(self) -> Iterator[None]:
-        """Hold the lock; on leaving, run a cleanup the exit asked for while it was held."""
-        with self.lock:
-            try:
-                yield
-            finally:
-                if self.exit_pending and not self.done:
-                    self.run()
+    def locked(self, warn: _Warn | None = None) -> Iterator[_Warn]:
+        """Hold the lock; yield the sink its warnings must go to; on leaving, run a cleanup the exit asked for.
 
-    def remove(self, name: str) -> None:
-        """Delete one file by name; when that fails (logged) it stays a closed file, counted and evictable."""
+        What the body hands the sink is collected (``_Held``) and emitted once
+        the lock is released -- through ``warn`` when given, else logged -- so
+        nothing logs while the lock is held.
+
+        ``warn``: as ``OverflowDir.open`` takes it, for the ``run()`` this may
+        start: a caller that holds a lock a logging handler could re-enter.
+        """
+        warnings = _Held()
+        try:
+            with self.lock:
+                try:
+                    yield warnings
+                finally:
+                    if self.exit_pending and not self.done:
+                        self.run(warn=warnings)
+        finally:
+            warnings.emit(warn)
+
+    def remove(self, name: str, warn: _Warn | None = None) -> None:
+        """Delete one file by name; when that fails (warned) it stays a closed file, counted and evictable."""
         path = os.path.join(self.path, name)
         try:
             os.unlink(path)
         except FileNotFoundError:
             pass
-        except OSError:
-            _log.warning("could not delete overflow file %r", path, exc_info=True)
+        except OSError as error:
+            _warn(warn, "could not delete overflow file %r", path, exc=error)
             self.files[name] = True
             return
         del self.files[name]
 
-    def new_writer(self, max_bytes: int) -> OverflowWriter | None:
+    def new_writer(self, max_bytes: int, warn: _Warn | None = None) -> OverflowWriter | None:
         """Create a new file, make room for it and return its writer, or ``None`` (memory only). Under the lock.
 
         The place is reserved before the file is created and given up on
@@ -234,12 +306,12 @@ class _Folder:
             for old in closed:
                 if len(self.files) <= self.max_files:
                     break
-                self.remove(old)
+                self.remove(old, warn=warn)
             if len(self.files) <= self.max_files and not self.closing:
                 return OverflowWriter(fd, path, max_bytes, self)
-        except OSError:  # only os.open raises it: nothing was created or evicted
+        except OSError as error:  # only os.open raises it: nothing was created or evicted
             del self.files[name]
-            _log.warning("could not create an overflow file; keeping memory only", exc_info=True)
+            _warn(warn, "could not create an overflow file; keeping memory only", exc=error)
             return None
         except BaseException:  # interrupted, perhaps after the file was made: the name is ours
             self.files.pop(name, None)
@@ -249,24 +321,28 @@ class _Folder:
                 os.unlink(path)
             raise
         os.close(fd)  # no room after all, or the exit began meanwhile
-        self.remove(name)
+        self.remove(name, warn=warn)
         return None
 
-    def finished(self, name: str, *, delete: bool) -> None:
+    def finished(self, name: str, *, delete: bool, warn: _Warn | None = None) -> None:
         """The writer of ``name`` finished: delete it, or make it the newest closed file."""
         if not self.mine():
             return
-        with self.locked():
+        with self.locked(warn=warn) as warnings:
             if self.closing or name not in self.files:
                 return  # the folder closed, or evicted it
             if delete:
-                self.remove(name)
+                self.remove(name, warn=warnings)
             else:
                 del self.files[name]
                 self.files[name] = True  # newest finished: evicted last
 
-    def run(self) -> None:
-        """Remove the whole private folder; on failure (logged) stay registered to retry. Under the lock."""
+    def run(self, warn: _Warn | None = None) -> None:
+        """Remove the whole private folder; on failure stay registered to retry. Under the lock.
+
+        ``warn``: as ``OverflowDir.open`` takes it: a failure warning goes to
+        this callable instead of being logged here.
+        """
         self.closing = True
         if self.done or not self.mine():
             return
@@ -276,9 +352,7 @@ class _Folder:
             nonlocal ok
             if not isinstance(exc, FileNotFoundError):
                 ok = False
-                _log.warning(
-                    "could not remove %r in overflow folder %r", path, self.path, exc_info=exc
-                )
+                _warn(warn, "could not remove %r in overflow folder %r", path, self.path, exc=exc)
 
         shutil.rmtree(self.path, onexc=failed)
         if not ok:
@@ -291,11 +365,13 @@ class _Folder:
     def close_at_exit(self) -> None:
         """The exit cleanup: under the lock, or by the thread holding it when it lets go."""
         self.closing = self.exit_pending = True
+        warnings = _Held()
         if self.lock.acquire(timeout=1.0):
             try:
-                self.run()
+                self.run(warn=warnings)
             finally:
                 self.lock.release()
+                warnings.emit()  # the lock is gone: a handler may write back now
         elif not self.done:
             _log.warning(
                 "overflow folder %r is busy at exit; the thread using it removes it", self.path
@@ -310,13 +386,24 @@ _live_lock = threading.Lock()  # held for set updates only, never across I/O
 _exiting = False
 
 
+# The process-default folder (``OverflowDir.default()``): made on first use, per process.
+_default: OverflowDir | None = None
+_default_lock = threading.Lock()
+_default_failed = False  # a creation failure was logged (once, until one succeeds)
+
+
 def _after_fork_in_child() -> None:
     """A forked child starts with no exit cleanups: the inherited folders are its parent's (inert here)."""
-    global _live, _live_lock  # noqa: PLW0603 - per-process registry
+    global _live, _live_lock, _default, _default_lock, _default_failed  # noqa: PLW0603 - per-process registry
     for folder in _live:
         folder.lock = threading.Lock()
     _live = set()
     _live_lock = threading.Lock()
+    _default, _default_lock, _default_failed = (
+        None,
+        threading.Lock(),
+        False,
+    )  # the child makes its own
 
 
 if hasattr(os, "register_at_fork"):
@@ -348,6 +435,10 @@ class OverflowDir:
     - ``max_files``: at most this many of its files exist at once.
     - ``file_bytes``: each file holds at most this many bytes, so the
       folder never holds more than ``max_files * file_bytes``.
+    - ``warn``: hand each warning raised while the folder is made -- the
+      removal of a folder created after the exit cleanup began -- to this
+      callable instead of logging it here, once no lock is held; as
+      ``open()`` takes it. ``None``: log here.
 
     ``open(max_bytes=None)`` creates a new file in the folder (exclusively,
     ``O_NOFOLLOW``, 0600) and returns its ``OverflowWriter``. It creates the
@@ -377,6 +468,9 @@ class OverflowDir:
     returns ``None`` (logged), and ``close()`` and the child's exit leave
     the parent's files alone. A child makes its own ``OverflowDir``.
 
+    ``OverflowDir.default()``: the process's own folder, made on first use,
+    for output nobody else owns; ``None`` when it cannot be created.
+
     Threads: ``open()``, ``close()`` and the writers' ``finish`` may run in
     any threads; the bookkeeping is locked.
 
@@ -385,7 +479,11 @@ class OverflowDir:
     """
 
     def __init__(
-        self, *, max_files: int = DEFAULT_MAX_FILES, file_bytes: int = DEFAULT_FILE_BYTES
+        self,
+        *,
+        max_files: int = DEFAULT_MAX_FILES,
+        file_bytes: int = DEFAULT_FILE_BYTES,
+        warn: _Warn | None = None,
     ) -> None:
         if max_files < 0 or file_bytes < 0:
             raise ValueError("max_files and file_bytes must be non-negative")
@@ -395,8 +493,8 @@ class OverflowDir:
             if not exiting:
                 _live.add(folder)
         if exiting:  # made after the exit cleanup started: nothing would remove it
-            with folder.lock:
-                folder.run()
+            with folder.locked(warn=warn) as warnings:
+                folder.run(warn=warnings)
         self._folder = folder
 
     @property
@@ -419,7 +517,9 @@ class OverflowDir:
         """Whether ``close()`` (or the exit) ran: no new files; its files are gone, or a retry is pending."""
         return self._folder.closing
 
-    def open(self, max_bytes: int | None = None) -> OverflowWriter | None:
+    def open(
+        self, max_bytes: int | None = None, *, warn: _Warn | None = None
+    ) -> OverflowWriter | None:
         """A writer of a new file in the folder, within the budget; ``None``: keep memory only.
 
         ``max_bytes``: this file's cap, at most ``file_bytes`` (``None``:
@@ -427,25 +527,32 @@ class OverflowDir:
         Creates the file, then deletes the oldest finished closed files to
         make room (see ``OverflowDir``). Returns ``None`` when ``max_files``
         files are still in use (or could not be deleted), ``file_bytes`` is
-        0, the file cannot be created (logged), once the folder is closed or
-        the exit began, in a forked child (logged), or without
-        ``O_NOFOLLOW`` (logged once). Raises ``ValueError`` for a negative
+        0, the file cannot be created (warned), once the folder is closed or
+        the exit began, in a forked child (warned), or without
+        ``O_NOFOLLOW`` (warned once). Raises ``ValueError`` for a negative
         ``max_bytes``.
+
+        ``warn``: hand each warning to this callable instead of logging it
+        here, once the folder's lock is released; it gets a no-argument
+        callable that logs the message, for a caller that holds a lock a
+        logging handler could re-enter (see ``Warn``). ``None``: log here.
         """
         if max_bytes is not None and max_bytes < 0:
             raise ValueError("max_bytes must be non-negative")
         if _NOFOLLOW is None:
-            _unsupported()
+            _unsupported(warn)
             return None
         folder = self._folder
         if not folder.mine():  # never take the lock: a parent thread may have held it at fork
-            _log.warning(
-                "overflow folder %r belongs to the parent process; keeping memory only", self.path
+            _warn(
+                warn,
+                "overflow folder %r belongs to the parent process; keeping memory only",
+                self.path,
             )
             return None
         cap = folder.file_bytes if max_bytes is None else min(max_bytes, folder.file_bytes)
-        with folder.locked():
-            return None if folder.closing else folder.new_writer(cap)
+        with folder.locked(warn=warn) as warnings:
+            return None if folder.closing else folder.new_writer(cap, warn=warnings)
 
     def close(self) -> None:
         """Remove the whole folder and every file in it.
@@ -456,8 +563,52 @@ class OverflowDir:
         """
         folder = self._folder
         if folder.mine():
-            with folder.locked():
-                folder.run()
+            with folder.locked() as warnings:
+                folder.run(warn=warnings)
+
+    @classmethod
+    def default(cls) -> OverflowDir | None:
+        """This process's default ``OverflowDir`` (default sizes), made on first use; ``None``: memory only.
+
+        For output with no owner of its own (no session set a folder).
+        Every call in one process returns the same folder; it is removed at
+        interpreter exit, like any folder never closed. A forked child
+        never gets its parent's: its first call makes its own. When the
+        folder cannot be created (``OSError``: no temporary directory, a
+        full disk) it returns ``None`` and logs it, once until a creation
+        succeeds; a later call tries again. Once the default is closed (by
+        ``close()`` or the exit cleanup), the next call makes a new one,
+        except during the exit (then ``None``).
+        """
+        global _default, _default_failed  # noqa: PLW0603 - one per process
+        warnings = _Held()
+        try:
+            with _default_lock:
+                if _default is not None and not _default.closed:
+                    return _default
+                with _live_lock:
+                    exiting = _exiting
+                if exiting:
+                    return None
+                try:
+                    # warn=: the folder may be removed at once (the exit began); that
+                    # warning is emitted with the one below, after _default_lock is gone.
+                    _default = cls(warn=warnings)
+                except OSError:
+                    if not _default_failed:
+                        _default_failed = True
+                        warnings(
+                            functools.partial(
+                                _log.warning,
+                                "could not create the default overflow folder; keeping memory only",
+                                exc_info=True,
+                            )
+                        )
+                    return None
+                _default_failed = False
+                return _default
+        finally:
+            warnings.emit()  # the lock is gone: a handler may write back now
 
     def __enter__(self) -> OverflowDir:
         """Return the folder itself, for ``with OverflowDir() as folder:``."""

@@ -26,6 +26,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
+from nooa.agentdoc import spec
 from nooa.context_blocks.roles import Role
 
 _logger = logging.getLogger(__name__)
@@ -78,6 +79,9 @@ class ResultStatus(StrEnum):
 # === Base Event ===
 
 
+# pformat leaves out empty fields (``None``, ``''``, ``[]``...) of every event, as
+# ``__instance_values__`` does for doc() and search: nooa.snapshot reads this.
+@spec(hide_empty=True)
 class EventBase(BaseModel):
     """Durable record with identity, lifecycle, and public searchable fields.
 

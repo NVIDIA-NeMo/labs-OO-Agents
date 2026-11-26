@@ -37,7 +37,7 @@ class TestStdoutTruncationIntegration:
 
         assert result.success
         assert result.stdout == "hello world\n"
-        assert "Output too large" not in result.stdout
+        assert "chars omitted; full output" not in result.stdout
 
     @pytest.mark.asyncio
     async def test_large_output_truncated(self, test_agent):
@@ -51,9 +51,9 @@ for i in range(10000):
 
         assert result.success
         # Should have truncation notice in prose format
-        assert "Output too large" in result.stdout
+        assert "chars omitted; full output" in result.stdout
         assert "chars" in result.stdout
-        assert "Showing first" in result.stdout
+        assert "\n[... " in result.stdout  # one cut line between the head and the tail
 
     @pytest.mark.asyncio
     async def test_stderr_truncated_separately(self, test_agent):
@@ -78,7 +78,7 @@ for i in range(500):
 
     @pytest.mark.asyncio
     async def test_truncation_notice_before_content(self, test_agent):
-        """Truncation notice should appear BEFORE content."""
+        """The cut line comes after the head (render_output: HEAD, line, TAIL)."""
         code = """
 print("START")
 for i in range(10000):
@@ -86,13 +86,13 @@ for i in range(10000):
 """
         result = await test_agent.runtime.execute_code(code)
 
-        # Notice should come before actual content
-        notice_pos = result.stdout.find("Output too large")
+        # The head keeps the start; the cut line follows it
+        notice_pos = result.stdout.find("chars omitted; full output")
         start_pos = result.stdout.find("START")
 
         assert notice_pos >= 0
         assert start_pos >= 0
-        assert notice_pos < start_pos  # Notice comes first
+        assert start_pos < notice_pos  # the head comes first
 
 
 class TestTruncationOnlyIntegration:
@@ -112,5 +112,5 @@ for i in range(10000):
         result = await test_agent.runtime.execute_code(code)
 
         assert result.success
-        assert "Output too large" in result.stdout
+        assert "chars omitted; full output" in result.stdout
         assert "chars" in result.stdout
