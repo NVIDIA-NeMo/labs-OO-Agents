@@ -111,12 +111,12 @@ async def test_scope_cleanup_does_not_replace_method_outcome(monkeypatch, body_e
 
 
 @pytest.mark.asyncio
-async def test_legacy_sanitizers_keep_payload_contract():
+async def test_sanitizers_redact_chat_responses_and_tool_values():
     events = []
     relay.subscribers.register("review-redaction", events.append)
 
     def sanitize_llm(payload, context):
-        message = payload.get("message", {})
+        message = payload["choices"][0].get("message", {})
         for key in ("content", "reasoning_content"):
             if key in message:
                 message[key] = message[key].replace("SECRET", "REDACTED")
@@ -153,8 +153,8 @@ async def test_legacy_sanitizers_keep_payload_contract():
             for e in events
             if getattr(e, "category", None) == "llm" and e.scope_category == "end"
         )
-        assert llm["message"]["content"] == "REDACTED answer"
-        assert llm["message"]["reasoning_content"] == "REDACTED rationale"
+        assert llm["choices"][0]["message"]["content"] == "REDACTED answer"
+        assert llm["choices"][0]["message"]["reasoning_content"] == "REDACTED rationale"
     finally:
         relay.guardrails.deregister_llm_sanitize_response("review-legacy")
         relay.guardrails.deregister_tool_sanitize_response("review-legacy")
@@ -162,7 +162,7 @@ async def test_legacy_sanitizers_keep_payload_contract():
 
 
 @pytest.mark.asyncio
-async def test_max_priority_legacy_event_sanitizer_keeps_payload_contract():
+async def test_max_priority_event_sanitizer_redacts_chat_responses():
     events = []
     relay.subscribers.register("review-event-redaction", events.append)
     try:
@@ -171,9 +171,9 @@ async def test_max_priority_legacy_event_sanitizer_keeps_payload_contract():
             def sanitize(event, fields):
                 data = fields["data"]
                 if event.category == "llm" and isinstance(data, dict):
-                    data["message"]["content"] = data["message"]["content"].replace(
-                        "SECRET", "REDACTED"
-                    )
+                    data["choices"][0]["message"]["content"] = data["choices"][0]["message"][
+                        "content"
+                    ].replace("SECRET", "REDACTED")
                 elif event.category == "tool" and isinstance(data, str):
                     data = data.replace("SECRET", "REDACTED")
                 return {**fields, "data": data, "metadata": None}
@@ -197,7 +197,7 @@ async def test_max_priority_legacy_event_sanitizer_keeps_payload_contract():
         assert "SECRET" not in json.dumps(outputs)
         assert "REDACTED answer" in json.dumps(outputs)
         assert "REDACTED tool" in json.dumps(outputs)
-        assert any(isinstance(value, dict) and "message" in value for value in outputs)
+        assert any(isinstance(value, dict) and "choices" in value for value in outputs)
         assert "REDACTED tool" in outputs
         assert all(
             e.metadata is None
@@ -674,8 +674,8 @@ async def test_large_llm_preview_preserves_usage_and_provider_call_ids():
         await relay.subscribers.flush_async()
         data = next(e.data for e in events if e.category == "llm" and e.scope_category == "end")
         assert data["usage"]["prompt_tokens"] == 7
-        assert data["message"]["tool_calls"][0]["id"] == "provider-large"
-        assert len(data["message"]["content"]) < 50000
+        assert data["choices"][0]["message"]["tool_calls"][0]["id"] == "provider-large"
+        assert len(data["choices"][0]["message"]["content"]) < 50000
         assert data["nooa.output.preview.incomplete"] is True
     finally:
         relay.subscribers.deregister("review-large-model-response")

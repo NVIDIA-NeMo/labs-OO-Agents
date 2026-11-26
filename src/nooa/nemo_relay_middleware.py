@@ -71,29 +71,30 @@ def _reconcile_messages(originals, public):
     ]
 
 
-def _relay_response(response: LLMResponse) -> dict[str, Any]:
-    """Project the canonical response only when NeMo Relay needs wire JSON."""
-    result: dict[str, Any] = {"finish_reason": response.finish_reason}
+def _relay_response(response: LLMResponse, model_name: str = "") -> dict[str, Any]:
+    """Project a bounded OpenAI chat completion for Relay's response codec."""
+    result: dict[str, Any] = {"object": "chat.completion"}
+    if model := response.model_name or model_name:
+        result["model"] = model
     if response.usage is not None:
         result["usage"] = {
             "prompt_tokens": response.usage.input_tokens,
             "completion_tokens": response.usage.output_tokens,
             "total_tokens": response.usage.total_tokens,
-            "cached_tokens": response.usage.cached_input_tokens,
+            "prompt_tokens_details": {"cached_tokens": response.usage.cached_input_tokens},
+            "completion_tokens_details": {"reasoning_tokens": response.usage.reasoning_tokens},
             "cache_creation_input_tokens": response.usage.cache_write_input_tokens,
-            "reasoning_tokens": response.usage.reasoning_tokens,
-            "cost_usd": response.usage.cost_usd,
         }
+        if response.usage.cost_usd:
+            result["usage"]["cost_usd"] = response.usage.cost_usd
+    choice: dict[str, Any] = {"index": 0, "finish_reason": response.finish_reason}
     if response.content or response.tool_calls or response.reasoning:
-        # Preserve the payload shape used by existing response sanitizers.
-        # Export formatting consumes only the final sanitized output.
         message = response.public_message()
-        result["message"] = {
+        choice["message"] = {
             **{key: message[key] for key in ("role", "tool_calls") if key in message},
             **message,
         }
-    else:
-        result["content"] = ""
+    result["choices"] = [choice]
     return result
 
 
@@ -239,7 +240,7 @@ _PROPAGATABLE_LLM_PARAMS: frozenset[str] = frozenset(
 )
 
 # Tool execution args that NeMo Relay intercepts may modify.
-_PROPAGATABLE_TOOL_PARAMS: frozenset[str] = frozenset({"tool_call_id", "timeout"})
+_PROPAGATABLE_TOOL_PARAMS: frozenset[str] = frozenset({"timeout"})
 
 
 def _extract_model_name(agent: Any) -> str:
@@ -314,7 +315,7 @@ async def nemo_relay_llm_middleware(
         resp = captured_ctx.response
         if resp is None:
             return {}
-        data, attributes = inspection_snapshot(_relay_response(resp))
+        data, attributes = inspection_snapshot(_relay_response(resp, model_name))
         if isinstance(data, dict) and attributes["nooa.output.preview.incomplete"]:
             data.update(attributes)
         return data
@@ -327,8 +328,15 @@ async def nemo_relay_llm_middleware(
     from nooa._relay_callback import execute_callback
 
     execute = nemo_relay.llm.execute
+    response_codec = nemo_relay.codecs.OpenAIChatCodec()
     await execute_callback(
-        lambda callback: execute(model_name, request, callback, model_name=model_name),
+        lambda callback: execute(
+            model_name,
+            request,
+            callback,
+            model_name=model_name,
+            response_codec=response_codec,
+        ),
         _wrapper,
     )
 
@@ -414,10 +422,11 @@ async def nemo_relay_tool_middleware(
     from nooa._relay_callback import execute_callback
 
     execute = nemo_relay.tools.execute
+    call_id = ctx.params.get("tool_call_id") or None
+    if isinstance(call_id, str) and call_id.startswith("prefill_"):
+        call_id = None
     await execute_callback(
-        lambda callback: execute(
-            "execute_python", args, callback, tool_call_id=ctx.params.get("tool_call_id") or None
-        ),
+        lambda callback: execute("execute_python", args, callback, tool_call_id=call_id),
         _wrapper,
     )
 

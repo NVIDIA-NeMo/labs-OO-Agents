@@ -15,7 +15,6 @@ pure_python.py missing: 59-61, 105-106, 147, 236-238, 243, 274-288, 304-340, 467
 """
 
 import json
-import re
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -273,7 +272,7 @@ class TestSanitizeCode:
         fenced = "```python\nasync def helper(self, x):\n    return x * 2\n```"
         cleaned, token = strip_code_fences(fenced)
         assert token == "```python"
-        # Must be valid Python (HelperFunctionManager.apply calls ast.parse)
+        # Must be valid Python (the cell compiler parses it)
         tree = ast.parse(cleaned)
         assert any(isinstance(n, ast.AsyncFunctionDef) for n in tree.body)
 
@@ -1629,12 +1628,13 @@ class TestPurePythonHelperMethodErrors:
     """Tests for helper method binding errors."""
 
     @pytest.mark.asyncio
-    async def test_helper_method_with_same_name_rejected(self):
-        """Helper method with same name as target is rejected (lines 708-717).
+    async def test_helper_named_like_the_target_does_not_replace_the_method(self):
+        """A cell function named like the target is a namespace name, not a method.
 
-        Note: When LLM wraps entire code in target method function def, the body
-        is extracted first. Rejection only fires when a separate helper function
-        is defined with the same name as the target alongside other statements.
+        When the LLM wraps the entire code in the target method's def, the body is
+        extracted first. A separate function of that name next to other
+        statements is not extracted: the cell binds it in the call's namespace
+        (nothing rejects it) and the agent's method is untouched.
         """
 
         class TestAgent(Agent, llm=_TEST_LLM):
@@ -1643,22 +1643,17 @@ class TestPurePythonHelperMethodErrors:
                 """Compute."""
                 ...
 
-        # Define a compute helper with the SAME name alongside other code.
-        # The HelperFunctionManager will see 'compute' as a helper (separate from target body)
-        # and reject it because it conflicts with the method being implemented.
-        # Note: pure function definitions without 'self' as first arg won't trigger
-        # the rejection; we need async def compute(self) as a standalone helper.
+        # A compute function next to a plain statement (which prevents extraction).
         fake_llm = FakeLLMClient(
             scripted_responses=[
-                # This defines a compute function as a separate helper (not wrapping),
-                # alongside a non-self call that prevents extraction.
-                _resp("x = 1\nasync def compute(self):\n    return 99"),  # rejected
+                _resp("x = 1\nasync def compute(self):\n    return 99"),
                 _resp("return 42"),
             ]
         )
         agent = TestAgent(llm=fake_llm)
         result = await agent.compute()
         assert result == 42
+        assert "compute" not in vars(agent)
 
 
 # ---------------------------------------------------------------------------
@@ -2764,8 +2759,8 @@ class TestCodeActExecutePrefillStep:
     """Tests for _execute_prefill_step."""
 
     @pytest.mark.asyncio
-    async def test_execute_prefill_step_merges_captured_locals(self):
-        """Captured locals from prefill should be merged into session (lines 1773-1774)."""
+    async def test_execute_prefill_step_labels_events(self):
+        """Prefill events carry the actual prefill kind (the cell's names live in its namespace)."""
         from nooa.events import ExecutionResult, PythonOutput
 
         strat = CodeActStrategy()
@@ -2797,16 +2792,30 @@ class TestCodeActExecutePrefillStep:
             "pre_ellipsis",
         )
 
-        # Captured locals should be in session, and both synthetic events retain
-        # the actual prefill kind rather than being mislabeled as input inspection.
-        assert "x" in session.session_locals
-        assert session.session_locals["x"] == 42
+        # Both synthetic events retain the actual prefill kind rather than
+        # being mislabeled as input inspection.
         emitted = [call.args[0] for call in em.add.call_args_list]
         assert emitted
         assert all(event.metadata["prefill_type"] == "pre_ellipsis" for event in emitted)
         assert all("execution_error" not in event.metadata for event in emitted)
         output = next(event for event in emitted if isinstance(event, PythonOutput))
         assert output.execution_count == 1
+
+    @pytest.mark.asyncio
+    async def test_prefill_bindings_reach_the_next_cell(self):
+        """A pre-ellipsis prefill cell binds into the call's namespace; the next cell reads it."""
+
+        class PrefillAgent(Agent, llm=_TEST_LLM):
+            @strategy(CodeActStrategy(config=CodeActConfig()))
+            async def compute(self) -> int:
+                """Compute."""
+                prefilled = 42  # noqa: F841 - the pre-ellipsis prefill cell binds it
+                ...
+
+        llm = FakeLLMClient(
+            scripted_responses=[_resp("", tool_calls=[_tool_call("return_result(prefilled + 1)")])]
+        )
+        assert await PrefillAgent(llm=llm).compute() == 43
 
     @pytest.mark.asyncio
     async def test_execute_prefill_steps_use_distinct_execution_counts(self):
@@ -2940,49 +2949,6 @@ class TestCodeActExecuteCodeValidationErrors:
 
 
 # ---------------------------------------------------------------------------
-# CodeActStrategy._execute_code - helper method binding error (lines 1871-1875)
-# "rejected on name collision" path no longer exists — helpers are
-# never attached to the agent, so same-name helper defs can't conflict.
-# ---------------------------------------------------------------------------
-
-
-class TestCodeActExecuteCodeHelperBindingError:
-    """Tests for _execute_code when helper method compilation reports errors."""
-
-    @pytest.mark.asyncio
-    async def test_execute_code_returns_error_on_helper_binding_error(self):
-        """_execute_code should return error result when helper fails to compile (lines 1871-1875)."""
-        from nooa.strategies.generated_code import (
-            HelperApplyResult,
-            HelperFunctionManager,
-        )
-
-        strat = CodeActStrategy()
-        em = MagicMock()
-        em.add = MagicMock(return_value="evt1")
-        session = CodeActSession(
-            max_iterations=5, max_retries=3, target_method_name="compute", event_manager=em
-        )
-
-        rt = MagicMock()
-        rt.agent = MagicMock()
-        rt.event_manager = em
-
-        error_result = HelperApplyResult(installed=[], errors=["Failed to bind method"])
-        with patch.object(HelperFunctionManager, "apply", return_value=error_result):
-            result = await strat._execute_code(
-                rt,
-                "x = 1",
-                {},
-                session,
-                "compute",
-                tool_call_id="t1",
-            )
-
-        assert result.error is not None
-
-
-# ---------------------------------------------------------------------------
 # Pure Python - line 366-371 (captured locals in execute main loop)
 # ---------------------------------------------------------------------------
 
@@ -3057,7 +3023,7 @@ class TestPurePythonExecutionError:
         assert failed.execution_count == 1
         assert failed.stdout == "before failure\n"
         assert failed.stderr == "warning\n"
-        assert "Cell In[1], line 5" in failed.error
+        assert "Cell In[1], line 5, in <module>" in failed.error and "[ns:" not in failed.error
         assert "text.index('missing')" in failed.error
         assert failed.error.endswith("ValueError: substring not found")
         assert succeeded.execution_count == 2
@@ -3704,47 +3670,6 @@ class TestPurePythonHelperErrors:
 # ---------------------------------------------------------------------------
 
 
-class TestCodeActHelperInstalledLogging:
-    """Tests for _execute_code helper installation."""
-
-    @pytest.mark.asyncio
-    async def test_execute_code_with_helper_that_gets_installed(self):
-        """When helper is installed, _execute_code should log it (lines 1877-1878)."""
-        from nooa.events import ExecutionResult
-        from nooa.strategies.generated_code import (
-            HelperApplyResult,
-            HelperFunctionManager,
-        )
-
-        strat = CodeActStrategy()
-        em = MagicMock()
-        em.add = MagicMock(return_value="evt1")
-        session = CodeActSession(
-            max_iterations=5, max_retries=3, target_method_name="compute", event_manager=em
-        )
-
-        rt = MagicMock()
-        rt.agent = MagicMock()
-        rt.event_manager = em
-        rt.execute_code = AsyncMock(
-            return_value=ExecutionResult(stdout="42", error=None, defined_methods={})
-        )
-
-        installed_result = HelperApplyResult(installed=["my_helper"], errors=[])
-        with patch.object(HelperFunctionManager, "apply", return_value=installed_result):
-            result = await strat._execute_code(
-                rt,
-                "async def my_helper(self): return 42",
-                {},
-                session,
-                "compute",
-                tool_call_id="t1",
-            )
-
-        # Should have executed (returned the mocked result)
-        assert result is not None
-
-
 # ---------------------------------------------------------------------------
 # CodeActStrategy - test module-level context building (lines 2031-2057)
 # ---------------------------------------------------------------------------
@@ -4378,8 +4303,8 @@ class TestCodeActInlineReturnResultWithError:
             for event in agent.event_manager.values()
             if isinstance(event, PythonOutput) and event.tool_call_id == "c1"
         )
-        # Owned-namespace cells are named "Cell In[1] [ns:<identity>:1]".
-        assert re.search(r"Cell In\[1\]( \[ns:\w+:1\])?, line 1", failed_output.error)
+        # The model sees the IPython cell name, not the namespace-qualified filename.
+        assert "Cell In[1], line 1, in <module>" in failed_output.error
         assert "x = 1/0" in failed_output.error
         assert "ZeroDivisionError: division by zero" in failed_output.error
         assert "Execution error" not in failed_output.stderr

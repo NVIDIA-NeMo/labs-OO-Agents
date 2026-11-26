@@ -6,9 +6,19 @@ import pytest
 
 from nooa.agent import Agent
 from nooa.runtime.actor import ActorRuntime
+from nooa.runtime.execution_namespace import RUNTIME_NAMES, ExecutionNamespace
 from nooa.unifiedllm import FakeLLMClient
 
 _TEST_LLM = FakeLLMClient()
+
+
+async def _execute(runtime, code, **kwargs):
+    """Run ``code`` in a fresh namespace; return the result and the names it bound."""
+    namespace = ExecutionNamespace(reserved=RUNTIME_NAMES)
+    with namespace.enter({}):
+        result = await runtime.execute_code(code, execution_namespace=namespace, **kwargs)
+    bound = namespace.user_names
+    return result, {name: namespace.globals[name] for name in bound if name in namespace.globals}
 
 
 @pytest.mark.asyncio
@@ -29,20 +39,20 @@ raise Exception('test error')
 z = 3  # This won't be reached
 """
 
-    result = await runtime.execute_code(code, wrap_in_function=True)
+    result, bound = await _execute(runtime, code, wrap_in_function=True)
 
     # Should have an error
     assert result.error is not None
     assert "test error" in str(result.error)
 
     # But x and y should be captured (IPython behavior)
-    assert "x" in result.captured_locals, "x should be captured before error"
-    assert "y" in result.captured_locals, "y should be captured before error"
-    assert result.captured_locals["x"] == 1
-    assert result.captured_locals["y"] == 2
+    assert "x" in bound, "x should be captured before error"
+    assert "y" in bound, "y should be captured before error"
+    assert bound["x"] == 1
+    assert bound["y"] == 2
 
     # z should NOT be captured (never executed)
-    assert "z" not in result.captured_locals
+    assert "z" not in bound
 
 
 @pytest.mark.asyncio
@@ -82,23 +92,23 @@ counter.inc()
 raise Exception('error after state mutations')
 """
 
-    result = await runtime.execute_code(code, wrap_in_function=True)
+    result, bound = await _execute(runtime, code, wrap_in_function=True)
 
     # Should have an error
     assert result.error is not None
 
     # List should have accumulated state
-    assert "items" in result.captured_locals
-    assert result.captured_locals["items"] == [1, 2]
+    assert "items" in bound
+    assert bound["items"] == [1, 2]
 
     # Dict should have modified state
-    assert "config" in result.captured_locals
-    assert result.captured_locals["config"]["count"] == 10
-    assert result.captured_locals["config"]["name"] == "test"
+    assert "config" in bound
+    assert bound["config"]["count"] == 10
+    assert bound["config"]["name"] == "test"
 
     # Class instance should have its state
-    assert "counter" in result.captured_locals
-    assert result.captured_locals["counter"].value == 2
+    assert "counter" in bound
+    assert bound["counter"].value == 2
 
 
 @pytest.mark.asyncio
@@ -122,8 +132,8 @@ z = 99  # This won't be reached
 """
 
     # Inject ExecutionSignal into builtins so it's available in the executed code
-    result = await runtime.execute_code(
-        code, wrap_in_function=True, builtins={"ExecutionSignal": ExecutionSignal}
+    result, bound = await _execute(
+        runtime, code, wrap_in_function=True, builtins={"ExecutionSignal": ExecutionSignal}
     )
 
     # Should have a signal, not an error
@@ -131,13 +141,13 @@ z = 99  # This won't be reached
     assert result.signal is not None
 
     # x and y should be captured
-    assert "x" in result.captured_locals, "x should be captured before signal"
-    assert "y" in result.captured_locals, "y should be captured before signal"
-    assert result.captured_locals["x"] == 42
-    assert result.captured_locals["y"] == "hello"
+    assert "x" in bound, "x should be captured before signal"
+    assert "y" in bound, "y should be captured before signal"
+    assert bound["x"] == 42
+    assert bound["y"] == "hello"
 
     # z should NOT be captured (never executed)
-    assert "z" not in result.captured_locals
+    assert "z" not in bound
 
 
 @pytest.mark.asyncio
@@ -164,7 +174,8 @@ return_result(result)
 z = 99  # This won't be reached
 """
 
-    result = await runtime.execute_code(
+    result, bound = await _execute(
+        runtime,
         code,
         wrap_in_function=True,
         builtins={"return_result": return_result, "ExecutionSignal": ExecutionSignal},
@@ -175,15 +186,15 @@ z = 99  # This won't be reached
     assert result.signal is not None
 
     # All variables before return_result should be captured
-    assert "x" in result.captured_locals
-    assert "y" in result.captured_locals
-    assert "result" in result.captured_locals
-    assert result.captured_locals["x"] == 42
-    assert result.captured_locals["y"] == "computed"
-    assert result.captured_locals["result"] == 84
+    assert "x" in bound
+    assert "y" in bound
+    assert "result" in bound
+    assert bound["x"] == 42
+    assert bound["y"] == "computed"
+    assert bound["result"] == 84
 
     # z should NOT be captured (never executed)
-    assert "z" not in result.captured_locals
+    assert "z" not in bound
 
 
 @pytest.mark.asyncio
@@ -205,7 +216,7 @@ await asyncio.sleep(10)  # Will timeout
 z = 3
 """
 
-    result = await runtime.execute_code(code, wrap_in_function=True, timeout=0.1)
+    result, bound = await _execute(runtime, code, wrap_in_function=True, timeout=0.1)
 
     # Should have a timeout error
     assert result.error is not None
@@ -214,10 +225,10 @@ z = 3
     # x and y should be captured before timeout
     # Note: This depends on when exactly the timeout fires - variables assigned
     # before the blocking call should be captured
-    assert "x" in result.captured_locals, "x should be captured before timeout"
-    assert "y" in result.captured_locals, "y should be captured before timeout"
-    assert result.captured_locals["x"] == 1
-    assert result.captured_locals["y"] == 2
+    assert "x" in bound, "x should be captured before timeout"
+    assert "y" in bound, "y should be captured before timeout"
+    assert bound["x"] == 1
+    assert bound["y"] == 2
 
 
 @pytest.mark.asyncio
@@ -243,24 +254,24 @@ except ValueError:
 final = 5  # Never reached
 """
 
-    result = await runtime.execute_code(code, wrap_in_function=True)
+    result, bound = await _execute(runtime, code, wrap_in_function=True)
 
     # Should have an error
     assert result.error is not None
     assert "inner error" in str(result.error)
 
     # All variables defined before re-raise should be captured
-    assert "x" in result.captured_locals
-    assert "y" in result.captured_locals
-    assert "z" in result.captured_locals
-    assert "w" in result.captured_locals
-    assert result.captured_locals["x"] == 1
-    assert result.captured_locals["y"] == 2
-    assert result.captured_locals["z"] == 3
-    assert result.captured_locals["w"] == 4
+    assert "x" in bound
+    assert "y" in bound
+    assert "z" in bound
+    assert "w" in bound
+    assert bound["x"] == 1
+    assert bound["y"] == 2
+    assert bound["z"] == 3
+    assert bound["w"] == 4
 
     # final should NOT be captured (never executed)
-    assert "final" not in result.captured_locals
+    assert "final" not in bound
 
 
 @pytest.mark.asyncio
@@ -285,24 +296,24 @@ finally:
 after = 5  # Never reached
 """
 
-    result = await runtime.execute_code(code, wrap_in_function=True)
+    result, bound = await _execute(runtime, code, wrap_in_function=True)
 
     # Should have the finally error (it overrides any previous exception)
     assert result.error is not None
     assert "finally error" in str(result.error)
 
     # All variables including those in finally should be captured
-    assert "x" in result.captured_locals
-    assert "y" in result.captured_locals
-    assert "z" in result.captured_locals
-    assert "w" in result.captured_locals
-    assert result.captured_locals["x"] == 1
-    assert result.captured_locals["y"] == 2
-    assert result.captured_locals["z"] == 3
-    assert result.captured_locals["w"] == 4
+    assert "x" in bound
+    assert "y" in bound
+    assert "z" in bound
+    assert "w" in bound
+    assert bound["x"] == 1
+    assert bound["y"] == 2
+    assert bound["z"] == 3
+    assert bound["w"] == 4
 
     # after should NOT be captured
-    assert "after" not in result.captured_locals
+    assert "after" not in bound
 
 
 @pytest.mark.asyncio
@@ -333,3 +344,18 @@ z = 3
     # CancelledError should propagate (not be caught and returned as result.error)
     with pytest.raises(asyncio.CancelledError):
         await runtime.execute_code(code, wrap_in_function=True)
+
+
+@pytest.mark.asyncio
+async def test_in_process_results_leave_captured_locals_empty():
+    """The namespace holds what a cell bound, never a name it did not assign."""
+
+    class TestAgent(Agent, llm=_TEST_LLM):
+        pass
+
+    runtime = ActorRuntime(TestAgent())
+    result, bound = await _execute(runtime, "x = 1\nif False:\n    y = 2", wrap_in_function=True)
+
+    assert result.error is None
+    assert result.captured_locals == {}  # the field stays for compatibility, unfilled
+    assert bound == {"x": 1}

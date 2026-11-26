@@ -35,8 +35,13 @@ def _step(identifier, content: Any = "answer"):
     }
 
 
-def test_unique_provider_id_repairs_concurrent_ownership_and_caps_results():
+@pytest.mark.parametrize("chat_completion", [False, True])
+def test_unique_provider_id_repairs_concurrent_ownership_and_caps_results(chat_completion):
     first, second = _step("first"), _step("second")
+    if chat_completion:
+        for step in (first, second):
+            response = step["extra"]["llm_response"]
+            response["choices"] = [{"message": response.pop("message")}]
     second["tool_calls"] = [{"tool_call_id": "first", "function_name": "execute_python"}]
     second["observation"] = {
         "results": [
@@ -55,7 +60,9 @@ def test_unique_provider_id_repairs_concurrent_ownership_and_caps_results():
     result = _normalize_atif({"steps": [first, second]})
     assert result["steps"][0]["message"] == "answer"
     assert first["reasoning_content"] == "redacted reasoning"
-    assert "reasoning_content" not in first["extra"]["llm_response"]["message"]
+    response = first["extra"]["llm_response"]
+    message = response["choices"][0]["message"] if chat_completion else response["message"]
+    assert "reasoning_content" not in message
     observation = first["observation"]["results"][0]
     assert observation["source_call_id"] == "first"
     assert len(observation["content"]) < 4200
@@ -226,7 +233,7 @@ def test_export_keeps_original_incomplete_report_when_display_fits():
 
 
 @pytest.mark.asyncio
-async def test_real_relay_export_preserves_late_legacy_redaction():
+async def test_real_relay_export_preserves_late_redaction():
     relay = pytest.importorskip("nemo_relay")
     from nooa import Agent
     from nooa.events import ExecutionResult
@@ -254,9 +261,9 @@ async def test_real_relay_export_preserves_late_legacy_redaction():
                 if (
                     event.category == "llm"
                     and isinstance(data, dict)
-                    and isinstance(data.get("message"), dict)
+                    and isinstance(data.get("choices"), list)
                 ):
-                    data["message"]["content"] = "REDACTED"
+                    data["choices"][0]["message"]["content"] = "REDACTED"
                 return fields
 
             async def model(ctx):

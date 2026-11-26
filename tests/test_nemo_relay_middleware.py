@@ -291,6 +291,7 @@ class TestLLMSanitizeRequest:
                 return c
 
             await nemo_relay_llm_middleware(ctx, nxt)
+            await nemo_relay.subscribers.flush_async()  # 0.9 sanitizes on publication
             assert len(sanitize_called) == 1
         finally:
             nemo_relay.guardrails.deregister_llm_sanitize_request("test-san-req")
@@ -315,8 +316,8 @@ class TestLLMSanitizeResponse:
         """A sanitize-response guardrail transforms what subscribers see."""
         subscriber_saw: list[Any] = []
 
-        def _sanitize(response: dict, context) -> dict:
-            msg = response.get("message", {})
+        def _sanitize(response: dict, context: Any) -> dict:
+            msg = response["choices"][0].get("message", {})
             if isinstance(msg, dict) and "content" in msg:
                 msg["content"] = msg["content"].replace("hello", "[REDACTED]")
             return response
@@ -352,7 +353,7 @@ class TestLLMSanitizeResponse:
             assert len(subscriber_saw) > 0, "Subscriber should have received at least one event"
             last_output = subscriber_saw[-1]
             assert isinstance(last_output, dict), f"Expected dict output, got {type(last_output)}"
-            msg = last_output.get("message")
+            msg = last_output["choices"][0].get("message")
             assert isinstance(msg, dict), f"Expected 'message' to be a dict, got {type(msg)}"
             assert msg.get("content") == "[REDACTED] world"
         finally:
@@ -1053,6 +1054,84 @@ class TestToolMiddlewareEdgeCases:
         result = await nemo_relay_tool_middleware(ctx, nxt)
         assert result.result is not None
         assert result.result.returned_value is None
+
+
+class TestRelayEventProfiles:
+    @pytest.mark.asyncio
+    async def test_tool_call_id_is_the_calls_not_an_argument(self):
+        starts: list[nemo_relay.ScopeEvent] = []
+
+        def _spy(event: nemo_relay.Event):
+            if isinstance(event, nemo_relay.ScopeEvent) and event.category == "tool":
+                if event.scope_category == "start":
+                    starts.append(event)
+
+        nemo_relay.subscribers.register("tool-id-spy", _spy)
+        try:
+
+            async def nxt(c):
+                c.result = FakeExecutionResult()
+                return c
+
+            await nemo_relay_tool_middleware(_make_exec_ctx(), nxt)
+            await nemo_relay.subscribers.flush_async()
+        finally:
+            nemo_relay.subscribers.deregister("tool-id-spy")
+
+        assert starts[0].category_profile["tool_call_id"] == "tc-1"
+        assert "tool_call_id" not in starts[0].data
+
+    @pytest.mark.asyncio
+    async def test_a_prefill_cell_answers_no_model_call(self):
+        starts: list[nemo_relay.ScopeEvent] = []
+
+        def _spy(event: nemo_relay.Event):
+            if isinstance(event, nemo_relay.ScopeEvent) and event.category == "tool":
+                if event.scope_category == "start":
+                    starts.append(event)
+
+        nemo_relay.subscribers.register("prefill-spy", _spy)
+        try:
+
+            async def nxt(c):
+                c.result = None
+                return c
+
+            ctx = _make_exec_ctx()
+            ctx.params["tool_call_id"] = "prefill_0123abcd"
+            await nemo_relay_tool_middleware(ctx, nxt)
+            await nemo_relay.subscribers.flush_async()
+        finally:
+            nemo_relay.subscribers.deregister("prefill-spy")
+
+        assert not (starts[0].category_profile or {}).get("tool_call_id")
+
+    @pytest.mark.asyncio
+    async def test_llm_end_carries_the_decoded_response(self):
+        ends: list[nemo_relay.ScopeEvent] = []
+
+        def _spy(event: nemo_relay.Event):
+            if isinstance(event, nemo_relay.ScopeEvent) and event.category == "llm":
+                if event.scope_category == "end":
+                    ends.append(event)
+
+        nemo_relay.subscribers.register("llm-end-spy", _spy)
+        try:
+
+            async def nxt(c):
+                c.response = FakeLLMResponse("hello")
+                return c
+
+            await nemo_relay_llm_middleware(_make_llm_ctx(agent=_make_real_agent("m1")), nxt)
+            await nemo_relay.subscribers.flush_async()
+        finally:
+            nemo_relay.subscribers.deregister("llm-end-spy")
+
+        decoded = ends[0].category_profile["annotated_response"]
+        assert decoded["message"] == "hello"
+        assert decoded["model"] == "m1"
+        assert decoded["usage"]["prompt_tokens"] == 10
+        assert decoded["usage"]["completion_tokens"] == 5
 
 
 # ===================================================================

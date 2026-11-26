@@ -73,9 +73,12 @@ def _normalize_atif(trajectory: dict[str, Any]) -> dict[str, Any]:
         extra = step.get("extra")
         response = extra.get("llm_response", {}) if isinstance(extra, dict) else {}
         message = response.get("message") if isinstance(response, dict) else None
+        if isinstance(response, dict) and isinstance(response.get("choices"), list):
+            choices = _objects(response["choices"])
+            message = choices[0].get("message") if choices else None
         if not isinstance(message, dict):
             continue
-        # This is the sanitized legacy payload, never a saved pre-redaction copy.
+        # Read only the sanitized payload, never a saved pre-redaction copy.
         content = message.get("content")
         step["message"] = (
             content

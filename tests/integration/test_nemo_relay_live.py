@@ -125,7 +125,7 @@ async def test_live_relay_nested_concurrent_atif(tmp_path):
         assert [s["step_id"] for s in steps] == list(range(1, len(steps) + 1))
         model_steps = [s for s in steps if s.get("metrics")]
         assert len(model_steps) >= 4
-        assert all(s["model_name"] == model for s in model_steps)
+        assert all(s["model_name"] == s["extra"]["llm_response"]["model"] for s in model_steps)
         assert all(s["metrics"]["prompt_tokens"] > 0 for s in model_steps)
         assert all(isinstance(s["message"], str) for s in model_steps)
         assert not any('"assistant_message"' in s["message"] for s in model_steps)
@@ -135,7 +135,9 @@ async def test_live_relay_nested_concurrent_atif(tmp_path):
             calls = {c["tool_call_id"] for c in step.get("tool_calls", [])}
             if step.get("metrics"):
                 response = step["extra"]["llm_response"]
-                issued = {c["id"] for c in response.get("message", {}).get("tool_calls", [])}
+                issued = {
+                    c["id"] for c in response["choices"][0].get("message", {}).get("tool_calls", [])
+                }
                 # Relay may attach host-generated prefills to a preceding model
                 # step. They are not provider-issued calls; do not count them as
                 # evidence that the model chose to execute this code.
