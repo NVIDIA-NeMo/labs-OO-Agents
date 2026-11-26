@@ -12,7 +12,7 @@ The deprecated `nooa-acp` package is not changed.
 
 | Area | v1 (what Atom does today) | v2 |
 |---|---|---|
-| Negotiation | `initialize` answers `min(requested, 1)` | Pick the highest supported version ≤ requested: v1 for 1, v2 for ≥ 2. `-32022` when none |
+| Negotiation | `initialize` answers `min(requested, 1)` | Pick the highest supported version ≤ requested: v1 for 1, v2 for ≥ 2. `-32022` when none. Atom serves v2 only to a v2-shaped request (`info`, no `clientCapabilities`/`clientInfo`): T3 Code asks for 2 in v1 shape and reads v1 |
 | Initialize shape | `clientCapabilities`/`clientInfo`, `agentCapabilities`/`agentInfo`, boolean markers, `loadSession` | `capabilities`/`info` both ways (`info` required), object markers, session groups under `capabilities.session` (`prompt`, `mcp.stdio`/`mcp.http`, `delete`, ...). Advertising `session` commits to new/list/resume/close/prompt/cancel |
 | Prompt lifecycle | `session/prompt` stays open for the turn; its response carries `stopReason` | The response acknowledges insertion with `{messageId}`. A `user_message` update echoes the prompt with that id; `state_update` reports `running` / `requires_action` / `idle` (+ `stopReason`, `error`). Failures after insertion are `idle` + `stopReason: error`, never an error response. Optional `idempotencyKey` |
 | Messages | chunks without ids | every chunk carries a `messageId`; whole-message upserts exist |

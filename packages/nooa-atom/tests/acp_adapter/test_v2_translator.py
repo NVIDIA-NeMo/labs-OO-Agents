@@ -83,7 +83,24 @@ class Wire:
     ("requested", "version"), [(1, V1), (0, V1), (2, V2), (7, V2), ("2", None), (None, None)]
 )
 def test_negotiation(requested, version):
-    assert negotiate({"protocolVersion": requested}) == version
+    assert negotiate({"protocolVersion": requested, "info": {"name": "roy"}}) == version
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        # T3 Code: version 2 in v1 shape.
+        {
+            "protocolVersion": 2,
+            "clientCapabilities": {"terminal": True},
+            "clientInfo": {"name": "t3"},
+        },
+        {"protocolVersion": 2, "info": {"name": "x"}, "clientCapabilities": {}},
+        {"protocolVersion": 2},
+    ],
+)
+def test_v1_shaped_requests_keep_v1(params):
+    assert negotiate(params) == V1
 
 
 def test_initialize_result_shape():

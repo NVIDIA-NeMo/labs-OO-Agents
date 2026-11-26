@@ -112,7 +112,11 @@ def requested_version(params: Any) -> int | None:
 
 
 def negotiate(params: Any) -> int | None:
-    """The version to speak: v2 for a request of 2 or more, else v1.
+    """The version to speak: v2 for a v2 request of 2 or more, else v1.
+
+    A v2 request carries ``info`` (required in v2) and none of v1's
+    ``clientCapabilities`` / ``clientInfo``. T3 Code asks for version 2 in
+    v1 shape and reads v1: it keeps v1, as before.
 
     ``None`` for a missing or malformed ``protocolVersion`` (``-32602``,
     left to the v1 library to report). A request below 1 also gets v1,
@@ -121,7 +125,11 @@ def negotiate(params: Any) -> int | None:
     requested = requested_version(params)
     if requested is None:
         return None
-    return V2 if requested >= V2 else V1
+    if requested < V2 or not isinstance(params.get("info"), dict):
+        return V1
+    if "clientCapabilities" in params or "clientInfo" in params:
+        return V1
+    return V2
 
 
 def initialize_params_to_v1(params: dict[str, Any]) -> dict[str, Any]:
