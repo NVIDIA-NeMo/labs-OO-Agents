@@ -127,6 +127,27 @@ async def test_waiting_ends_outcome_resolves_the_prompt_with_the_waiting(make_se
     assert [e.outcome_kind for e in ended] == ["waiting", "done"]
 
 
+@pytest.mark.parametrize("waiting_ends_outcome", [False, True])
+async def test_done_after_a_message_less_waiting_replies_with_its_explanation(
+    make_session, waiting_ends_outcome
+):
+    session, _ = make_session(wait_on("jobs"), done("job finished"), start=False)
+    session.waiting_ends_outcome = waiting_ends_outcome
+    jobs = session._agent.queue_manager.queue("jobs")  # a host-declared channel
+    session.start()
+    ended, messages = [], []
+    session.subscribe(lambda e: ended.append(e) if isinstance(e, TurnEndedUpdate) else None)
+    session._agent.event_manager.on("AgentMessage", lambda event: messages.append(event.content))
+
+    pending = asyncio.ensure_future(session.prompt("run the job"))
+    await until(lambda: ended)
+    jobs.put("job output")  # a jobs-only turn ends Done without a message
+    await until(lambda: len(ended) == 2)
+    assert messages == ["job finished"]  # the person's prompt still gets its reply
+    assert session._unanswered == set()
+    await asyncio.wait_for(pending, TIMEOUT)
+
+
 async def test_prompt_for_an_item_taken_mid_turn_resolves_with_that_turn(make_session):
     started, block = agents.fresh_events()
     session, _ = make_session(

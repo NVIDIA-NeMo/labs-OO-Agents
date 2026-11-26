@@ -322,6 +322,9 @@ class Session:
         # sent (user_messages or steers), and whether any agent message went out
         # since the oldest of them was consumed.
         self._user_items: set[str] = set()
+        # Person-sent items a Waiting resolved (waiting_ends_outcome) before
+        # any reply: their prompt is settled, but a later Done still answers them.
+        self._unanswered: set[str] = set()
         self._replied: bool = False
         # How the last turn ended ("waiting" shows a child as "working").
         self.last_outcome_kind: str | None = None
@@ -937,6 +940,7 @@ class Session:
         owed = self._waiting + self._consumed + [item_id for item_id, _, _ in self._pending_steers]
         self._waiting, self._consumed = [], []
         self._user_items.clear()
+        self._unanswered.clear()
         self._replied = False
         if self._pending_steers:
             self._record_failure(exc, owed)
@@ -989,7 +993,9 @@ class Session:
         """
         if self.parent_id is not None or self._replied:
             return False
-        return any(item_id in self._user_items for item_id in self._waiting + self._consumed)
+        return bool(self._unanswered) or any(
+            item_id in self._user_items for item_id in self._waiting + self._consumed
+        )
 
     def _settle(self, event: TurnSettled) -> None:
         # Items stay in self._consumed / self._waiting until the end, so a
@@ -1029,9 +1035,13 @@ class Session:
         if kind != "waiting" or self.waiting_ends_outcome:
             for item_id in waiting:
                 self._resolve(item_id, outcome)
+                if kind == "waiting" and item_id in self._user_items:
+                    self._unanswered.add(item_id)  # settled, but not yet answered
                 self._user_items.discard(item_id)
             waiting = []
-            self._replied = False
+            if kind != "waiting":  # as with the Waiting kept open: the reply is still owed
+                self._replied = False
+                self._unanswered.clear()
         self._waiting = waiting
         self._consumed = [i for i in self._consumed if i not in consumed]
         if kind != "cancelled":
