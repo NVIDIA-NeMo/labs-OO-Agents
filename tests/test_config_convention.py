@@ -65,23 +65,36 @@ def _package_roots() -> list[str]:
 
 
 def _import_everything() -> list[str]:
-    """Import every module under the package roots so ``Agent.__subclasses__`` is complete."""
+    """Import every module under the package roots so ``Agent.__subclasses__`` is complete.
+
+    Walks packages by hand instead of ``pkgutil.walk_packages``: that helper imports a
+    package before the caller can skip it, and ``nooa.viewer`` raises at import time
+    when no frontend build is present. A package matching ``SKIP_MODULE_PARTS`` is
+    neither imported nor traversed.
+    """
     skipped: list[str] = []
-    for root in _package_roots():
+
+    def import_module(name: str) -> object | None:
         try:
-            package = importlib.import_module(root)
-        except Exception as exc:  # noqa: BLE001 - optional packages may be absent
-            skipped.append(f"{root}: {type(exc).__name__}: {exc}")
-            continue
-        for info in pkgutil.walk_packages(package.__path__, prefix=f"{root}."):
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                return importlib.import_module(name)
+        except BaseException as exc:  # noqa: BLE001 - optional deps, platform guards
+            skipped.append(f"{name}: {type(exc).__name__}: {str(exc)[:80]}")
+            return None
+
+    def walk(package: object, prefix: str) -> None:
+        for info in pkgutil.iter_modules(getattr(package, "__path__", []), prefix=prefix):
             if any(part in info.name for part in SKIP_MODULE_PARTS):
                 continue
-            try:
-                with warnings.catch_warnings():
-                    warnings.simplefilter("ignore")
-                    importlib.import_module(info.name)
-            except BaseException as exc:  # noqa: BLE001 - optional deps, platform guards
-                skipped.append(f"{info.name}: {type(exc).__name__}: {str(exc)[:80]}")
+            module = import_module(info.name)
+            if module is not None and info.ispkg:
+                walk(module, f"{info.name}.")
+
+    for root in _package_roots():
+        package = import_module(root)
+        if package is not None:
+            walk(package, f"{root}.")
     return skipped
 
 
@@ -107,6 +120,25 @@ def _config_field_owners() -> dict[str, list[str]]:
 def _carries_config_object(annotation: object) -> bool:
     text = str(annotation)
     return any(config.__name__ in text for config in CONFIG_OBJECTS)
+
+
+OPTION_MODELS: tuple[tuple[str, str], ...] = (
+    ("nooa_atom.session.options", "SessionOptions"),
+    ("nooa_atom.workspace.options", "AtomOptions"),
+)
+
+
+def _option_models(skipped: list[str]) -> list[tuple[str, type]]:
+    """Atom's option models as (owner name, class); an absent package is recorded, not failed."""
+    models: list[tuple[str, type]] = []
+    for module_name, class_name in OPTION_MODELS:
+        try:
+            model = getattr(importlib.import_module(module_name), class_name)
+        except Exception as exc:  # noqa: BLE001 - the Atom package may be absent
+            skipped.append(f"{module_name}.{class_name}: {type(exc).__name__}: {exc}")
+            continue
+        models.append((f"{module_name}.{class_name}", model))
+    return models
 
 
 def _violations() -> tuple[list[str], list[str]]:
@@ -142,17 +174,9 @@ def _violations() -> tuple[list[str], list[str]]:
                 continue
             check(f"{cls.__module__}.{cls.__qualname__}", name, parameter.annotation)
 
-    for module_name, class_name in (
-        ("nooa_atom.session.options", "SessionOptions"),
-        ("nooa_atom.workspace.options", "AtomOptions"),
-    ):
-        try:
-            model = getattr(importlib.import_module(module_name), class_name)
-        except Exception as exc:  # noqa: BLE001 - the Atom package may be absent
-            skipped.append(f"{module_name}.{class_name}: {type(exc).__name__}: {exc}")
-            continue
+    for owner, model in _option_models(skipped):
         for name, field in model.model_fields.items():
-            check(f"{module_name}.{class_name}", name, field.annotation)
+            check(owner, name, field.annotation)
 
     return findings, skipped
 
@@ -166,7 +190,7 @@ def test_settings_snap_to_config_objects() -> None:
 
 def test_allow_list_entries_are_still_needed() -> None:
     """A stale ALLOWED entry hides nothing today but would hide a future regression."""
-    _import_everything()
+    skipped = _import_everything()
     owners = _config_field_owners()
     present: set[tuple[str, str]] = set()
     for cls in _all_subclasses(Agent):
@@ -176,8 +200,10 @@ def test_allow_list_entries_are_still_needed() -> None:
             continue
         owner = f"{cls.__module__}.{cls.__qualname__}"
         present.update((owner, name) for name in signature.parameters if name in owners)
+    for owner, model in _option_models(skipped):
+        present.update((owner, name) for name in model.model_fields if name in owners)
     stale = sorted(key for key in ALLOWED if key not in present)
-    assert not stale, f"ALLOWED entries no longer match any parameter: {stale}"
+    assert not stale, f"ALLOWED entries no longer match any parameter or field: {stale}"
 
 
 @pytest.mark.parametrize("config", CONFIG_OBJECTS)
