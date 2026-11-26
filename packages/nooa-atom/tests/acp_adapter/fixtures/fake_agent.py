@@ -6,8 +6,9 @@ Runs the real server (``nooa_atom.acp.cli.run``) and the real Atom
 agent with a fake model. Flags pick the model's script: ``--blocking``
 (a cell that never ends), ``--shell`` (a cell blocked in a shell command),
 ``--question`` (asks which branch, then finishes), ``--noisy`` (prints to
-stdout while building each session's model, as tracing does); default: one message
-and ``Done``. ``--tee PATH`` turns on the in-process tee.
+stdout while building each session's model, as tracing does), ``--relay-probe``
+(says whether the server has imported ``nooa_atom.session.relay``); default: one
+message and ``Done``. ``--tee PATH`` turns on the in-process tee.
 """
 
 import json
@@ -56,6 +57,14 @@ def llm_factory(alias, workspace) -> FakeLLMClient:
         script = [_cell("await Shell().run('sleep 30', timeout=30)")]
     elif "--blocking" in sys.argv:
         script = [_cell("await asyncio.Event().wait()")]
+    elif "--relay-probe" in sys.argv:
+        script = [
+            _cell(
+                "import sys\n"
+                "self.message(f\"relay imported: {'nooa_atom.session.relay' in sys.modules}\")\n"
+                "return_result(Done(explanation='probed'))"
+            )
+        ]
     elif "--question" in sys.argv:
         script = [
             _cell("return_result(NeedInput(question='Which branch?'))"),
