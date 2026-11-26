@@ -154,8 +154,9 @@ class CurrentCall:
     execution namespace during setup. Do not change ``id`` while using the call
     as a set member or dictionary key; equality and hashing use that ID.
     ``session_locals`` is the optional caller-owned seed/writeback dictionary for
-    carrying names between invocations. CodeAct copies it into a fresh execution
-    namespace and writes filtered names back when the call completes.
+    carrying names between invocations (the ``_session_locals`` call argument).
+    CodeAct and PurePython seed it into the call's execution namespace as user
+    globals and write the names cells bound back when the call completes.
     ``execution_locals`` refers to that live per-invocation namespace, including
     names created by earlier cells and session internals such as ``Out``. Dynamic
     context blocks use it while the call is running; it exists even when the caller
@@ -234,10 +235,17 @@ class CurrentCall:
     positional_param_names: list[str] | None = None
     var_positional_param_name: str | None = None
     var_keyword_param_name: str | None = None
-    # The owned namespace this call's cells run in (CodeAct in-process: from the
-    # agent's ``execution_namespace_for`` hook; None for the sandbox backend and
+    # The owned namespace this call's cells run in (in-process CodeAct and
+    # PurePython, from ``enter_call_namespace``; None for the sandbox backend and
     # strategies without one); never copied into snapshot/user state.
     execution_namespace: ExecutionNamespace | None = None
+    # Write-back state, set by ``enter_call_namespace`` and cleared by
+    # ``write_back_session_locals`` (rules: "session_locals seeding and
+    # write-back" in nooa/runtime/README.md). ``argument_names``: PurePython's
+    # arguments, user names that never reach the caller.
+    argument_names: frozenset[str] = frozenset()
+    seeded_locals: dict[str, Any] = field(default_factory=dict)
+    namespace_before: dict[str, Any] = field(default_factory=dict)
     # Per-request facts for views, filled in by the runtime for each model
     # request; never client/provider configuration. Runtime owners are
     # excluded from repr and comparison, which use the call id.

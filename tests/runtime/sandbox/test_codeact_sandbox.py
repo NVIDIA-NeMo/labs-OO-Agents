@@ -244,3 +244,30 @@ async def test_custom_formatter_receives_worker_rendered_diagnostic():
     assert "Cell In[1], line 2" in output.error
     assert "text.index('missing')" in output.error
     assert output.error.endswith("ValueError: substring not found")
+
+
+class _SeededAgent(Agent, llm=FakeLLMClient()):
+    @strategy(
+        CodeActStrategy(
+            config=CodeActConfig(
+                execution_backend="sandbox", cell_timeout=15.0, max_retries=1, sandbox=_SANDBOX
+            )
+        )
+    )
+    async def pick(self) -> int:
+        """Return the seeded value."""
+        ...
+
+
+async def test_sandbox_return_result_resolves_a_caller_seeded_variable_name():
+    """The parent-side ``return_result`` variable lookup sees the caller's seed.
+
+    The sandbox worker owns the cells' namespace, so the parent keeps the
+    caller's ``_session_locals`` for its own lookups (tool names, a
+    ``return_result`` argument that names a variable).
+    """
+    llm = FakeLLMClient(scripted_responses=[_resp("", tool_calls=[_ret(result="seeded")])])
+    agent = _SeededAgent(llm=llm)
+    stack = {"seeded": 42}
+    assert await agent.pick(_session_locals=stack) == 42
+    assert stack == {"seeded": 42}

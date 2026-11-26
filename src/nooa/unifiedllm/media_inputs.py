@@ -140,6 +140,8 @@ _IMAGE_LIMIT_RES = (
         r"(?:limit|maximum|max)\s*(?:is|of|=|:)?\s*(\d+)\b"
     ),
     re.compile(r"\bexceeds? the (?:maximum|max|limit) of (\d+) images?\b"),
+    # "Exceeded maximum number of images (50) allowed in the request." (Azure OpenAI).
+    re.compile(r"\bmax(?:imum)?(?:\s+number\s+of)?\s+images?\s*\(\s*(\d+)\s*\)"),
 )
 
 

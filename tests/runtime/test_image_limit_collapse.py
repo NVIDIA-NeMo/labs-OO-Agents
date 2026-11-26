@@ -69,6 +69,7 @@ class ImageAgent(Agent, llm=FakeLLMClient()):
         ("You can send at most 3 images per request", 3),
         ("Maximum of 10 images allowed", 10),
         ("request exceeds the maximum of 20 images", 20),
+        ("Exceeded maximum number of images (50) allowed in the request.", 50),
         ("Invalid image", None),
         ("context length exceeded", None),
     ],
