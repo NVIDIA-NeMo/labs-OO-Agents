@@ -148,6 +148,40 @@ async def test_done_after_a_message_less_waiting_replies_with_its_explanation(
     await asyncio.wait_for(pending, TIMEOUT)
 
 
+_WAIT_WITH_MESSAGE = (
+    "return_result(Waiting(explanation='waiting', message='Started A', "
+    "on=['user_messages', 'jobs']))"
+)
+
+
+async def test_a_new_prompt_after_an_answered_waiting_replies_with_its_explanation(make_session):
+    session, _ = make_session(cell(_WAIT_WITH_MESSAGE), done("Answer B"), start=False)
+    session.waiting_ends_outcome = True
+    session.start()
+    messages = []
+    session._agent.event_manager.on("AgentMessage", lambda event: messages.append(event.content))
+
+    await asyncio.wait_for(session.prompt("A"), TIMEOUT)
+    assert await asyncio.wait_for(session.prompt("B"), TIMEOUT) == Done(explanation="Answer B")
+    assert messages == ["Started A", "Answer B"]
+
+
+async def test_a_jobs_only_turn_after_an_answered_waiting_does_not_reply_again(make_session):
+    session, _ = make_session(cell(_WAIT_WITH_MESSAGE), done("job finished"), start=False)
+    session.waiting_ends_outcome = True
+    jobs = session._agent.queue_manager.queue("jobs")  # a host-declared channel
+    session.start()
+    ended, messages = [], []
+    session.subscribe(lambda e: ended.append(e) if isinstance(e, TurnEndedUpdate) else None)
+    session._agent.event_manager.on("AgentMessage", lambda event: messages.append(event.content))
+
+    await asyncio.wait_for(session.prompt("A"), TIMEOUT)
+    jobs.put("job output")  # a jobs-only turn ends Done without a message
+    await until(lambda: len(ended) == 2)
+    assert [e.outcome_kind for e in ended] == ["waiting", "done"]
+    assert messages == ["Started A"]  # A was answered; nothing is repeated
+
+
 async def test_prompt_for_an_item_taken_mid_turn_resolves_with_that_turn(make_session):
     started, block = agents.fresh_events()
     session, _ = make_session(

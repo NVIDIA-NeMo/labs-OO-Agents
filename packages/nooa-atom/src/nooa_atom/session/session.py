@@ -1035,11 +1035,13 @@ class Session:
         if kind != "waiting" or self.waiting_ends_outcome:
             for item_id in waiting:
                 self._resolve(item_id, outcome)
-                if kind == "waiting" and item_id in self._user_items:
+                if kind == "waiting" and not self._replied and item_id in self._user_items:
                     self._unanswered.add(item_id)  # settled, but not yet answered
                 self._user_items.discard(item_id)
             waiting = []
-            if kind != "waiting":  # as with the Waiting kept open: the reply is still owed
+            # A message-less Waiting still owes the reply, as with the Waiting
+            # kept open; once answered, the next person input starts afresh.
+            if kind != "waiting" or self._replied:
                 self._replied = False
                 self._unanswered.clear()
         self._waiting = waiting
