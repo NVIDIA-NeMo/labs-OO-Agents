@@ -3,7 +3,8 @@
 """Send each ACP session's turns through NeMo Relay when the host sets
 ``NEMO_RELAY_PLUGIN_CONFIG_PATH`` to a Relay ``plugins.toml``, the variable the
 ``nemo-relay`` CLI reads; see "Capturing ACP sessions with NeMo Relay" in the
-nooa-atom README. Unset, ``nemo_relay`` is not imported and nothing changes.
+nooa-atom README. Hosts import this module only then
+(``session.tracing.relay_activated``, ``trace_in_relay``).
 """
 
 from __future__ import annotations
@@ -18,11 +19,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from nooa_atom.session.items import ClosedUpdate
+from nooa_atom.session.tracing import RELAY_CONFIG_ENV as CONFIG_ENV
 
 if TYPE_CHECKING:
     from nooa_atom.session.session import Session
 
-CONFIG_ENV = "NEMO_RELAY_PLUGIN_CONFIG_PATH"
 METADATA_ENV = "NEMO_RELAY_SESSION_METADATA"
 _INJECTOR = "nooa-atom-session"
 _KEY = re.compile(r"[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*")
@@ -37,12 +38,9 @@ _open_turns: dict[str, Any] = {}
 
 @asynccontextmanager
 async def activated() -> AsyncIterator[None]:
-    """Hold Relay's plugin host while the server runs, when ``CONFIG_ENV`` is set."""
+    """Hold Relay's plugin host, configured by ``CONFIG_ENV``, while the server runs."""
     global _host_metadata
-    path = os.environ.get(CONFIG_ENV)
-    if not path:
-        yield
-        return
+    path = os.environ[CONFIG_ENV]
     if not Path(path).is_file():
         raise FileNotFoundError(f"{CONFIG_ENV} names no file: {path}")
     metadata = json.loads(os.environ.get(METADATA_ENV) or "{}")

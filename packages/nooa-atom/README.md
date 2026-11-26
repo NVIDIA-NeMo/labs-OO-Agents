@@ -252,8 +252,8 @@ dot-separated segments of ASCII letters, digits, `_` or `-`, as Relay requires,
 or the server does not start. A delegated child's events also carry its own id
 as `subagent_session_id`. A turn still running when the server stops (end of
 input or SIGTERM) is closed and exported then; a host that kills the server
-with SIGKILL loses that turn. Unset, Relay is not
-imported (`nooa_atom/session/relay.py`).
+with SIGKILL loses that turn. Unset, neither Relay nor
+`nooa_atom/session/relay.py` is imported.
 
 ## Todo lookup and cell inspection
 

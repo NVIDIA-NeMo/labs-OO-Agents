@@ -15,6 +15,7 @@ from nooa_atom.session import relay
 from nooa_atom.session.options import SessionOptions
 from nooa_atom.session.registry import SessionRegistry
 from nooa_atom.session.store import SessionStore
+from nooa_atom.session.tracing import relay_activated
 
 from nooa.unifiedllm import LLMResponse
 
@@ -106,7 +107,7 @@ async def test_without_the_variable_nothing_goes_through_relay(
     atom_adapter, workspace, monkeypatch, events
 ):
     monkeypatch.delenv(relay.CONFIG_ENV, raising=False)
-    async with relay.activated():
+    async with relay_activated():
         adapter = await atom_adapter([reply("Hello.\n")])
         await _one_turn(adapter, workspace)
 
@@ -180,7 +181,8 @@ async def test_a_child_that_a_traced_turn_delegates_to_is_in_its_trace(
             assert "subagent_session_id" not in event.metadata, event.name
 
 
-async def test_a_worker_closes_the_plugin_host_before_its_socket(monkeypatch):
+async def test_a_worker_closes_the_plugin_host_before_its_socket(plugins, monkeypatch):
+    monkeypatch.setenv(relay.CONFIG_ENV, str(plugins))
     order = []
 
     @asynccontextmanager

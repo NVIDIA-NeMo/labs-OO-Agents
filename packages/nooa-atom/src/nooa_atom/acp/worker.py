@@ -31,7 +31,7 @@ from typing import Any
 from nooa._platform import require_posix
 from nooa_atom.acp.framing import FRAME_LIMIT
 from nooa_atom.acp.server import serve_connection
-from nooa_atom.session import relay
+from nooa_atom.session.tracing import relay_activated
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ async def serve_worker(
     """
     reader, writer = await asyncio.open_unix_connection(sock=sock, limit=FRAME_LIMIT)
     try:
-        async with relay.activated():
+        async with relay_activated():
             try:
                 await serve_connection(agent, reader, writer, id_base=id_base, observers=observers)
             finally:

@@ -22,7 +22,6 @@ from typing import Any, Protocol
 from nooa.events import SessionResumed
 from nooa.interactive import AgentMessage, Done
 from nooa.storage.sqlite import SessionAlreadyActiveError
-from nooa_atom.session import relay
 from nooa_atom.session.events import (
     ChildClosed,
     ChildDeleted,
@@ -59,7 +58,7 @@ from nooa_atom.session.store import (
     SessionNotFoundError,
     SessionStore,
 )
-from nooa_atom.session.tracing import trace_in_tree, trace_under_caller
+from nooa_atom.session.tracing import trace_in_relay, trace_in_tree, trace_under_caller
 
 logger = logging.getLogger(__name__)
 
@@ -230,7 +229,7 @@ class SessionRegistry:
             session = await self._build(options, handle)
             if parent is not None:
                 trace_under_caller(session)
-                relay.trace_session(session)
+                trace_in_relay(session)
                 await self._inherit_tools(session, parent)
             if prepare is not None:
                 await prepare(session)
@@ -955,7 +954,7 @@ class SessionRegistry:
 
         async def trace(child: Session) -> None:
             trace_under_caller(child)
-            relay.trace_session(child)
+            trace_in_relay(child)
 
         return await self.load(
             child_id,

@@ -84,7 +84,6 @@ from nooa_atom.acp.protocol import (
 from nooa_atom.acp.recover import COMMAND as RECOVER
 from nooa_atom.acp.recover import recover
 from nooa_atom.agent.slash_commands import RESERVED_COMMAND_NAMES
-from nooa_atom.session import relay
 from nooa_atom.session.items import (
     CommandInfo,
     CommandsChangedUpdate,
@@ -106,6 +105,7 @@ from nooa_atom.session.store import (
     SessionStore,
     sessions_root,
 )
+from nooa_atom.session.tracing import trace_in_relay
 from nooa_atom.workspace.settings import load_acp_verbosity, write_settings_updates
 
 _VERBOSITY_HELP = (
@@ -394,7 +394,7 @@ class AtomACPAgent:
 
         async def prepare(session: Session) -> None:
             _trace_as(session)
-            relay.trace_session(session)
+            trace_in_relay(session)
             attached.append(self._attach(session))
             warnings.extend(await self._prepare_tools(session, mcp_servers))
 
@@ -443,7 +443,7 @@ class AtomACPAgent:
 
         async def prepare(session: Session) -> None:
             _trace_as(session)
-            relay.trace_session(session)
+            trace_in_relay(session)
             bridge = self._attach(session)
             attached.append(bridge)
             self._replay(bridge, session, pool=self._pool_client)
