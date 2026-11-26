@@ -65,21 +65,26 @@ def _reconcile_messages(originals, public):
     ]
 
 
-def _relay_response(response: LLMResponse) -> dict[str, Any]:
-    """Project the canonical response only when NeMo Relay needs wire JSON."""
-    result: dict[str, Any] = {"finish_reason": response.finish_reason}
+def _relay_response(response: LLMResponse, model_name: str = "") -> dict[str, Any]:
+    """Project the response as the OpenAI chat completion that Relay's
+    ``OpenAIChatCodec`` decodes."""
+    choice: dict[str, Any] = {"index": 0, "finish_reason": response.finish_reason}
     if response.content or response.tool_calls or response.reasoning:
-        result["message"] = response.public_message()
+        choice["message"] = response.public_message()
+    result: dict[str, Any] = {"object": "chat.completion", "choices": [choice]}
+    if model := response.model_name or model_name:
+        result["model"] = model
     if response.usage is not None:
         result["usage"] = {
             "prompt_tokens": response.usage.input_tokens,
             "completion_tokens": response.usage.output_tokens,
             "total_tokens": response.usage.total_tokens,
-            "cached_tokens": response.usage.cached_input_tokens,
+            "prompt_tokens_details": {"cached_tokens": response.usage.cached_input_tokens},
+            "completion_tokens_details": {"reasoning_tokens": response.usage.reasoning_tokens},
             "cache_creation_input_tokens": response.usage.cache_write_input_tokens,
-            "reasoning_tokens": response.usage.reasoning_tokens,
-            "cost_usd": response.usage.cost_usd,
         }
+        if response.usage.cost_usd:
+            result["usage"]["cost_usd"] = response.usage.cost_usd
     return result
 
 
@@ -222,14 +227,21 @@ async def nemo_relay_llm_middleware(
         resp = captured_ctx.response
         if resp is None:
             return {}
-        return _relay_response(resp)
+        return _relay_response(resp, model_name)
 
     # Note: nemo_relay.llm.execute() returns the pre-guardrail response.
     # Sanitize-response guardrails transform data for NeMo Relay internals
     # (ATIF export, event subscribers) but the caller always receives
     # the original response.  Conditional-execution guardrails that
     # reject raise GuardrailRejected, which propagates naturally.
-    await nemo_relay.llm.execute(model_name, request, _wrapper, model_name=model_name)  # type: ignore[union-attr]
+    # No request codec: with one, Relay rejects intercepts that change request.content.
+    await nemo_relay.llm.execute(  # type: ignore[union-attr]
+        model_name,
+        request,
+        _wrapper,
+        model_name=model_name,
+        response_codec=nemo_relay.codecs.OpenAIChatCodec(),  # type: ignore[union-attr]
+    )
 
     if captured_ctx is not None:
         return captured_ctx
