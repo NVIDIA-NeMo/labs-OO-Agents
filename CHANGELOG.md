@@ -6,6 +6,22 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- The NeMo Relay middleware works with nemo-relay 0.9: the `nemo-relay` extra
+  requires `>=0.9.3,<0.10` (was `>=0.6,<0.7`). Code cells run through Relay
+  again (0.9 failed every one), with the model's `tool_call_id`.
+- The NeMo Relay middleware hands Relay the model's response as an OpenAI chat
+  completion, so Relay's events and OpenTelemetry `chat` spans carry the
+  model's output, finish reason and token usage. Breaking for Relay
+  guardrails and subscribers that read the LLM response JSON: the message is
+  at `choices[0].message`, cached tokens at
+  `usage.prompt_tokens_details.cached_tokens` and reasoning tokens at
+  `usage.completion_tokens_details.reasoning_tokens`, and a zero `cost_usd`
+  is left out.
+- Dependency security update. Pydantic is now locked at 2.14.3 with
+  pydantic-core 2.50.4, and the `pydantic` requirement starts at 2.14.2, the
+  first release that fixes CVE-2026-133276, CVE-2026-133421 and
+  CVE-2026-133424. This applies to the root project, nooa-memory, nooa-atom
+  and the cybergym example.
 - Text files are now read and written as UTF-8 regardless of the locale: the
   library, `nooa-cli`, `nooa-bench`, the eval pipeline, scripts and examples
   pass `encoding="utf-8"` to every text-mode `open()`, `Path.read_text()`,
