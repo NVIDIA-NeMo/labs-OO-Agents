@@ -84,11 +84,11 @@ async def test_prompt_on_an_unknown_session_is_resource_not_found(make_adapter):
     assert caught.value.code == -32002
 
 
-async def test_a_waiting_turn_keeps_the_prompt_open_until_a_later_turn_ends(
+async def test_keep_prompt_open_on_waiting_holds_the_prompt_until_a_later_turn_ends(
     make_adapter, workspace
 ):
     models = ScriptedModels({None: [wait_on("jobs"), reply("All done.")]})
-    adapter = await make_adapter(models)
+    adapter = await make_adapter(models, end_turn_on_waiting=False)
     session_id = await _new(adapter, workspace)
     first = asyncio.create_task(adapter.prompt(session_id, [text_block("start the job")]))
     session = adapter.session(session_id)

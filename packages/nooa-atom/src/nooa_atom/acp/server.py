@@ -253,9 +253,9 @@ class AtomACPAgent:
     ``agent_spec`` names the agent class for new sessions (``None``: the
     workspace's ``atom.agent_spec`` setting, else the Atom agent).
     ``model`` is the model alias new sessions start with; the registry's
-    ``llm_factory`` builds the client. ``end_turn_on_waiting`` answers a
-    prompt whose turn ends ``Waiting`` with ``end_turn`` instead of keeping
-    it open until a later turn ends (``--end-turn-on-waiting``).
+    ``llm_factory`` builds the client. ``end_turn_on_waiting`` (default ``True``)
+    answers a prompt whose turn ends ``Waiting`` with ``end_turn``; ``False``
+    keeps it open until a later turn ends (``--keep-prompt-open-on-waiting``).
     """
 
     def __init__(
@@ -265,10 +265,11 @@ class AtomACPAgent:
         sessions_dir: Path | None = None,
         agent_spec: str | None = None,
         model: str | None = None,
-        end_turn_on_waiting: bool = False,
+        end_turn_on_waiting: bool = True,
     ) -> None:
         self._new_registry = new_registry
-        # ``--end-turn-on-waiting``: a Waiting turn answers its prompt end_turn.
+        # Default (``--end-turn-on-waiting``): a Waiting turn answers its prompt
+        # end_turn. False (``--keep-prompt-open-on-waiting``) keeps it open.
         self._end_turn_on_waiting = end_turn_on_waiting
         self._sessions_dir = sessions_dir
         # By store directory: two workspaces sharing one directory share a registry.
@@ -704,9 +705,10 @@ class AtomACPAgent:
         The text is submitted on ``user_messages`` and the request waits for
         the outcome of the turn that consumes it: the next turn, or the
         running one if the model takes the pending message from its queue
-        (the queues context block lists it). A ``Waiting`` outcome keeps the
-        request open (with ``end_turn_on_waiting`` it answers ``end_turn``,
-        and the turns the awaited work starts stream as plain updates), and
+        (the queues context block lists it). A ``Waiting`` outcome answers
+        ``end_turn`` by default (the turns the awaited work starts stream as
+        plain updates); with ``end_turn_on_waiting=False`` it keeps the
+        request open, and
         so do messages Pool hands over during the prompt (``_pool_steer``)
         until they are handled. Stop answers a waiting
         prompt ``cancelled`` and withdraws its message if no turn took it.
@@ -1646,7 +1648,7 @@ async def serve(
     sessions_dir: Path | None = None,
     agent_spec: str | None = None,
     model: str | None = None,
-    end_turn_on_waiting: bool = False,
+    end_turn_on_waiting: bool = True,
     observers: list[Callable[[Any], None]] | None = None,
     input_fd: int | None = None,
     output_fd: int | None = None,

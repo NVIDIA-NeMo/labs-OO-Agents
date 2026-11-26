@@ -7,13 +7,16 @@ based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
-- `nooa-atom`: `nooa atom --end-turn-on-waiting` (or
-  `NOOA_ATOM_END_TURN_ON_WAITING=1`) ends a `session/prompt` with `end_turn`
-  when its turn ends `Waiting`, instead of keeping it open until a later turn
-  ends. The turns the awaited work starts stream as ordinary
-  `session/update` notifications. Off by default; for ACP clients such as
-  T3 Code that show an open prompt as running and send the next message as a
-  steer. `Session.waiting_ends_outcome` is the Session side.
+- `nooa-atom`: `nooa atom` now ends a `session/prompt` with `end_turn` by
+  default when its turn ends `Waiting`, instead of keeping it open until a
+  later turn ends. The turns the awaited work starts stream as ordinary
+  `session/update` notifications. This suits ACP clients such as T3 Code
+  that show an open prompt as running and send the next message as a steer.
+  Opt out with `--keep-prompt-open-on-waiting` (or
+  `NOOA_ATOM_END_TURN_ON_WAITING=0`); `--end-turn-on-waiting` is the default.
+  `AtomACPAgent(end_turn_on_waiting=True)` is the server default;
+  `Session.waiting_ends_outcome` (still `False` on a bare Session) is the
+  Session side.
 
 - `nooa-atom`: reflection. The `nemo.reflection` skill posts a housekeeping
   message on a root session's `system_messages` queue when one is due (20

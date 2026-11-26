@@ -32,7 +32,8 @@ worker whose id range contains the reply's id.
 
 The shared options are `NOOA_MODEL` (environment variable; default: the first model in the workspace's LLM configuration), `--client-type`,
 `--agent`, `--sessions-dir` (or `NOOA_SESSIONS_DIR`),
-`--end-turn-on-waiting` (or `NOOA_ATOM_END_TURN_ON_WAITING=1`, see below) and
+`--end-turn-on-waiting/--keep-prompt-open-on-waiting` (or
+`NOOA_ATOM_END_TURN_ON_WAITING=0|1`; default on, see below) and
 `--tee`. The router starts
 each worker by re-running its own command line (`sys.orig_argv`) with
 `--worker-fd` and `--id-base` added. A worker therefore runs the same
@@ -116,16 +117,16 @@ message, "Stopped before these messages were handled"; the prompt answers
 `cancelled`. A message sent this way with no prompt open is only queued.
 `_nooa/session/inject` messages never hold a prompt open.
 
-A turn that ends `Waiting` (the agent waits for a job or a subagent) keeps
-its `session/prompt` open by default, until a later turn ends `Done`,
-`NeedInput` or is stopped. Clients that show an open prompt as "running" and
-send the next message as a steer (T3 Code, for example) can start the
-server with `--end-turn-on-waiting` (or `NOOA_ATOM_END_TURN_ON_WAITING=1`):
-then a `Waiting` turn answers its prompt `end_turn` like `Done`, and the
+A turn that ends `Waiting` (the agent waits for a job or a subagent)
+answers its `session/prompt` `end_turn` by default, like `Done`, and the
 messages it consumed are settled, so nothing stays open for Stop or a later
 turn. The turns the awaited work starts run with no prompt open; their
 messages and tool cards arrive as ordinary `session/update` notifications,
-and the person's next message is a new prompt.
+and the person's next message is a new prompt. Clients such as T3 Code,
+which show an open prompt as "running" and send the next message as a steer,
+need this. To keep the previous behaviour (the prompt stays open until a
+later turn ends `Done`, `NeedInput` or is stopped), start the server with
+`--keep-prompt-open-on-waiting` (or `NOOA_ATOM_END_TURN_ON_WAITING=0`).
 
 ## Lifetime
 

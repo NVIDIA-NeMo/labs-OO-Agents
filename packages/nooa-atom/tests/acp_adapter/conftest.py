@@ -121,7 +121,7 @@ async def make_adapter(client):
         model: str | None = None,
         client_: Any = None,
         client_info: Any = None,
-        end_turn_on_waiting: bool = False,
+        end_turn_on_waiting: bool = True,
     ) -> Any:
         def new_registry(store: Any) -> SessionRegistry:
             return SessionRegistry(store, agent_factory=models, llm_factory=llm_factory)

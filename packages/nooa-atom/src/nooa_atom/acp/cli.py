@@ -164,12 +164,14 @@ def _resolve_agent_spec(_ctx: click.Context, _param: click.Parameter, value: str
     help=f"With --http on a loopback address, accept connections without the {TOKEN_ENV} token.",
 )
 @click.option(
-    "--end-turn-on-waiting",
-    is_flag=True,
+    "--end-turn-on-waiting/--keep-prompt-open-on-waiting",
+    default=True,
+    show_default=True,
     envvar="NOOA_ATOM_END_TURN_ON_WAITING",
     help=(
-        "End a session/prompt with end_turn when the turn ends Waiting, instead of keeping "
-        "it open until a later turn ends. Or set NOOA_ATOM_END_TURN_ON_WAITING=1."
+        "End a session/prompt with end_turn when the turn ends Waiting (the default). "
+        "--keep-prompt-open-on-waiting (or NOOA_ATOM_END_TURN_ON_WAITING=0) keeps it open "
+        "until a later turn ends."
     ),
 )
 @click.option("--worker-fd", type=int, default=None, hidden=True)
@@ -296,7 +298,7 @@ def run(
     worker_fd: int | None = None,
     id_base: int | None = None,
     http: HttpOptions | None = None,
-    end_turn_on_waiting: bool = False,
+    end_turn_on_waiting: bool = True,
 ) -> None:
     """Serve ACP until the client leaves, in the role the options select.
 
@@ -445,7 +447,7 @@ def _run_worker(
     agent_spec: str | None,
     sessions_dir: Path | None,
     agent_factory: Any,
-    end_turn_on_waiting: bool = False,
+    end_turn_on_waiting: bool = True,
 ) -> None:
     # --tee and NOOA_ACP_MCP_TRACE are ignored here: the router records the
     # client's side. The server logs each workspace's model configuration
@@ -502,7 +504,7 @@ async def _serve(
     tee: Path | None,
     agent_factory: Any,
     acp_stdin: int,
-    end_turn_on_waiting: bool = False,
+    end_turn_on_waiting: bool = True,
     acp_stdout: int,
 ) -> None:
     from nooa_atom.acp._mcp_trace import MCPHandoffTrace
