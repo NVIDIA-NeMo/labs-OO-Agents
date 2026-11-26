@@ -6,6 +6,9 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- The NeMo Relay middleware works with nemo-relay 0.9: the `nemo-relay` extra
+  requires `>=0.9.3,<0.10` (was `>=0.6,<0.7`). Code cells run through Relay
+  again (0.9 failed every one), with the model's `tool_call_id`.
 - Dependency security update. Pydantic is now locked at 2.14.3 with
   pydantic-core 2.50.4, and the `pydantic` requirement starts at 2.14.2, the
   first release that fixes CVE-2026-133276, CVE-2026-133421 and
