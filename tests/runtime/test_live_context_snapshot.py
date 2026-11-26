@@ -238,3 +238,54 @@ def test_the_dynamic_context_stamp_is_the_envelope_as_on_main():
     ]
     assert _extract_trailing_context_envelope(messages) == ENVELOPE
     assert _extract_trailing_context_envelope([{"role": "user", "content": "just a task"}]) == ""
+
+
+PROBE = "probe-secret-" * 300  # ~4k chars: well over a 1-token budget, well under a huge one
+
+
+@pytest.mark.parametrize("policy", [AppendedLiveContext(every_n_turns=1), DynamicLiveContext()])
+@pytest.mark.parametrize("budget", [1, 10_000_000])
+async def test_the_snapshot_honours_the_same_token_budget_as_the_request(policy, budget):
+    """A live block the request would send as EVICTED is snapshotted as EVICTED (issue #670).
+
+    Under ``append`` the probe must be absent from the recorded snapshot and the
+    request; under ``dynamic`` from the trailing <context> message. A large
+    budget keeps it in both.
+    """
+    from nooa.config import TruncationConfig
+    from nooa.llm_types import AssistantText
+    from nooa.strategies import PredictStrategy
+
+    requests: list[list] = []
+
+    class Recording(FakeLLMClient):
+        async def acall(self, messages, **kwargs):
+            requests.append(list(messages))
+            return await super().acall(messages, **kwargs)
+
+    llm = Recording(scripted_responses=[LLMResponse(parts=(AssistantText(text='{"value": "a"}'),))])
+
+    class Echo(Agent, llm=llm, truncation=TruncationConfig(max_context_tokens=budget)):
+        @strategy(PredictStrategy())
+        async def say(self, text: str) -> str:
+            """Repeat the text."""
+            ...
+
+    agent = Echo(render_config=RenderConfig(live_context=policy))
+    agent.context["probe"] = Context(expr="self.probe")
+    agent.probe = PROBE
+    try:
+        await agent.say("one")
+        request_text = "\n".join(str(m.get("content")) for m in requests[0] if isinstance(m, dict))
+        snapshots = _snapshots(agent)
+        evicted = budget == 1
+        if isinstance(policy, AppendedLiveContext):
+            assert len(snapshots) == 1
+            assert (PROBE in snapshots[0].content) is not evicted
+            assert ("EVICTED: over context budget" in snapshots[0].content) is evicted
+        else:
+            assert snapshots == []
+        assert (PROBE in request_text) is not evicted
+        assert ("EVICTED: over context budget" in request_text) is evicted
+    finally:
+        await agent.aclose()

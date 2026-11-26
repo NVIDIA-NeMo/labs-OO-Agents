@@ -17,7 +17,7 @@ from nooa.context_blocks.formatter import (
     XMLBlockFormatter,
 )
 from nooa.context_blocks.models import BlockMetadata, RenderedMessage, ResolvedBlock, Role
-from nooa.context_blocks.renderer import _utf8_safe, render_context
+from nooa.context_blocks.renderer import _utf8_safe, budget_context_blocks, render_context
 
 
 class TestRenderContextBasic:
@@ -773,3 +773,52 @@ class TestRenderContextLoneSurrogates:
         assert "Héllo 🎉 — ok" in result.output[0]["content"]
         assert _utf8_safe(result.output) is result.output
         assert _utf8_safe(result.messages) is result.messages
+
+
+class TestBudgetContextBlocks:
+    """``budget_context_blocks`` is the one budget shared by the request and the
+    live-context snapshot (issue #670)."""
+
+    @staticmethod
+    def _blocks():
+        return [
+            ResolvedBlock(key="sys", content="s" * 40, metadata=BlockMetadata(static=True)),
+            ResolvedBlock(key="probe", content="p" * 400, metadata=BlockMetadata(user_block=True)),
+            ResolvedBlock(key="note", content="n" * 40),
+            ResolvedBlock(key="msg", content="an event", role=Role.USER),
+        ]
+
+    def test_without_a_limit_it_only_selects_the_system_blocks(self):
+        budgeted, dropped = budget_context_blocks(
+            self._blocks(), context_limit=None, count_tokens=len
+        )
+        assert [b.key for b in budgeted] == ["sys", "probe", "note"]
+        assert dropped == 0
+        assert all(not b.metadata.truncated for b in budgeted)
+
+    def test_over_budget_blocks_are_marked_evicted_and_static_ones_kept(self):
+        blocks = self._blocks()
+        budgeted, dropped = budget_context_blocks(blocks, context_limit=100, count_tokens=len)
+        by_key = {b.key: b for b in budgeted}
+        assert dropped == 1
+        assert by_key["probe"].content.startswith("EVICTED: over context budget")
+        assert by_key["probe"].metadata.truncated
+        assert by_key["sys"].content == "s" * 40 and by_key["note"].content == "n" * 40
+        # Pure: the input blocks are untouched.
+        assert blocks[1].content == "p" * 400
+
+    def test_render_context_sends_exactly_the_budgeted_blocks(self):
+        blocks = self._blocks()
+        budgeted, dropped = budget_context_blocks(blocks, context_limit=100, count_tokens=len)
+        result = render_context(
+            blocks,
+            block_formatter=XMLBlockFormatter(),
+            provider_formatter=OpenAIProviderFormatter(),
+            context_limit=100,
+            count_tokens=len,
+        )
+        assert result.stats.context_blocks_dropped == dropped == 1
+        system_text = next(m["content"] for m in result.output if m["role"] == "system")
+        for block in budgeted:
+            assert block.content in system_text
+        assert "p" * 400 not in system_text
