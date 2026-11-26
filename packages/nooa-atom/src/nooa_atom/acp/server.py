@@ -105,6 +105,7 @@ from nooa_atom.session.store import (
     SessionStore,
     sessions_root,
 )
+from nooa_atom.session.tracing import trace_in_relay
 from nooa_atom.workspace.settings import load_acp_verbosity, write_settings_updates
 
 _VERBOSITY_HELP = (
@@ -393,6 +394,7 @@ class AtomACPAgent:
 
         async def prepare(session: Session) -> None:
             _trace_as(session)
+            trace_in_relay(session)
             attached.append(self._attach(session))
             warnings.extend(await self._prepare_tools(session, mcp_servers))
 
@@ -441,6 +443,7 @@ class AtomACPAgent:
 
         async def prepare(session: Session) -> None:
             _trace_as(session)
+            trace_in_relay(session)
             bridge = self._attach(session)
             attached.append(bridge)
             self._replay(bridge, session, pool=self._pool_client)
