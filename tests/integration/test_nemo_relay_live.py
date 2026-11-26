@@ -130,7 +130,14 @@ async def test_live_relay_nested_concurrent_atif(tmp_path):
         assert all(isinstance(s["message"], str) for s in model_steps)
         assert not any('"assistant_message"' in s["message"] for s in model_steps)
         observations = []
-        prefill_calls = []
+        provider_ids = {
+            call["id"]
+            for step in model_steps
+            for call in step["extra"]["llm_response"]["choices"][0]
+            .get("message", {})
+            .get("tool_calls", [])
+        }
+        host_calls = []
         for step in steps:
             calls = {c["tool_call_id"] for c in step.get("tool_calls", [])}
             if step.get("metrics"):
@@ -138,20 +145,16 @@ async def test_live_relay_nested_concurrent_atif(tmp_path):
                 issued = {
                     c["id"] for c in response["choices"][0].get("message", {}).get("tool_calls", [])
                 }
-                # Relay may attach host-generated prefills to a preceding model
-                # step. They are not provider-issued calls; do not count them as
-                # evidence that the model chose to execute this code.
-                prefills = {call_id for call_id in calls if call_id.startswith("prefill_")}
-                assert calls - prefills == issued
-                prefill_calls.extend(prefills)
+                # Relay also exports host-generated cells with synthetic IDs.
+                # Only provider-issued IDs establish which model chose a call.
+                assert calls & provider_ids == issued
+                host_calls.extend(calls - provider_ids)
             for observation in step.get("observation", {}).get("results", []):
                 assert observation["source_call_id"] in calls
                 assert isinstance(observation["content"], str)
                 observations.append(observation)
         assert len(observations) >= 4
-        print(
-            f"ATIF host-generated prefill calls (ownership is upstream-defined): {len(prefill_calls)}"
-        )
+        print(f"ATIF host-generated cells (ownership is upstream-defined): {len(host_calls)}")
         assert trajectory["final_metrics"]["total_prompt_tokens"] == sum(
             s["metrics"].get("prompt_tokens", 0) for s in model_steps
         )
