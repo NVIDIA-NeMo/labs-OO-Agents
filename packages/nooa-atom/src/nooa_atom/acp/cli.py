@@ -491,6 +491,7 @@ async def _serve(
     from nooa_atom.agent.factory import create_session_agent
     from nooa_atom.session.registry import SessionRegistry
     from nooa_atom.session.store import SessionStore
+    from nooa_atom.session.tracing import relay_activated
 
     def new_registry(store: SessionStore) -> SessionRegistry:
         return SessionRegistry(
@@ -505,15 +506,16 @@ async def _serve(
     if frame_log is not None:
         observers.append(frame_log)
     try:
-        await serve(
-            new_registry,
-            sessions_dir=sessions_dir,
-            agent_spec=agent_spec,
-            model=model,
-            observers=observers,
-            input_fd=acp_stdin,
-            output_fd=acp_stdout,
-        )
+        async with relay_activated():
+            await serve(
+                new_registry,
+                sessions_dir=sessions_dir,
+                agent_spec=agent_spec,
+                model=model,
+                observers=observers,
+                input_fd=acp_stdin,
+                output_fd=acp_stdout,
+            )
     finally:
         try:
             if frame_log is not None:

@@ -15,6 +15,13 @@ based on [Keep a Changelog](https://keepachangelog.com/).
   events with `model_dump(mode="json")` failed and lost the `Done`. `run_task`
   now starts no turn once the root is done and leaves those events out of
   `TaskRun.events`.
+- `nooa-atom`: with `NEMO_RELAY_PLUGIN_CONFIG_PATH` naming a NeMo Relay
+  `plugins.toml`, each turn of an ACP session is one Relay trace
+  (`invoke_agent atom` over `chat` and `execute_tool` spans, a delegated
+  child's turns inside the caller's) with `session_id`, `agent_kind` and
+  `NEMO_RELAY_SESSION_METADATA` on every event (and a delegated child's own id
+  as `subagent_session_id`); see the README.
+  Unset, nothing changes.
 - `nooa-atom`: reflection. The `nemo.reflection` skill posts a housekeeping
   message on a root session's `system_messages` queue when one is due (20
   turns or 60 minutes since the last, or the context half full; at least 5

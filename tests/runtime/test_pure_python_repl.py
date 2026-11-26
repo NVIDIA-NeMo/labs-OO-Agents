@@ -177,7 +177,7 @@ def my_method(self, x):
         assert "my_method" in result.defined_methods
 
     @pytest.mark.asyncio
-    async def test_method_with_print_inside(self, test_agent):
+    async def test_method_with_print_inside(self, test_agent, capfd):
         """Print inside method only outputs when method is called."""
         code = """
 
@@ -193,10 +193,10 @@ def my_method(self, x):
         assert result.stdout == ""
         assert "my_method" in result.defined_methods
 
-        # Now call the method.: it's a plain function, so pass self explicitly.
+        # Called after its cell ended (no cell running), ``print`` goes to stdout.
         method = result.defined_methods["my_method"]
-        method(test_agent, 5)
-        # The print happens but we'd need to capture it in a new execute_code call
+        assert method(test_agent, 5) == 10
+        assert "Processing: 5" in capfd.readouterr().out
 
 
 if __name__ == "__main__":

@@ -53,7 +53,7 @@ async def _invoke_wrapper_for_llm(*args, **kwargs):
     await wrapper(request)
 
 
-async def _invoke_wrapper_for_tools(tool_name, args, wrapper):
+async def _invoke_wrapper_for_tools(tool_name, args, wrapper, **kwargs):
     """Default: call the wrapper with the args to simulate NeMo Relay invoking it."""
     await wrapper(args)
 
@@ -334,7 +334,7 @@ class TestNemoRelayToolMiddleware:
         """When nemo_relay.tools.execute() never invokes _wrapper, raise RuntimeError."""
         with _nemo_relay_patched() as (nm, fake_nemo_relay, _):
 
-            async def blocking_execute(tool_name, args, wrapper):
+            async def blocking_execute(tool_name, args, wrapper, **kwargs):
                 pass  # don't call wrapper
 
             fake_nemo_relay.tools.execute.side_effect = blocking_execute
@@ -418,7 +418,7 @@ class TestNemoRelayToolMiddleware:
         """NeMo Relay intercept can rewrite code; it propagates to ctx."""
         with _nemo_relay_patched() as (nm, fake_nemo_relay, _):
 
-            async def intercepting_execute(tool_name, args, wrapper):
+            async def intercepting_execute(tool_name, args, wrapper, **kwargs):
                 modified_args = {"code": "print('intercepted')", "timeout": 5}
                 await wrapper(modified_args)
 

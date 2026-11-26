@@ -172,12 +172,64 @@ Rules:
 
 # Cell execution
 
-CodeAct's in-process backend runs every cell in an owned
-`ExecutionNamespace` (`nooa.runtime.execution_namespace`): one authoritative
-globals dictionary per call, from `Agent.execution_namespace_for(call)` (a
-fresh namespace per call by default; Atom's `handle` keeps one per live
-session). Runtime names (`self`, `print`, `return_result`...) resolve through
-the builtin fallback; framework names come from the namespace providers
-(`nooa.runtime.namespace_providers`). Caller `_session_locals` seed the
-namespace and are written back when the call ends. The sandbox backend keeps
-its worker's namespace.
+In-process cells have one execution path: `ActorRuntime.execute_code` runs
+every cell in an owned `ExecutionNamespace` (`nooa.runtime.execution_namespace`),
+one authoritative globals dictionary that the cell's bindings are written to.
+CodeAct and PurePython enter it with `enter_call_namespace`. CodeAct asks
+`Agent.execution_namespace_for(call)` (a fresh namespace per call by default;
+Atom's `handle` keeps one per live session). PurePython always gets a fresh
+namespace per call and never consults the hook. A direct `execute_code` call
+without a namespace runs in a fresh one for that cell (pass a namespace to keep
+what the cell binds; in-process `ExecutionResult.captured_locals` stays empty).
+Runtime names (`self`, `print`, `return_result`...) resolve through the builtin
+fallback; framework names come from the namespace providers
+(`nooa.runtime.namespace_providers`).
+
+A helper that outlives its cell (used in another call's cell, a late thread,
+or with no cell running) keeps `print`, `pprint`, `show` and `self`: its output
+goes to the cell running in the caller's context, else to the process's
+stdout. Other runtime names (`return_result`, CodeAct's arguments...) raise a
+clear error there. PurePython's arguments are ordinary globals, so such a
+helper keeps reading them. An asyncio task created in a cell inherits its
+context and keeps its originating call's names, also after the call ended
+(by design: background tasks of a call keep working).
+
+## session_locals seeding and write-back
+
+The one place for these rules; `enter_call_namespace` and
+`write_back_session_locals` implement them.
+
+Seeding, when the call enters its namespace:
+
+- The namespace is entered first: one that another call occupies (a shared
+  CodeAct namespace) raises before anything in it changes.
+- Each caller `_session_locals` key becomes a user global, except protected
+  names (reserved runtime names, `__builtins__`, the engine's internals).
+  CodeAct reserves the call's arguments, so a same-named key is not seeded.
+- PurePython then seeds its arguments as ordinary user names a cell can read,
+  rebind and delete (like a function's locals); an argument wins over a
+  same-named key. `del arg` stays deleted in later cells of the call.
+- The call records its seeds, its argument names and a snapshot of every
+  unprotected global (dunders included).
+
+Write-back, when the call ends (returns, or fails after retries):
+
+- A global changed if its object is not the snapshot's (identity, not
+  equality), or if it is new, unless it is a new dunder or the environment the
+  runtime seeded (modules, tools) still holding its seeded object. So a
+  rebound environment name (`asyncio = 5`) or seeded dunder (`__version__`)
+  writes back, and an unchanged re-import (`import json`) does not. A
+  helper's `global` write and a write no cell spells out count too, and the
+  changed names join the namespace's user names (`inventory()`).
+- Each changed name updates the caller's key; arguments never do, and a caller
+  key named like an argument keeps its value.
+- A seed the cells deleted is removed from the caller's dict, unless the caller
+  changed that key meanwhile.
+- Every other key keeps the caller's current value: write-back merges, it
+  does not replace the dict. Keys others added or changed while the call ran
+  survive, and a reused namespace's older bindings never reach this caller.
+- A helper defined in an earlier call reads and writes the globals of the call
+  that defined it: with fresh namespaces, its writes do not reach a later
+  call's caller.
+- The sandbox backend seeds its worker from `_session_locals` but never writes
+  back: the caller's dict stays as given. The parent passes no namespace there.
