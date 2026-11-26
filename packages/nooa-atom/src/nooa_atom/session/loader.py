@@ -106,7 +106,7 @@ def load_agent_class(spec: str, *, base: str | Path | None = None) -> type[Inter
             f"Agent spec {spec!r} must look like 'module:Class' or 'file.py:Class'"
         )
     target: Any
-    if _is_file_spec(module_name):
+    if is_file_spec(module_name):
         file_path = Path(module_name).expanduser()
         if not file_path.is_absolute() and base is not None:
             file_path = Path(base).expanduser() / file_path
@@ -132,7 +132,7 @@ def load_agent_class(spec: str, *, base: str | Path | None = None) -> type[Inter
     return target
 
 
-def _is_file_spec(module_name: str) -> bool:
+def is_file_spec(module_name: str) -> bool:
     return module_name.endswith(".py") or "/" in module_name or module_name.startswith((".", "~"))
 
 

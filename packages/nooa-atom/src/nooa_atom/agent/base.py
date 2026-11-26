@@ -30,6 +30,7 @@ from nooa.storage.markers import nosnapshot
 from nooa.strategies import CodeActV2, PredictStrategy
 from nooa.tools import MethodWriting, SkillWriting, Todo, TodoManager
 from nooa.tools.shell_tools import ShellTools
+from nooa.workspace_trust import WorkspaceTrustError, is_inside, is_trusted, trust
 from nooa_atom.agent.activity import ActivityShellTools
 from nooa_atom.agent.instructions import RepositoryInstructions
 from nooa_atom.agent.jobs import JobInfo, JobsApi, JobUpdate  # noqa: F401  (visible to cells)
@@ -181,6 +182,8 @@ class AtomAgentBase(InteractiveAgent):
     # AtomAgent's self.files; it reports commands and edits as activity events.
     # The model runs its own commands in Shell()s, never in this one.
     _workspace_shell: Annotated[ActivityShellTools, hidden, nosnapshot]
+    # Whether self.cwd is a trusted folder (nooa.workspace_trust).
+    _workspace_trusted: Annotated[bool, hidden, nosnapshot]
     _instructions: Annotated[RepositoryInstructions, hidden, nosnapshot]
     _summarizers: Annotated[list[Any], hidden, nosnapshot]
     _delegates_in: Annotated[Any, hidden, nosnapshot]
@@ -228,6 +231,7 @@ class AtomAgentBase(InteractiveAgent):
         self._jobs_running = {}
         self.jobs = JobsApi(self)
         self.skills = SkillManager(self)
+        self._workspace_trusted = is_trusted(self.cwd)
         # Skills the agent writes live at <project>/.nooa/skills (an older
         # <project>/.nooa/libs is not loaded). get_project_dir() resolves that
         # per process, which is what a one-workspace host like the TUI wants.
@@ -250,8 +254,16 @@ class AtomAgentBase(InteractiveAgent):
         # SkillWriting loads the saved local.* skills while it is built, so it
         # is built after the tools above: a saved skill named like one of them
         # is then refused instead of taking the name and failing this install.
+        # An untrusted workspace's saved skills do not load (the host leaves
+        # its skill directories out of skills_dirs); the ones the agent
+        # writes in this session do. /trust loads the rest.
+        load_existing = self._workspace_trusted or not is_inside(skills_dir, self.cwd)
         self.skills.registry.activate(
-            {"nemo.skill_writing": SkillWriting(self, path=skills_dir, shell=self._workspace_shell)}
+            {
+                "nemo.skill_writing": SkillWriting(
+                    self, path=skills_dir, shell=self._workspace_shell, load_existing=load_existing
+                )
+            }
         )
         # Installed ``nooa.skills`` entry points are part of the shared host
         # surface. Load them so hosts can expose ``@slash_command`` methods,
@@ -299,6 +311,31 @@ class AtomAgentBase(InteractiveAgent):
 
         self._summarization = summarization or SummarizationConfig()
         install_summarizer(self._summarization, self)
+
+    @no_trace
+    def _trust_folder(self) -> str:
+        """``/trust``: trust ``cwd`` (``nooa.workspace_trust.trust``) and load its skills now.
+
+        Returns the reply for the user. Private: the user trusts a folder
+        with ``/trust`` or the host's form, not the model through its API.
+        """
+        from nooa_atom.workspace.settings import load_skills_dirs
+
+        if self._workspace_trusted:
+            return f"This folder is already trusted: {self.cwd}"
+        try:
+            trust(self.cwd)
+        except WorkspaceTrustError as exc:
+            return str(exc)
+        self._workspace_trusted = True
+        self.skill_writing._load_existing()
+        for path in load_skills_dirs(self.cwd, trusted=True):
+            self.slash_commands.add_skills_dir(path)
+        return (
+            f"Trusted {self.cwd}. Its skills are loaded (skills in .nooa/skills are active; "
+            "others: /skills activate). Its model settings (.nooa/llm_config.yaml) apply "
+            "from the next session."
+        )
 
     @no_trace
     def _context_usage(self) -> str:

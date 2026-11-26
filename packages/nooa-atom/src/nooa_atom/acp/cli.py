@@ -89,10 +89,10 @@ def _resolve_agent_spec(_ctx: click.Context, _param: click.Parameter, value: str
     """
     if not value:
         return value
-    from nooa_atom.session.loader import _is_file_spec
+    from nooa_atom.session.loader import is_file_spec
 
     module, _, class_path = value.rpartition(":")
-    if not module or not _is_file_spec(module):
+    if not module or not is_file_spec(module):
         return value
     path = Path(module).expanduser()
     if not path.is_absolute():
@@ -223,7 +223,11 @@ def command(
                 f"--http needs a token: set {TOKEN_ENV} (for example to the output of "
                 "'openssl rand -hex 32'), or pass --no-auth on a loopback address."
             )
-    load_secrets_into_env()
+    from nooa.workspace_trust import launch_project_trusted
+
+    # The project layer of secrets.yaml comes from the launch directory; an
+    # untrusted one must not set keys (nooa.workspace_trust).
+    load_secrets_into_env(include_project=launch_project_trusted())
     nvidia_api_key = os.getenv("NVIDIA_API_KEY")
 
     def llm_factory(alias: str | None, workspace: Path) -> Any:

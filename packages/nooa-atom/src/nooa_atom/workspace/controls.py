@@ -505,11 +505,35 @@ def _usage_lines(usage: Any) -> list[str]:
     return lines
 
 
+class TrustControl(BehaviorControl):
+    """Trust this folder: load its code skills and, from the next session, its model settings."""
+
+    @property
+    def name(self) -> str:
+        return "trust"
+
+    @classmethod
+    def help_text(cls) -> dict[str, str]:
+        return {"/trust": cls.__doc__ or ""}
+
+    def validate_args(self, args: list[str]) -> tuple[bool, str | None]:
+        if args:
+            return False, "Usage: /trust"
+        return True, None
+
+    async def execute(self, args: list[str]) -> ControlResult:
+        trust_folder = getattr(self.agent, "_trust_folder", None)
+        if not callable(trust_folder):
+            return ControlResult.err("This agent cannot change workspace trust.")
+        return ControlResult.ok(ControlMessage(trust_folder(), "success"))
+
+
 CONTROL_TYPES = {
     "skills": SkillsControl,
     "mcp": MCPControl,
     "trace-url": TraceUrlControl,
     "usage": UsageControl,
+    "trust": TrustControl,
 }
 
 
@@ -531,7 +555,7 @@ class ControlCommand:
 def behavior_commands(
     agent: Any, config: Any, *, workspace: Path, command_registry: Any
 ) -> list[ControlCommand]:
-    """The ``/skills``, ``/mcp``, ``/trace-url`` and ``/usage`` controls, as plain commands."""
+    """The ``/skills``, ``/mcp``, ``/trace-url``, ``/usage`` and ``/trust`` controls, as plain commands."""
     result = []
     for control_type in CONTROL_TYPES.values():
         control = control_type(
@@ -549,6 +573,7 @@ def behavior_commands(
                     "mcp": MCPControl.usage,
                     "trace-url": "",
                     "usage": "",
+                    "trust": "",
                 }[control.name],
                 invoke=control.invoke,
             )

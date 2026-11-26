@@ -80,7 +80,8 @@ async def test_registry_refresh_callback_observes_new_skill_commands(tmp_path):
         agent.skills.register("test.workflow", _WorkflowSkill())
         agent.skills.activate(["test.workflow"])
 
-        assert updates == [(), ("diagnose",)]
+        # /trust is the agent's own command and is always there.
+        assert updates == [("trust",), ("diagnose", "trust")]
     finally:
         registry.close()
         await agent.close()

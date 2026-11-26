@@ -32,7 +32,9 @@ CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
 
 # `completion` just emits a shell script and doesn't need the ~1.5s core
 # import cost or secrets preload.
-_SKIP_SECRETS_PRELOAD = {"completion"}
+# ``acp`` and ``atom`` load secrets themselves, leaving out the project layer of
+# an untrusted launch directory (nooa.workspace_trust).
+_SKIP_SECRETS_PRELOAD = {"completion", "acp", "atom"}
 
 
 @click.group(context_settings=CONTEXT_SETTINGS)

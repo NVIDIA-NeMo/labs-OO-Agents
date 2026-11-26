@@ -305,9 +305,11 @@ async def test_adapter_loads_workspace_skills_and_advertises_commands(tmp_path, 
         update for update in client.updates if isinstance(update, AvailableCommandsUpdate)
     ]
     assert len(advertised) == 1
+    # /trust is the agent's own command and is always offered.
     assert [command.name for command in advertised[0].available_commands] == [
         "diagnose",
         "skill-status",
+        "trust",
     ]
     diagnose = advertised[0].available_commands[0]
     assert diagnose.description == "Diagnose the workspace."
@@ -628,7 +630,7 @@ async def test_adapter_republishes_commands_after_skill_activation(tmp_path):
         update for update in client.updates if isinstance(update, AvailableCommandsUpdate)
     ]
     assert len(advertised) == 2
-    assert [command.name for command in advertised[-1].available_commands] == ["later"]
+    assert [command.name for command in advertised[-1].available_commands] == ["later", "trust"]
     await adapter.close()
 
 
@@ -670,7 +672,7 @@ async def test_adapter_replaces_advertised_commands_after_skill_reload(tmp_path,
         update for update in client.updates if isinstance(update, AvailableCommandsUpdate)
     ]
     assert len(advertised) == 1
-    assert [command.name for command in advertised[0].available_commands] == ["repair"]
+    assert [command.name for command in advertised[0].available_commands] == ["repair", "trust"]
     invoked = await runtime.commands.invoke("repair", "deep")
     assert invoked.text == "Repair using deep mode (reloaded)."
     await adapter.close()
@@ -707,6 +709,7 @@ async def test_failed_skill_reload_keeps_previous_command_and_advertisement(tmp_
     assert [command.name for command in runtime.commands.commands()] == [
         "diagnose",
         "skill-status",
+        "trust",
     ]
     invoked = await runtime.commands.invoke("diagnose", "deep")
     assert invoked.text == "Diagnose using deep mode."
@@ -965,8 +968,8 @@ async def test_adapter_routes_distinct_workspace_commands_to_their_sessions(tmp_
         for session_id, update in client.accepted
         if isinstance(update, AvailableCommandsUpdate)
     }
-    assert commands_by_session[alpha_session.session_id] == ["alpha"]
-    assert commands_by_session[beta_session.session_id] == ["beta"]
+    assert commands_by_session[alpha_session.session_id] == ["alpha", "trust"]
+    assert commands_by_session[beta_session.session_id] == ["beta", "trust"]
     messages = {
         session_id: update.content.text
         for session_id, update in client.accepted
@@ -1695,3 +1698,33 @@ async def test_load_session_with_an_unreadable_snapshot_starts_a_fresh_agent(tmp
     assert replayed == ["remember this\n"]
     await second.prompt(session_id, [text_block("still usable")])
     await second.close()
+
+
+async def test_untrusted_workspace_loads_no_skills_and_tells_the_user(tmp_path, untrusted_folders):
+    """An untrusted folder: no skills from it, one message for the user, /trust loads them."""
+    workspace = tmp_path / "workspace"
+    hello = workspace / ".claude" / "skills" / "hello"
+    hello.mkdir(parents=True)
+    (hello / "SKILL.md").write_text("---\nname: hello\ndescription: Say hello.\n---\n\nHello.\n")
+    client = _RecordingClient()
+    adapter = CodingACPAdapter(_completed_llm)
+    adapter.on_connect(client)  # type: ignore[arg-type]
+    session = await adapter.new_session(str(workspace))
+    runtime = await _session(adapter, session.session_id)
+    await asyncio.sleep(0)
+    await runtime.bridge.flush()
+
+    messages = [u.content.text for u in client.updates if isinstance(u, AgentMessageChunk)]
+    assert messages == ["This folder isn't trusted, so its skills are off. Type /trust to allow."]
+    assert "cmd.hello" not in runtime.agent.skills.discovered()
+    assert "trust" not in runtime.agent.skills.status().lower()
+
+    response = await adapter.prompt(session.session_id, [text_block("/trust")])
+    await runtime.bridge.flush()
+    assert response.stop_reason == "end_turn"
+    messages = [u.content.text for u in client.updates if isinstance(u, AgentMessageChunk)]
+    assert messages[-1] == f"Trusted {workspace.resolve()}. Its skills are loaded now."
+    assert "cmd.hello" in runtime.agent.skills.discovered()
+    # The reply went to the user only: the model did not answer (no "ACP response").
+    assert "ACP response" not in messages
+    await adapter.close()

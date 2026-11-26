@@ -55,6 +55,7 @@ from nooa_cli.coding import (
     CodingSlashCommandRegistry,
     load_coding_skills_dirs,
 )
+from nooa_cli.coding.settings import untrusted_workspace_notice
 from nooa_cli.sessions import (
     InvalidSessionIdError,
     SessionHandle,
@@ -598,6 +599,10 @@ class CodingACPAdapter:
             session.bridge.publish_best_effort(
                 _available_commands_update(session.commands.commands())
             )
+            # For the user, not the agent: the untrusted folder's skills are off.
+            notice = untrusted_workspace_notice(session.agent.cwd)
+            if notice:
+                session.bridge.publish_best_effort(update_agent_message(text_block(notice)))
             if session.startup_warnings:
                 details = "\n".join(f"- {warning}" for warning in session.startup_warnings)
                 session.bridge.publish_best_effort(

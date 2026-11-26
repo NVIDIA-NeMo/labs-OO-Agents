@@ -61,13 +61,17 @@ class CodingSlashCommandRegistry:
         commands: dict[str, CodingSlashCommand] = {}
         skills = getattr(self.agent, "skills", None)
         loaded = skills.loaded() if skills is not None and hasattr(skills, "loaded") else []
+        # The agent's own commands (``/trust``) come first: they are host
+        # commands, not skill methods the model sees.
+        sources: list[tuple[str, Any]] = [("agent", self.agent)]
         for skill_name in loaded:
             try:
                 skill = skills[skill_name]
             except (AttributeError, KeyError):
                 continue
-            if not isinstance(skill, Skill):
-                continue
+            if isinstance(skill, Skill):
+                sources.append((skill_name, skill))
+        for skill_name, skill in sources:
             for meta, method in get_slash_commands(skill):
                 name = meta.name.lower()
                 if name in commands:
