@@ -233,6 +233,11 @@ _ARCHIVE_TARGET_UTILIZATION = 0.60
 # response has calibrated _tokens_per_char from real usage.
 _DEFAULT_TOKENS_PER_CHAR = 0.25
 
+# ``(limits, context_limit, count_tokens)`` as resolved by ``Actor._context_budget``:
+# the request's model limits, its context budget and the token counter used
+# to size blocks against it.
+ContextBudget = tuple[Any, "int | None", Callable[[str], int]]
+
 
 def _collapse_oldest(
     event_manager: Any,
@@ -1131,17 +1136,22 @@ class ActorRuntime:
         # every later one carry the same bytes. Retries after a context-window
         # error rebuild the request but record nothing: the snapshot just
         # recorded has no response after it, so it is not due again.
-        await self._record_live_context_snapshot(_current_llm_var.get(), kwargs)
+        # The snapshot and the request share ONE budget resolution: a concurrent
+        # generate() may recalibrate the chars->tokens ratio while the snapshot
+        # awaits _prepare_context, and both must evict the same blocks.
+        budget = self._context_budget(_current_llm_var.get(), kwargs)
+        await self._record_live_context_snapshot(budget)
         # Build messages from context + events (timers inside _build_messages).
         # No proactive clamping — recovery is error-driven. If the API rejects
         # with ContextWindowExceededError, the except handler archives events,
-        # rebuilds messages, and retries.
+        # rebuilds messages, and retries (resolving a fresh budget).
         messages = await self._build_messages(
             self._current_method,
             call_args=self._current_call.args if self._current_call else (),
             call_kwargs=self._current_call.kwargs if self._current_call else {},
             tools=tools,
             request_params=kwargs,
+            budget=budget,
         )
         _gen_hm = get_harness_metrics()
 
@@ -2937,14 +2947,12 @@ class ActorRuntime:
             # (handles nested generation sessions correctly)
             _in_generation_session.set(prev_in_session)
 
-    async def _record_live_context_snapshot(
-        self, llm_client: Any, request_params: dict[str, Any]
-    ) -> None:
+    async def _record_live_context_snapshot(self, budget: ContextBudget) -> None:
         """Under ``AppendedLiveContext``, record the live context as history when due.
 
-        Prepares the context exactly as the request will, applies the same
-        token budget (``max_context_tokens`` or the half-window default, with
-        the same token counter), takes the live blocks the formatter would put
+        Prepares the context exactly as the request will, applies the request's
+        own token ``budget`` (the ``_context_budget`` triple ``generate`` also
+        hands to ``_build_messages``), takes the live blocks the formatter would put
         after the boundary, and records a :class:`LiveContextSnapshot` if the
         cadence says so and any live block changed since the last snapshot (the
         first one always records; a due snapshot is skipped only when no live
@@ -2964,12 +2972,14 @@ class ActorRuntime:
         events = list(self.event_manager.values())
         if not snapshot_due(events, policy.every_n_turns):
             return
-        _limits, context_limit, count_tokens = self._context_budget(llm_client, request_params)
+        _limits, context_limit, count_tokens = budget
         blocks = await self._prepare_context(
             self._current_method,
             self._current_call.args if self._current_call else (),
             self._current_call.kwargs if self._current_call else {},
         )
+        # snapshot: allow whole-block request-budget eviction (the same EVICTED
+        # marker the request itself sends; not a reader preview)
         budgeted, _dropped = budget_context_blocks(
             blocks, context_limit=context_limit, count_tokens=count_tokens
         )
@@ -3103,9 +3113,7 @@ class ActorRuntime:
             )
         return limits
 
-    def _context_budget(
-        self, llm_client: Any, params: dict[str, Any]
-    ) -> tuple[Any, int | None, Callable[[str], int]]:
+    def _context_budget(self, llm_client: Any, params: dict[str, Any]) -> ContextBudget:
         """The token budget of the next request: ``(limits, context_limit, count_tokens)``.
 
         Refreshes the model limits, then resolves the context budget:
@@ -3152,6 +3160,7 @@ class ActorRuntime:
         max_output_tokens: int | None = None,
         request_params: dict[str, Any] | None = None,
         llm_client: Any = None,
+        budget: ContextBudget | None = None,
     ) -> list[dict[str, Any]]:
         """Build messages for LLM API.
 
@@ -3169,12 +3178,17 @@ class ActorRuntime:
         is ``context_window - reserve``. Only an unknown cap falls back to the
         truncation configuration's explicitly labelled planning reserve.
         ``max_output_tokens`` is retained for direct callers of this helper.
+        ``budget`` is a ``_context_budget`` triple already resolved by the caller
+        (``generate`` shares one with the live-context snapshot); when omitted it
+        is resolved here.
         """
-        llm_client = llm_client if llm_client is not None else _current_llm_var.get()
-        params = dict(request_params or {})
-        if max_output_tokens is not None:
-            params["max_tokens"] = max_output_tokens
-        limits, effective_context_limit, count_tokens = self._context_budget(llm_client, params)
+        if budget is None:
+            llm_client = llm_client if llm_client is not None else _current_llm_var.get()
+            params = dict(request_params or {})
+            if max_output_tokens is not None:
+                params["max_tokens"] = max_output_tokens
+            budget = self._context_budget(llm_client, params)
+        limits, effective_context_limit, count_tokens = budget
         hm = get_harness_metrics()
         with hm.timer("time_prepare_context"):
             blocks = await self._prepare_context(method, call_args, call_kwargs)

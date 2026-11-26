@@ -289,3 +289,55 @@ async def test_the_snapshot_honours_the_same_token_budget_as_the_request(policy,
         assert ("EVICTED: over context budget" in request_text) is evicted
     finally:
         await agent.aclose()
+
+
+async def test_the_snapshot_and_the_request_share_one_budget_across_recalibration():
+    """A ratio recalibrated while the snapshot prepares its context cannot split the two.
+
+    A concurrent ``generate`` can rewrite the chars->tokens ratio while the
+    snapshot awaits ``_prepare_context``. The request must still size its blocks
+    with the ratio the snapshot used, so both keep (or both evict) the probe.
+    """
+    from nooa.config import TruncationConfig
+    from nooa.llm_types import AssistantText
+    from nooa.strategies import PredictStrategy
+
+    requests: list[list] = []
+
+    class Recording(FakeLLMClient):
+        async def acall(self, messages, **kwargs):
+            requests.append(list(messages))
+            return await super().acall(messages, **kwargs)
+
+    llm = Recording(scripted_responses=[LLMResponse(parts=(AssistantText(text='{"value": "a"}'),))])
+
+    # ~4k chars: fits a 2,000-token budget at the default 0.25 tokens/char, not at 1.0.
+    class Echo(Agent, llm=llm, truncation=TruncationConfig(max_context_tokens=2_000)):
+        @strategy(PredictStrategy())
+        async def say(self, text: str) -> str:
+            """Repeat the text."""
+            ...
+
+    agent = Echo(render_config=RenderConfig(live_context=AppendedLiveContext(every_n_turns=1)))
+    agent.context["probe"] = Context(expr="self.probe")
+    agent.probe = PROBE
+    runtime = agent.runtime
+    prepare = runtime._prepare_context
+
+    async def recalibrating_prepare(*args, **kwargs):
+        blocks = await prepare(*args, **kwargs)
+        runtime._tokens_per_char = 1.0  # another call's response lands mid-await
+        return blocks
+
+    runtime._prepare_context = recalibrating_prepare
+    try:
+        await agent.say("one")
+        request_text = "\n".join(str(m.get("content")) for m in requests[0] if isinstance(m, dict))
+        (snapshot,) = _snapshots(agent)
+        assert PROBE in snapshot.content
+        assert PROBE in request_text
+        # The request sized its blocks with the snapshot's ratio: nothing evicted
+        # (at 1.0 tokens/char it would have dropped the probe the snapshot kept).
+        assert runtime._last_context_stats.context_blocks_dropped == 0
+    finally:
+        await agent.aclose()
