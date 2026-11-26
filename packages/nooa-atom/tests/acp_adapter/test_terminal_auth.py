@@ -6,6 +6,7 @@ The wizard itself is mocked; nothing here touches the network.
 """
 
 import json
+import os
 import time
 
 import click
@@ -631,6 +632,55 @@ async def test_a_workspace_entry_that_shadows_the_save_is_reported(
     assert adapter.session(session_id).info.model == "first"
     text = "".join(client.texts(AgentMessageChunk, session_id))
     assert "configures second differently" in text
+
+
+async def test_the_agent_loads_a_key_the_wizard_saved_after_it_started(
+    make_adapter, workspace, client, user_dir, saving_wizard, no_server, monkeypatch
+):
+    # The wizard is another process: it writes the key to secrets.yaml but
+    # cannot set it in this agent's environment, which read that file at
+    # startup. Switching to the saved model must load it.
+    monkeypatch.setenv("K", "placeholder")
+    monkeypatch.delenv("K")  # restored to unset after the test
+    monkeypatch.delenv("NEMO_OO_SECRETS", raising=False)
+    factory = WorkspaceDefault()
+    adapter, session_id = await _connected_session(make_adapter, workspace, user_dir, factory)
+    (user_dir / "secrets.yaml").write_text(yaml.safe_dump({"env": {"K": "new-key"}}))
+    assert "K" not in os.environ
+    await _connect_prompt(adapter, session_id)
+    assert adapter.session(session_id).info.model == "second"
+    assert os.environ.get("K") == "new-key"
+
+
+async def test_session_new_reports_a_save_the_workspace_shadows(
+    make_adapter, workspace, client, user_dir, saving_wizard, no_server
+):
+    adapter = await _adapter(make_adapter, WorkspaceDefault())
+    with pytest.raises(RequestError):
+        await adapter.new_session(str(workspace))
+    assert _connect().exit_code == 0
+    own = workspace / ".nooa" / "llm_config.yaml"
+    own.parent.mkdir(exist_ok=True)
+    own.write_text(yaml.safe_dump({"models": {"second": {"model_name": "openai/elsewhere"}}}))
+    new = await adapter.new_session(str(workspace))
+    sid = new.session_id
+
+    def reported():
+        return "configures second differently" in "".join(client.texts(AgentMessageChunk, sid))
+
+    await client.wait_for(reported)
+    assert "Saved model alias second" in "".join(client.texts(AgentMessageChunk, sid))
+
+
+def test_mark_applied_leaves_a_newer_save_under_the_same_alias(user_dir):
+    key = session_key("s")
+    terminal_auth.write_result(key, "work", "openai/a", "", now=time.time() - 5)
+    first = terminal_auth.peek_result(key)
+    terminal_auth.write_result(key, "work", "openai/b", "")  # saved again meanwhile
+    terminal_auth.mark_applied(key, first)
+    newer = terminal_auth.peek_result(key)
+    assert newer["model"] == "openai/b"
+    assert newer["applied"] is False
 
 
 async def test_an_alias_the_workspace_cannot_use_is_reported_not_switched_to(

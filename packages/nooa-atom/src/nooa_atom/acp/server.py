@@ -238,6 +238,23 @@ def _entry_fingerprint(workspace: Path, alias: str) -> str | None:
     return terminal_auth.entry_fingerprint(entry) if entry is not None else None
 
 
+def _with_new_secrets(result: dict | None) -> dict | None:
+    """Pass ``result`` through, first loading keys the wizard saved after this process started.
+
+    The wizard runs in its own process and writes a new key to
+    ``secrets.yaml``; this agent read that file only at startup. Variables
+    already set are kept (see :func:`nooa.secrets.load_secrets_into_env`).
+    """
+    if result is not None:
+        from nooa.secrets import load_secrets_into_env
+
+        try:
+            load_secrets_into_env()
+        except Exception:
+            logger.warning("Could not reload secrets for the Connect result", exc_info=True)
+    return result
+
+
 def model_aliases(workspace: Path) -> list[str]:
     """The model aliases configured for ``workspace``, sorted.
 
@@ -999,6 +1016,7 @@ class AtomACPAgent:
             raise RequestError.auth_required(
                 {"reason": "/connect runs `nooa connect` in a terminal."}
             )
+        _with_new_secrets(result)
         return await self._say(bridge, await self._use_connect_result(session, bridge, result))
 
     def _request_connect(self, session_id: str | None, workspace: Path) -> None:
@@ -1013,20 +1031,22 @@ class AtomACPAgent:
         if not self._terminal_auth():
             return None
         try:
-            return terminal_auth.peek_result(key)
+            result = terminal_auth.peek_result(key)
         except OSError:
             logger.warning("Could not read the Connect result", exc_info=True)
             return None
+        return _with_new_secrets(result)
 
     def _take_connect_result(self, session: Session) -> dict | None:
         """The wizard's fresh result for ``session`` (taken), else ``None``."""
         if not self._terminal_auth():
             return None
         try:
-            return terminal_auth.consume_result(terminal_auth.session_key(session.id))
+            result = terminal_auth.consume_result(terminal_auth.session_key(session.id))
         except OSError:
             logger.warning("Could not read the Connect result", exc_info=True)
             return None
+        return _with_new_secrets(result)
 
     def _new_session_result(self, workspace: Path) -> tuple[str | None, dict | None]:
         """A result for a new session in ``workspace``, or one saved with no request."""

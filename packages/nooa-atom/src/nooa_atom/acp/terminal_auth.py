@@ -250,6 +250,7 @@ def _valid(data: dict | None, *, now: float | None, max_age: float) -> dict | No
         "server": data.get("server") if isinstance(data.get("server"), str) else "",
         "fingerprint": data.get("fingerprint") if isinstance(data.get("fingerprint"), str) else "",
         "applied": data.get("applied") is True,
+        "saved_at": data.get("saved_at"),
     }
 
 
@@ -271,8 +272,12 @@ def mark_applied(key: str, result: dict) -> None:
     """Keep ``result`` for the retried ``/connect``, noting the session already switched."""
     path = _path("result", key)
     data = _read(path)
-    if data is None or data.get("alias") != result["alias"]:
-        return  # taken, or replaced by a newer save
+    if (
+        data is None
+        or data.get("alias") != result["alias"]
+        or data.get("saved_at") != result.get("saved_at")
+    ):
+        return  # taken, or replaced by a newer save (even under the same alias)
     _write(path, {**data, "applied": True})
 
 
