@@ -238,6 +238,17 @@ paginating a query, a protocol limit), mark the line with the reason:
 The reason is required. Existing truncation code is being moved onto
 `nooa.snapshot` in follow-up pull requests; don't add more of it.
 
+### Configuration
+
+An agent behaviour is configured through the config object that owns the
+concern: `RenderConfig` for rendering, `TruncationConfig`, `SummarizationConfig`,
+`HttpConfig` / `RetryConfig` / `ReasoningConfig` on model clients, Atom's
+`AtomOptions` for workspace settings. Surfaces that construct agents (`Agent`
+subclasses, Atom's `SessionOptions` and factory, `BenchAgent`, Gym `init_kwargs`)
+accept and pass those objects; they don't mirror a field as a new kwarg or
+settings key. `tests/test_config_convention.py` fails on a name collision; a
+deliberate one goes in its `ALLOWED` dict with a reason.
+
 ### Quality & Testing
 
 - **Evidence before assertions.** Run tests/verification before claiming work is done. Enforce in the orchestrator.
