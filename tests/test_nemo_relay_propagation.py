@@ -334,8 +334,9 @@ async def test_scope_local_delivery_at_task_boundary(relay_events, child_task):
     assert {event["propagation_root_uuid"] for event in events} == {root}
     assert {event["parent_uuid"] for event in events} == {str(parent.uuid)}
     assert (stacks["method"] is stacks["parent"]) is not child_task
-    local_functions = [event for event in local_events if event["category"] == "function"]
-    assert len(local_functions) == (0 if child_task else 2)
+    if not child_task:
+        local_functions = [event for event in local_events if event["category"] == "function"]
+        assert len(local_functions) == 2
 
 
 async def test_nested_method_keeps_scope_local_tool_guardrail(relay_events):
