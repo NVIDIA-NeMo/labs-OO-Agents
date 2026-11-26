@@ -17,6 +17,7 @@ from typing import Literal
 from pydantic import BaseModel
 
 from nooa.llm_types import CacheBoundary, LLMResponse
+from nooa.media_capabilities import MediaCapabilities
 from nooa.media_inputs import attachment_kind
 
 from ._accounting import _logical_account_scope
@@ -60,6 +61,12 @@ def _snapshot_capabilities(facts: Capabilities) -> Capabilities:
         raise LLMFailure(
             FailureKind.CONFIG, "Capability developer_role must be bool or unknown (None)"
         )
+    if facts.media_capabilities is not None and not isinstance(
+        facts.media_capabilities, MediaCapabilities
+    ):
+        raise LLMFailure(
+            FailureKind.CONFIG, "Capability media_capabilities must be MediaCapabilities or None"
+        )
     # Independently advertised ceilings need not be ordered. Validate the
     # selected request budget below, rather than rejecting usable route facts.
     if (
@@ -74,6 +81,7 @@ def _snapshot_capabilities(facts: Capabilities) -> Capabilities:
 def _portable_media(messages):
     """Only the mapping attachment slots supported by filter_media_messages.
 
+    Yields (kind, block); ``block`` is None for an assistant ``audio`` field.
     Never traverse Tool arguments, vendor extensions or opaque LLMResponse data.
     This does not implement the design's future Message/MediaPart model.
     """
@@ -81,15 +89,15 @@ def _portable_media(messages):
         if not isinstance(message, Mapping):
             continue
         if (kind := attachment_kind(message)) is not None:
-            yield kind
+            yield kind, message
         if message.get("role") == "assistant" and message.get("audio") is not None:
-            yield "audio"
+            yield "audio", None
         slot = "output" if message.get("type") == "function_call_output" else "content"
         content = message.get(slot)
         if isinstance(content, (list, tuple)):
             for block in content:
                 if isinstance(block, Mapping) and (kind := attachment_kind(block)) is not None:
-                    yield kind
+                    yield kind, block
 
 
 class LLM:
@@ -165,15 +173,22 @@ class LLM:
         facts = self.capabilities
         if facts.tools is False and (request.tools or choice not in ("auto", "none")):
             raise LLMFailure(FailureKind.BAD_REQUEST, "This route does not support tools")
+        media_caps = facts.media_capabilities
         if self._media_policy == "error":
-            for kind in _portable_media(request.messages):
-                if kind not in facts.media_kinds:
+            for kind, block in _portable_media(request.messages):
+                reason = None
+                if kind in facts.media_kinds and media_caps is not None and block is not None:
+                    reason = media_caps.refusal(block, kind)
+                if kind not in facts.media_kinds or reason:
                     raise LLMFailure(
                         FailureKind.MEDIA_REJECTED,
-                        f"Unsupported {kind} media",
+                        f"Unsupported {kind} media"
+                        + (f": this model does not accept {reason}" if reason else ""),
                         media_kind=kind if kind in _MEDIA_KINDS else None,
                     )
-        messages = filter_media_messages(request.messages, tuple(facts.media_kinds))
+        messages = filter_media_messages(
+            request.messages, tuple(facts.media_kinds), capabilities=media_caps
+        )
         return request.model_copy(update={"messages": messages})
 
     def _acquire(self):

@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from nooa.llm_types import CacheBoundary, LLMResponse
+from nooa.media_capabilities import MediaCapabilities
 from nooa.media_inputs import MediaInput, attachment_kind
 from nooa.media_inputs import MediaInputs as MediaInputs
 from nooa.media_inputs import validate_media_inputs as validate_media_inputs
@@ -28,6 +29,15 @@ def removed_media_notice(kind: str) -> str:
         return "[A file was removed here. Only PDF files can be sent to a model.]"
     subject, plural = _NOTICE_SUBJECT[kind]
     return f"[{subject} was removed here because this model is not set up to receive {plural}.]"
+
+
+def unaccepted_media_notice(kind: str, reason: str) -> str:
+    """The text the model sees in place of media its declared capabilities rule out.
+
+    ``reason`` comes from ``MediaCapabilities.refusal``, e.g. ``"image/heic images"``.
+    """
+    subject = _NOTICE_SUBJECT.get(kind, ("A file", "files"))[0]
+    return f"[{subject} was removed here because this model does not accept {reason}.]"
 
 
 def rejected_media_notice(kind: str) -> str:
@@ -79,12 +89,30 @@ def _occurrences(messages):
             yield index, slot, position, kind, (kind, digest, count)
 
 
-def media_occurrences(messages, enabled: tuple[MediaInput, ...]):
-    """The attachment occurrences a request sends, oldest first, as (kind, key)."""
-    return [(kind, key) for *_, kind, key in _occurrences(messages) if kind in enabled]
+def media_occurrences(
+    messages, enabled: tuple[MediaInput, ...], capabilities: MediaCapabilities | None = None
+):
+    """The attachment occurrences a request sends, oldest first, as (kind, key).
+
+    Attachments that ``capabilities`` rule out are not sent, so not listed.
+    """
+    return [
+        (kind, key)
+        for index, slot, position, kind, key in _occurrences(messages)
+        if kind in enabled
+        and (
+            capabilities is None
+            or capabilities.refusal(messages[index][slot][position], kind) is None
+        )
+    ]
 
 
-def filter_media_messages(messages, enabled: tuple[MediaInput, ...], excluded=frozenset()):
+def filter_media_messages(
+    messages,
+    enabled: tuple[MediaInput, ...],
+    excluded=frozenset(),
+    capabilities: MediaCapabilities | None = None,
+):
     """Return a copy of ``messages`` with media that is not ``enabled`` replaced.
 
     Each disabled attachment is replaced by a short text notice (see
@@ -94,7 +122,10 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...], excluded=fr
     blocks of a ``content`` list (``output`` for ``function_call_output`` items).
     ``excluded`` holds keys from ``media_occurrences`` that the current
     connection rejected; each such block becomes a ``rejected_media_notice``.
-    Tool arguments, reasoning and vendor extensions are not inspected.
+    ``capabilities`` (the model's declared ``media_capabilities``) replace an
+    enabled attachment whose MIME type, transport or size the model does not
+    accept with an ``unaccepted_media_notice``, before the request is sent;
+    None checks nothing beyond ``enabled``. Tool arguments, reasoning and vendor extensions are not inspected.
     ``LLMResponse`` and ``CacheBoundary`` objects are passed through unchanged;
     their native content is checked later by ``check_replayed_native_media``. The input
     list and its messages are not modified.
@@ -111,10 +142,10 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...], excluded=fr
             continue
         item = dict(message)
         kind = attachment_kind(item)
-        if kind is not None and kind not in enabled:
+        if kind is not None and (notice := _unsendable_notice(item, kind, enabled, capabilities)):
             # The whole message is an attachment item, so there is no content
             # list to filter: replace the item with a user notice.
-            result.append({"role": "user", "content": removed_media_notice(kind)})
+            result.append({"role": "user", "content": notice})
             continue
         slot = "output" if item.get("type") == "function_call_output" else "content"
         if isinstance(item.get(slot), tuple):
@@ -138,22 +169,31 @@ def filter_media_messages(messages, enabled: tuple[MediaInput, ...], excluded=fr
             blocks = []
             for position, block in enumerate(content):
                 kind = attachment_kind(block) if isinstance(block, Mapping) else None
-                if kind is not None and (
-                    kind not in enabled or (message_index, position) in rejected
-                ):
+                notice = None
+                if kind is not None:
+                    notice = _unsendable_notice(block, kind, enabled, capabilities) or (
+                        rejected_media_notice(kind)
+                        if (message_index, position) in rejected
+                        else None
+                    )
+                if notice is not None:
                     blocks.append(
-                        {
-                            "type": "input_text" if slot == "output" else "text",
-                            "text": removed_media_notice(kind)
-                            if kind not in enabled
-                            else rejected_media_notice(kind),
-                        }
+                        {"type": "input_text" if slot == "output" else "text", "text": notice}
                     )
                 else:
                     blocks.append(block)
             item[slot] = blocks
         result.append(item)
     return result
+
+
+def _unsendable_notice(block, kind, enabled, capabilities) -> str | None:
+    """The notice for an attachment that must not be sent, or None to send it."""
+    if kind not in enabled:
+        return removed_media_notice(kind)
+    if capabilities is not None and (reason := capabilities.refusal(block, kind)):
+        return unaccepted_media_notice(kind, reason)
+    return None
 
 
 def check_replayed_native_media(

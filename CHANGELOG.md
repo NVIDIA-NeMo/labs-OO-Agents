@@ -6,6 +6,17 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Model entries can declare `media_capabilities` per media kind: accepted
+  `mime_types`, `transports` (`inline`, `url`) and `max_bytes` for inline data.
+  Each request interface has a provider default; entry fields override it.
+  Attachments the declared capabilities rule out are replaced with a text notice
+  before the request is sent (native and LiteLLM routes), so a known
+  unsupported format no longer needs a failed request. Chat, Responses and
+  Anthropic routes declare no limits by default, so entries without the key send
+  unchanged requests. Decision routes keep PNG/JPEG/WebP/GIF, inline or URL, at
+  most 20 MiB as their default, and an entry can now widen or narrow it.
+  `Capabilities.media_capabilities` exposes the result.
+
 - Model entries can set `structured_output_format: json_schema | json_object`
   and record detected `developer_role` (exposed on `Capabilities`).
   `nooa connect` checks them by default on Chat and

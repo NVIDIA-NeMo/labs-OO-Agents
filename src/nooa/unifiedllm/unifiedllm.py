@@ -24,6 +24,11 @@ from nooa.llm_types import (
     LLMUsage,
     ToolCall,
 )
+from nooa.media_capabilities import (
+    MediaCapabilities,
+    resolve_media_capabilities,
+    validate_media_capabilities,
+)
 from nooa.unifiedllm.cache_policy import (
     apply_cache_policy,
     reject_legacy_cache_config,
@@ -1048,6 +1053,7 @@ class UnifiedLLM(ABC):
         reasoning_default: str | None = None,
         reasoning_level: str | None = None,
         media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
+        media_capabilities: Mapping[str, Any] | None = None,
         context_window: int | None = None,
         developer_role: bool | None = None,
         structured_output_format: str | None = None,
@@ -1089,6 +1095,9 @@ class UnifiedLLM(ABC):
             self._reasoning_config.settings(reasoning_level)
         self.reasoning_level = reasoning_level
         self.media_inputs = validate_media_inputs(media_inputs)
+        # This entry's media_capabilities override (nooa.media_capabilities);
+        # None uses the provider default of the request interface.
+        self.media_capabilities = validate_media_capabilities(media_capabilities)
         # Attachment occurrences the current connection rejected; reset when
         # a request goes to another model or endpoint.
         self._media_exclusions: tuple[tuple[Any, ...] | None, set[Any]] = (None, set())
@@ -1203,12 +1212,34 @@ class UnifiedLLM(ABC):
             return ()
         return validate_media_inputs(self.media_inputs)
 
+    def _request_media_capabilities(
+        self, call_config: dict[str, Any] | None = None
+    ) -> MediaCapabilities | None:
+        """Declared media capabilities for this call's route; None declares no limit.
+
+        The provider default of the request interface, with this entry's
+        ``media_capabilities`` applied. A call to another route keeps only the
+        default (it also receives no media: see ``_request_media_inputs``).
+        """
+        call_config = self.config if call_config is None else call_config
+        kept = call_config is self.config or bool(self._request_media_inputs(call_config))
+        caps = resolve_media_capabilities(
+            self._media_interface(call_config), self.media_capabilities if kept else None
+        )
+        return None if caps.unrestricted else caps
+
     def _prepare_media_messages(self, messages, call_config):
         enabled = self._request_media_inputs(call_config)
         # Media the interface cannot send is rejected after projection, by
         # _validate_implemented_media: only the projected request also shows the
-        # native content of replayed assistant turns.
-        return filter_media_messages(messages, enabled, self._rejected_media(call_config))
+        # native content of replayed assistant turns. Media the declared
+        # capabilities rule out is replaced here, before anything is sent.
+        return filter_media_messages(
+            messages,
+            enabled,
+            self._rejected_media(call_config),
+            capabilities=self._request_media_capabilities(call_config) if enabled else None,
+        )
 
     def _rejected_media(self, call_config: dict[str, Any]) -> set[Any]:
         """Rejected attachment occurrences of this request's connection only."""
@@ -1246,7 +1277,12 @@ class UnifiedLLM(ABC):
         except Exception:
             return False  # The request itself is invalid; re-raise the original error.
         rejected = self._rejected_media(call_config)
-        sent = media_occurrences(messages, self._request_media_inputs(call_config))
+        enabled = self._request_media_inputs(call_config)
+        sent = media_occurrences(
+            messages,
+            enabled,
+            self._request_media_capabilities(call_config) if enabled else None,
+        )
         candidates = [
             (kind, key)
             for kind, key in reversed(sent)
@@ -1282,16 +1318,20 @@ class UnifiedLLM(ABC):
         for rejected, key in staged:
             rejected.discard(key)
 
-    def _validate_implemented_media(self, messages, call_config):
-        from nooa.media_policy import reject_unsupported_media
+    def _media_interface(self, call_config: dict[str, Any]) -> str:
+        """The request interface (nooa.request_interface) this call sends through."""
         from nooa.request_interface import resolved_input_interface
 
-        interface = resolved_input_interface(
+        return resolved_input_interface(
             self._effective_model(call_config),
             call_config,
             client_type="responses" if isinstance(self, ResponsesClient) else "completion",
         )
-        reject_unsupported_media(messages, interface)
+
+    def _validate_implemented_media(self, messages, call_config):
+        from nooa.media_policy import reject_unsupported_media
+
+        reject_unsupported_media(messages, self._media_interface(call_config))
 
     def get_context_limits(
         self, overrides: dict[str, Any] | None = None, *, fallback_reserve: int = 0
@@ -1444,6 +1484,13 @@ class UnifiedLLM(ABC):
             and "media_inputs" in call_config["extra_body"]
         ):
             raise ValueError("media_inputs is a client setting, not a provider request parameter")
+        if "media_capabilities" in call_config or (
+            isinstance(call_config.get("extra_body"), Mapping)
+            and "media_capabilities" in call_config["extra_body"]
+        ):
+            raise ValueError(
+                "media_capabilities is a client setting, not a provider request parameter"
+            )
         if name in call_config:
             raise ValueError(
                 f"{name!r} is managed by UnifiedLLM; pass conversation data through "

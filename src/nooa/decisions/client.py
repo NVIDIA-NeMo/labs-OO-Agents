@@ -28,6 +28,7 @@ from pydantic import JsonValue
 from nooa._immutable_json import freeze
 from nooa.decisions.media import DecisionAttachment, decision_media_inputs, validate_attachments
 from nooa.decisions.types import Criterion
+from nooa.media_capabilities import resolve_media_capabilities
 
 if TYPE_CHECKING:
     # Importing nooa.unifiedllm loads LiteLLM; keep `import nooa` lightweight.
@@ -250,6 +251,7 @@ class DecisionClient(DecisionModel):
         media_inputs: object = (),
         decision_image_transport: DecisionImageTransport = "json",
         typesafe_danger_zone_images: bool = False,
+        media_capabilities: object = None,
     ) -> None:
         """Configure a decision client.
 
@@ -273,6 +275,10 @@ class DecisionClient(DecisionModel):
             typesafe_danger_zone_images: Opt-in for TypeSafe's experimental
                 image support. Multipart images need this flag in addition to
                 ``media_inputs: [image]``.
+            media_capabilities: Optional per-model image limits
+                (``nooa.media_capabilities``): accepted ``mime_types``,
+                ``transports`` and ``max_bytes``. Undeclared fields keep the
+                decision default (PNG, JPEG, WebP, GIF; inline or URL; 20 MiB).
 
         Raises:
             ValueError: If ``model`` or ``endpoint`` is empty, ``api_style`` or
@@ -286,6 +292,12 @@ class DecisionClient(DecisionModel):
         if api_style not in ("systemone", "openai"):
             raise ValueError(f"api_style must be 'systemone' or 'openai', got {api_style!r}")
         self.media_inputs = decision_media_inputs(media_inputs)
+        # None: the decision default limits of nooa.decisions.media apply.
+        self.media_capabilities = (
+            None
+            if media_capabilities is None
+            else resolve_media_capabilities("decision", media_capabilities)
+        )
         if decision_image_transport not in ("json", "typesafe_multipart"):
             raise ValueError("decision_image_transport must be json or typesafe_multipart")
         if decision_image_transport == "typesafe_multipart" and api_style != "systemone":
@@ -329,7 +341,9 @@ class DecisionClient(DecisionModel):
             DecisionRefusedError: If an OpenAI-style endpoint refuses a question.
             InvalidDecisionResponseError: If the response body is malformed.
         """
-        decoded = validate_attachments(request.attachments, self.media_inputs)
+        decoded = validate_attachments(
+            request.attachments, self.media_inputs, self.media_capabilities
+        )
         # Check the state here too: requests built by hand or changed by
         # middleware have not gone through render_decision_state.
         from nooa.decisions.schema import _json_value

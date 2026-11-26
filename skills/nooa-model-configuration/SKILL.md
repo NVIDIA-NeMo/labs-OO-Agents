@@ -111,7 +111,10 @@ Each model's `media_inputs` declares accepted `image`, `audio`, `video`, `pdf`
 formats; omitted/null/empty means text-only. `File` supports PDFs with
 `application/pdf`. Use [nooa-media](../nooa-media/SKILL.md) for typed examples and
 [nooa-connect](../nooa-connect/SKILL.md) for authorized checks before changing
-these settings. Declaration alone is not verification.
+these settings. Declaration alone is not verification. Optional
+`media_capabilities` narrows each kind by `mime_types`, `transports`
+(`inline`, `url`) and `max_bytes`; undeclared media is replaced with a notice
+before sending (see `docs/media.md`).
 
 Headless configuration, manual declarations and generated checks follow the
 permission and evidence rules in [nooa-connect](../nooa-connect/SKILL.md).

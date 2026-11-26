@@ -114,6 +114,40 @@ max_attachments_per_execution=3))` through the agent's `truncation=` setting to
 change this positive count; both classes are in `nooa.config.truncation_config`.
 Limit file sizes separately. Predict's direct arguments have no per-cell cap.
 
+## Per-model formats, transports and sizes
+
+`media_inputs` turns a kind on; `media_capabilities` narrows it for one model:
+the MIME types it accepts, whether it takes inline (base64) data, remote URLs or
+both, and the largest inline attachment in bytes. Every field is optional.
+
+```yaml
+models:
+  vision:
+    model_name: openai/my-vision-model
+    media_inputs: [image, pdf]
+    media_capabilities:
+      image: {mime_types: [image/png, image/jpeg], transports: [inline], max_bytes: 5242880}
+```
+
+Each request interface has a provider default (`nooa.media_capabilities.PROVIDER_MEDIA_DEFAULTS`),
+and the fields an entry declares replace the default's fields for that kind.
+Chat Completions, native Anthropic Messages and Responses routes declare no
+limits by default, so their requests are unchanged. Decision routes keep their
+existing default: PNG, JPEG, WebP or GIF, inline or URL, at most 20 MiB.
+`ModelConfig.resolved_media_capabilities()` returns the result for an entry.
+
+An attachment the declared capabilities rule out is replaced with a notice before
+the request is sent, so no request fails because of it:
+
+```text
+[An image was removed here because this model does not accept image/heic images.]
+```
+
+Facts the request does not show (a URL without a type hint, a file ID) are not
+checked. Decision routes raise `ValueError` instead, as for other invalid
+decision images. Like `media_inputs`, the setting belongs to the entry's route:
+a call that changes model or endpoint drops it.
+
 ## Text-only requests and replay
 
 For formats missing from `media_inputs`, NOOA replaces attachments with text

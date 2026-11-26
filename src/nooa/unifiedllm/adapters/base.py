@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from nooa.llm_types import LLMResponse
+from nooa.media_capabilities import MediaCapabilities
 
 if TYPE_CHECKING:
     from nooa.unifiedllm.request import LLMRequest
@@ -21,6 +22,8 @@ class Capabilities:
     ``context_window`` and ``max_output_tokens`` are None when unknown.
     ``developer_role`` is None when unknown, else whether the route accepts
     ``developer`` messages.
+    ``media_capabilities`` narrows ``media_kinds`` by MIME type, transport and
+    size (``nooa.media_capabilities``); None declares no such limit.
     """
 
     media_kinds: frozenset[str] = frozenset()
@@ -29,6 +32,7 @@ class Capabilities:
     context_window: int | None = None
     max_output_tokens: int | None = None
     developer_role: bool | None = None
+    media_capabilities: MediaCapabilities | None = None
 
 
 @runtime_checkable
