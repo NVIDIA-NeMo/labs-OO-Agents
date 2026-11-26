@@ -676,7 +676,9 @@ async def test_the_tool_docs_are_in_the_cached_prefix(tmp_path):
     assert messages[0]["role"] == "system"
     assert "<python_cell_tools>" in str(messages[0]["content"])
     envelope = str(messages[-1]["content"])
-    assert envelope.lstrip().startswith("<context>")
+    # The default live-context policy opens the snapshot with a one-line note.
+    assert envelope.lstrip().startswith(("<context>", "[live context snapshot"))
+    assert "\n<context>\n" in "\n" + envelope
     assert "<python_cell_tools" not in envelope
 
 

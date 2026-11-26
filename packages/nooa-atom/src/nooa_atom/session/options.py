@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from nooa.context_blocks import RenderConfig
 from nooa_atom.agent.reflection_gate import reflection_min_seconds, reflection_min_turns
 from nooa_atom.benchmark_policy import POLICY, validate_benchmark_policy
 
@@ -75,6 +76,10 @@ class SessionOptions(BaseModel):
     """Reflection (``nooa_atom.skills.reflection``) for this run: ``None`` keeps the
     workspace's ``atom.reflection.enabled`` (by default on for ``acp`` hosts, off
     elsewhere); ``True``/``False`` overrides it, e.g. for a benchmark arm."""
+    render_config: RenderConfig | None = None
+    """The agent's ``RenderConfig`` for this run (for example a live-context policy):
+    ``None`` keeps the workspace's ``atom.render_config``, else the agent class's
+    default. A mapping is accepted. Children inherit it."""
 
     @field_validator("experimental_reflection_min_turns", mode="before")
     @classmethod
@@ -112,4 +117,5 @@ class SessionOptions(BaseModel):
         data.update(name=None, kept=False, todo_id=None)
         data.update(values)
         data["llm"] = values.get("llm", llm)
+        data["render_config"] = values.get("render_config", self.render_config)
         return SessionOptions.model_validate(data)
