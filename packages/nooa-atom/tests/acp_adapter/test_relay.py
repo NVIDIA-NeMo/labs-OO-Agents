@@ -149,6 +149,16 @@ async def test_a_child_that_a_traced_turn_delegates_to_is_in_its_trace(
         assert event.metadata["session_id"] == root.id
         inside.add(event.uuid)
     assert len([e for e in events if e.category == "llm" and e.scope_category == "start"]) == 2
+    child = next(e for e in events[1:] if e.name == "atom" and e.scope_category == "start")
+    child_id = child.metadata["subagent_session_id"]
+    assert child_id not in {None, root.id}
+    in_child = {child.uuid}
+    for event in events[events.index(child) + 1 :]:
+        if event.parent_uuid in in_child or event.uuid in in_child:
+            in_child.add(event.uuid)
+            assert event.metadata["subagent_session_id"] == child_id, event.name
+        else:
+            assert "subagent_session_id" not in event.metadata, event.name
 
 
 async def test_a_worker_closes_the_plugin_host_before_its_socket(monkeypatch):

@@ -98,7 +98,8 @@ def trace_session(session: Session) -> None:
         metadata = {**_host_metadata, "session_id": session.id, "agent_kind": "atom"}
         parent = None
     else:
-        metadata = turn
+        # The caller's trace, plus the child's own id to tell its events apart.
+        metadata = {**turn, "subagent_session_id": session.id}
         parent = nemo_relay.scope.get_handle()
     events = session._agent.event_manager
     uninstalls = [

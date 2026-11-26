@@ -248,7 +248,8 @@ that ACP loads directly is a trace of its own. Every event carries
 `session_id`, `agent_kind: "atom"` and the flat JSON object in
 `NEMO_RELAY_SESSION_METADATA`, which cannot override those two; its keys are
 dot-separated segments of ASCII letters, digits, `_` or `-`, as Relay requires,
-or the server does not start. The rest is
+or the server does not start. A delegated child's events also carry its own id
+as `subagent_session_id`. The rest is
 exported as the server stops, on end of input or SIGTERM; a host that kills
 the server with SIGKILL loses what was not exported yet. Unset, Relay is not
 imported (`nooa_atom/session/relay.py`).
