@@ -31,6 +31,8 @@ _host_metadata: dict[str, Any] | None = None
 _session_metadata: contextvars.ContextVar[dict[str, Any] | None] = contextvars.ContextVar(
     "nooa_atom_relay_session", default=None
 )
+# Each traced session's running turn span, so a child's turn can nest under it.
+_open_turns: dict[str, Any] = {}
 
 
 @asynccontextmanager
@@ -83,9 +85,14 @@ def _in_turns(middleware: Any) -> Any:
 
 
 def trace_session(session: Session) -> None:
-    """Send ``session``'s turns through Relay while the plugin host is held: a child's, when a
-    traced turn creates it (call it there), in that turn's trace; any other session's, such as
-    a child that ACP loads directly, as a trace of its own."""
+    """Send ``session``'s turns through Relay while the plugin host is held, one
+    ``invoke_agent atom`` span per turn (as Relay's own integrations do per run).
+
+    A child that a traced turn creates (call it there) joins that trace: its
+    events carry the caller's metadata plus its own ``subagent_session_id``, and
+    each of its turns nests under the caller's turn that is running then. Any
+    other session, such as a child that ACP loads directly, is a trace of its own.
+    """
     if _host_metadata is None:
         return
     import nemo_relay
@@ -93,14 +100,13 @@ def trace_session(session: Session) -> None:
     from nooa import nemo_relay_middleware as relay_middleware
     from nooa.runtime import middleware
 
-    turn = _session_metadata.get() if session.parent_id is not None else None
-    if turn is None:
+    caller = _session_metadata.get() if session.parent_id is not None else None
+    if caller is None:
         metadata = {**_host_metadata, "session_id": session.id, "agent_kind": "atom"}
-        parent = None
+        parent_id = None
     else:
-        # The caller's trace, plus the child's own id to tell its events apart.
-        metadata = {**turn, "subagent_session_id": session.id}
-        parent = nemo_relay.scope.get_handle()
+        metadata = {**caller, "subagent_session_id": session.id}
+        parent_id = session.parent_id
     events = session._agent.event_manager
     uninstalls = [
         events.intercept(kind, _in_turns(handler))
@@ -111,23 +117,31 @@ def trace_session(session: Session) -> None:
     ]
     opened: list[tuple[Any, contextvars.Context]] = []
 
-    def enter() -> None:
+    def begin(_event: object) -> None:
+        # In the turn's own context: post-settlement maintenance (Done
+        # reflection) runs in a copy of the loop's and stays out of Relay.
+        _session_metadata.set(metadata)
+        caller_turn = _open_turns.get(parent_id) if parent_id is not None else None
         handle = nemo_relay.scope.push(
-            "atom", nemo_relay.ScopeType.Agent, handle=parent, metadata=metadata
+            "atom", nemo_relay.ScopeType.Agent, handle=caller_turn, metadata=metadata
         )
-        # Relay's scope stack lives in a ContextVar: pop in a copy of this context.
+        _open_turns[session.id] = handle
+        # Relay's scope stack lives in a ContextVar and the turn settles in the
+        # loop's context: pop in a copy of the turn's.
         opened.append((handle, contextvars.copy_context()))
+
+    def end() -> None:
+        _open_turns.pop(session.id, None)
+        for handle, context in reversed(opened):
+            context.run(nemo_relay.scope.pop, handle)
+        opened.clear()
 
     def on_update(update: object) -> None:
         if isinstance(update, ClosedUpdate):
             for uninstall in uninstalls:
                 uninstall()
-            for handle, context in opened:
-                context.run(nemo_relay.scope.pop, handle)
-            opened.clear()
+            end()
 
-    # Set in each turn's context, not the loop's: post-settlement maintenance
-    # (Done reflection) runs in a copy of the loop's and stays out of Relay.
-    uninstalls.append(events.on("TurnBegan", lambda _event: _session_metadata.set(metadata)))
-    session.add_loop_context_hook(enter)
+    uninstalls.append(events.on("TurnBegan", begin))
+    uninstalls.append(events.on("TurnSettled", lambda _event: end()))
     session.subscribe(on_update)

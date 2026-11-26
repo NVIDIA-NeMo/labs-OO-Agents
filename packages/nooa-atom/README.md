@@ -239,19 +239,20 @@ connection. Stop cancels an open picker.
 With `NEMO_RELAY_PLUGIN_CONFIG_PATH` naming a NeMo Relay `plugins.toml` (the
 variable the `nemo-relay` CLI reads), `nooa atom` holds Relay's plugin host
 while it serves and sends each ACP session's turns through NOOA's Relay
-middleware (`nooa[nemo-relay]`). A session is one trace: an `invoke_agent
-atom` span from the session's start to its close, over a `chat` span (with
-the model's output and usage) for each model call of its turns and an
-`execute_tool execute_python` span for each cell. A child that a turn
-delegates to is an `invoke_agent atom` span inside that turn's trace; a child
-that ACP loads directly is a trace of its own. Every event carries
+middleware (`nooa[nemo-relay]`). Each turn is one trace, as each run is in
+Relay's own integrations: an `invoke_agent atom` span from the turn's start
+until it settles, over a `chat` span (with the model's output and usage) for
+each model call and an `execute_tool execute_python` span for each cell; a
+session's turns share its `session_id`. Each turn of a child that a traced turn
+delegates to is an `invoke_agent atom` span inside the caller's turn running
+then; a child that ACP loads directly is traced on its own. Every event carries
 `session_id`, `agent_kind: "atom"` and the flat JSON object in
 `NEMO_RELAY_SESSION_METADATA`, which cannot override those two; its keys are
 dot-separated segments of ASCII letters, digits, `_` or `-`, as Relay requires,
 or the server does not start. A delegated child's events also carry its own id
-as `subagent_session_id`. The rest is
-exported as the server stops, on end of input or SIGTERM; a host that kills
-the server with SIGKILL loses what was not exported yet. Unset, Relay is not
+as `subagent_session_id`. A turn still running when the server stops (end of
+input or SIGTERM) is closed and exported then; a host that kills the server
+with SIGKILL loses that turn. Unset, Relay is not
 imported (`nooa_atom/session/relay.py`).
 
 ## Todo lookup and cell inspection

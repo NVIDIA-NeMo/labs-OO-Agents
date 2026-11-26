@@ -46,7 +46,7 @@ async def _one_turn(adapter, workspace) -> str:
     return session_id
 
 
-async def test_a_session_is_one_agent_scope_with_its_metadata_on_every_event(
+async def test_a_turn_is_one_agent_scope_with_its_metadata_on_every_event(
     atom_adapter, workspace, plugins, monkeypatch, events
 ):
     monkeypatch.setenv(relay.CONFIG_ENV, str(plugins))
@@ -66,6 +66,25 @@ async def test_a_session_is_one_agent_scope_with_its_metadata_on_every_event(
         inside.add(event.uuid)
     assert events[0] is start and events[-1] is end
     assert {"llm", "tool"} <= {e.category for e in events}
+
+
+async def test_each_turn_is_its_own_agent_scope_of_one_session(
+    atom_adapter, workspace, plugins, monkeypatch, events
+):
+    monkeypatch.setenv(relay.CONFIG_ENV, str(plugins))
+    async with relay.activated():
+        adapter = await atom_adapter([reply("One.\n"), reply("Two.\n")])
+        session_id = (await adapter.new_session(str(workspace))).session_id
+        for text in ("first", "second"):
+            await asyncio.wait_for(adapter.prompt(session_id, [text_block(text)]), TIMEOUT)
+        await adapter.close_session(session_id)
+        await nemo_relay.subscribers.flush_async()
+
+    scopes = [e for e in events if e.name == "atom"]
+    assert [e.scope_category for e in scopes] == ["start", "end", "start", "end"]
+    assert scopes[0].uuid != scopes[2].uuid
+    assert not {e.parent_uuid for e in scopes} & {e.uuid for e in scopes}
+    assert all(e.metadata["session_id"] == session_id for e in scopes)
 
 
 async def test_the_hosts_metadata_cannot_rename_the_session_or_its_agent(
