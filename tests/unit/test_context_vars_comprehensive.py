@@ -675,13 +675,13 @@ class TestBlockStdinVarLifecycle:
     """_block_stdin_var is set True inside execute_code and reset in finally."""
 
     async def test_is_false_outside_execute_code(self):
-        from nooa.runtime.actor import _block_stdin_var
+        from nooa.runtime.stream_wrappers import _block_stdin_var
 
         assert _block_stdin_var.get() is False
 
     async def test_reset_after_execute_code(self):
         """_block_stdin_var is False after execute_code completes normally."""
-        from nooa.runtime.actor import _block_stdin_var
+        from nooa.runtime.stream_wrappers import _block_stdin_var
 
         agent = _SimpleAgent(llm=_make_llm())
         await agent.runtime.execute_code("x = 1", validate=False)
@@ -689,7 +689,7 @@ class TestBlockStdinVarLifecycle:
 
     async def test_reset_after_execute_code_exception(self):
         """_block_stdin_var is False even after user code raises."""
-        from nooa.runtime.actor import _block_stdin_var
+        from nooa.runtime.stream_wrappers import _block_stdin_var
 
         agent = _SimpleAgent(llm=_make_llm())
         result = await agent.runtime.execute_code(
@@ -700,7 +700,7 @@ class TestBlockStdinVarLifecycle:
 
     async def test_isolated_between_concurrent_tasks(self):
         """Two concurrent execute_code calls each have their own stdin block state."""
-        from nooa.runtime.actor import _block_stdin_var
+        from nooa.runtime.stream_wrappers import _block_stdin_var
 
         agent_a = _SimpleAgent(llm=_make_llm())
         agent_b = _SimpleAgent(llm=_make_llm())
