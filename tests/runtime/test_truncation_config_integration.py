@@ -251,8 +251,7 @@ class TestTokenBudgetIntegration:
     async def test_max_context_tokens_does_not_crash_on_generation(self):
         """Agent with max_context_tokens set should not raise ValueError during generation.
 
-        Regression test: render_context() raises ValueError if context_limit is non-None
-        but count_tokens is not provided. The actor must pass count_tokens to render_context().
+        The runtime supplies the view's budget and counter before rendering.
         """
         from nooa.unifiedllm import FakeLLMClient
 
@@ -389,8 +388,11 @@ class TestMethodLevelTruncationConfig:
             traceable = False
             requires_lock = False
 
-            def get_block_overrides(self):
-                return {}
+            @property
+            def default_context_view(self):
+                from nooa.default_context_view import ManagedContextView
+
+                return ManagedContextView()
 
             async def execute(self, runtime, call: CurrentCall):
                 captured_tc["config"] = runtime.truncation_config
@@ -443,8 +445,11 @@ class TestMethodLevelTruncationConfig:
             traceable = False
             requires_lock = False
 
-            def get_block_overrides(self):
-                return {}
+            @property
+            def default_context_view(self):
+                from nooa.default_context_view import ManagedContextView
+
+                return ManagedContextView()
 
             async def execute(self, runtime, call: CurrentCall):
                 # Execute code that produces 5000 chars of output
@@ -516,8 +521,11 @@ for i in range(4):
             traceable = False
             requires_lock = False
 
-            def get_block_overrides(self):
-                return {}
+            @property
+            def default_context_view(self):
+                from nooa.default_context_view import ManagedContextView
+
+                return ManagedContextView()
 
             async def execute(self, runtime, call: CurrentCall):
                 result = await runtime.execute_code(
@@ -641,8 +649,11 @@ for i in range(4):
             traceable = False
             requires_lock = False
 
-            def get_block_overrides(self):
-                return {}
+            @property
+            def default_context_view(self):
+                from nooa.default_context_view import ManagedContextView
+
+                return ManagedContextView()
 
             async def execute(self, runtime, call: CurrentCall):
                 captured["during"] = runtime.truncation_config
@@ -698,8 +709,11 @@ for i in range(4):
             traceable = False
             requires_lock = False
 
-            def get_block_overrides(self):
-                return {}
+            @property
+            def default_context_view(self):
+                from nooa.default_context_view import ManagedContextView
+
+                return ManagedContextView()
 
             async def execute(self, runtime, call: CurrentCall):
                 # The per-call override is still visible to the strategy.
@@ -759,8 +773,11 @@ for i in range(4):
             traceable = False
             requires_lock = False
 
-            def get_block_overrides(self):
-                return {}
+            @property
+            def default_context_view(self):
+                from nooa.default_context_view import ManagedContextView
+
+                return ManagedContextView()
 
             async def execute(self, runtime, call: CurrentCall):
                 # Yield once to allow the other task to interleave
@@ -822,8 +839,11 @@ for i in range(4):
             traceable = False
             requires_lock = False
 
-            def get_block_overrides(self):
-                return {}
+            @property
+            def default_context_view(self):
+                from nooa.default_context_view import ManagedContextView
+
+                return ManagedContextView()
 
             async def execute(self, runtime, call: CurrentCall):
                 captured["inner"] = runtime.truncation_config.capture.max_stdout
@@ -836,8 +856,11 @@ for i in range(4):
             traceable = False
             requires_lock = False
 
-            def get_block_overrides(self):
-                return {}
+            @property
+            def default_context_view(self):
+                from nooa.default_context_view import ManagedContextView
+
+                return ManagedContextView()
 
             async def execute(self, runtime, call: CurrentCall):
                 captured["outer_before"] = runtime.truncation_config.capture.max_stdout
@@ -893,8 +916,11 @@ class TestPerCallTruncationRendering:
             traceable = False
             requires_lock = False
 
-            def get_block_overrides(self):
-                return {}
+            @property
+            def default_context_view(self):
+                from nooa.default_context_view import ManagedContextView
+
+                return ManagedContextView()
 
             async def execute(self, runtime, call: CurrentCall):
                 marker = call.method_name.upper()
@@ -935,8 +961,8 @@ class TestPerCallTruncationRendering:
         assert "[:500]='AGENT_EVENT_" in rendered
 
     @pytest.mark.asyncio
-    async def test_method_level_context_block_format_does_not_rerender_whole_context(self):
-        """Verify method-level truncation does not re-render existing context blocks."""
+    async def test_method_level_context_block_format_applies_during_view_assembly(self):
+        """The selected view materializes context with the current call's bounds."""
         from nooa import strategy
         from nooa.strategies.base import GenerationStrategy
         from nooa.strategies.current_call import CurrentCall
@@ -946,14 +972,19 @@ class TestPerCallTruncationRendering:
             traceable = False
             requires_lock = False
 
-            def get_block_overrides(self):
-                return {}
+            @property
+            def default_context_view(self):
+                from nooa.default_context_view import ManagedContextView
+
+                return ManagedContextView()
 
             async def execute(self, runtime, call: CurrentCall):
                 blocks = await runtime._prepare_context(
                     getattr(runtime.agent, call.method_name), call.args, call.kwargs
                 )
-                rendered_context = next(b.content for b in blocks if b.key == "payload")
+                rendered_context = next(
+                    b.content for b in blocks if getattr(b, "key", None) == "payload"
+                )
                 return rendered_context
 
         class TestAgent(
@@ -975,9 +1006,9 @@ class TestPerCallTruncationRendering:
         agent = TestAgent()
         rendered_context = await agent.inspect_context()
 
-        assert "dict(len=1" not in rendered_context
-        assert "list(len=80" not in rendered_context
-        assert "79" in rendered_context
+        assert "list(len=80" in rendered_context
+        assert "[:5]=[0, 1, 2, 3, 4]" in rendered_context
+        assert "[-5:]=[75, 76, 77, 78, 79]" in rendered_context
 
     @pytest.mark.asyncio
     async def test_event_truncation_format_persists_across_session_resume(self):
@@ -1004,8 +1035,11 @@ class TestPerCallTruncationRendering:
             traceable = False
             requires_lock = False
 
-            def get_block_overrides(self):
-                return {}
+            @property
+            def default_context_view(self):
+                from nooa.default_context_view import ManagedContextView
+
+                return ManagedContextView()
 
             async def execute(self, runtime, call: CurrentCall):
                 runtime.event_manager.add(Error(content="R_" + "R" * 2000))

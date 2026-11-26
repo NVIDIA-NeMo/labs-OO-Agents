@@ -769,9 +769,10 @@ class TestReload:
 
     @pytest.mark.asyncio
     async def test_reload_ambiguous_leaf_raises(self, registry):
-        """A leaf that matches more than one loaded skill fails loudly."""
+        """Defensively reject ambiguous state from older registries."""
         registry.register("nvzurich.shell", FakeSkill())
-        registry.register("nemo.shell", FakeSkill())
+        registry._loaded.add("nemo.shell")
+        registry._attr_map["nemo.shell"] = "shell"
         with pytest.raises(ValueError):
             await registry.reload("shell")
 
@@ -799,9 +800,10 @@ class TestReload:
 
     @pytest.mark.asyncio
     async def test_reload_exact_fq_name_takes_precedence(self, registry):
-        """An exact FQ name reloads that skill even when a leaf would be ambiguous."""
+        """An exact FQ name resolves even in older ambiguous registry state."""
         registry.register("nvzurich.shell", FakeSkill())
-        registry.register("nemo.shell", FakeSkill())
+        registry._loaded.add("nemo.shell")
+        registry._attr_map["nemo.shell"] = "shell"
         called = {}
 
         async def fake(name):

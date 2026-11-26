@@ -180,58 +180,6 @@ class TestCodeActGenerationIdNone:
 
 
 # ===========================================================================
-# CODEACT: Lines 626-627 — BlockSyntaxError handler + continue
-# ===========================================================================
-
-
-class TestCodeActBlockSyntaxError:
-    """Cover lines 625-627: BlockSyntaxError catch → handler → continue."""
-
-    @pytest.mark.asyncio
-    async def test_block_syntax_error_recovery(self):
-        """When generate() raises BlockSyntaxError, the loop should
-        handle it and continue to the next iteration (lines 625-627)."""
-        from nooa.context_blocks.exceptions import BlockSyntaxError
-
-        class TestAgent(Agent, llm=_TEST_LLM):
-            @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=3)))
-            async def do_task(self) -> int:
-                """Do a task."""
-                ...
-
-        fake_llm = FakeLLMClient(
-            scripted_responses=[
-                # Second call after error recovery
-                _resp("", tool_calls=[_return_result(result=99)]),
-            ]
-        )
-        agent = TestAgent(llm=fake_llm)
-
-        call_count = [0]
-
-        # Patch within the agent execution
-        from nooa.runtime.actor import ActorRuntime
-
-        orig_gen = ActorRuntime.generate
-
-        async def patched_generate(self_rt, *args, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                raise BlockSyntaxError(
-                    key="test_block",
-                    expr="invalid python [[[",
-                    original_error=SyntaxError("invalid syntax"),
-                )
-            return await orig_gen(self_rt, *args, **kwargs)
-
-        call_count[0] = 0
-        with patch.object(ActorRuntime, "generate", patched_generate):
-            result = await agent.do_task()
-
-        assert result == 99
-
-
-# ===========================================================================
 # CODEACT: Lines 919, 921 — tool call result handling after translation
 # ===========================================================================
 

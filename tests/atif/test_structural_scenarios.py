@@ -555,6 +555,7 @@ def test_compaction_boundary(tmp_path: Path) -> None:
     )
     exporter.on_summary(
         Summary(
+            source_call_ids=[],
             summary_tag="2..3",
             replaced_range=(2, 3),
             summary_text="Earlier steps computed x=1.",

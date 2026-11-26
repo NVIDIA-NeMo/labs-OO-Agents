@@ -74,14 +74,18 @@ class Context(BaseModel):
             "shell": Context(expr="doc(self.shell)", prefix=True),    # prefix, evaluated each turn
             "config": Context("stable config", prefix=True),          # prefix, literal
             "status": Context(expr="f'{self.done}/{self.total}'"),    # suffix, evaluated
-            "self": None,                                             # suppress block
+            "notes": None,                                            # suppress a block by name
         }
 
     At runtime::
 
         self.context["shell"] = Context(expr="doc(self.shell)", prefix=True)
         self.context["status"] = Context(expr="f'{self.done}/{self.total}'")
-        self.context["self"] = None  # suppress
+        self.context["notes"] = None  # suppress
+
+    ``None`` suppresses user, skill, and decorator/scoped blocks. Blocks a view
+    builds itself (``system_prompt``, ``self``, ``state``, strategy instructions)
+    are configured on the view, e.g. ``CodeActView(state=False)``.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -154,9 +158,16 @@ class BlockMetadata(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    expr: str | None = Field(default=None, description="Python expression for accessing this block")
+    expr: str | None = Field(
+        default=None,
+        description="Expression the model can evaluate in its REPL to get this block's content. "
+        "Rendered as the block's label when set.",
+    )
     tag: str | None = Field(default=None, description="Event position tag")
-    truncated: bool = Field(default=False, description="Whether content was truncated")
+    evicted: bool = Field(
+        default=False,
+        description="Whether the view's budget replaced this block's content with an eviction notice",
+    )
     user_block: bool = Field(
         default=False,
         description="Whether this is a user-set block (from self.context). "
@@ -165,14 +176,8 @@ class BlockMetadata(BaseModel):
     static: bool = Field(
         default=False,
         description="Author's declaration that the block's content is stable across "
-        "turns. Renderers use this to place the block in a cacheable prefix. "
-        "Does not affect truncation or correctness — only caching behavior.",
-    )
-    source_dynamic: bool = Field(
-        default=False,
-        description="Whether this block came from self.context.set_dynamic(). "
-        "Only these blocks render their ``expr`` attribute — static blocks, "
-        "framework blocks, strategy overrides, and events suppress it.",
+        "turns. The default context views use this to place the block in the "
+        "cacheable prefix. Does not affect truncation or correctness — only caching behavior.",
     )
 
 

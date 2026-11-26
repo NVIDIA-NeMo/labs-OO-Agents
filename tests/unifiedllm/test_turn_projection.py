@@ -9,11 +9,12 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from nooa.context_blocks.events import ToolCallEvent, ToolResult
-from nooa.context_blocks.formatter import OpenAIProviderFormatter
-from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
+from nooa.context_blocks.events import EventBase, ToolCallEvent, ToolResult
+from nooa.context_blocks.exceptions import UnsupportedContextLayout
+from nooa.context_blocks.formatter import OpenAIProviderFormatter, XMLBlockFormatter
+from nooa.context_blocks.models import BlockMetadata, Role
 from nooa.context_blocks.renderer import render_context
-from nooa.context_blocks.renderers.cached import CachedBlockFormatter
+from nooa.context_view import Block, replayable
 from nooa.llm_types import AssistantText, LLMResponse, ToolCall
 from nooa.runtime.middleware import LLMCallContext
 from nooa.storage.sqlite import SQLiteStorageManager
@@ -77,12 +78,12 @@ def turn(items=None):
 
 def blocks(response, state="live 1"):
     result = [
-        ResolvedBlock(
+        Block(
             key="instructions",
             content="Stable instructions " * 100,
             metadata=BlockMetadata(static=True),
         ),
-        ResolvedBlock(key="turn", content="", role=Role.ASSISTANT, event=response),
+        response,
     ]
     for call in response.tool_calls:
         event = ToolCallEvent(
@@ -92,10 +93,14 @@ def blocks(response, state="live 1"):
             llm_response_id=response.id,
             result=ToolResult(tool_call_id=call.id, content="done"),
         )
-        result.append(ResolvedBlock(key=call.id, content="", role=Role.ASSISTANT, event=event))
+        result.append(event)
+    result.append(CacheBoundary())
     result.append(
-        ResolvedBlock(
-            key="live", content=state, metadata=BlockMetadata(user_block=True, static=False)
+        Block(
+            key="live",
+            content=state,
+            role=Role.USER,
+            metadata=BlockMetadata(user_block=True, static=False),
         )
     )
     return result
@@ -104,7 +109,7 @@ def blocks(response, state="live 1"):
 def render(response, state="live 1", formatter=None):
     return render_context(
         blocks(response, state),
-        block_formatter=formatter or CachedBlockFormatter(),
+        block_formatter=formatter or XMLBlockFormatter(),
         provider_formatter=OpenAIProviderFormatter(),
     )
 
@@ -244,7 +249,7 @@ def test_renderer_keeps_reference_and_truncation_replaces_without_native_state()
     original = turn()
     assert render(original).output[1] == original
 
-    class ShortFormatter(CachedBlockFormatter):
+    class ShortFormatter(XMLBlockFormatter):
         def format_event(self, event, event_format=None):
             return super().format_event(event, event_format)[:3]
 
@@ -255,10 +260,19 @@ def test_renderer_keeps_reference_and_truncation_replaces_without_native_state()
     assert original.content == "Before.Between."
 
 
-def test_renderer_drops_incomplete_calls_as_a_state_stripping_edit():
+def test_incomplete_calls_render_as_a_state_stripping_edit_after_replayable():
     original = turn()
     original.finish_reason = "length"
-    result = render(original)
+    with pytest.raises(UnsupportedContextLayout, match="outside the selection"):
+        render(original)
+    items = blocks(original)
+    kept = {event.id for event in replayable(i for i in items if isinstance(i, EventBase))}
+    items = [i for i in items if not isinstance(i, EventBase) or i.id in kept]
+    result = render_context(
+        items,
+        block_formatter=XMLBlockFormatter(),
+        provider_formatter=OpenAIProviderFormatter(),
+    )
     replacement = result.output[1]
     assert "tool_calls" not in replacement
     resolved = [replacement]

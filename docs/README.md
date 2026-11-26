@@ -75,6 +75,8 @@ First [connect a model](model-connect.md). Then:
 | [Decision models](concepts/decisions.md) | How do I use typed probability, choice, and score decisions? |
 | [Tools and visibility](concepts/tools-and-visibility.md) | How does generated code discover and call capabilities? |
 | [Prompts and context](concepts/prompts-and-context.md) | Where should instructions, inputs, and cross-call information live? |
+| [Context views](context.md) | How do I control exactly what the model sees on each request? |
+| [Summarizing history](summarizing-history.md) | How do I keep long-running agents within the model's context window? |
 | [Connect a model](model-connect.md) | How do I configure and test an endpoint, then use an alias? |
 | [Model configuration](model-configuration.md) | What do model settings mean, and how do I find the effective configuration? |
 | [Media inputs](media.md) | How do I attach images, audio, video, or PDFs, and authorize them on a route? |

@@ -61,7 +61,8 @@ def test_namespace_selector_is_rejected_not_ignored(tmp_path, obsolete):
         AtomAgent(cwd=tmp_path, llm=CellLLM(), experimental_namespace=obsolete)
     values = {"workspace": tmp_path, "agent_spec": "nooa_atom.agent:AtomAgent"}
     with pytest.raises(TypeError, match="experimental_namespace.*removed"):
-        SessionOptions(**values, experimental_namespace=obsolete)
+        # The removed keyword is passed on purpose: the options must reject it.
+        SessionOptions(**values, experimental_namespace=obsolete)  # pyright: ignore[reportCallIssue]
     options = SessionOptions(**values)
     assert "experimental_namespace" not in options.model_dump()
     with pytest.raises(TypeError, match="experimental_namespace.*removed"):
@@ -157,6 +158,7 @@ hostile = Hostile()
                 raise AssertionError("metaclass callback must not run")
 
         ns = agent._handle_namespace
+        assert ns is not None
         ns.globals["aaa_hostile_meta"] = HostileMeta("HostileType", (), {})()
         ns.user_names.add("aaa_hostile_meta")
         inventory = ns.inventory()
@@ -181,7 +183,9 @@ async def test_inventory_lists_the_newest_bindings_first(tmp_path):
     try:
         await agent.handle({"user_messages": ["one"]})
         await agent.handle({"user_messages": ["two"]})
-        names = list(agent._handle_namespace.inventory()["names"])
+        ns = agent._handle_namespace
+        assert ns is not None
+        names = list(ns.inventory()["names"])
         assert names[:2] == ["aaa_3", "zzz_report"]  # newest cell first, then by name
         assert names[2:5] == ["aaa_0", "aaa_1", "aaa_10"]
     finally:
@@ -228,10 +232,10 @@ async def wait_idle(root):
 def reflection(**fields):
     import json
 
-    from nooa.unifiedllm import LLMResponse, LLMUsage
+    from nooa.unifiedllm import AssistantText, LLMResponse, LLMUsage
 
     return LLMResponse(
-        content=json.dumps(fields),
+        parts=(AssistantText(text=json.dumps(fields)),),
         finish_reason="stop",
         usage=LLMUsage(input_tokens=11, output_tokens=7),
     )
@@ -283,7 +287,9 @@ async def test_accepted_done_reflects_archives_and_drops_only_proposed_variable(
             assert "KEEP VERBATIM" in saved.context["done_reflection_notes"]
         finally:
             await saved.aclose()
-        assert len(llm.calls) == 2 and llm.calls[1].output_model.__name__ == "DoneReflectionPlan"
+        reflection_model = llm.calls[1].output_model
+        assert len(llm.calls) == 2 and reflection_model is not None
+        assert reflection_model.__name__ == "DoneReflectionPlan"
         assert llm.calls[1].kwargs["max_tokens"] == 2048
         assert "TOOL_EVIDENCE_73100" in str(llm.calls[1].messages)
         assert root.info.usage.input_tokens >= 11 and root.info.usage.output_tokens >= 7
@@ -624,6 +630,7 @@ return_result(Done(explanation='foreground done'))
             explanation="foreground done"
         )
         ns = agent._handle_namespace
+        assert ns is not None
         outputs = list(agent.events.query(type="PythonOutput"))
         before = [(output.stdout, list(output.images)) for output in outputs]
         ns.globals["gate"].set()
@@ -642,9 +649,9 @@ def test_reflection_evidence_has_a_hard_budget_and_skips_oversized_events():
     from nooa.events import Error
 
     one, big, later = (
-        Error(content="small", metadata={"call_id": "completed"}),
-        Error(content="x" * EVIDENCE_CHARS, metadata={"call_id": "completed"}),
-        Error(content="later", metadata={"call_id": "completed"}),
+        Error(content="small", call_id="completed"),
+        Error(content="x" * EVIDENCE_CHARS, call_id="completed"),
+        Error(content="later", call_id="completed"),
     )
     selected, evidence = _bounded_evidence([("1", one), ("2", big), ("3", later)])
     assert len(selected) == 1 and selected[0].tag == "1"
@@ -668,7 +675,9 @@ async def test_rejected_done_is_not_a_reflection_boundary(tmp_path):
         await wait_idle(root)
         assert len(llm.calls) == 3
         assert llm.calls[0].output_model is None and llm.calls[1].output_model is None
-        assert llm.calls[2].output_model.__name__ == "DoneReflectionPlan"
+        reflection_model = llm.calls[2].output_model
+        assert reflection_model is not None
+        assert reflection_model.__name__ == "DoneReflectionPlan"
         assert root.info.reply_count == 2
         assert "scratch" not in root._agent._handle_namespace.globals
     finally:
@@ -699,7 +708,7 @@ async def test_every_reflection_effect_requires_frozen_evidence_and_provenance(
         if change == "content":
             self.event_manager.update(target, stdout="NEW CORRECTED EVIDENCE")
         elif change == "call_id":
-            self.event_manager.update(target, metadata={"call_id": "different-call"})
+            self.event_manager.update(target, call_id="different-call")
         else:
             self.event_manager.update(target, id=str(uuid4()))
         return DoneReflectionPlan(
@@ -730,7 +739,7 @@ async def test_notes_only_cleanup_only_and_noop_stale_plans(tmp_path, monkeypatc
 
     async def propose(self, request):
         target = request["completed_event_tags"][0]
-        self.event_manager.update(target, metadata={"call_id": "new owner"})
+        self.event_manager.update(target, call_id="new owner")
         return DoneReflectionPlan(
             useful_findings="STALE" if effect == "notes" else "",
             drop_names=["scratch"] if effect == "cleanup" else [],
@@ -798,7 +807,7 @@ async def test_in_memory_event_id_is_frozen_not_a_live_event_alias(monkeypatch):
     from nooa.runtime.event_manager import EventManager
 
     manager = EventManager()
-    event = Error(content="captured", metadata={"call_id": "completed"})
+    event = Error(content="captured", call_id="completed")
     tag = manager.add(event)
     original_id = event.id
     outcome = Done(explanation="accepted")

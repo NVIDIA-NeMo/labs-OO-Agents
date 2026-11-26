@@ -15,6 +15,7 @@ from nooa.ellipsis_detection import has_ellipsis_body, has_ellipsis_marker
 
 if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
+    from nooa.context_view import ContextView
     from nooa.decisions import UnifiedDecisionModel
     from nooa.strategies import GenerationStrategy as GenerationStrategyABC
     from nooa.unifiedllm import UnifiedLLM
@@ -30,6 +31,7 @@ def strategy(
     llm: "UnifiedLLM | str | Callable[[Any], UnifiedLLM] | None" = None,
     decision_model: "UnifiedDecisionModel | str | Callable[[Any], UnifiedDecisionModel] | None" = None,
     truncation: "TruncationConfig | None" = None,
+    context_view: "ContextView[Any] | None" = None,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Strategy decorator for agent methods.
 
@@ -45,8 +47,9 @@ def strategy(
         strategy_instance: Strategy to use (e.g., ReflexionStrategy())
         context: Context block overrides. Accepts either:
             - A plain dict ``{key: str | Context | DynamicContext | None}`` for context-only overrides.
-            - A ``ScopedContext`` instance when you also need event filtering.
-            Applied in _prepare_context() between strategy overrides and scoped blocks.
+            - A ``ScopedContext`` instance with context-block overrides.
+            The default context views add these blocks after ``self.context`` and skill
+            blocks; scoped context applied at call time takes precedence.
         llm: Optional LLM override for this method. One of:
             - a client compatible with the selected strategy (fixed at import
               time and shared by every instance of the class)
@@ -65,17 +68,23 @@ def strategy(
         truncation: Optional TruncationConfig override for this method. Fields set
             here take precedence over the agent-level truncation config. Unset fields
             inherit from the agent-level config.
+        context_view: Complete context view for this method. Replaces the strategy's
+            default view; a call-level ``context_view=`` takes precedence.
 
     Examples:
         from nooa import Context
         from nooa.context_blocks import ScopedContext
 
         # Simple context dict (recommended):
-        @strategy(CodeActStrategy(), context={"focus": "security", "self": None})
+        @strategy(CodeActStrategy(), context={"focus": "security", "notes": None})
         async def analyze(self): ...
 
-        # With event filtering (use ScopedContext):
-        @strategy(ScopedContext(context={"focus": "security"}, events=EventQuery.current_call()))
+        # Turn off a block the view builds itself, via the view's own option:
+        @strategy(context_view=CodeActView(state=False))
+        async def summarize(self): ...
+
+        # With a custom view owning event selection:
+        @strategy(context_view=ResearchView())
         async def solve_with_reflection(self, problem: str): ...
 
     Returns:
@@ -92,19 +101,17 @@ def strategy(
         if hasattr(func, "_strategy_override"):
             raise ValueError(f"Cannot stack multiple @strategy decorators on {func.__name__}")
 
-        # Extract context and events from ScopedContext or plain dict
+        # Extract block overrides from ScopedContext or plain dict
         final_context = None
-        final_events = None
         if context is not None:
             if isinstance(context, dict):
                 final_context = context
             elif isinstance(context, ScopedContext):
                 final_context = context.context
-                final_events = context.events
             else:
                 raise TypeError(
                     f"@strategy context parameter must be a dict or ScopedContext, got {type(context).__name__}. "
-                    f"Use context={{...}} or ScopedContext(context={{...}}, events={{...}})"
+                    f"Use context={{...}} or ScopedContext(context={{...}})"
                 )
 
         # Attach metadata for metaclass to read (when used at class definition time)
@@ -112,8 +119,8 @@ def strategy(
         setattr(func, "_strategy_llm", llm)  # noqa: B010
         setattr(func, "_strategy_decision_model", decision_model)  # noqa: B010
         setattr(func, "_strategy_context", final_context)  # noqa: B010
-        setattr(func, "_strategy_events", final_events)  # noqa: B010
         setattr(func, "_strategy_truncation", truncation)  # noqa: B010
+        setattr(func, "_strategy_context_view", context_view)  # noqa: B010
 
         # @strategy has a unary, single-result contract. Deterministic
         # generators need no strategy, while generated streams require a
@@ -197,8 +204,8 @@ def strategy(
         setattr(wrapper, "_plan_llm", llm)  # noqa: B010
         setattr(wrapper, "_plan_decision_model", decision_model)  # noqa: B010
         setattr(wrapper, "_strategy_context", final_context)  # noqa: B010
-        setattr(wrapper, "_strategy_events", final_events)  # noqa: B010
         setattr(wrapper, "_strategy_truncation", truncation)  # noqa: B010
+        setattr(wrapper, "_strategy_context_view", context_view)  # noqa: B010
 
         # Also attach to original function (needed for _execute_task)
         setattr(func, "_agent_decorator", "auto")  # noqa: B010
