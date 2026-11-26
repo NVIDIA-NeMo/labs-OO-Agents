@@ -6,9 +6,20 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
-- The NeMo Relay middleware works with nemo-relay 0.9: the `nemo-relay` extra
-  requires `>=0.9.3,<0.10` (was `>=0.6,<0.7`). Code cells run through Relay
-  again (0.9 failed every one), with the model's `tool_call_id`.
+- The optional NeMo Relay integration now supports and checks `>=0.11.2,<0.12`,
+  with a package-specific dependency cutoff. Same-task nesting preserves
+  scope-local rules and subscribers; concurrent calls use independent stacks
+  carrying the caller's propagation root and parent trace links. Global rules
+  and exporters apply throughout; ancestor scope-local registrations do not
+  cross task boundaries. Tool telemetry uses bounded
+  `nooa.snapshot` inspection instead of full codec/pickle serialization, leaving
+  original caller results unchanged. The new `export_nemo_relay_atif()` helper
+  formats sanitized ATIF-v1.7 exports with readable observations and unique
+  tool-call ID correlation. Callback exception text stays out of native error
+  metadata; cancellation allows one second for cleanup before returning, with a
+  warning if the callback outlives it. The example offers optional diagnostics and
+  CPU/memory measurements in private files. See the
+  [quickstart](examples/quickstart/15_nemo_relay.py) for usage.
 - The NeMo Relay middleware hands Relay the model's response as an OpenAI chat
   completion, so Relay's events and OpenTelemetry `chat` spans carry the
   model's output, finish reason and token usage. Breaking for Relay
@@ -16,7 +27,9 @@ to follow semantic versioning.
   at `choices[0].message`, cached tokens at
   `usage.prompt_tokens_details.cached_tokens` and reasoning tokens at
   `usage.completion_tokens_details.reasoning_tokens`, and a zero `cost_usd`
-  is left out.
+  is left out. Scope-end event redactors must also sanitize
+  `category_profile.annotated_response`; LLM sanitize-response guardrails run
+  before decoding and cover both representations.
 - Dependency security update. Pydantic is now locked at 2.14.3 with
   pydantic-core 2.50.4, and the `pydantic` requirement starts at 2.14.2, the
   first release that fixes CVE-2026-133276, CVE-2026-133421 and

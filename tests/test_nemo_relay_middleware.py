@@ -25,6 +25,7 @@ from unittest.mock import MagicMock
 
 from nooa.llm_types import LLMResponse
 from nooa.nemo_relay_middleware import (
+    export_nemo_relay_atif,
     install_nemo_relay,
     nemo_relay_agent_call_middleware,
     nemo_relay_llm_middleware,
@@ -45,10 +46,11 @@ from nooa.unifiedllm import CacheBoundary
 
 
 @pytest.fixture(autouse=True)
-def _nemo_relay_scope():
+async def _nemo_relay_scope():
     """Enter a NeMo Relay scope for every test so scope stack is initialised."""
     with nemo_relay.scope.scope("test-agent", nemo_relay.ScopeType.Agent):
         yield
+    await nemo_relay.subscribers.flush_async()
 
 
 # ---------------------------------------------------------------------------
@@ -178,8 +180,10 @@ class TestLLMRequestIntercepts:
         def _intercept(
             name: str, req: nemo_relay.LLMRequest, annotated: nemo_relay.AnnotatedLLMRequest | None
         ) -> nemo_relay.LLMRequestInterceptOutcome:
-            req.headers["X-Test-Header"] = "test-value"
-            return nemo_relay.LLMRequestInterceptOutcome(req, annotated)
+            request = nemo_relay.LLMRequest(
+                {**req.headers, "X-Test-Header": "test-value"}, req.content
+            )
+            return nemo_relay.LLMRequestInterceptOutcome(request, annotated)
 
         nemo_relay.intercepts.register_llm_request("test-header", 1, False, _intercept)
         try:
@@ -209,6 +213,8 @@ class TestLLMRequestIntercepts:
 
             # The middleware should have completed successfully
             assert result.response is fake_resp
+            await nemo_relay.subscribers.flush_async()
+            assert captured_headers["X-Test-Header"] == "test-value"
 
             nemo_relay.subscribers.deregister("header-spy")
         finally:
@@ -599,6 +605,29 @@ class TestModelNameExtraction:
     """Verify model_name is correctly extracted and passed to NeMo Relay."""
 
     @pytest.mark.asyncio
+    async def test_effective_client_overrides_agent_default(self):
+        from nooa.unifiedllm import FakeLLMClient
+
+        events = []
+        nemo_relay.subscribers.register("effective-model-spy", events.append)
+        try:
+            ctx = _make_llm_ctx(agent=_make_real_agent("default-model"))
+            client = FakeLLMClient()
+            client.model = "override-model"
+            ctx = ctx.model_copy(update={"client": client})
+
+            async def nxt(c):
+                c.response = FakeLLMResponse()
+                return c
+
+            await nemo_relay_llm_middleware(ctx, nxt)
+            await nemo_relay.subscribers.flush_async()
+            assert any(e.name == "override-model" for e in events)
+            assert not any(e.name == "default-model" for e in events)
+        finally:
+            nemo_relay.subscribers.deregister("effective-model-spy")
+
+    @pytest.mark.asyncio
     async def test_model_name_from_agent_llm(self):
         """model_name is extracted from agent._llm.model."""
         captured_model: list[str] = []
@@ -618,6 +647,7 @@ class TestModelNameExtraction:
                 return c
 
             await nemo_relay_llm_middleware(ctx, nxt)
+            await nemo_relay.subscribers.flush_async()
             assert any("claude-3" in m for m in captured_model)
         finally:
             nemo_relay.subscribers.deregister("model-spy")
@@ -678,6 +708,66 @@ class TestATIFExport:
     """Verify ATIF trajectory export captures LLM and tool events."""
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "value,error", [(42, None), ({"answer": 42}, None), (None, ValueError("bad input"))]
+    )
+    async def test_atif_messages_usage_and_tool_correlation(self, value, error):
+        from nooa.events import ExecutionResult
+        from nooa.llm_types import AssistantReasoning, AssistantText, LLMUsage, ToolCall
+
+        exporter = nemo_relay.AtifExporter(
+            session_id="semantic-test", agent_name="test-agent", agent_version="0.1"
+        )
+        exporter.register("atif-semantic-test")
+        try:
+            ctx = _make_llm_ctx(agent=_make_real_agent("test-model"))
+            response = LLMResponse(
+                parts=(
+                    AssistantText(text="Computing the answer"),
+                    AssistantReasoning(text="public rationale", native={"secret": "private-state"}),
+                    ToolCall(id="call-exact-id", name="execute_python", arguments='{"code":"42"}'),
+                ),
+                usage=LLMUsage(input_tokens=12, output_tokens=3, cached_input_tokens=8),
+            )
+
+            async def model(c):
+                c.response = response
+                return c
+
+            await nemo_relay_llm_middleware(ctx, model)
+            exec_ctx = _make_exec_ctx(code="42")
+            exec_ctx.params["tool_call_id"] = "call-exact-id"
+            execution = ExecutionResult(returned_value=value, error=error)
+
+            async def execute(c):
+                c.result = execution
+                return c
+
+            assert (await nemo_relay_tool_middleware(exec_ctx, execute)).result is execution
+            assert ctx.response is response
+            await nemo_relay.subscribers.flush_async()
+            trajectory = await export_nemo_relay_atif(exporter)
+            assert trajectory["schema_version"] == "ATIF-v1.7"
+            step = next(s for s in trajectory["steps"] if s.get("tool_calls"))
+            assert step["message"] == "Computing the answer"
+            assert step["reasoning_content"] == "public rationale"
+            assert step["model_name"] == "test-model"
+            assert step["metrics"]["prompt_tokens"] == 12
+            assert step["metrics"]["completion_tokens"] == 3
+            assert step["metrics"]["cached_tokens"] == 8
+            assert step["tool_calls"][0]["tool_call_id"] == "call-exact-id"
+            observation = step["observation"]["results"][0]
+            assert observation["source_call_id"] == "call-exact-id"
+            if error is None:
+                assert json.loads(observation["content"]) == value
+            else:
+                assert "bad input" in observation["content"]
+                assert observation["extra"]["is_error"] is True
+            assert "private-state" not in json.dumps(trajectory)
+        finally:
+            exporter.deregister("atif-semantic-test")
+
+    @pytest.mark.asyncio
     async def test_atif_captures_llm_call(self):
         """An LLM call through NeMo Relay middleware appears in the ATIF trajectory."""
         exporter = nemo_relay.AtifExporter(
@@ -735,6 +825,7 @@ class TestATIFExport:
 
                 await nemo_relay_tool_middleware(ctx, nxt)
 
+            await nemo_relay.subscribers.flush_async()
             traj = exporter.export_json()
             if isinstance(traj, str):
                 import json
@@ -908,7 +999,7 @@ class TestToolMiddlewareEdgeCases:
             # NeMo Relay subscriber should see the extracted value (99)
             await nemo_relay.subscribers.flush_async()  # event dispatch is async in nemo_relay
             assert len(subscriber_saw) > 0
-            assert any(o == 99 for o in subscriber_saw)
+            assert 99 in subscriber_saw
         finally:
             nemo_relay.subscribers.deregister("signal-spy")
 
@@ -1271,24 +1362,43 @@ class TestConcurrentAgentCallScopes:
     ``asyncio.gather(self.a(), self.b())`` in generated code) used to interleave
     their pushes on that shared stack; whichever finished first could not pop,
     leaving the stack permanently desynchronised and raising out of
-    ``nemo_relay_scope``.  ``nemo_relay_agent_call_middleware`` now isolates a
-    concurrently-dispatched call onto its own stack.
+    ``nemo_relay_scope``. Middleware gives every
+    call its own stack automatically, preserving parent trace relationships.
     """
 
-    def test_scope_stack_var_still_exists_upstream(self):
-        """The private ContextVar the fix relies on must still be there.
+    @pytest.mark.asyncio
+    async def test_cancelled_child_restores_parent_and_closes_scope(self):
+        import asyncio
 
-        It is not part of ``nemo_relay.__all__``; if upstream renames it the
-        middleware silently degrades to the old (broken) shared-stack path, so
-        fail loudly here instead.
-        """
-        import nooa.nemo_relay_middleware as nm
+        entered = asyncio.Event()
+        events = []
+        nemo_relay.subscribers.register("cancel-scope-spy", events.append)
+        agent = _make_real_agent()
+        try:
+            async with nemo_relay_scope(agent, "cancel-parent") as root:
+                original_stack = nemo_relay.get_scope_stack()
 
-        assert getattr(nemo_relay, "_scope_stack_var", None) is not None, (
-            "nemo_relay._scope_stack_var is gone — nemo_relay_agent_call_middleware "
-            "can no longer isolate concurrent scopes; see its Concurrency docstring."
-        )
-        assert nm._SCOPE_STACK_VAR is not None
+                async def body(c):
+                    entered.set()
+                    await asyncio.Event().wait()
+
+                child = asyncio.create_task(
+                    nemo_relay_agent_call_middleware(
+                        AgentCallContext(agent=agent, method_name="cancelled"), body
+                    )
+                )
+                await entered.wait()
+                child.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await child
+                assert nemo_relay.get_scope_stack() is original_stack
+                assert nemo_relay.scope.get_handle().uuid == root.uuid
+            await nemo_relay.subscribers.flush_async()
+            child_events = [e for e in events if e.name == f"{type(agent).__name__}.cancelled"]
+            assert [e.scope_category for e in child_events] == ["start", "end"]
+            assert str(child_events[-1].parent_uuid) == str(root.uuid)
+        finally:
+            nemo_relay.subscribers.deregister("cancel-scope-spy")
 
     @pytest.mark.asyncio
     async def test_overlapping_agent_calls_keep_stack_balanced(self):
@@ -1308,7 +1418,7 @@ class TestConcurrentAgentCallScopes:
         with nemo_relay.scope.scope("concurrent-root", nemo_relay.ScopeType.Agent) as root:
             import nooa.nemo_relay_middleware as nm
 
-            token = nm._current_relay_scope.set((root, asyncio.current_task()))
+            token = nm._current_relay_scope.set(root)
             try:
                 # "first" finishes before "second", so a shared stack would pop
                 # out of order and raise.
@@ -1332,7 +1442,7 @@ class TestConcurrentAgentCallScopes:
             async def body(c):
                 import nooa.nemo_relay_middleware as nm
 
-                handles.append(nm._current_relay_scope.get()[0])
+                handles.append(nm._current_relay_scope.get())
                 await asyncio.sleep(delay)
                 c.result = method_name
                 return c
@@ -1342,7 +1452,7 @@ class TestConcurrentAgentCallScopes:
         with nemo_relay.scope.scope("parent-root", nemo_relay.ScopeType.Agent) as root:
             import nooa.nemo_relay_middleware as nm
 
-            token = nm._current_relay_scope.set((root, asyncio.current_task()))
+            token = nm._current_relay_scope.set(root)
             try:
                 await asyncio.gather(one("left", 0.01), one("right", 0.03))
             finally:

@@ -88,6 +88,8 @@ nooa-atom = { workspace = true }
 # Extra index URLs to search for packages (in addition to PyPI)
 # Ignore packages uploaded less than 7 days ago to mitigate supply-chain attacks
 exclude-newer = "2026-11-11T00:00:00Z"
+# Qualify Relay 0.11.2 explicitly without advancing unrelated dependencies.
+exclude-newer-package = { nemo-relay = "2026-11-21T00:00:00Z" }
 # Newer LiteLLM/OpenInference releases export opaque provider reasoning state
 # in OTLP spans, and mcp 2.x stops raising MCP tool-level errors. Hold them
 # until NOOA is adapted; mcp 1.30 carries the 1.x security fix.
@@ -170,10 +172,10 @@ mcp = [
 # export).
 # See src/nooa/nemo_relay_middleware.py and examples/quickstart/15_nemo_relay.py.
 #
-# Floor 0.9.3: 0.9 needs `ToolExecutionResult` from a tool callback and
-# `flush_async()` inside an event loop. Ceiling <0.10: tested with 0.9.4.
+# Uses 0.11's public scope propagation, canonical ToolExecutionResult and
+# asynchronous subscriber flushing. Keep future minor migrations explicit.
 nemo-relay = [
-    "nemo-relay>=0.9.3,<0.10",
+    "nemo-relay>=0.11.2,<0.12",
 ]
 
 # CLI ships as a separate package: `uv add nooa-cli`.
