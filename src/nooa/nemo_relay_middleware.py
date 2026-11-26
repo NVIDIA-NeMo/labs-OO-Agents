@@ -149,7 +149,7 @@ _PROPAGATABLE_LLM_PARAMS: frozenset[str] = frozenset(
 )
 
 # Tool execution args that NeMo Relay intercepts may modify.
-_PROPAGATABLE_TOOL_PARAMS: frozenset[str] = frozenset({"tool_call_id", "timeout"})
+_PROPAGATABLE_TOOL_PARAMS: frozenset[str] = frozenset({"timeout"})
 
 
 def _extract_model_name(agent: Any) -> str:
@@ -278,7 +278,7 @@ async def nemo_relay_tool_middleware(
         captured_ctx = await nxt(ctx)
         result = captured_ctx.result
         if result is None:
-            return codec.to_json(None)
+            return nemo_relay.ToolExecutionResult(codec.to_json(None))  # type: ignore[union-attr]
 
         # Extract meaningful return value (returned_value > signal > stdout)
         from nooa.events import _NO_RETURN
@@ -295,14 +295,20 @@ async def nemo_relay_tool_middleware(
             else:
                 rv = getattr(result, "stdout", None) or None
 
-        return codec.to_json(rv)
+        return nemo_relay.ToolExecutionResult(codec.to_json(rv))  # type: ignore[union-attr]
 
     # Note: nemo_relay.tools.execute() returns the pre-guardrail result.
     # Sanitize-response guardrails transform data for NeMo Relay internals
     # (ATIF export, event subscribers) but the caller always receives
     # the original result.  Conditional-execution guardrails that reject
     # raise GuardrailRejected, which propagates naturally.
-    await nemo_relay.tools.execute("execute_python", args, _wrapper)  # type: ignore[union-attr]
+    # Only a model's call id: NOOA's own prefill cells (``prefill_*``) answer no call.
+    call_id = ctx.params.get("tool_call_id")
+    if isinstance(call_id, str) and call_id.startswith("prefill_"):
+        call_id = None
+    await nemo_relay.tools.execute(  # type: ignore[union-attr]
+        "execute_python", args, _wrapper, tool_call_id=call_id
+    )
 
     if captured_ctx is not None:
         return captured_ctx
