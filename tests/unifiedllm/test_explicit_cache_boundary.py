@@ -11,6 +11,7 @@ import httpx
 import litellm
 import pytest
 
+from nooa.context_blocks import DynamicLiveContext, RenderConfig
 from nooa.context_blocks.events import UserEvent
 from nooa.context_blocks.formatter import OpenAIProviderFormatter
 from nooa.context_blocks.models import (
@@ -56,7 +57,7 @@ def _render_result(dynamic: str) -> RenderResult:
     ]
     return render_context(
         blocks,
-        block_formatter=CachedBlockFormatter(),
+        block_formatter=CachedBlockFormatter(live_context=DynamicLiveContext()),
         provider_formatter=OpenAIProviderFormatter(),
     )
 
@@ -994,7 +995,8 @@ async def test_codeact_v2_runtime_growing_http_prefix_retains_checkpoints(
     # context-block eviction erase the live suffix in this offline wire test.
     class TestAgent(Agent, llm=client, truncation=TruncationConfig(max_context_tokens=4_000_000)):
         def __init__(self):
-            super().__init__()
+            # Every request's live block is checked: the ``dynamic`` live-context policy.
+            super().__init__(render_config=RenderConfig(live_context=DynamicLiveContext()))
             self._live_state = "live initial"
             self.context["fixed_reference"] = Context(prefix, prefix=True)
             self.context["live_reference"] = Context(expr="self._live_state")

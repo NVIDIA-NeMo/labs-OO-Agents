@@ -30,7 +30,12 @@ if TYPE_CHECKING:
     from nooa.llm_types import LLMResponse
 
 from nooa.agentdoc import pformat
-from nooa.context_blocks.events import CODEACT_INLINE_RETURN, EventBase, ToolCallEvent
+from nooa.context_blocks.events import (
+    CODEACT_INLINE_RETURN,
+    EventBase,
+    LiveContextSnapshot,
+    ToolCallEvent,
+)
 from nooa.context_blocks.models import (
     RenderedMessage,
     ResolvedBlock,
@@ -129,6 +134,8 @@ class BlockFormatter(ABC):
         """
         if _is_llm_response(event):
             return event.replay_content
+        if isinstance(event, LiveContextSnapshot):
+            return event.content  # exactly what the model saw, no repr
         if event.event_role is Role.ASSISTANT:
             content = getattr(event, "content", None)
             if isinstance(content, str):
@@ -185,6 +192,8 @@ def _xml_message_content(block: ResolvedBlock) -> str:
     """
     if block.role == Role.ASSISTANT:
         return block.content
+    if isinstance(block.event, LiveContextSnapshot):
+        return block.content  # the snapshot is its own envelope; no <sys> wrapper
     role_label = "sys" if block.role == Role.USER else f"{block.role.value}_message"
     attrs: list[str] = []
     if block.metadata.source_dynamic and block.metadata.expr:

@@ -34,3 +34,22 @@ def test_agent_default_render_config():
     agent = MyAgent()
     assert isinstance(agent.render_config, RenderConfig)
     assert isinstance(agent.render_config.block_formatter, CachedBlockFormatter)
+
+
+def test_agent_accepts_render_config_as_a_mapping():
+    """``{"live_context": ...}`` goes through RenderConfig's own validation."""
+    from nooa import Agent
+    from nooa.context_blocks import AppendedLiveContext, DynamicLiveContext, NoLiveContext
+
+    class MyAgent(Agent, llm=make_llm()):
+        pass
+
+    assert MyAgent(render_config={"live_context": {"kind": "off"}}).render_config.live_context == (
+        NoLiveContext()
+    )
+    assert MyAgent(render_config={"live_context": "dynamic"}).render_config.live_context == (
+        DynamicLiveContext()
+    )
+    assert MyAgent(render_config={}).render_config.live_context == AppendedLiveContext()
+    explicit = RenderConfig(live_context=NoLiveContext())
+    assert MyAgent(render_config=explicit).render_config is explicit

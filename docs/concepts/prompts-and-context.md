@@ -92,6 +92,71 @@ Fixed versus expression-backed content and prefix versus suffix placement are
 independent choices. A bare `agent.context["key"] = value` is fixed content in
 the volatile suffix.
 
+### How the live context reaches the model
+
+The volatile suffix is the *live context*. By default it is **recorded into
+the history at least every 5 turns**: right before a request that is due, the
+runtime records a `LiveContextSnapshot` event (a one-line note saying it is
+periodic and may be stale, then the `<context>` envelope) and the request
+carries it like any other event. Being history, it stays in every later request
+unchanged, so requests are append-only, provider prompt caching covers the whole
+history, and training can consume the transcript as is. Before this default the
+live context was regenerated as a trailing `<context>` message on every
+request; that behaviour is still available.
+
+`RenderConfig(live_context=...)` builds the renderer with one of three policy
+classes, each carrying only the parameters it reads (`kind` tells them apart in
+settings files and JSON); read it back as `render_config.live_context`:
+
+| policy | what the model sees | when to use it |
+|---|---|---|
+| `AppendedLiveContext(every_n_turns=5)` — `kind: append` (default) | static prefix · history, in which a `LiveContextSnapshot` event is recorded before a due request · boundary | normal operation; append-only transcripts |
+| `DynamicLiveContext()` — `kind: dynamic` | static prefix · history · boundary · fresh `<context>` on every request | the previous behaviour |
+| `NoLiveContext()` — `kind: off` | static prefix · history · boundary | measuring what the live blocks contribute |
+
+A snapshot is due when the visible history holds no snapshot event (the first
+request, or after every earlier one was archived) or when `every_n_turns` or
+more responses follow the last one; a due snapshot is skipped only when no live
+block changed since the last one, so blocks that change every turn (a context
+usage counter, say) make most due snapshots record. Events recorded while a
+call is pending land after the snapshot, as the model saw them; a retry after a
+context-window error reuses the snapshot already recorded; archiving the oldest
+events can only delay the next snapshot, and archiving the latest snapshot
+brings it forward. A session recorded under `dynamic`, or switched to `append`
+mid-session, simply gets a fresh snapshot on its next request. Smaller
+`every_n_turns` values trade prompt size for freshness (`1` snapshots before
+every call). Agents without a static block keep their fixed text in the system
+message; expression-backed blocks still follow the policy.
+
+```python
+from nooa.context_blocks import DynamicLiveContext, RenderConfig
+
+# Restore the previous behaviour: regenerate the live context on every request.
+agent = MyAgent(render_config=RenderConfig(live_context=DynamicLiveContext()))
+```
+
+`RenderConfig` is the only place the policy lives. A policy is written as an
+object, its dict form (`{"kind": "append", "every_n_turns": 3}`) or a bare kind
+name (`"dynamic"`, `"off"`; YAML's bare `off` too), and a `RenderConfig` itself
+may be given as a mapping wherever an agent takes one:
+
+- any agent: `MyAgent(render_config={"live_context": "off"})`;
+- Atom, in `settings.yaml` (a session's `SessionOptions.render_config`
+  overrides it; `AtomHarness` forwards its `render_config` keyword):
+
+  ```yaml
+  atom:
+    render_config:
+      live_context:
+        kind: "off"
+  ```
+
+- NeMo Gym: `init_kwargs.render_config.live_context.kind=off`, or a dict for
+  `append`.
+- Atom can change it from a session, for the running agent and future ones:
+  `self.workspace_settings.set_live_context("append", every_n_turns=3)`, or
+  `/live-context append 3` in the TUI/ACP (`/live-context` alone shows it).
+
 ## Events are history, not configuration
 
 Each call records task, model, code-execution, error, and result events. The

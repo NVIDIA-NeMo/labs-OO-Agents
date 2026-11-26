@@ -170,12 +170,11 @@ class TestNestedAgentHistoryBug:
 
         inner_prefix = from_outer_call(inner_prompt)
         outer_suffix = from_outer_call(outer_followup_prompt)
-        # Dynamic context is deliberately a recomputed trailing suffix, so
-        # compare only the stable history before it.
-        assert inner_prefix[-1]["role"] == "user"
-        assert inner_prefix[-1]["content"].startswith("<context>")
-        assert inner_prefix[-2] == CacheBoundary()
-        inner_prefix = inner_prefix[:-2]
+        # The live context follows the cache boundary (a recomputed trailing
+        # suffix, or a periodic snapshot under the default policy); compare only
+        # the stable history before the boundary.
+        assert CacheBoundary() in inner_prefix
+        inner_prefix = inner_prefix[: inner_prefix.index(CacheBoundary())]
         assert outer_suffix[: len(inner_prefix)] == inner_prefix
 
         receipt = next(

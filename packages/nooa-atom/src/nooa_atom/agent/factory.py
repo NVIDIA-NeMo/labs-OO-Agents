@@ -51,8 +51,9 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
 
     An Atom agent (``nooa_atom.agent:AtomAgent``, a subclass of it, or any
     other subclass of its private base ``AtomAgentBase``) also gets the workspace's
-    settings (``AtomOptions``): ``cwd``, ``skills_dirs``, ``summarization``
-    and a ``libs_dir`` inside the workspace, each one its ``__init__``
+    settings (``AtomOptions``): ``cwd``, ``skills_dirs``, ``summarization``,
+    a ``libs_dir`` inside the workspace and, when one is configured
+    (``options.render_config`` over ``atom.render_config``), a ``render_config``, each one its ``__init__``
     accepts (a warning names the ones it does not), and then its MCP
     registry and configured skills (``configure_session_skills``) and its
     ``/skills`` and ``/mcp`` controls, before the registry restores any
@@ -83,6 +84,15 @@ def create_session_agent(options: SessionOptions, storage: StorageManager) -> In
             "summarization": atom_options.summarization,
             "libs_dir": workspace / ".nooa" / "skills",
         }
+        render_config = (
+            options.render_config
+            if options.render_config is not None
+            else atom_options.render_config
+        )
+        if render_config is not None:
+            # An explicit session or workspace RenderConfig always wins; without
+            # one the agent class keeps its own default.
+            settings["render_config"] = render_config
         if issubclass(agent_class, AtomAgent):
             # One turn method (handle): the session's turn_method selects the role.
             settings["policy"], settings["instructions"] = role_for(options.turn_method)

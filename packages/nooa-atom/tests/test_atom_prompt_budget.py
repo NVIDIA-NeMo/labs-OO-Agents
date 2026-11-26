@@ -211,11 +211,13 @@ RESULT = (
 # new messages until it ends." bullet (2026-11-10, Shell deadline handover):
 # handle system / total 22,541 / 23,874 -> 22,597 / 23,930 (only handle's role).
 LIMITS = {
-    (ATOM, "handle"): (22_700, 24_000),
-    (ATOM, "handle_batch"): (22_500, 23_900),
-    (ATOM, "handle_work"): (22_700, 24_100),
-    (ATOM, "handle_orchestrate"): (22_800, 24_200),
+    (ATOM, "handle"): (22_700, 24_200),
+    (ATOM, "handle_batch"): (22_500, 24_100),
+    (ATOM, "handle_work"): (22_700, 24_300),
+    (ATOM, "handle_orchestrate"): (22_800, 24_400),
 }
+# Total limits raised by 200 on 2026-11-26 for the live-context snapshot note that
+# opens the trailing <context> message under the default ``append`` policy.
 # The bench guard's system-prompt ceiling; every agent stays under it.
 # Raised from 20,000 for the Done(message=...) guidance (2026-10-29, see above),
 # then from 21,200 to 22,600 for self.jobs.after/every/tail (2026-10-30), and

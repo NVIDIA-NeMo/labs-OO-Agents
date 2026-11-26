@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig
+from nooa.context_blocks import DynamicLiveContext, RenderConfig
 from nooa.events import PythonOutput, ResultStatus
 from nooa.strategies.codeact import CodeActStrategy, return_text_as_result
 from nooa.strategies.codeact_errors import (
@@ -1090,7 +1091,11 @@ class TestCodeActStrategyEventSequence:
             ]
         )
 
-        agent_instance = TestAgent(llm=fake_llm)
+        # The sequences describe the strategy; the live-context snapshot event
+        # belongs to the append render policy, so pin the dynamic policy.
+        agent_instance = TestAgent(
+            llm=fake_llm, render_config=RenderConfig(live_context=DynamicLiveContext())
+        )
         result = await agent_instance.get_value()
 
         assert result == 42
@@ -1153,7 +1158,9 @@ class TestCodeActStrategyEventSequence:
             ]
         )
 
-        agent_instance = TestAgent(llm=fake_llm)
+        agent_instance = TestAgent(
+            llm=fake_llm, render_config=RenderConfig(live_context=DynamicLiveContext())
+        )
         result = await agent_instance.simple_task()
 
         assert result == "done"
@@ -1201,7 +1208,9 @@ class TestCodeActStrategyEventSequence:
             ]
         )
 
-        agent_instance = TestAgent(llm=fake_llm)
+        agent_instance = TestAgent(
+            llm=fake_llm, render_config=RenderConfig(live_context=DynamicLiveContext())
+        )
         result = await agent_instance.think_and_answer()
 
         # With str return type, the text content passes validation and becomes the result
@@ -1256,7 +1265,9 @@ class TestCodeActStrategyEventSequence:
             ]
         )
 
-        agent_instance = TestAgent(llm=fake_llm)
+        agent_instance = TestAgent(
+            llm=fake_llm, render_config=RenderConfig(live_context=DynamicLiveContext())
+        )
         result = await agent_instance.think_and_answer()
 
         # BaseModel serialized as JSON string passes str return type validation
@@ -1299,7 +1310,9 @@ class TestCodeActStrategyEventSequence:
             ]
         )
 
-        agent_instance = TestAgent(llm=fake_llm)
+        agent_instance = TestAgent(
+            llm=fake_llm, render_config=RenderConfig(live_context=DynamicLiveContext())
+        )
         result = await agent_instance.compute_stats()
 
         # The LLM self-corrected and returned the proper typed result
@@ -1345,7 +1358,9 @@ class TestCodeActStrategyEventSequence:
             ]
         )
 
-        agent_instance = TestAgent(llm=fake_llm)
+        agent_instance = TestAgent(
+            llm=fake_llm, render_config=RenderConfig(live_context=DynamicLiveContext())
+        )
         result = await agent_instance.do_side_effects()
 
         assert result is None
@@ -1373,7 +1388,9 @@ class TestCodeActStrategyEventSequence:
             ]
         )
 
-        agent_instance = TestAgent(llm=fake_llm)
+        agent_instance = TestAgent(
+            llm=fake_llm, render_config=RenderConfig(live_context=DynamicLiveContext())
+        )
 
         with pytest.raises(GenerationError):
             await agent_instance.whitespace_task()
@@ -1416,7 +1433,9 @@ class TestCodeActStrategyEventSequence:
             ]
         )
 
-        agent_instance = TestAgent(llm=fake_llm)
+        agent_instance = TestAgent(
+            llm=fake_llm, render_config=RenderConfig(live_context=DynamicLiveContext())
+        )
         result = await agent_instance.think_and_answer()
         assert result == "done"
 
@@ -1452,7 +1471,9 @@ class TestCodeActStrategyEventSequence:
             ]
         )
 
-        agent_instance = TestAgent(llm=fake_llm)
+        agent_instance = TestAgent(
+            llm=fake_llm, render_config=RenderConfig(live_context=DynamicLiveContext())
+        )
         result = await agent_instance.empty_task()
 
         assert result == "corrected answer"
@@ -1490,7 +1511,9 @@ class TestCodeActStrategyEventSequence:
             ]
         )
 
-        agent_instance = TestAgent(llm=fake_llm)
+        agent_instance = TestAgent(
+            llm=fake_llm, render_config=RenderConfig(live_context=DynamicLiveContext())
+        )
         result = await agent_instance.multi_step()
 
         assert result == 3
@@ -1539,7 +1562,9 @@ class TestCodeActStrategyEventSequence:
             ]
         )
 
-        agent_instance = TestAgent(llm=fake_llm)
+        agent_instance = TestAgent(
+            llm=fake_llm, render_config=RenderConfig(live_context=DynamicLiveContext())
+        )
         result = await agent_instance.think_and_answer()
 
         assert result == "done"
@@ -1567,7 +1592,9 @@ class TestCodeActStrategyEventSequence:
             ]
         )
 
-        agent_instance = TestAgent(llm=fake_llm)
+        agent_instance = TestAgent(
+            llm=fake_llm, render_config=RenderConfig(live_context=DynamicLiveContext())
+        )
         result = await agent_instance.compute()
 
         assert result == 7
@@ -1607,7 +1634,9 @@ class TestCodeActStrategyEventSequence:
             ]
         )
 
-        agent_instance = TestAgent(llm=fake_llm)
+        agent_instance = TestAgent(
+            llm=fake_llm, render_config=RenderConfig(live_context=DynamicLiveContext())
+        )
 
         with pytest.raises(GenerationError) as exc_info:
             await agent_instance.stuck_task()
@@ -1656,7 +1685,9 @@ class TestCodeActStrategyEventSequence:
             ]
         )
 
-        agent_instance = TestAgent(llm=fake_llm)
+        agent_instance = TestAgent(
+            llm=fake_llm, render_config=RenderConfig(live_context=DynamicLiveContext())
+        )
         result = await agent_instance.mixed()
         assert result == 42
 
@@ -1684,7 +1715,9 @@ class TestCodeActStrategyEventSequence:
             scripted_responses=[_resp("text") for _ in range(5)],
         )
 
-        agent_instance = TestAgent(llm=fake_llm)
+        agent_instance = TestAgent(
+            llm=fake_llm, render_config=RenderConfig(live_context=DynamicLiveContext())
+        )
         with pytest.raises(GenerationError) as exc_info:
             await agent_instance.stuck_task()
         # When disabled, the abort message should not appear
@@ -1712,7 +1745,9 @@ class TestCodeActStrategyEventSequence:
             scripted_responses=[_resp("text") for _ in range(4)],
         )
 
-        agent_instance = TestAgent(llm=fake_llm)
+        agent_instance = TestAgent(
+            llm=fake_llm, render_config=RenderConfig(live_context=DynamicLiveContext())
+        )
         captured: list[Any] = []
         agent_instance.event_manager.on("AfterTurn", lambda e: captured.append(e))
 
@@ -1748,7 +1783,9 @@ class TestCodeActStrategyEventSequence:
             ]
         )
 
-        agent_instance = TestAgent(llm=fake_llm)
+        agent_instance = TestAgent(
+            llm=fake_llm, render_config=RenderConfig(live_context=DynamicLiveContext())
+        )
         result = await agent_instance.compute()
         assert result == 3
 

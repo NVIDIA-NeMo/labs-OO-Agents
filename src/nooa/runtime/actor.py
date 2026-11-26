@@ -1126,6 +1126,12 @@ class ActorRuntime:
         # A limit a recovery learned earlier in this session (e.g. images): stay under it.
         for recovery in self._request_recoveries:
             recovery.before_request()
+        # Under the append live-context policy the live context is history: record
+        # it as an event before this request when one is due, so the request and
+        # every later one carry the same bytes. Retries after a context-window
+        # error rebuild the request but record nothing: the snapshot just
+        # recorded has no response after it, so it is not due again.
+        await self._record_live_context_snapshot()
         # Build messages from context + events (timers inside _build_messages).
         # No proactive clamping — recovery is error-driven. If the API rejects
         # with ContextWindowExceededError, the except handler archives events,
@@ -2930,6 +2936,40 @@ class ActorRuntime:
             # Restore previous context variable value
             # (handles nested generation sessions correctly)
             _in_generation_session.set(prev_in_session)
+
+    async def _record_live_context_snapshot(self) -> None:
+        """Under ``AppendedLiveContext``, record the live context as history when due.
+
+        Prepares the context exactly as the request will, takes the live blocks
+        the formatter would put after the boundary, and records a
+        :class:`LiveContextSnapshot` if the cadence says so and any live block
+        changed since the last snapshot (the first one always records; a due
+        snapshot is skipped only when no live block changed). Prompt previews call ``_build_messages`` directly and never
+        reach this, so they record nothing.
+        """
+        from nooa.context_blocks.events import LiveContextSnapshot
+        from nooa.context_blocks.live_context import AppendedLiveContext, snapshot_due
+        from nooa.context_blocks.renderers.cached import live_blocks, snapshot_event
+
+        policy = getattr(self.agent.render_config, "live_context", None)
+        if not isinstance(policy, AppendedLiveContext):
+            return
+        events = list(self.event_manager.values())
+        if not snapshot_due(events, policy.every_n_turns):
+            return
+        blocks = await self._prepare_context(
+            self._current_method,
+            self._current_call.args if self._current_call else (),
+            self._current_call.kwargs if self._current_call else {},
+        )
+        live = live_blocks(blocks)
+        if not live:
+            return
+        snapshot = snapshot_event(live, policy.every_n_turns)
+        last = next((e for e in reversed(events) if isinstance(e, LiveContextSnapshot)), None)
+        if last is not None and last.comparable == snapshot.comparable:
+            return  # nothing that matters changed since the last snapshot
+        self.event_manager.add(snapshot, record=True)
 
     async def _prepare_context(
         self,

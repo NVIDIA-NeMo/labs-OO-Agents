@@ -9,6 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from nooa.context_blocks import RenderConfig
 from nooa.interactive import DEFAULT_MODEL, SummarizationConfig
 from nooa_atom.skills.reflection import ReflectionConfig
 from nooa_atom.workspace.settings import load_skills_dirs
@@ -35,6 +36,11 @@ class AtomOptions(BaseModel):
     mcp_servers: dict[str, dict[str, Any]] = Field(default_factory=dict)
     mcp_auto_connect: list[str] = Field(default_factory=list)
     reflection: ReflectionConfig = Field(default_factory=ReflectionConfig)
+    render_config: RenderConfig | None = None
+    """The agent's ``RenderConfig`` (``atom.render_config`` in settings.yaml), e.g.
+    ``{live_context: {kind: off}}`` to change how the live ``<context>`` reaches the
+    model; ``None`` keeps the agent class's default. A session's
+    ``SessionOptions.render_config`` overrides it."""
 
     @classmethod
     def load(cls, workspace: str | Path, **overrides: Any) -> AtomOptions:

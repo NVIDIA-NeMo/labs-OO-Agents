@@ -37,6 +37,14 @@ from nooa.context_blocks.formatter import (
     ProviderFormatter,
     XMLBlockFormatter,
 )
+from nooa.context_blocks.live_context import (
+    AppendedLiveContext,
+    DynamicLiveContext,
+    LiveContextPolicy,
+    NoLiveContext,
+    coerce_live_context,
+    snapshot_preface,
+)
 from nooa.context_blocks.models import (
     BlockMetadata,
     Context,
@@ -94,6 +102,12 @@ __all__ = [
     "ToolResult",
     # Render config
     "RenderConfig",
+    "AppendedLiveContext",
+    "DynamicLiveContext",
+    "LiveContextPolicy",
+    "NoLiveContext",
+    "coerce_live_context",
+    "snapshot_preface",
     # Scoped overrides
     "ScopedContext",
     # Exceptions

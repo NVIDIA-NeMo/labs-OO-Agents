@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from nooa import Agent, Context, hidden, strategy
 from nooa.config import CodeActConfig
+from nooa.context_blocks import DynamicLiveContext, RenderConfig
 from nooa.strategies.codeact_v2 import CodeActV2
 
 with hidden:
@@ -129,7 +130,11 @@ def _assert_projected_fork(case, parent, fork):
 async def _run_summary_agent(case, client, monkeypatch, *, mock_usage=None):
     """Use the installed runtime fork, shared client and documented llm_call hook."""
     reference = f"Summary cache isolation nonce: {uuid.uuid4().hex}\n{FIXED_PREFIX}"
-    agent = SummaryCacheAgent(llm=client)
+    # These checks read the live context of every request: the ``dynamic`` policy
+    # (the default appends a snapshot every few turns).
+    agent = SummaryCacheAgent(
+        llm=client, render_config=RenderConfig(live_context=DynamicLiveContext())
+    )
     agent.context["cache_reference"] = Context(reference, prefix=True)
     agent._summary_phase = 0
     agent.context["live"] = Context(expr="self._summary_phase")

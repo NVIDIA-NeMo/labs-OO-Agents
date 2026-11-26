@@ -198,22 +198,39 @@ class ScriptedModels:
     session whose name has no script gets an empty strict model.
     """
 
-    def __init__(self, scripts: dict[str | None, list[LLMResponse]] | None = None) -> None:
+    def __init__(
+        self,
+        scripts: dict[str | None, list[LLMResponse]] | None = None,
+        *,
+        render_config: Any = None,
+    ) -> None:
         self.scripts = dict(scripts or {})
         self.llms: dict[str | None, FakeLLMClient] = {}
         self.built: list[Any] = []
+        # Passed to every agent this factory builds, e.g. a ``dynamic`` live-context
+        # policy for a test that reads the live blocks of every request.
+        self.render_config = render_config
 
     def __call__(self, options: Any, storage: Any) -> InteractiveAgent:
         llm = CellLLM(list(self.scripts.get(options.name, [])))
         self.llms[options.name] = llm
         self.built.append(options)
-        return plain_agent_factory(options.model_copy(update={"llm": llm}), storage)
+        return plain_agent_factory(
+            options.model_copy(update={"llm": llm}), storage, render_config=self.render_config
+        )
 
 
-def plain_agent_factory(options: Any, storage: Any) -> InteractiveAgent:
+def plain_agent_factory(
+    options: Any, storage: Any, *, render_config: Any = None
+) -> InteractiveAgent:
     """``options.agent_spec`` built with only the session's storage and ``options.llm``."""
     agent_class = load_agent_class(options.agent_spec, base=options.workspace)
-    return agent_class(storage=storage, **({"llm": options.llm} if options.llm is not None else {}))
+    kwargs: dict[str, Any] = {"storage": storage}
+    if options.llm is not None:
+        kwargs["llm"] = options.llm
+    if render_config is not None:
+        kwargs["render_config"] = render_config
+    return agent_class(**kwargs)
 
 
 class SessionUserMessage(Metadata):

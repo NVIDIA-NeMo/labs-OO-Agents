@@ -10,7 +10,11 @@ import pytest
 
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig
-from nooa.context_blocks import ToolCallEvent
+from nooa.context_blocks import (
+    DynamicLiveContext,
+    RenderConfig,
+    ToolCallEvent,
+)
 from nooa.events import PythonOutput, Task
 from nooa.strategies.codeact import CodeActStrategy
 from nooa.strategies.codeact_v2 import CodeActV2
@@ -558,7 +562,8 @@ async def test_text_only_retry_preserves_response_and_uses_python_cell():
             """Calculate the result."""
             ...
 
-    agent = TestAgent()
+    # The state block after the boundary is inspected on the retry request.
+    agent = TestAgent(render_config=RenderConfig(live_context=DynamicLiveContext()))
     assert await agent.answer() == 42
     assert agent.event_manager[original.id] is original
     assert any(message is original for message in llm.request_messages)
@@ -982,7 +987,8 @@ async def test_python_cell_state_lists_user_created_locals():
             """Uppercase the question."""
             ...
 
-    agent = TestAgent()
+    # The state block of the last request is inspected: regenerate it every request.
+    agent = TestAgent(render_config=RenderConfig(live_context=DynamicLiveContext()))
     assert await agent.answer("hello") == "HELLO"
     rendered_context = "\n".join(
         str(message.get("content", "")) for message in fake_llm.last_messages

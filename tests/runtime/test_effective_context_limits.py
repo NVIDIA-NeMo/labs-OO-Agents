@@ -8,6 +8,7 @@ import pytest
 
 from nooa import Agent, Context
 from nooa.agents.summarization import context_budget
+from nooa.context_blocks import DynamicLiveContext, RenderConfig
 from nooa.events import Message
 from nooa.interactive import SummarizationConfig, apply_model_limits, install_summarizer
 from nooa.runtime.actor import _compute_reduced_max_tokens, _current_llm_var
@@ -140,7 +141,8 @@ async def test_rendered_context_and_stats_use_request_limit(overrides, expected)
             """Answer."""
             ...
 
-    agent = A(llm=llm)
+    # The rendered live context is inspected per request: the dynamic policy.
+    agent = A(llm=llm, render_config=RenderConfig(live_context=DynamicLiveContext()))
     agent.context["context_usage"] = Context(
         expr="self.context_stats.format() if self.context_stats else ''"
     )

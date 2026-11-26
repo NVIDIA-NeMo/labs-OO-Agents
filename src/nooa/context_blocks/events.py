@@ -228,6 +228,31 @@ class AssistantEvent(EventBase):
     content: Annotated[str, Field(description="Response content from the assistant")]
 
 
+class LiveContextSnapshot(EventBase):
+    """The live context as the model saw it before a request, under the ``append`` policy.
+
+    Recorded by the runtime right before the request, so it is history like any
+    other event: later requests carry it unchanged, events recorded while the
+    call was pending follow it, and archiving it makes the next request record a
+    fresh one. ``content`` is exactly what the model received (the note and the
+    ``<context>...</context>`` envelope); ``comparable`` holds every rendered
+    live block by key: a due snapshot is skipped only when no live block changed
+    since the last one (blocks that change every turn, such as a context-usage
+    counter, therefore make most due snapshots record).
+    """
+
+    _role: ClassVar[Role] = Role.USER
+
+    content: str = Field(
+        description="The note and the <context>...</context> envelope the model saw"
+    )
+    comparable: dict[str, str] = Field(
+        default_factory=dict,
+        repr=False,
+        description="Rendered live blocks by key, for change detection",
+    )
+
+
 class ToolResult(BaseModel):
     """Result of a tool call, stored as child of ToolCallEvent.
 

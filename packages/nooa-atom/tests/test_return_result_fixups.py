@@ -67,7 +67,9 @@ def _merged(flushed):
 
 
 def _cell_output(models, call):
-    return str(models.llms[None].calls[call].messages[-2])
+    """The cell feedback the model saw on ``call``: the last PythonOutput message."""
+    messages = models.llms[None].calls[call].messages
+    return next(str(m) for m in reversed(messages) if "PythonOutput(" in str(m))
 
 
 async def test_value_keyword_is_read_as_the_result(registry, options, models, span_attributes):

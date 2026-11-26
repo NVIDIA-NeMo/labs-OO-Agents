@@ -398,6 +398,11 @@ class AtifExporter:
         role = getattr(event, "_role", None)
         if role in (Role.RUNTIME_EVENT, Role.METADATA, None):
             return  # internal — not LLM-visible
+        if event.event_type == "LiveContextSnapshot":
+            # The live context the model saw under the append policy. It is
+            # framework-rendered state, not a conversation turn: ATIF keeps
+            # its trajectory shape (system, user, agent ...) without it.
+            return
 
         from nooa.agentdoc import pformat as _pformat
 

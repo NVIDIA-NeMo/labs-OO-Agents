@@ -28,6 +28,7 @@ import httpx
 import pytest
 
 from nooa._immutable_json import json_containers
+from nooa.context_blocks import DynamicLiveContext
 from nooa.context_blocks.events import EventBase, ToolCallEvent, ToolResult, UserEvent
 from nooa.context_blocks.formatter import OpenAIProviderFormatter
 from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
@@ -154,7 +155,8 @@ def _render(family, events, instructions, live_state, *, stable_image=False):
     ]
     messages = render_context(
         blocks,
-        block_formatter=CachedBlockFormatter(),
+        # These checks follow the live state through the request: the dynamic policy.
+        block_formatter=CachedBlockFormatter(live_context=DynamicLiveContext()),
         provider_formatter=OpenAIProviderFormatter(),
     ).output
     if stable_image:
