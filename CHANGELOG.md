@@ -6,6 +6,11 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Dependency security update. Pydantic is now locked at 2.14.3 with
+  pydantic-core 2.50.4, and the `pydantic` requirement starts at 2.14.2, the
+  first release that fixes CVE-2026-133276, CVE-2026-133421 and
+  CVE-2026-133424. This applies to the root project, nooa-memory, nooa-atom
+  and the cybergym example.
 - Dependency security update. LiteLLM is now locked at 1.100.5
   (CVE-2026-114612); the `litellm` requirement starts at 1.100.4 and excludes
   the unfixed 1.101-1.103 releases. LiteLLM now requires boto3. Chat
