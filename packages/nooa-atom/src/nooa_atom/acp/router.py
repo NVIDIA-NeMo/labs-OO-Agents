@@ -72,6 +72,7 @@ from nooa._platform import require_posix
 from nooa_atom.acp.framing import FRAME_LIMIT, Frame, encode, read_frame
 from nooa_atom.acp.listing import list_sessions
 from nooa_atom.acp.protocol import initialize_response
+from nooa_atom.acp.v2 import V2, initialize_params_to_v1, initialize_result_to_v2, negotiate
 from nooa_atom.session.store import (
     InvalidSessionIdError,
     SessionNotFoundError,
@@ -95,7 +96,10 @@ STOP_GRACE = 5.0
 STDOUT_QUEUE_SIZE = 1000
 
 _DELETE_METHOD = "_nooa/session/delete"
-_ROUTED_BY_STORE = ("session/load", _DELETE_METHOD)
+# ``session/resume`` and ``session/delete`` are their ACP v2 names.
+_LOAD_METHODS = ("session/load", "session/resume")
+_DELETE_METHODS = (_DELETE_METHOD, "session/delete")
+_ROUTED_BY_STORE = (*_LOAD_METHODS, *_DELETE_METHODS)
 _MAX_TREE_DEPTH = 64
 
 
@@ -462,17 +466,22 @@ class Router:
         worker.outbound.put_nowait(frame.raw)
 
     def _initialize(self, frame: Frame) -> None:
+        params = frame.message.get("params")
+        v2 = negotiate(params) == V2
         try:
-            request = InitializeRequest.model_validate(frame.message.get("params"))
+            request = InitializeRequest.model_validate(
+                initialize_params_to_v1(params) if v2 else params
+            )
         except ValidationError as exc:
             self._fail(frame.id, RequestError.invalid_params({"errors": exc.errors()}))
             return
-        self._init_params = frame.message.get("params")
+        # Replayed unchanged: each worker negotiates the same version.
+        self._init_params = params
         response = initialize_response(request.protocol_version, request.client_info)
-        self._answer(
-            frame,
-            response.model_dump(mode="json", by_alias=True, exclude_none=True, exclude_unset=True),
+        result = response.model_dump(
+            mode="json", by_alias=True, exclude_none=True, exclude_unset=True
         )
+        self._answer(frame, initialize_result_to_v2(result) if v2 else result)
 
     async def _list_sessions(self, frame: Frame) -> None:
         try:
@@ -542,7 +551,7 @@ class Router:
             worker = self._new_worker()
             worker.root_id = root_id
         mapped = False
-        if frame.method == "session/load" and session_id not in self._sessions:
+        if frame.method in _LOAD_METHODS and session_id not in self._sessions:
             self._map(session_id, worker)
             mapped = True
         self._forward(worker, frame, mapped=mapped)
@@ -707,6 +716,7 @@ class Router:
                     worker.k,
                     frame.id,
                 )
+            self._note_subagent(worker, frame)
             await self._emit(frame.raw, frame.message)
             return
         pending = self._pending.get(_key(frame.id))
@@ -721,6 +731,21 @@ class Router:
         if not worker.sessions and not self._has_pending(worker):
             self._close_worker(worker)
 
+    def _note_subagent(self, worker: _Worker, frame: Frame) -> None:
+        """Map a child session an ACP v2 ``subagent_update`` announces to its root's worker.
+
+        The client may then send ``session/cancel`` for it; it is unmapped
+        with its root.
+        """
+        if frame.method != "session/update" or frame.session_id not in worker.sessions:
+            return
+        update = frame.params.get("update")
+        if not isinstance(update, dict) or update.get("sessionUpdate") != "subagent_update":
+            return
+        child_id = update.get("sessionId")
+        if isinstance(child_id, str) and child_id not in self._sessions and not worker.stopping:
+            self._map(child_id, worker)
+
     def _settle(self, worker: _Worker, pending: _Pending, frame: Frame) -> None:
         """Update the session map for a worker's answer, before the client sees it."""
         ok = "error" not in frame.message
@@ -733,17 +758,17 @@ class Router:
                 self._map(new_id, worker)
                 worker.root_id = worker.root_id or new_id
                 session_id = new_id
-        elif method == "session/load" and not ok and pending.mapped and session_id is not None:
+        elif method in _LOAD_METHODS and not ok and pending.mapped and session_id is not None:
             self._unmap(session_id, worker)
-        elif method == "session/load" and ok and session_id is not None and not worker.stopping:
+        elif method in _LOAD_METHODS and ok and session_id is not None and not worker.stopping:
             # A close answered while this load was in flight unmapped the id;
             # the load succeeded, so the session is open on this worker again.
             self._map(session_id, worker)
-        elif method in ("session/close", _DELETE_METHOD) and ok and session_id is not None:
+        elif method in ("session/close", *_DELETE_METHODS) and ok and session_id is not None:
             ids = list(worker.sessions) if session_id == worker.root_id else [session_id]
             for each in ids:
                 self._unmap(each, worker)
-        if method in ("session/new", "session/load"):
+        if method in ("session/new", *_LOAD_METHODS):
             forward_ms = (time.perf_counter() - max(pending.sent_at, worker.ready_at or 0)) * 1000
             logger.info(
                 "worker %d %s %s: spawn_ms=%.0f handshake_ms=%.0f forward_ms=%.0f",

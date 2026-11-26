@@ -83,6 +83,7 @@ from nooa_atom.acp.protocol import (
 )
 from nooa_atom.acp.recover import COMMAND as RECOVER
 from nooa_atom.acp.recover import recover
+from nooa_atom.acp.v2 import ACCEPTED_METHOD, META_KEY, serve_v2_edge
 from nooa_atom.agent.slash_commands import RESERVED_COMMAND_NAMES
 from nooa_atom.session.items import (
     CommandInfo,
@@ -280,6 +281,9 @@ class AtomACPAgent:
         self._model = model
         self._conn: Client | None = None
         self.client_capabilities: ClientCapabilities | None = None
+        # The client asked for ACP v2: ``serve_v2_edge`` translates this
+        # connection, and the adapter sends it the hints described there.
+        self._v2 = False
         # The client is Pool (``clientInfo.name``): it gets Pool's input events.
         self._pool_client = False
         # The Pool dialects of this connection (``pool_dialects``): which
@@ -360,7 +364,8 @@ class AtomACPAgent:
         client_info: Implementation | None = None,
         **kwargs: Any,
     ) -> InitializeResponse:
-        del kwargs
+        v2 = kwargs.get(META_KEY)
+        self._v2 = isinstance(v2, dict) and v2.get("protocolVersion") == 2
         self.client_capabilities = client_capabilities
         self._pool_dialects = pool_dialects(client_info)
         self._pool_client = bool(self._pool_dialects)
@@ -417,6 +422,7 @@ class AtomACPAgent:
             session_id=session.id,
             modes=self._modes(session),
             config_options=self._config_options(session),
+            field_meta=self._v2_setup_meta(session),
         )
 
     # ---- load ----------------------------------------------------------
@@ -438,11 +444,13 @@ class AtomACPAgent:
             # Attach: the same Session; reuse this adapter's bridge if it has
             # one (a second bridge would send every update twice) and replay.
             bridge = self._bridges.get(session_id) or self._attach(live)
-            self._replay(bridge, live, pool=self._pool_client)
+            self._replay(bridge, live, pool=self._pool_client, v2=self._v2)
             await bridge.flush()
             self._defer_bootstrap_updates(live, [])
             return LoadSessionResponse(
-                modes=self._modes(live), config_options=self._config_options(live)
+                modes=self._modes(live),
+                config_options=self._config_options(live),
+                field_meta=self._v2_setup_meta(live),
             )
 
         warnings: list[str] = []
@@ -453,7 +461,7 @@ class AtomACPAgent:
             trace_in_relay(session)
             bridge = self._attach(session)
             attached.append(bridge)
-            self._replay(bridge, session, pool=self._pool_client)
+            self._replay(bridge, session, pool=self._pool_client, v2=self._v2)
             warnings.extend(await self._prepare_tools(session, mcp_servers))
 
         try:
@@ -466,7 +474,9 @@ class AtomACPAgent:
         await self._bridges[session.id].flush()
         self._defer_bootstrap_updates(session, warnings)
         return LoadSessionResponse(
-            modes=self._modes(session), config_options=self._config_options(session)
+            modes=self._modes(session),
+            config_options=self._config_options(session),
+            field_meta=self._v2_setup_meta(session),
         )
 
     # ---- list ----------------------------------------------------------
@@ -721,7 +731,8 @@ class AtomACPAgent:
         session command run the command. To steer a running turn, clients
         use ``_nooa/session/inject`` with ``mode: "steer"``.
         """
-        del kwargs
+        v2 = kwargs.get(META_KEY)
+        ack = v2.get("ack") if isinstance(v2, dict) and self._v2 else None
         session, bridge = self._followed(session_id)
         text = self._prompt_text(prompt)
         try:
@@ -732,6 +743,8 @@ class AtomACPAgent:
                     return handled
             await self._request_title(session, text)
             receipt = await session.submit(text, source=SOURCE)
+            if ack is not None:
+                await self._acknowledge(ack, receipt.item_id)
             if self._pool_client:
                 bridge.publish(pool_input_event(receipt.item_id, dialects=self._pool_dialects))
             self._prompts.setdefault(session_id, []).append(receipt)
@@ -747,6 +760,29 @@ class AtomACPAgent:
             raise RequestError.resource_not_found(session_id) from None
         except TurnFailedError as exc:
             return await self._turn_failed(bridge, exc)
+
+    async def _acknowledge(self, ack: str, message_id: str) -> None:
+        """v2: tell the translator the prompt was inserted, as ``message_id``.
+
+        The receipt's item id is the message's id: replay reuses it.
+        """
+        try:
+            await self._require_conn().ext_notification(
+                ACCEPTED_METHOD, {"ack": ack, "messageId": message_id}
+            )
+        except Exception:
+            logger.warning("Could not acknowledge a v2 prompt", exc_info=True)
+
+    def _v2_setup_meta(self, session: Session) -> dict[str, Any] | None:
+        """v2: the session's commands, for the setup response (``_meta`` the translator lifts)."""
+        if not self._v2:
+            return None
+        update = _available_commands_update(session.commands())
+        commands = [
+            command.model_dump(mode="json", by_alias=True, exclude_none=True)
+            for command in update.available_commands
+        ]
+        return {META_KEY: {"availableCommands": commands}}
 
     async def _request_title(self, session: Session, text: str) -> None:
         """On a session's first prompt, ask the agent to title it (once per session).
@@ -1081,6 +1117,11 @@ class AtomACPAgent:
         """Stop the running turn. The bridge closes its cards when the Session reports it."""
         del kwargs
         session = self.session(session_id)
+        if session is not None and session_id not in self._bridges and self._v2:
+            # v2 announces children with capabilities.cancel: stop that child only.
+            if self._descends_from_followed(session):
+                await session.cancel(by="user")
+            return
         if session is None or session_id not in self._bridges:
             return  # a notification: nothing to answer
         self._cancel_client_calls(session_id)
@@ -1286,6 +1327,7 @@ class AtomACPAgent:
         bridge = ACPEventBridge(session, conn, resolve_child=self.session)
         if self._pool_dialects:
             bridge.pool_dialects = self._pool_dialects
+        bridge.v2 = self._v2
         bridge.set_verbosity(load_acp_verbosity(session.options.workspace))
         self._bridges[session.id] = bridge
 
@@ -1300,6 +1342,18 @@ class AtomACPAgent:
 
         unsubscribe = session.subscribe(on_update)
         return bridge
+
+    def _descends_from_followed(self, session: Session) -> bool:
+        """Whether a session is a child (at any depth) of one this connection follows."""
+        parent_id = session.parent_id
+        for _ in range(64):
+            if parent_id is None:
+                return False
+            if parent_id in self._bridges:
+                return True
+            parent = self.session(parent_id)
+            parent_id = parent.parent_id if parent is not None else None
+        return False
 
     def _parent_is_live(self, session: Session) -> bool:
         return session.parent_id is not None and self.session(session.parent_id) is not None
@@ -1423,11 +1477,14 @@ class AtomACPAgent:
         task.add_done_callback(finished)
 
     @staticmethod
-    def _replay(bridge: ACPEventBridge, session: Session, *, pool: bool = False) -> None:
+    def _replay(
+        bridge: ACPEventBridge, session: Session, *, pool: bool = False, v2: bool = False
+    ) -> None:
         """Queue the transcript as user and agent message chunks on the bridge.
 
         For Pool, each user message is followed by its input event, as Pool's
-        own agent replays them.
+        own agent replays them. On v2 a user message keeps its item id as its
+        message id, the id its prompt was acknowledged with.
         """
         for entry in session.transcript():
             if entry.role == "cancelled":
@@ -1440,9 +1497,12 @@ class AtomACPAgent:
             # bubble. End each entry with a newline to keep them apart.
             content = content if content.endswith("\n") else content + "\n"
             block = text_block(content)
-            bridge.publish(
+            update = (
                 update_user_message(block) if entry.role == "user" else update_agent_message(block)
             )
+            if v2 and entry.role == "user" and entry.item_id:
+                update.message_id = entry.item_id
+            bridge.publish(update)
             if pool and entry.role == "user" and entry.item_id:
                 bridge.publish(pool_input_event(entry.item_id, dialects=bridge.pool_dialects))
 
@@ -1606,7 +1666,7 @@ async def _taken_or_settled(
         await asyncio.gather(outcome, return_exceptions=True)
 
 
-async def serve_connection(
+async def _serve_v1_connection(
     agent: Any,
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
@@ -1614,7 +1674,7 @@ async def serve_connection(
     id_base: int | None = None,
     observers: list[Callable[[Any], None]] | None = None,
 ) -> None:
-    """Serve ACP for ``agent`` on one stream pair until the peer closes it.
+    """Serve ACP v1 for ``agent`` on one stream pair until the peer closes it.
 
     Used on standard input and output (``serve``) and on a router's
     socket (the worker). ``id_base`` is the first id of the requests this
@@ -1644,6 +1704,34 @@ async def serve_connection(
         await conn.listen()
     finally:
         await asyncio.shield(conn.close())
+
+
+async def serve_connection(
+    agent: Any,
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    *,
+    id_base: int | None = None,
+    observers: list[Callable[[Any], None]] | None = None,
+) -> None:
+    """Serve ACP v1 or v2 for ``agent`` on one stream pair until the peer closes it.
+
+    Used on standard input and output (``serve``) and on a router's
+    socket (the worker). ``id_base`` is the first id of the requests this
+    side sends to the client (permission, elicitation, file and terminal
+    requests); a router gives each worker its own range so replies can be
+    routed by id alone. The client's ``initialize`` picks the version
+    (``nooa_atom.acp.v2``); ``observers`` see the v1 frames.
+    """
+
+    async def serve_v1(
+        inner_reader: asyncio.StreamReader, inner_writer: asyncio.StreamWriter
+    ) -> None:
+        await _serve_v1_connection(
+            agent, inner_reader, inner_writer, id_base=id_base, observers=observers
+        )
+
+    await serve_v2_edge(reader, writer, serve_v1)
 
 
 async def serve(

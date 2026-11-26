@@ -57,6 +57,7 @@ from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput, Summary
 from nooa.interactive import AgentMessage, Done, NeedInput, Waiting
 from nooa_atom.acp.protocol import POOLSIDE_DIALECT, PoolDialect
+from nooa_atom.acp.v2 import META_KEY
 from nooa_atom.agent.activity import (
     FileEdit,
     TerminalCommandFinished,
@@ -171,6 +172,16 @@ class _ClientInput:
     client_id: str
     future: asyncio.Future[None]
     taken: bool = False
+
+
+def _turn_ended_hint(update: TurnEndedUpdate) -> dict[str, Any]:
+    """The v2 translator's view of a turn end: its outcome, what it waits on, the error."""
+    hint: dict[str, Any] = {"turn": "ended", "outcome": update.outcome_kind}
+    if update.outcome_kind == "waiting":
+        hint["waitingOn"] = [str(name) for name in update.outcome.get("on") or []]
+    elif update.outcome_kind == "error":
+        hint["error"] = str(update.outcome.get("error") or "The turn failed.")
+    return hint
 
 
 def _observe_future(future: asyncio.Future[None]) -> None:
@@ -341,6 +352,9 @@ class ACPEventBridge:
         self.verbosity: Verbosity = "verbose"
         # The Pool meta key sets of input events (``pool_input_event``).
         self.pool_dialects: tuple[PoolDialect, ...] = (POOLSIDE_DIALECT,)
+        # The connection speaks ACP v2: send the hints ``nooa_atom.acp.v2``
+        # turns into state, subagent and background updates.
+        self.v2 = False
         self._resolve_child = resolve_child
         self._own_sources = own_sources
         self._loop = asyncio.get_running_loop()
@@ -446,14 +460,40 @@ class ACPEventBridge:
             kind = getattr(update, "kind", None)
             if isinstance(update, AgentEventUpdate):
                 self._on_agent_event(update.event, child.id)
+                if self.v2 and isinstance(update.event, AgentMessage):
+                    # v2 shows a child's own conversation under its id.
+                    message = update_agent_message(text_block(update.event.content))
+                    message.field_meta = {META_KEY: {"session": child.id}}
+                    self._enqueue(message)
             elif isinstance(update, ChildCreatedUpdate):
                 # Announced like this session's own children, so the client
                 # knows the id before cards arrive under it.
-                self._on_child_created(update)
+                self._on_child_created(update, parent=child.id)
+            elif isinstance(update, ItemAdmittedUpdate):
+                if update.channel in _ECHOED_CHANNELS:
+                    self._v2_hint(
+                        {
+                            "childMessage": {
+                                "sessionId": child.id,
+                                "messageId": update.item_id,
+                                "text": getattr(update, "text", "") or update.preview,
+                            }
+                        }
+                    )
             elif kind == "turn_started":
                 self._reset_rolling("A new helper turn started.", source=child.id)
+                self._v2_hint({"childTurn": {"sessionId": child.id, "state": "running"}})
             elif isinstance(update, TurnEndedUpdate):
                 self._reset_rolling("Helper turn ended before this finished.", source=child.id)
+                self._v2_hint(
+                    {
+                        "childTurn": {
+                            "sessionId": child.id,
+                            "state": "idle",
+                            "outcome": update.outcome_kind,
+                        }
+                    }
+                )
             elif isinstance(update, CancelledUpdate):
                 self._reset_rolling(cancel_text(update.by), source=child.id, title="Cancelled")
             elif kind == "closed":
@@ -684,6 +724,7 @@ class ACPEventBridge:
             )
         elif getattr(update, "kind", None) == "turn_started":
             self._reset_rolling("A new turn started.")
+            self._v2_hint({"turn": "started"})
         elif isinstance(update, CancelledUpdate):
             self._reset_rolling(cancel_text(update.by), title="Cancelled")
             # Before the prompt's future resolves: the Session emits this first,
@@ -692,6 +733,7 @@ class ACPEventBridge:
             self._enqueue(update_agent_message(text_block(cancel_text(update.by))))
         elif isinstance(update, TurnEndedUpdate):
             self._on_turn_ended(update)
+            self._v2_hint(_turn_ended_hint(update))
         elif isinstance(update, ChildCreatedUpdate):
             self._on_child_created(update)
         elif getattr(update, "kind", None) == "usage_changed":
@@ -722,7 +764,28 @@ class ACPEventBridge:
             self.fail_open_tools("Did not finish.", title="Unfinished")
         self._publish_plan()
 
-    def _on_child_created(self, update: ChildCreatedUpdate) -> None:
+    def _v2_hint(self, hint: dict[str, Any]) -> None:
+        """Queue a hint for the v2 translator (``nooa_atom.acp.v2``); nothing on v1."""
+        if self.v2:
+            self._enqueue(
+                SessionInfoUpdate(session_update="session_info_update", field_meta={META_KEY: hint})
+            )
+
+    def _on_child_created(self, update: ChildCreatedUpdate, *, parent: str | None = None) -> None:
+        if self.v2:
+            child = self._resolve_child(update.child_id) if self._resolve_child else None
+            options = getattr(child, "options", None)
+            workspace = getattr(options, "workspace", None)
+            self._v2_hint(
+                {
+                    "child": {
+                        "sessionId": update.child_id,
+                        "parentId": parent or self.session_id,
+                        "title": update.name or "helper",
+                        **({"cwd": str(workspace)} if workspace is not None else {}),
+                    }
+                }
+            )
         self._helper_names[update.child_id] = update.name or "helper"
         self._children.append(
             {
