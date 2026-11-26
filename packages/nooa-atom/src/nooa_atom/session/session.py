@@ -311,6 +311,9 @@ class Session:
         self._finished: OrderedDict[str, Any] = OrderedDict()
         self._consumed: list[str] = []  # consumed since the last turn settled
         self._waiting: list[str] = []  # items whose prompt stays open over a Waiting
+        # True: a Waiting outcome resolves the items its turn consumed, as Done
+        # does, so nothing stays in _waiting (ACP's default; --keep-prompt-open-on-waiting turns it off).
+        self.waiting_ends_outcome = False
         self._recording_error: BaseException | None = None
         self._started = False
         self._usage_before: Usage = self.info.usage.model_copy()
@@ -319,6 +322,9 @@ class Session:
         # sent (user_messages or steers), and whether any agent message went out
         # since the oldest of them was consumed.
         self._user_items: set[str] = set()
+        # Person-sent items a Waiting resolved (waiting_ends_outcome) before
+        # any reply: their prompt is settled, but a later Done still answers them.
+        self._unanswered: set[str] = set()
         self._replied: bool = False
         # How the last turn ended ("waiting" shows a child as "working").
         self.last_outcome_kind: str | None = None
@@ -708,7 +714,7 @@ class Session:
         Works for items from ``submit()`` and for steers: a steer a model
         call saw resolves with that turn; one admitted again as a message
         resolves with the turn that consumed it. ``Waiting`` outcomes keep
-        it open; a cancelled turn resolves it with ``TurnCancelledOutcome``;
+        it open (with ``waiting_ends_outcome`` they resolve it); a cancelled turn resolves it with ``TurnCancelledOutcome``;
         a failed turn raises ``TurnFailedError``. The outcomes of the last
         256 finished items are kept, so a recently finished item still
         answers; ``KeyError`` for an unknown item or an older one.
@@ -934,6 +940,7 @@ class Session:
         owed = self._waiting + self._consumed + [item_id for item_id, _, _ in self._pending_steers]
         self._waiting, self._consumed = [], []
         self._user_items.clear()
+        self._unanswered.clear()
         self._replied = False
         if self._pending_steers:
             self._record_failure(exc, owed)
@@ -986,7 +993,9 @@ class Session:
         """
         if self.parent_id is not None or self._replied:
             return False
-        return any(item_id in self._user_items for item_id in self._waiting + self._consumed)
+        return bool(self._unanswered) or any(
+            item_id in self._user_items for item_id in self._waiting + self._consumed
+        )
 
     def _settle(self, event: TurnSettled) -> None:
         # Items stay in self._consumed / self._waiting until the end, so a
@@ -1023,12 +1032,18 @@ class Session:
         )
         self.info.reply_count += 1  # as the store counts it, with each agent message
         waiting = self._waiting + consumed
-        if kind != "waiting":
+        if kind != "waiting" or self.waiting_ends_outcome:
             for item_id in waiting:
                 self._resolve(item_id, outcome)
+                if kind == "waiting" and not self._replied and item_id in self._user_items:
+                    self._unanswered.add(item_id)  # settled, but not yet answered
                 self._user_items.discard(item_id)
             waiting = []
-            self._replied = False
+            # A message-less Waiting still owes the reply, as with the Waiting
+            # kept open; once answered, the next person input starts afresh.
+            if kind != "waiting" or self._replied:
+                self._replied = False
+                self._unanswered.clear()
         self._waiting = waiting
         self._consumed = [i for i in self._consumed if i not in consumed]
         if kind != "cancelled":

@@ -253,7 +253,9 @@ class AtomACPAgent:
     ``agent_spec`` names the agent class for new sessions (``None``: the
     workspace's ``atom.agent_spec`` setting, else the Atom agent).
     ``model`` is the model alias new sessions start with; the registry's
-    ``llm_factory`` builds the client.
+    ``llm_factory`` builds the client. ``end_turn_on_waiting`` (default ``True``)
+    answers a prompt whose turn ends ``Waiting`` with ``end_turn``; ``False``
+    keeps it open until a later turn ends (``--keep-prompt-open-on-waiting``).
     """
 
     def __init__(
@@ -263,8 +265,12 @@ class AtomACPAgent:
         sessions_dir: Path | None = None,
         agent_spec: str | None = None,
         model: str | None = None,
+        end_turn_on_waiting: bool = True,
     ) -> None:
         self._new_registry = new_registry
+        # Default: a Waiting turn answers its prompt
+        # end_turn. False (``--keep-prompt-open-on-waiting``) keeps it open.
+        self._end_turn_on_waiting = end_turn_on_waiting
         self._sessions_dir = sessions_dir
         # By store directory: two workspaces sharing one directory share a registry.
         self._registries: dict[Path, SessionRegistry] = {}
@@ -699,9 +705,12 @@ class AtomACPAgent:
         The text is submitted on ``user_messages`` and the request waits for
         the outcome of the turn that consumes it: the next turn, or the
         running one if the model takes the pending message from its queue
-        (the queues context block lists it). A ``Waiting`` outcome keeps the
-        request open, and so do messages Pool hands over during the prompt
-        (``_pool_steer``) until they are handled. Stop answers a waiting
+        (the queues context block lists it). A ``Waiting`` outcome answers
+        ``end_turn`` by default (the turns the awaited work starts stream as
+        plain updates); with ``end_turn_on_waiting=False`` it keeps the
+        request open, and
+        so do messages Pool hands over during the prompt (``_pool_steer``)
+        until they are handled. Stop answers a waiting
         prompt ``cancelled`` and withdraws its message if no turn took it.
         ``/name`` prompts naming a
         session command run the command. To steer a running turn, clients
@@ -1274,6 +1283,7 @@ class AtomACPAgent:
             bridge.pool_dialects = self._pool_dialects
         bridge.set_verbosity(load_acp_verbosity(session.options.workspace))
         self._bridges[session.id] = bridge
+        session.waiting_ends_outcome = self._end_turn_on_waiting
 
         def on_update(update: Any) -> None:
             if isinstance(update, CommandsChangedUpdate):
@@ -1638,6 +1648,7 @@ async def serve(
     sessions_dir: Path | None = None,
     agent_spec: str | None = None,
     model: str | None = None,
+    end_turn_on_waiting: bool = True,
     observers: list[Callable[[Any], None]] | None = None,
     input_fd: int | None = None,
     output_fd: int | None = None,
@@ -1647,10 +1658,14 @@ async def serve(
     ``input_fd`` and ``output_fd`` are the descriptors frames are read from
     and written to when stdio was reserved for ACP
     (``cli.reserve_stdio_for_acp``); ``None`` uses the process's stdio.
-    ``new_registry`` and ``sessions_dir`` are as for ``AtomACPAgent``.
+    The other options are as for ``AtomACPAgent``.
     """
     adapter = AtomACPAgent(
-        new_registry, sessions_dir=sessions_dir, agent_spec=agent_spec, model=model
+        new_registry,
+        sessions_dir=sessions_dir,
+        agent_spec=agent_spec,
+        model=model,
+        end_turn_on_waiting=end_turn_on_waiting,
     )
     # ACP clients may terminate their subprocess instead of closing stdin.
     # Let normal teardown checkpoint sessions and release their file claims.
