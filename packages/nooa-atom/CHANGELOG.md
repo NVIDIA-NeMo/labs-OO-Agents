@@ -7,6 +7,13 @@ based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- `nooa-atom`: with `NEMO_RELAY_PLUGIN_CONFIG_PATH` naming a NeMo Relay
+  `plugins.toml`, each turn of an ACP session is one Relay trace
+  (`invoke_agent atom` over `chat` and `execute_tool` spans, a delegated
+  child's turns inside the caller's) with `session_id`, `agent_kind` and
+  `NEMO_RELAY_SESSION_METADATA` on every event (and a delegated child's own id
+  as `subagent_session_id`); see the README.
+  Unset, nothing changes.
 - Workspace trust (#231). In a folder you have not trusted, Atom loads no
   skills from it (nothing from `.nooa/skills`, the workspace's
   `.agents`/`.cursor`/`.claude` skill directories or the skill directories of
