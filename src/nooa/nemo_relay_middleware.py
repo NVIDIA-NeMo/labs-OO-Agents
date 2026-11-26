@@ -28,6 +28,11 @@ Requirements:
     ``nemo_relay`` must be installed (``uv sync --extra nemo-relay``).
     If not installed, ``install_nemo_relay()`` and ``nemo_relay_scope()`` raise
     ``ImportError`` with install instructions.
+
+Redaction:
+    Use Relay LLM sanitize-response guardrails to redact output before response
+    decoding. A scope-end event sanitizer runs later and must redact both the
+    raw ``data.choices[0].message`` and ``category_profile.annotated_response``.
 """
 
 from __future__ import annotations

@@ -27,7 +27,9 @@ to follow semantic versioning.
   at `choices[0].message`, cached tokens at
   `usage.prompt_tokens_details.cached_tokens` and reasoning tokens at
   `usage.completion_tokens_details.reasoning_tokens`, and a zero `cost_usd`
-  is left out.
+  is left out. Scope-end event redactors must also sanitize
+  `category_profile.annotated_response`; LLM sanitize-response guardrails run
+  before decoding and cover both representations.
 - Dependency security update. Pydantic is now locked at 2.14.3 with
   pydantic-core 2.50.4, and the `pydantic` requirement starts at 2.14.2, the
   first release that fixes CVE-2026-133276, CVE-2026-133421 and

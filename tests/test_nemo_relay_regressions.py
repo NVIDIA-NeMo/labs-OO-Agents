@@ -148,6 +148,7 @@ async def test_sanitizers_redact_chat_responses_and_tool_values():
         await relay.subscribers.flush_async()
         outputs = [e.data for e in events if getattr(e, "scope_category", None) == "end"]
         assert "SECRET" not in json.dumps(outputs)
+        assert "SECRET" not in json.dumps([event.to_dict() for event in events])
         llm = next(
             e.data
             for e in events
@@ -174,6 +175,8 @@ async def test_max_priority_event_sanitizer_redacts_chat_responses():
                     data["choices"][0]["message"]["content"] = data["choices"][0]["message"][
                         "content"
                     ].replace("SECRET", "REDACTED")
+                    profile = fields["category_profile"]["annotated_response"]
+                    profile["message"] = profile["message"].replace("SECRET", "REDACTED")
                 elif event.category == "tool" and isinstance(data, str):
                     data = data.replace("SECRET", "REDACTED")
                 return {**fields, "data": data, "metadata": None}
@@ -199,6 +202,7 @@ async def test_max_priority_event_sanitizer_redacts_chat_responses():
         assert "REDACTED tool" in json.dumps(outputs)
         assert any(isinstance(value, dict) and "choices" in value for value in outputs)
         assert "REDACTED tool" in outputs
+        assert "SECRET" not in json.dumps([event.to_dict() for event in events])
         assert all(
             e.metadata is None
             for e in events
