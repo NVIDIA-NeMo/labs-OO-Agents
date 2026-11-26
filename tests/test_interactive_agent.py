@@ -2,9 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for nooa.interactive — the dispatcher-driven agent base.
 
-Deeper behavioral coverage (dispatcher loop, snapshot restore, echo hooks)
-lives with the TUI package, whose BaseTUIAgent subclasses this. These tests
-pin the core contract the ARC-AGI-3 example and other hosts rely on.
+These tests pin the core contract the ARC-AGI-3 example and other hosts rely on.
 """
 
 import json
@@ -315,25 +313,6 @@ def test_install_summarizer_attaches(agent):
 def test_summarization_threshold_fraction_must_be_between_zero_and_one(fraction):
     with pytest.raises(ValidationError):
         SummarizationConfig(threshold_fraction=fraction)
-
-
-def test_interactive_agent_has_no_web_attribute(monkeypatch):
-    """self.web was removed: no attribute, no doc(self) entry, no "web" context block,
-    whether or not NEMO_OO_RICH_URL is set."""
-    from nooa.agentdoc import doc
-    from nooa.interactive import InteractiveAgent
-
-    for url in (None, "http://localhost:1234/rich"):
-        if url is None:
-            monkeypatch.delenv("NEMO_OO_RICH_URL", raising=False)
-        else:
-            monkeypatch.setenv("NEMO_OO_RICH_URL", url)
-        agent = InteractiveAgent()
-        assert not hasattr(agent, "web")
-        rendered = doc(agent)
-        assert "WebPublisher" not in rendered
-        assert "web:" not in rendered
-        assert "web" not in agent.context
 
 
 def test_need_input_roundtrip_and_extra_rejection():

@@ -27,10 +27,10 @@ from nooa_cli.sessions.events import (
 
 logger = logging.getLogger(__name__)
 
-_START_EVENT_TYPES = frozenset(("SessionStarted", "TUISessionStart"))
-_TITLE_EVENT_TYPES = frozenset(("SessionTitleUpdated", "TUISessionRename"))
-_USER_EVENT_TYPES = frozenset(("SessionUserMessage", "TUIUserInput"))
-_AGENT_EVENT_TYPES = frozenset(("AgentMessage", "TUIAgentMessage"))
+_START_EVENT_TYPES = frozenset(("SessionStarted",))
+_TITLE_EVENT_TYPES = frozenset(("SessionTitleUpdated",))
+_USER_EVENT_TYPES = frozenset(("SessionUserMessage",))
+_AGENT_EVENT_TYPES = frozenset(("AgentMessage",))
 _TURN_EVENT_TYPES = _USER_EVENT_TYPES | _AGENT_EVENT_TYPES
 
 
@@ -298,19 +298,19 @@ class SessionStore:
             try:
                 start_row = connection.execute(
                     "SELECT event_type, data FROM events "
-                    "WHERE event_type IN (?, ?) ORDER BY insertion_order LIMIT 1",
+                    "WHERE event_type IN (?) ORDER BY insertion_order LIMIT 1",
                     tuple(_START_EVENT_TYPES),
                 ).fetchone()
                 if start_row is None:
                     return None
 
                 title_rows = connection.execute(
-                    "SELECT data FROM events WHERE event_type IN (?, ?) ORDER BY insertion_order",
+                    "SELECT data FROM events WHERE event_type IN (?) ORDER BY insertion_order",
                     tuple(_TITLE_EVENT_TYPES),
                 ).fetchall()
                 turn_count = int(
                     connection.execute(
-                        "SELECT COUNT(*) FROM events WHERE event_type IN (?, ?)",
+                        "SELECT COUNT(*) FROM events WHERE event_type IN (?)",
                         tuple(_USER_EVENT_TYPES),
                     ).fetchone()[0]
                 )
@@ -326,7 +326,6 @@ class SessionStore:
         start = self._decode_data(start_row[1], path)
         if start is None:
             return None
-        start_event_type = str(start_row[0])
         started_at = self._timestamp(start, fallback=fallback)
         last_active = fallback
         if last_row is not None:
@@ -355,15 +354,7 @@ class SessionStore:
             working_directory=str(start.get("working_directory", start.get("working_dir", ""))),
             title=title,
             title_is_user_set=title_is_user_set,
-            origin=str(
-                start.get(
-                    "origin",
-                    start.get(
-                        "host",
-                        "tui" if start_event_type == "TUISessionStart" else "",
-                    ),
-                )
-            ),
+            origin=str(start.get("origin", start.get("host", ""))),
         )
 
     @staticmethod

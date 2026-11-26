@@ -122,10 +122,10 @@ class SkillWriting(Skill):
     - **Return value = agent prompt.** Don't just dump data — frame it.
       Tell the agent what the data means and what actions are available.
     - **``completions``** — tuple of subcommand names for tab-completion.
-      The TUI autocompletes ``/check <tab>`` → ``deps``, ``lint``, ``tests``.
+      A host can autocomplete ``/check <tab>`` → ``deps``, ``lint``, ``tests``.
     - **``argument_hint``** — shown in ``/help`` and tab-completion display.
     - **``output_to_agent=False``** — show the command's output to the user
-      in the TUI only, without spending an agent turn (useful for read-only
+      in the host only, without spending an agent turn (useful for read-only
       list/status commands).
     - Slash commands are discovered automatically when a skill is activated
       or hot-reloaded. No manual registration needed.

@@ -242,8 +242,8 @@ class ConnectCommand(click.Command):
     type=click.Path(file_okay=False, dir_okay=True, path_type=str),
     help=(
         "Save to this project's registry (<working-dir>/.nooa/llm_config.yaml) "
-        "instead of the user-global one — the same file `nooa tui -w <working-dir>` "
-        "reads. Mutually exclusive with --output."
+        "instead of the user-global one — the project file NOOA reads when it runs "
+        "in <working-dir>. Mutually exclusive with --output."
     ),
 )
 @click.option(

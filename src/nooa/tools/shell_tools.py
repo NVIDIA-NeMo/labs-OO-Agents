@@ -919,7 +919,7 @@ class ShellTools(Skill):
         self.max_file_bytes: int = max_file_bytes
         # Construct the session eagerly (it starts lazily on first run) so a
         # consumer wired at construction time — e.g. RepoTools(session=shell.session)
-        # in the TUI — shares this shell's bash session instead of capturing None.
+        # in a host — shares this shell's bash session instead of capturing None.
         # ``init_command`` (if given) runs once on session start, before any user
         # command, to set up the environment (e.g. activate a conda env).
         # ``keep_background_on_close`` lets background jobs outlive close().

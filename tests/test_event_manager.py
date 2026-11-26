@@ -1032,7 +1032,7 @@ def test_set_backend_preserves_subscribers():
 
     Regression for the silent-preview bug — when ``/clear`` swapped the
     agent's storage, the old EventManager went away with it and any
-    handler subscribed at startup (e.g. the TUI's AgentEventRenderer)
+    handler subscribed at startup (e.g. a host's event renderer)
     pointed at a dead manager. The structural fix moves backend swap
     onto a stable EventManager so subscribers keep firing across the
     swap.
@@ -1081,7 +1081,7 @@ def test_set_backend_resets_tag_allocation_to_new_backend():
 def test_multiple_managers_share_backend_without_tag_collision():
     """Two EventManagers writing through the same backend never reuse a tag.
 
-    This is the invariant that lets the TUI's SessionManager keep a
+    This is the invariant that lets a host's SessionManager keep a
     light EventManager bound to the storage backend while the agent
     uses its own stable EventManager — both safe because tag allocation
     lives on the backend.

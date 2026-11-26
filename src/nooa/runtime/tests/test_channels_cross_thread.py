@@ -3,14 +3,14 @@
 """Cross-thread Channel and QueueManager tests.
 
 Parameterized to run both same-loop (baseline regression) and cross-loop
-(the TUI agent-thread scenario). Every test verifies the identical
+(a host's agent-thread scenario). Every test verifies the identical
 observable behavior regardless of whether producer and consumer share a
 loop.
 
 The ``mode`` fixture controls threading:
 - ``"same_loop"`` — producer and consumer on the test's event loop.
 - ``"cross_loop"`` — consumer on the test's loop, producer on a
-  background thread with its own loop (mirrors TUI: UI thread produces,
+  background thread with its own loop (mirrors a host: UI thread produces,
   agent thread consumes).
 """
 
@@ -171,9 +171,8 @@ async def test_put_to_cancelled_waiter_rebuffers(producer: ProducerHelper, mode:
 
 async def test_on_get_fires_exactly_once(producer: ProducerHelper, mode: str):
     """on_get callback fires once per delivered item."""
-    ch = Channel[str]("test", "queue")
     fired: list[str] = []
-    ch.set_on_get(fired.append)
+    ch = Channel[str]("test", "queue", on_get=fired.append)
 
     producer.call(lambda: ch.put("x"))
     await asyncio.sleep(0.05)
@@ -183,9 +182,8 @@ async def test_on_get_fires_exactly_once(producer: ProducerHelper, mode: str):
 
 async def test_on_get_fires_on_pre_buffered_item(producer: ProducerHelper, mode: str):
     """on_get fires even when the item was already buffered before get()."""
-    ch = Channel[str]("test", "queue")
     fired: list[str] = []
-    ch.set_on_get(fired.append)
+    ch = Channel[str]("test", "queue", on_get=fired.append)
 
     producer.call(lambda: ch.put("buffered"))
     await asyncio.sleep(0.05)
@@ -236,16 +234,6 @@ async def test_has_waiters_true_when_get_blocked(mode: str):
     ch.put("release")
     await task
     assert ch.has_waiters() is False
-
-
-async def test_pop_last_removes_tail(producer: ProducerHelper, mode: str):
-    ch = Channel[str]("test", "queue")
-    producer.call(lambda: ch.put("first"))
-    producer.call(lambda: ch.put("second"))
-    await asyncio.sleep(0.05)
-
-    assert ch.pop_last() == "second"
-    assert ch.snapshot() == ["first"]
 
 
 async def test_flush_discards_buffered_items(mode: str):

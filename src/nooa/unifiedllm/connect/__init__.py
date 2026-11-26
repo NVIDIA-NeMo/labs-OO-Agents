@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Connect: set up and test a model entry, shared by the CLI and TUI.
+"""Connect: set up and test a model entry, shared by the CLI and other hosts.
 
 This module holds the logic only; it never prompts the user or prints.
 

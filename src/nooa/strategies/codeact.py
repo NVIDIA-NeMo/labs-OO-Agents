@@ -3586,7 +3586,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                 "framework_bindings": self._framework_bindings(runtime),
             }
 
-        # Track this execution so the /activity slash command can report that
+        # Track this execution so debug tooling can report that
         # the agent is currently running a code cell (vs blocked on an LLM call).
         from nooa.runtime.debug_handler import code_exec_context
 

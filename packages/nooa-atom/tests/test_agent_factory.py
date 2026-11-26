@@ -116,7 +116,7 @@ async def test_a_settings_file_from_before_legacy_agent_was_removed_still_loads(
 
     (workspace / ".nooa").mkdir()
     (workspace / ".nooa" / "settings.yaml").write_text(
-        "tui:\n  legacy_agent: true\natom:\n  legacy_agent: true\n  default_model: m\n"
+        "atom:\n  legacy_agent: true\n  default_model: m\n"
     )
     options = AtomOptions.load(workspace)
     assert options.default_model == "m"
@@ -243,9 +243,8 @@ def test_kwargs_are_not_forced_on_an_unrelated_agent(workspace):
 @pytest.mark.parametrize(
     "spec",
     [
-        "nooa_cli.tui.agent:TUIAgent",
-        "nooa_cli.coding.legacy_agent:TUIAgent",
         "nooa_cli.coding.agent:CodingAgent",
+        "nooa_coder.coding.agent:CodingAgent",
     ],
 )
 def test_legacy_agent_specs_load_the_moved_class(spec):

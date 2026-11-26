@@ -4,7 +4,7 @@
 
 Reproduces the failure where BashSession's internal asyncio.Lock gets bound
 to one event loop via contention, then fails on a different loop. This mirrors
-the TUI architecture where the agent loop can be recreated after crashes.
+an interactive host where the agent loop can be recreated after crashes.
 
 The bug triggers specifically when:
 1. Concurrent run() calls cause Lock contention (_get_loop() binds the Lock)
@@ -25,7 +25,7 @@ class TestCrossLoopLockContention:
     async def test_lock_survives_loop_restart_under_contention(self, tmp_path):
         """BashSession Lock contends on loop A, loop closed, contends on loop B.
 
-        This is the exact TUI failure mode: agent loop processes concurrent
+        This is the exact host failure mode: agent loop processes concurrent
         shell commands, then crashes/restarts, then processes concurrent
         commands again on a new loop.
         """

@@ -8,7 +8,7 @@ Stdlib-only — run with any python:
 
 What it does:
 1. creates ``results/arc_agi_3/nemo_solver/<ts>_<game>_<variant>/`` (+ ipc/),
-2. starts launcher.py as a headless subprocess (no TUI / tmux required),
+2. starts launcher.py as a headless subprocess (no tmux required),
 3. starts harness.py in this venv (the `arc` extra provides the arcade SDK),
 4. waits for the harness to finish and prints the result summary.
 """

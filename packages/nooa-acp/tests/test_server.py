@@ -211,7 +211,7 @@ def _write_external_workflow_skill(workspace, skills_root) -> None:
     config_dir = workspace / ".nooa"
     config_dir.mkdir()
     (config_dir / "settings.yaml").write_text(
-        f"tui:\n  additional_skills_dirs:\n    - {skills_root}\n"
+        f"coding:\n  additional_skills_dirs:\n    - {skills_root}\n"
     )
 
 

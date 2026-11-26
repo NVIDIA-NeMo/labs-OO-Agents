@@ -22,6 +22,28 @@ to follow semantic versioning.
   first release that fixes CVE-2026-133276, CVE-2026-133421 and
   CVE-2026-133424. This applies to the root project, nooa-memory, nooa-atom
   and the cybergym example.
+- Leftovers of the native TUI (`nooa tui` / `nooa term`, removed earlier) are
+  deleted, with no deprecation period:
+  - `nooa.tools.web_publisher` (`WebPublisher`, `RichOutput`) and the
+    `nemo.web` skill entry point are removed.
+  - `nooa.runtime.debug_handler.get_activity` and `attach_activity_tracking`
+    are removed.
+  - `Channel.set_on_get()` and `Channel.pop_last()` are removed; pass
+    `on_get=` when the channel is created (`QueueManager.queue(name, on_get=...)`).
+  - The `tui:` section of `settings.yaml` is no longer read by any host. Move
+    its keys to `atom:` (NOOA Atom) or `coding:` (nooa-acp):
+    `tui.additional_skills_dirs`, `tui.mcp_servers`, `tui.default_model`,
+    `tui.active_skills` and the other behaviour settings. `nooa config set
+    tui.<key>` now writes a `tui` key that nothing reads.
+  - `.nooa/config.toml` (`[tui].libs_dirs`) is no longer read; use
+    `additional_skills_dirs` in `.nooa/settings.yaml`.
+  - Sessions written by the old TUI are no longer listed or resumable:
+    `TUISessionStart`, `TUISessionRename`, `TUIUserInput` and
+    `TUIAgentMessage` rows are not read, stored `TuiSessionResumed` /
+    `TuiSessionCleared` rows load as generic events, and the `TUIAgent` /
+    `ExperimentalTUIAgent` agent specs no longer resolve.
+  - `nooa config show` summarizes the `atom`, `coding` and `agent` sections
+    (it named `tui` before).
 - Dependency security update. LiteLLM is now locked at 1.100.5
   (CVE-2026-114612); the `litellm` requirement starts at 1.100.4 and excludes
   the unfixed 1.101-1.103 releases. LiteLLM now requires boto3. Chat

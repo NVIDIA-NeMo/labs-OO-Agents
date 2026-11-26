@@ -76,7 +76,7 @@ return type. Its action chooses one of three append-only recovery paths:
 |---|---|
 | `TextOnlyResponseAction.return_result(value)` | Validate `value` through CodeAct's normal result path. Invalid values produce model-visible correction feedback. |
 | `TextOnlyResponseAction.retry(*events)` | Append feedback events, then ask the model again. |
-| `TextOnlyResponseAction.tool_calls(*calls)` | Run synthetic calls while retaining the original assistant turn. Use `execute_python`, not TUI-only tools. |
+| `TextOnlyResponseAction.tool_calls(*calls)` | Run synthetic calls while retaining the original assistant turn. Use `execute_python`, not host-only tools. |
 
 The safe default is `retry_text_only_response`: it appends an `Error` asking
 the model to call `return_result(value)` or `execute_python(code)`, then retries.

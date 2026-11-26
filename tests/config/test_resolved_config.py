@@ -74,9 +74,9 @@ class TestResolvedConfig:
         assert rc.secrets.env["K"].get_secret_value() == "realvalue"
 
     def test_settings_carried_as_dict(self, _isolate):
-        (_isolate / "settings.yaml").write_text("tui:\n  default_model: foo\n")
+        (_isolate / "settings.yaml").write_text("atom:\n  default_model: foo\n")
         rc = resolved_config()
-        assert rc.settings == {"tui": {"default_model": "foo"}}
+        assert rc.settings == {"atom": {"default_model": "foo"}}
 
     def test_models_are_typed(self, _isolate):
         (_isolate / "llm_config.yaml").write_text(
@@ -93,7 +93,7 @@ class TestResolvedConfig:
 
     def test_sources_lists_winning_files(self, _isolate, monkeypatch):
         s = _isolate / "settings.yaml"
-        s.write_text("tui: {}\n")
+        s.write_text("atom: {}\n")
         rc = resolved_config()
         assert str(s.resolve()) in rc.sources["settings"]
 

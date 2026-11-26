@@ -14,6 +14,15 @@ based on [Keep a Changelog](https://keepachangelog.com/).
   `NEMO_RELAY_SESSION_METADATA` on every event (and a delegated child's own id
   as `subagent_session_id`); see the README.
   Unset, nothing changes.
+- `nooa-atom`: compatibility with the removed native TUI is deleted. Atom no
+  longer reads the `tui:` settings section (`tui.additional_skills_dirs`,
+  `tui.mcp_servers`, the behaviour settings; move them to `atom:`), the
+  `.nooa/config.toml` `[tui].libs_dirs` key, or the old TUI's session
+  claims (`<id>.active/owner-*.json`). `canonical_setting_path` no longer
+  maps `tui.*` to `atom.*`. Sessions the old TUI wrote are no longer listed
+  or resumable (`TUISessionStart`/`TUISessionRename` events and the
+  `TUIAgent`/`ExperimentalTUIAgent` agent specs). The `coding` → `atom`
+  copy (`copy_coding_settings`) stays for nooa-acp settings.
 - `nooa-atom`: reflection. The `nemo.reflection` skill posts a housekeeping
   message on a root session's `system_messages` queue when one is due (20
   turns or 60 minutes since the last, or the context half full; at least 5

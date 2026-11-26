@@ -34,7 +34,7 @@ import sys
 import threading
 import time
 import traceback
-from collections.abc import Callable, Generator
+from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -100,8 +100,6 @@ def get_pending_llm_calls() -> list[dict[str, Any]]:
 
     Each entry carries ``call_id`` plus the metadata recorded at
     ``register_llm_call`` time and a live ``elapsed`` (seconds) field.
-    Used by the ``/activity`` slash command to report whether the agent
-    is blocked waiting on a model response.
     """
     now = time.monotonic()
     with _llm_call_lock:
@@ -142,7 +140,7 @@ def unregister_code_exec(exec_id: str) -> None:
 
 @contextmanager
 def code_exec_context(code: str | None = None) -> Generator[str, None, None]:
-    """Context manager tracking a Python code execution for ``/activity``."""
+    """Context manager tracking an in-flight Python code execution."""
     exec_id = register_code_exec(code)
     try:
         yield exec_id
@@ -163,33 +161,6 @@ def get_pending_code_execs() -> list[dict[str, Any]]:
         out.append(entry)
     out.sort(key=lambda e: e["start_time"])
     return out
-
-
-def get_activity() -> dict[str, Any]:
-    """Best-effort snapshot of what the agent is doing *right now*.
-
-    Returns a dict with:
-        - ``phase``: the *primary* activity — one of ``"executing_python"``,
-          ``"waiting_llm"``, ``"idle"``. ``executing_python`` wins when both are
-          in flight: an LLM call made from inside a running cell means the agent
-          is executing code that is itself blocked on the model. The full
-          ``code_execs``/``llm_calls`` lists below are always complete, so a
-          caller wanting to surface concurrent LLM calls reads those directly.
-        - ``code_execs``: list from ``get_pending_code_execs()``.
-        - ``llm_calls``: list from ``get_pending_llm_calls()``.
-
-    This reads process-global registries, so it reflects the live state even
-    when called from a different thread (e.g. a slash command handler).
-    """
-    code_execs = get_pending_code_execs()
-    llm_calls = get_pending_llm_calls()
-    if code_execs:
-        phase = "executing_python"
-    elif llm_calls:
-        phase = "waiting_llm"
-    else:
-        phase = "idle"
-    return {"phase": phase, "code_execs": code_execs, "llm_calls": llm_calls}
 
 
 @contextmanager
@@ -417,8 +388,8 @@ def install_debug_handler(dump_dir: Path | None = None) -> None:
         return
 
     # Enable basic faulthandler for segfaults etc.
-    # Best-effort: skip when stderr lacks a real file descriptor (Textual TUI,
-    # Jupyter notebooks, or any host that replaces sys.stderr).
+    # Best-effort: skip when stderr lacks a real file descriptor (Jupyter
+    # notebooks, or any host that replaces sys.stderr).
     try:
         faulthandler.enable()
     except (RuntimeError, AttributeError, OSError) as exc:
@@ -447,54 +418,3 @@ def dump_debug_info(file: IO[str] | None = None) -> None:
     file.write("\n--- Manual debug dump ---\n")
     _dump_pending_llm_calls(file)
     _dump_cell_code(file)
-
-
-# ---------------------------------------------------------------------------
-# Event-driven activity tracking (LLMCallStart / LLMCallEnd "on" hooks)
-# ---------------------------------------------------------------------------
-
-
-def attach_activity_tracking(event_manager: Any) -> Callable[[], None]:
-    """Subscribe to ``LLMCallStart`` / ``LLMCallEnd`` on *event_manager* so
-    ``get_activity()`` reflects in-flight LLM calls without relying on the
-    unifiedllm context manager.
-
-    These are ``on()`` (observer) hooks — fire-and-forget, after the event is
-    emitted. Each ``LLMCallStart`` registers a pending call keyed by
-    ``(generation_id, turn_number)``; the matching ``LLMCallEnd`` unregisters
-    it (whether the call succeeded or raised).
-
-    Returns an unsubscribe callable that removes both handlers and clears any
-    calls this tracker still has registered.
-    """
-    # generation_id + turn_number → registry call_id from register_llm_call.
-    live: dict[tuple[str, int], str] = {}
-
-    def _key(event: Any) -> tuple[str, int]:
-        return (getattr(event, "generation_id", ""), getattr(event, "turn_number", 0))
-
-    def _on_start(event: Any) -> None:
-        call_id = register_llm_call(
-            model=getattr(event, "strategy", "") or "llm",
-            endpoint=getattr(event, "method_name", None),
-            generation_id=getattr(event, "generation_id", ""),
-            turn_number=getattr(event, "turn_number", 0),
-        )
-        live[_key(event)] = call_id
-
-    def _on_end(event: Any) -> None:
-        call_id = live.pop(_key(event), None)
-        if call_id is not None:
-            unregister_llm_call(call_id)
-
-    unsub_start = event_manager.on("LLMCallStart", _on_start)
-    unsub_end = event_manager.on("LLMCallEnd", _on_end)
-
-    def _unsubscribe() -> None:
-        unsub_start()
-        unsub_end()
-        for call_id in live.values():
-            unregister_llm_call(call_id)
-        live.clear()
-
-    return _unsubscribe

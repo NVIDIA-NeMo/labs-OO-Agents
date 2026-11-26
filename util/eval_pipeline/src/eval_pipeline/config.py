@@ -148,7 +148,7 @@ def _resolve_registry_model(registry_name: str, overrides: dict | None = None) -
     Raises:
         ValueError: If the registry name is not found.
     """
-    # eval_pipeline is launched as a standalone CLI without the TUI
+    # eval_pipeline is launched as a standalone CLI without an interactive host
     # bootstrap, so the registry would otherwise be empty. Trigger the
     # lazy auto-load before reading MODELS.
     from nooa.unifiedllm.registry import MODELS, _registry_lock, ensure_loaded

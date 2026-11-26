@@ -198,22 +198,22 @@ def test_refresh_noop_for_own_writes(emb):
 # ---------------------------------------------------------------------------
 def test_rename_owner_restamps_rows(emb):
     store = MemoryStore(":memory:")
-    a = _add(store, emb, "legacy row one", owner="pkg.module:TUIAgent")
-    b = _add(store, emb, "legacy row two", owner="pkg.module:TUIAgent")
+    a = _add(store, emb, "legacy row one", owner="pkg.module:AtomAgent")
+    b = _add(store, emb, "legacy row two", owner="pkg.module:AtomAgent")
     keep = _add(store, emb, "someone else's row", owner="bob")
 
-    assert store.rename_owner("pkg.module:TUIAgent", "TUIAgent") == 2
-    assert store.get(a.id).owner == "TUIAgent"
-    assert store.get(b.id).owner == "TUIAgent"
+    assert store.rename_owner("pkg.module:AtomAgent", "AtomAgent") == 2
+    assert store.get(a.id).owner == "AtomAgent"
+    assert store.get(b.id).owner == "AtomAgent"
     assert store.get(keep.id).owner == "bob"
     # idempotent: nothing left under the old spelling
-    assert store.rename_owner("pkg.module:TUIAgent", "TUIAgent") == 0
+    assert store.rename_owner("pkg.module:AtomAgent", "AtomAgent") == 0
     store.close()
 
 
 def test_rename_owner_never_claims_unowned(emb):
     store = MemoryStore(":memory:")
     _add(store, emb, "shared row")  # owner=""
-    assert store.rename_owner("", "TUIAgent") == 0
+    assert store.rename_owner("", "AtomAgent") == 0
     assert store.all_memories()[0].owner == ""
     store.close()

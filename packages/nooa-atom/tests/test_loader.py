@@ -126,7 +126,7 @@ def test_bad_file_specs_are_rejected(tmp_path, body):
     "spec",
     [
         "nooa_atom.agent:ExperimentalAtomAgent",
-        "nooa_cli.coding.experimental_agent:ExperimentalTUIAgent",
+        "nooa_cli.coding.experimental_agent:ExperimentalCodingAgent",
     ],
 )
 def test_removed_experimental_agent_specs_load_the_atom_agent(spec):

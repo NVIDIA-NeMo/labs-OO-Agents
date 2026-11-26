@@ -102,12 +102,6 @@ for _cls in (
         )
     _CORE_TYPES[_key] = _cls
 
-# Stored event_type -> the current one, for event classes that were renamed.
-_RENAMED_EVENT_TYPES: dict[str, str] = {
-    "TuiSessionResumed": "SessionResumed",
-    "TuiSessionCleared": "SessionCleared",
-}
-
 _SCHEMA_VERSION = 1
 
 _SCHEMA = """\
@@ -211,7 +205,7 @@ class CorruptDatabaseError(sqlite3.DatabaseError):
     """Raised when a write fails because the SQLite file is corrupt.
 
     Subclasses sqlite3.DatabaseError so existing ``except sqlite3.Error``
-    handlers still catch it, while giving callers (e.g. the TUI) a typed
+    handlers still catch it, while giving callers (e.g. an interactive host) a typed
     signal to surface recovery guidance instead of an opaque crash.
     """
 
@@ -308,8 +302,6 @@ class SQLiteEventBackend:
         if event_type == "LLMOutput":
             raw["event_type"] = "LLMResponse"
             return LLMResponse.model_validate(raw, context={"archive": True})
-        if event_type in _RENAMED_EVENT_TYPES:  # rows stored under an older class name
-            event_type = raw["event_type"] = _RENAMED_EVENT_TYPES[event_type]
         cls = self._registry.get(event_type)
         if cls is None:
             # Fall back to the global auto-registration registry

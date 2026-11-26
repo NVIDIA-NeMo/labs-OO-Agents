@@ -5,8 +5,8 @@
 One layered ``settings.yaml`` holds them for every interactive host:
 the user file, the project ``.nooa/`` file and the files ``NEMO_OO_SETTINGS``
 names, highest priority last (``load_settings_layers``). Atom reads and
-writes its ``atom`` section. The TUI and ``nooa-acp`` keep using
-``coding``, the section Atom used to share with them: the first time Atom
+writes its ``atom`` section. ``nooa-acp`` keeps using ``coding``, the
+section Atom used to share with it: the first time Atom
 reads a settings file that has ``coding`` and no ``atom``, it copies one to
 the other (``copy_coding_settings``), and from then on each section changes
 on its own.
@@ -15,7 +15,6 @@ on its own.
 from __future__ import annotations
 
 import logging
-import os
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
 from functools import lru_cache
@@ -29,10 +28,9 @@ SETTINGS_ENV_VAR = "NEMO_OO_SETTINGS"
 SETTINGS_SECTION = "atom"
 """The ``settings.yaml`` section that holds Atom's settings."""
 CODING_SECTION = "coding"
-"""The section the TUI and ``nooa-acp`` read, which Atom copies from once."""
+"""The section ``nooa-acp`` reads, which Atom copies from once."""
 logger = logging.getLogger(__name__)
 
-_LEGACY_CONFIG_FILENAME = "config.toml"
 _WORKSPACE_SKILL_DIRS = (
     Path(".agents/skills"),
     Path(".cursor/skills"),
@@ -53,43 +51,14 @@ def load_skills_dirs(
 ) -> list[Path]:
     """Return existing skill roots for one Atom workspace.
 
-    ``atom.additional_skills_dirs`` is preferred; the legacy
-    ``tui.additional_skills_dirs`` is read when it is absent. Relative
-    configured paths are resolved against the active workspace, not the ACP
-    server process's checkout.
+    Reads ``atom.additional_skills_dirs``. Relative configured paths are
+    resolved against the active workspace, not the ACP server process's
+    checkout.
     """
     root = Path(workspace).expanduser().resolve()
     copy_coding_settings(root / ".nooa")
     settings = load_settings_layers(root / ".nooa")
-
-    configured: list[str | Path] = []
-    atom = settings.get(SETTINGS_SECTION)
-    section = (
-        SETTINGS_SECTION
-        if isinstance(atom, Mapping) and "additional_skills_dirs" in atom
-        else "tui"
-    )
-    if section == "tui" and isinstance(settings.get("tui"), Mapping):
-        if "additional_skills_dirs" in settings["tui"]:
-            logger.warning(
-                "Reading legacy tui.additional_skills_dirs; use atom.additional_skills_dirs"
-            )
-    configured.extend(_setting_paths(settings, section))
-    # A workspace's old config.toml is still a workspace layer. Do not let an
-    # unrelated user-level settings.yaml silently suppress it. A modern
-    # workspace settings file supersedes the legacy file, and an explicit
-    # NEMO_OO_SETTINGS file remains a full override.
-    project_settings = _read_project_settings(root / ".nooa" / SETTINGS_FILENAME)
-    # Presence of the key, not truthiness of its value: `additional_skills_dirs: []`
-    # is an explicit "none", and treating it as absent silently resurrected the
-    # legacy paths the user had just emptied.
-    modern_key_set = any(
-        isinstance(project_settings.get(section), Mapping)
-        and "additional_skills_dirs" in project_settings[section]
-        for section in (SETTINGS_SECTION, "tui")
-    )
-    if not os.environ.get(SETTINGS_ENV_VAR) and not modern_key_set:
-        configured.extend(_legacy_project_paths(root / ".nooa" / _LEGACY_CONFIG_FILENAME))
+    configured = _setting_paths(settings, SETTINGS_SECTION)
 
     candidates: list[Path] = []
     candidates.extend(_resolve_configured(path, root) for path in explicit)
@@ -134,50 +103,11 @@ def _resolve_configured(path: str | Path, workspace: Path) -> Path:
     return candidate if candidate.is_absolute() else workspace / candidate
 
 
-def _read_project_settings(path: Path) -> Mapping[str, Any]:
-    if not path.is_file():
-        return {}
-    import yaml
-
-    try:
-        value = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
-        logger.warning("Failed to read Atom settings %s: %s", path, exc)
-        return {}
-    return value if isinstance(value, Mapping) else {}
-
-
-def _legacy_project_paths(path: Path) -> list[str | Path]:
-    """Read the pre-settings-YAML ``[tui].libs_dirs`` compatibility key."""
-    if not path.is_file():
-        return []
-    import tomllib
-
-    try:
-        data = tomllib.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
-        logger.warning("Failed to read legacy Atom settings %s: %s", path, exc)
-        return []
-    tui = data.get("tui")
-    if not isinstance(tui, Mapping):
-        return []
-    value = tui.get("libs_dirs")
-    if isinstance(value, (str, list)):
-        logger.warning(
-            "Reading legacy config.toml tui.libs_dirs; use settings.yaml atom.additional_skills_dirs"
-        )
-    if isinstance(value, str):
-        return [value]
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, str)]
-
-
 @lru_cache(maxsize=1)
 def _warn_ignored_agent_spec() -> None:
     """Report the process-wide agent-selection policy once despite repeated loads."""
     logger.warning(
-        "Ignoring atom.agent_spec and tui.agent_spec in all settings layers "
+        "Ignoring atom.agent_spec in all settings layers "
         "(including user and project settings); select custom agents explicitly "
         "through the host CLI or AtomOptions overrides"
     )
@@ -259,33 +189,28 @@ def _invalid_settings_files(workspace: str | Path) -> list[str]:
 
 
 def resolve_behavior_settings(data: dict[str, Any]) -> dict[str, Any]:
-    """Resolve legacy aliases and partial nested overrides identically for both hosts."""
+    """Resolve the ``agent.summarization`` alias and partial nested overrides identically for both hosts."""
     from .options import AtomOptions
 
     values: dict[str, Any] = {}
     agent = data.get("agent", {})
     if isinstance(agent, dict) and isinstance(agent.get("summarization"), dict):
         values["summarization"] = deepcopy(agent["summarization"])
-    for name in ("tui", SETTINGS_SECTION):
-        section = data.get(name)
-        if not isinstance(section, dict):
+    section = data.get(SETTINGS_SECTION)
+    for key, value in section.items() if isinstance(section, dict) else ():
+        if key == "verbosity":
+            # ACP presentation only; do not pass it to agent options.
             continue
-        if name == "tui" and section:
-            logger.warning("Reading legacy tui settings; move shared behavior settings to atom")
-        for key, value in section.items():
-            if name == SETTINGS_SECTION and key == "verbosity":
-                # ACP presentation only; do not pass it to agent options.
-                continue
-            if key == "agent_spec":
-                _warn_ignored_agent_spec()
-            if key not in behavior_fields():
-                if name == SETTINGS_SECTION and key != "agent_spec":
-                    logger.warning("Ignoring unsupported Atom setting %r", key)
-                continue
-            if key in ("summarization", "reflection") and isinstance(value, dict):
-                values.setdefault(key, {}).update(value)
-            else:
-                values[key] = deepcopy(value)
+        if key == "agent_spec":
+            _warn_ignored_agent_spec()
+        if key not in behavior_fields():
+            if key != "agent_spec":
+                logger.warning("Ignoring unsupported Atom setting %r", key)
+            continue
+        if key in ("summarization", "reflection") and isinstance(value, dict):
+            values.setdefault(key, {}).update(value)
+        else:
+            values[key] = deepcopy(value)
     servers = values.get("mcp_servers")
     if isinstance(servers, dict):
         # forget_mcp() writes ``name: null`` to mask an inherited definition;
@@ -295,10 +220,7 @@ def resolve_behavior_settings(data: dict[str, Any]) -> dict[str, Any]:
 
 
 def canonical_setting_path(path: tuple[str, ...]) -> tuple[str, ...]:
-    if len(path) >= 2 and (
-        (path[0] == "tui" and path[1] in behavior_fields())
-        or (path[0] == "agent" and path[1] == "summarization")
-    ):
+    if len(path) >= 2 and path[0] == "agent" and path[1] == "summarization":
         return (SETTINGS_SECTION, *path[1:])
     return path
 
@@ -377,8 +299,8 @@ def _set_mapping_path(data: dict[str, Any], path: list[str], value: Any) -> None
 def copy_coding_settings(project_dir: Path | None = None) -> None:
     """Copy ``coding`` to ``atom`` in each settings layer that has no ``atom`` yet.
 
-    Atom used to read the ``coding`` section, which the TUI and ``nooa-acp``
-    still use. Each settings file Atom reads (user, project ``project_dir``
+    Atom used to read the ``coding`` section, which ``nooa-acp`` still
+    uses. Each settings file Atom reads (user, project ``project_dir``
     or the files ``NEMO_OO_SETTINGS`` names) that has a ``coding`` mapping
     and no ``atom`` key gets an ``atom`` section with the same settings. The
     copy happens once per file: afterwards the ``atom`` key exists, and a

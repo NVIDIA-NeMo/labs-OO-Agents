@@ -755,7 +755,7 @@ class PurePythonStrategy(CompositeStrategy):
             logger.warning(f"[PURE_PYTHON] Validation errors: {validation_errors}")
             return ExecutionResult(stdout="", error=None, defined_methods={})
 
-        # Track this execution so the /activity slash command can report that
+        # Track this execution so debug tooling can report that
         # the agent is currently running a code cell (vs blocked on an LLM call).
         from nooa.runtime.debug_handler import code_exec_context
 

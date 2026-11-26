@@ -97,7 +97,7 @@ not repinned. Runs from this branch measure today's `AtomAgent` with one
 `handle` and the role table above.
 
 Atom reads its settings from the `atom` section of `settings.yaml` (user and
-workspace `.nooa/`). The TUI and `nooa-acp` read `coding`; the first time
+workspace `.nooa/`). `nooa-acp` reads `coding`; the first time
 Atom reads a settings file that has `coding` and no `atom`, it adds an `atom`
 copy, and the two sections change independently from then on.
 
@@ -111,8 +111,8 @@ yet, and its API may change until the hosts switch over to it. The ACP
 adapter and the benchmark host move onto it in later changes.
 
 Sessions are stored per workspace, in `<workspace>/.nooa/sessions`
-(`sessions_root(workspace)`), where the `nooa-acp` server and the TUI keep
-theirs; sessions they wrote are listed and load, with their saved agent
+(`sessions_root(workspace)`), where the `nooa-acp` server keeps
+its own; sessions it wrote are listed and load, with their saved agent
 state when it can be restored. `NOOA_SESSIONS_DIR`, or an explicit
 `SessionOptions.sessions_dir` / `--sessions-dir`, names one shared directory
 for all workspaces instead. A `SessionRegistry` serves one such directory;

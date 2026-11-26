@@ -217,10 +217,6 @@ async def test_channel_flush_remove_during_prepare_rechecks_readiness(agent):
 
 async def test_cross_thread_batch_fifo_and_observer_reentry_is_after_ownership():
     qm = QueueManager()
-    a, b = qm.queue("a"), qm.queue("b")
-    for value in range(30):
-        await asyncio.to_thread(a.put, value)
-    b.put("b")
     observed = []
 
     def observe(item):
@@ -228,7 +224,10 @@ async def test_cross_thread_batch_fifo_and_observer_reentry_is_after_ownership()
         if item == 0:
             a.put("later")
 
-    a.set_on_get(observe)
+    a, b = qm.queue("a", on_get=observe), qm.queue("b")
+    for value in range(30):
+        await asyncio.to_thread(a.put, value)
+    b.put("b")
     await asyncio.wait_for(qm.wait_ready(), TIMEOUT)
     batch = qm.claim_batch()
     assert batch == {"a": list(range(30)), "b": ["b"]}

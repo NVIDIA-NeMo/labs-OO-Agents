@@ -148,7 +148,7 @@ class MemoryConfig(BaseModel, frozen=True):
     enabled: bool = False  # master on/off (additive guarantee when False)
     path: str | None = None  # SQLite file; None -> project memory dir
     # Writer identity for shared stores: hierarchical ``role[@instance]``
-    # (e.g. "TUIAgent@04aaac87"). None -> the agent's class name; "" -> write
+    # (e.g. "AtomAgent@04aaac87"). None -> the agent's class name; "" -> write
     # to the unowned/shared namespace (visible to every owner).
     owner: str | None = None
 

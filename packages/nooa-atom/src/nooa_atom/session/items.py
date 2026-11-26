@@ -438,7 +438,7 @@ class InUseSession(BaseModel):
     """A stored session some process holds, as ``SessionStore.in_use()`` reports it.
 
     ``owner`` describes the holder: ``pid N on HOST`` (another machine),
-    ``local process (pid N)``, or ``old TUI (pid N)``. ``title``,
+    or ``local process (pid N)``. ``title``,
     ``parent_id`` and ``workspace`` are empty when the file could not be
     read. ``last_write`` is the file's modification time.
     """

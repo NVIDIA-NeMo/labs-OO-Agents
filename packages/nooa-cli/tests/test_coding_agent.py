@@ -119,7 +119,7 @@ async def test_library_directory_can_be_scoped_by_the_host(tmp_path):
 
     SkillWriting puts it on sys.path and imports from it, so a shared one
     leaks agent-authored code between concurrent sessions. The default is
-    unchanged for single-workspace hosts like the TUI.
+    unchanged for single-workspace hosts.
     """
     libs_dir = tmp_path / "scoped" / "libs"
     agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=libs_dir)

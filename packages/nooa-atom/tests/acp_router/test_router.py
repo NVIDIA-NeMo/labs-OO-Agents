@@ -763,10 +763,10 @@ async def test_a_failure_in_the_input_loop_is_logged_and_ends_the_router(harness
 async def test_session_list_gives_a_relative_recorded_workspace_the_store_directory(
     harness, monkeypatch
 ):
-    """The old TUI recorded "../"; the entry's cwd is the directory the store belongs to."""
+    """Older hosts recorded "../"; the entry's cwd is the directory the store belongs to."""
     import nooa_atom.session.store as store_module
 
-    # create() resolves the workspace now; write the record as the old TUI did.
+    # create() resolves the workspace now; write the record as older hosts did.
     monkeypatch.setattr(store_module, "_normalise_workspace", lambda workspace: str(workspace))
     old = _stored(harness, turns=1, workspace="../")
     monkeypatch.undo()

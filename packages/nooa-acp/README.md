@@ -119,8 +119,8 @@ Three paths load workspace code at `session/new` and `session/load`:
   `.claude/skills`, or `.claude/commands` is imported. Module-level code runs
   during import, before anything checks whether the file defines a skill, so the
   contents are irrelevant.
-- **Workspace settings.** `<workspace>/.nooa/settings.yaml` and the legacy
-  `.nooa/config.toml` may name *additional* skill roots. Those paths are not
+- **Workspace settings.** `<workspace>/.nooa/settings.yaml` may name
+  *additional* skill roots. Those paths are not
   confined to the workspace: a relative path escaping it, an absolute path, or a
   symlink is accepted as written.
 - **Agent-written skills.** `<workspace>/.nooa/skills/<package>/` (and an older
@@ -145,7 +145,7 @@ credentials and network access that the session may use.
 Cancellation stops cooperative local work immediately. An in-flight provider
 request may finish in the background when its client does not support
 transport-level aborts. Slash commands run on the agent's event loop so they
-have the same semantics as the native TUI and can safely start agent jobs. An
+have the same semantics as in any other host and can safely start agent jobs. An
 async command is cooperatively cancellable; a synchronous command that blocks
 that loop cannot be preempted by the current in-process adapter. The planned
 one-process-per-agent boundary is the safe kill mechanism for that case.
@@ -153,8 +153,8 @@ one-process-per-agent boundary is the safe kill mechanism for that case.
 ## Sessions and skills
 
 Each ACP session has an independent live agent and allows one foreground prompt
-at a time. Sessions are stored in `<workspace>/.nooa/sessions`, where the TUI
-and ACP adapter can share list and replay metadata. These files are inside the
+at a time. Sessions are stored in `<workspace>/.nooa/sessions`, where other
+hosts (such as NOOA Atom) can share list and replay metadata. These files are inside the
 workspace trust boundary: a repository can supply session records that appear
 in `session/list` and are replayed as conversation history by `session/load`.
 Open only repositories whose code and conversation history you trust. The
@@ -178,8 +178,7 @@ but remain opt-in. The agent can activate a relevant skill with
 `self.skills.activate(["name"])`. Stdio MCP servers supplied by an ACP client
 are registered and activated as `mcp.<name>` skills for that session.
 
-Workspace and user skill roots are shared with the terminal host through
-layered `settings.yaml`. New configuration should use:
+Workspace and user skill roots are configured in layered `settings.yaml`:
 
 ```yaml
 coding:
@@ -187,9 +186,9 @@ coding:
     - ../nemo-oo-skills
 ```
 
-The existing `tui.additional_skills_dirs` key remains supported during the
-migration, as does the older project-local `.nooa/config.toml` key
-`[tui].libs_dirs`. Packaged libraries declared through `nooa.skills`, `SKILL.md`
+The old `tui.additional_skills_dirs` key and the project-local
+`.nooa/config.toml` key `[tui].libs_dirs` are no longer read; move those paths
+to `coding.additional_skills_dirs`. Packaged libraries declared through `nooa.skills`, `SKILL.md`
 skills, and standalone Python skills are discovered from each configured root.
 Loaded `@slash_command` methods are advertised through ACP and matching
 `/command arguments` prompts are dispatched through the shared typed command

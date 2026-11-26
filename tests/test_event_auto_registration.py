@@ -260,11 +260,6 @@ class TestExistingEventsStillWork:
             == "AfterTurn"
         )
 
-    def test_rich_output_event(self):
-        from nooa.tools.web_publisher import RichOutput
-
-        assert RichOutput().event_type == "RichOutput"
-
     def test_core_events_in_registry(self):
         """All core event types should be in the global registry."""
         from nooa.events import (

@@ -288,22 +288,17 @@ def test_an_untitled_session_gets_a_plain_title(tmp_path):
     assert store.fork(handle.id).title == "Recovered session"
 
 
-def test_old_tui_claims_and_workspaces_in_the_in_use_listing(tmp_path):
-    import json
-    import os
-
+def test_the_in_use_listing_filters_by_workspace(tmp_path):
     store = SessionStore(tmp_path / "sessions")
-    with store.create(workspace=str(tmp_path / "one")) as claimed:
+    with store.create(workspace=str(tmp_path / "one")) as held:
         pass
     with store.create(workspace=str(tmp_path / "two")) as elsewhere:
         pass
     with store.create(workspace=str(tmp_path / "one")) as free:
         pass
-    claim_dir = store.path_for(claimed.id).with_suffix(".active")
-    claim_dir.mkdir()
-    (claim_dir / "owner-a.json").write_text(json.dumps({"pid": os.getpid()}))
+    _mark_foreign(store, held.id)
     _mark_foreign(store, elsewhere.id)
 
     listed = {info.id: info.owner for info in store.in_use(workspace=tmp_path / "one")}
-    assert listed == {claimed.id: f"old TUI (pid {os.getpid()})"}
+    assert listed == {held.id: "pid 4242 on other-box"}
     assert free.id not in {info.id for info in store.in_use()}

@@ -660,11 +660,6 @@ Attribution Statements: NVIDIA includes `pyright` under the MIT License for use 
 License Text(https://spdx.org/licenses/MIT.html)
 Source/Homepage: https://github.com/microsoft/pyright
 
-pyte - GNU Lesser General Public License v3.0 or later
-Attribution Statements: NVIDIA includes `pyte` under the GNU Lesser General Public License v3.0 or later for use with NVIDIA OO Agents.
-License Text(https://spdx.org/licenses/LGPL-3.0-or-later.html)
-Source/Homepage: https://github.com/selectel/pyte
-
 pytest - MIT License
 Attribution Statements: NVIDIA includes `pytest` under the MIT License for use with NVIDIA OO Agents.
 License Text(https://spdx.org/licenses/MIT.html)

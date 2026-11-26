@@ -1108,7 +1108,7 @@ async def test_messages_from_other_senders_are_echoed_as_user_chunks(bridged):
         ("delegates", "child:helper"),
         ("user_messages", "acp:form-answer"),
         ("user_messages", "parent:root"),
-        ("steer", "tui"),
+        ("steer", "cli"),
     ):
         session.emit(
             ItemAdmittedUpdate(
@@ -1125,7 +1125,7 @@ async def test_messages_from_other_senders_are_echoed_as_user_chunks(bridged):
         for _, u in client.updates
         if isinstance(u, UserMessageChunk)
     ]
-    assert echoed == ["from acp:form-answer", "from parent:root", "from tui"]
+    assert echoed == ["from acp:form-answer", "from parent:root", "from cli"]
 
 
 async def test_tool_cards_of_a_child_are_mirrored_under_the_childs_id(tmp_path):

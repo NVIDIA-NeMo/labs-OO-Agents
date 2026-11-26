@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Launch the ARC-AGI-3 solver agent in headless mode (no TUI / tmux required).
+"""Launch the ARC-AGI-3 solver agent in headless mode (no tmux required).
 
-Runs the agent directly via the ``InteractiveAgent`` dispatcher loop — no
-``nooa_tui`` package needed. All agent behaviours (memory, reflection,
-summarization, effort ladder, IPC tail, context blocks) are preserved; the only
-thing removed is the terminal-drawing layer.
+Runs the agent directly via the ``InteractiveAgent`` dispatcher loop. All
+agent behaviours (memory, reflection, summarization, effort ladder, IPC tail,
+context blocks) are preserved; nothing draws to the terminal.
 
 Usage (normally started by run_solver.py):
 
@@ -172,7 +171,7 @@ def seed_knowledge(src: Path, workspace: Path, variant: str) -> None:
 
 
 async def _headless_dispatch(agent) -> None:
-    """Drive the agent via its queue dispatcher — no TUI session required.
+    """Drive the agent via its queue dispatcher — no interactive session required.
 
     Races all registered queues (game_states, user_messages, system_messages)
     each turn and calls ``agent.handle(notification)``: every turn result
@@ -310,9 +309,8 @@ async def run() -> None:
         )
         agent.skills.activate(["nemo.memory"])
 
-    # Kickoff parity with the TUI runner: run_solver used to type this message
-    # into the TUI once the first game state existed. Deliver the same message
-    # on the user_messages channel so turn 0 matches the TUI-driven agent.
+    # Kickoff message: once the first game state exists, deliver it on the
+    # user_messages channel so turn 0 starts the same way on every run.
     states_path = run_dir / "ipc" / "states.jsonl"
 
     async def _kickoff() -> None:

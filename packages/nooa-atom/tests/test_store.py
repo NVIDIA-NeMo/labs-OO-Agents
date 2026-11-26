@@ -95,7 +95,7 @@ def test_records_written_before_the_tree_fields_still_load(sessions_dir):
         "id": "e1",
         "metadata": {},
         "timestamp": "2026-09-01T10:00:00",
-        "origin": "tui",
+        "origin": "acp",
         "model": "old-model",
         "agent": "old:Agent",
         "working_directory": "/work/old",
@@ -111,12 +111,12 @@ def test_records_written_before_the_tree_fields_still_load(sessions_dir):
     assert (info.model, info.agent, info.host, info.workspace) == (
         "old-model",
         "old:Agent",
-        "tui",
+        "acp",
         "/work/old",
     )
     assert (info.parent_id, info.depth, info.name, info.retained) == (None, 0, None, False)
     with store.open(session_id) as handle:
-        assert handle.info.host == "tui"
+        assert handle.info.host == "acp"
 
 
 def test_open_of_a_deleted_session_raises_and_creates_no_file(sessions_dir):
@@ -291,12 +291,6 @@ def test_create_records_the_workspace_as_a_resolved_absolute_path(tmp_path, monk
     assert store.get(handle.id).workspace == str(workspace.resolve())
 
 
-def _claim(store, session_id, pid):
-    claim_dir = store.path_for(session_id).with_suffix(".active")
-    claim_dir.mkdir()
-    (claim_dir / "owner-abc.json").write_text(json.dumps({"token": "abc", "pid": pid}))
-
-
 def _dead_pid():
     import subprocess
     import sys
@@ -304,38 +298,6 @@ def _dead_pid():
     proc = subprocess.Popen([sys.executable, "-c", "pass"])
     proc.wait()
     return proc.pid  # finished and reaped: no such process
-
-
-def test_a_tui_claim_with_a_live_process_marks_the_session_active(tmp_path):
-    """The TUI claims a session through <id>.active/owner-*.json, not the file lock."""
-    import os
-
-    from nooa_atom.session.store import SessionStore
-
-    from nooa.storage.sqlite import SessionAlreadyActiveError
-
-    store = SessionStore(tmp_path / "sessions")
-    with store.create(workspace=str(tmp_path)) as handle:
-        pass
-    assert store.is_active(handle.id) is False
-    _claim(store, handle.id, os.getpid())
-    assert store.is_active(handle.id) is True
-    assert store.claim_owner(handle.id) == os.getpid()
-    with pytest.raises(SessionAlreadyActiveError) as excinfo:
-        store.open(handle.id)
-    assert excinfo.value.owner_pid == os.getpid()
-
-
-def test_a_tui_claim_whose_process_is_gone_does_not_block(tmp_path):
-    from nooa_atom.session.store import SessionStore
-
-    store = SessionStore(tmp_path / "sessions")
-    with store.create(workspace=str(tmp_path)) as handle:
-        pass
-    _claim(store, handle.id, _dead_pid())
-    assert store.is_active(handle.id) is False
-    with store.open(handle.id):
-        pass
 
 
 def test_the_lock_file_names_the_owner_and_is_blank_after_a_clean_close(tmp_path):

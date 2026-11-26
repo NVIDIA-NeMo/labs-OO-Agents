@@ -139,15 +139,10 @@ async def test_cancelled_get_late_result_stays_before_put_before_cancel_unwinds(
 # ---------------------------------------------------------------------------
 
 
-def test_pop_last_and_snapshot():
+def test_snapshot():
     q: Channel[str] = Channel("q", "queue")
-    assert q.pop_last() is None
     q.put("a")
     q.put("b")
-    q.put("c")
-    assert q.snapshot() == ["a", "b", "c"]
-    # pop_last removes the tail.
-    assert q.pop_last() == "c"
     assert q.snapshot() == ["a", "b"]
     # Snapshot is a copy — mutating it doesn't affect the queue.
     snap = q.snapshot()
@@ -218,7 +213,7 @@ async def test_reader_get_timeout_none_preserves_indefinite_wait():
 @pytest.mark.asyncio
 async def test_on_get_fires_on_slow_path_backlog_drain():
     """When the item was already on the deque, ``get()`` fires ``on_get``
-    before returning. The TUI relies on this for the mid-turn dequeue
+    before returning. A host relies on this for the mid-turn dequeue
     case where the agent's ``await self.user_messages.get()`` drains
     a message that was typed while the agent was busy."""
     seen: list[str] = []
@@ -289,19 +284,6 @@ async def test_on_get_hook_exception_is_swallowed_and_item_still_returned():
     # Must not raise.
     got = await q.get()
     assert got == "payload"
-
-
-@pytest.mark.asyncio
-async def test_set_on_get_late_binds():
-    """Session installs its ``_on_user_message`` hook AFTER the agent
-    has already created its ``_user_messages_in`` queue, so late
-    binding must work."""
-    seen: list[str] = []
-    q: Channel[str] = Channel("user_messages", "queue")  # no hook yet
-    q.set_on_get(seen.append)
-    q.put("x")
-    await q.get()
-    assert seen == ["x"]
 
 
 # ---------------------------------------------------------------------------

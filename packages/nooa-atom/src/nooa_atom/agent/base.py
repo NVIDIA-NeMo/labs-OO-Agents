@@ -230,7 +230,7 @@ class AtomAgentBase(InteractiveAgent):
         self.skills = SkillManager(self)
         # Skills the agent writes live at <project>/.nooa/skills (an older
         # <project>/.nooa/libs is not loaded). get_project_dir() resolves that
-        # per process, which is what a one-workspace host like the TUI wants.
+        # per process, which is what a one-workspace host wants.
         # A host serving several workspaces at once must say which project it
         # means, or every session shares one directory — and SkillWriting puts
         # it on sys.path and activates local.*, so that would expose one
@@ -257,15 +257,14 @@ class AtomAgentBase(InteractiveAgent):
         # surface. Load them so hosts can expose ``@slash_command`` methods,
         # but leave them inactive until the user opts in with ``/skills``.
         # Memory integration is deferred; do not auto-load its entry point.
-        # Also ignore the retired web publisher entry point in older installed
-        # package metadata, producers (core already sets ``self.producers``),
-        # and core's shell (the model runs commands in its own Shell()s).
+        # Also ignore producers (core already sets ``self.producers``) and
+        # core's shell (the model runs commands in its own Shell()s).
         loaded = set(self.skills.loaded())
         installed = []
         for name in self.skills.discovered():
             attr_name = name.rsplit(".", 1)[-1].replace("-", "_")
             if (
-                name in {"nemo.memory", "nemo.web", "nemo.producers", "nemo.shell"}
+                name in {"nemo.memory", "nemo.producers", "nemo.shell"}
                 or name in loaded
                 or hasattr(self, attr_name)
             ):

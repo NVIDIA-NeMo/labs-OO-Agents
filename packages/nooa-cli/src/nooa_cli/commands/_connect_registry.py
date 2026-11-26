@@ -80,7 +80,7 @@ def shadowing_source(alias, path, *, extra_priority=False):
 
     Set ``extra_priority`` when ``path`` is a ``--working-dir``/``-w`` target.
     Such a file is read last (highest priority) by ``entries()`` and by a later
-    ``nooa tui -w`` on the same directory, so nothing overrides it. Any other
+    NOOA process running in that directory, so nothing overrides it. Any other
     ``--output`` path that NOOA does not load by default is treated as
     overridden by any existing definition elsewhere.
     """

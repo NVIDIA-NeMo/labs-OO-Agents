@@ -103,7 +103,7 @@ def _system_browser_available() -> bool:
     raises only when *no* browser-like executable is found. On a non-minimal host
     that has a text browser (``elinks``/``links``/``lynx``) or ``xdg-open`` on
     PATH it returns True even without a graphical display, so the auto-fallback
-    won't trigger there. Such environments should set ``oauth_manual = true`` in
+    won't trigger there. Such environments should set ``oauth_manual: true`` in
     the server config to force the out-of-band flow.
     """
     # Explicit sandbox/container signals must win over DISPLAY/WAYLAND_DISPLAY.
@@ -228,8 +228,8 @@ class OAuthHandler:
                 binding a local callback server. Required for headless/remote
                 sessions (e.g. a docker sandbox with no browser/localhost loop).
             code_prompt: Async callback that takes the authorization URL and
-                returns the pasted code. Used in manual mode so the host
-                application (TUI) controls input instead of blocking ``input()``.
+                returns the pasted code. Used in manual mode so an interactive
+                host controls input instead of blocking ``input()``.
             browser_open: Async hook that opens a URL in a *reachable* browser and
                 returns True on success. Lets a headless/sandboxed host open the
                 consent page elsewhere (e.g. on the host machine) while the
@@ -429,7 +429,7 @@ class OAuthHandler:
         Implements RFC 8252 §7.3: binds a temporary local HTTP server on an
         OS-assigned port (port 0) so the callback is captured automatically
         without any copy-paste.  Fails fast if the local callback server
-        cannot be started; blocking stdin prompts are unsafe inside the TUI.
+        cannot be started; blocking stdin prompts are unsafe inside an interactive host.
 
         Args:
             open_browser: Whether to automatically open browser
@@ -460,10 +460,9 @@ class OAuthHandler:
                 raise RuntimeError(
                     "OAuth requires a browser to complete the loopback-callback flow, but no "
                     "system browser is available in this session (headless/remote). Configure "
-                    "the MCP server for manual OAuth by adding to its block in "
-                    ".nooa/config.toml:\n"
-                    "    oauth_manual = true\n"
-                    "    oauth_open_browser = false\n"
+                    "the MCP server for manual OAuth by adding to its server definition:\n"
+                    "    oauth_manual: true\n"
+                    "    oauth_open_browser: false\n"
                     "then reconnect and paste the authorization code or callback URL when prompted."
                 )
 
@@ -473,7 +472,7 @@ class OAuthHandler:
             raise RuntimeError(
                 "OAuth browser callback failed before an authorization code was received. "
                 "Retry the connection; if this persists, check that the browser can open "
-                "localhost callback URLs from this TUI session."
+                "localhost callback URLs from this session."
             ) from e
 
         if not code:

@@ -172,7 +172,7 @@ def _summarize_settings(path: Path) -> str:
     if not isinstance(data, dict) or not data:
         return "(empty)"
     parts = []
-    for section in ("tui", "agent"):
+    for section in ("atom", "coding", "agent"):
         sect = data.get(section)
         if isinstance(sect, dict):
             parts.append(f"{section}: {len(sect)} keys")

@@ -223,18 +223,9 @@ packages/.venv/
 # Experimental implementations (on experimental-implementations branch)
 composer-packages/
 gpt-packages/
-trace_tui/
-NEW_AGENT_TUI.md
-RUN_NEW_AGENT_TUI.md
-SETUP_QWEN_TUI.md
-TUI_INTEGRATION_SUMMARY.md
-run-new-tui.sh
-test-tui-debug.py
-test-tui.sh
 scratch/ALIGNMENT_SUMMARY.md
 scratch/DESIGN_ALIGNMENT_REPORT.md
 packages/nemo_oo_agents-core/src/nemo_oo_agents/cli.py
-packages/nemo_oo_agents-tui/src/nemo_oo_agents_tui/cli.py
 
 # Prompt optimization experiment results
 util/prompt-optimization/results/*.json

@@ -3,8 +3,7 @@
 """Sessions written by the ``nooa-acp`` server are found and loaded by nooa-atom.
 
 The old server keeps each workspace's sessions in ``<workspace>/.nooa/sessions``
-and records the agent as the bare name ``AtomAgent`` (the old TUI wrote
-``TUIAgent``). Only this test
+and records the agent as the bare name ``CodingAgent``. Only this test
 imports ``nooa_cli``; the package source must not.
 """
 
@@ -52,7 +51,7 @@ def _workspace(tmp_path):
     return workspace
 
 
-@pytest.mark.parametrize("agent_name", ["CodingAgent", "TUIAgent"])
+@pytest.mark.parametrize("agent_name", ["CodingAgent"])
 async def test_an_old_session_is_listed_and_loads_with_its_state(tmp_path, agent_name):
     workspace = _workspace(tmp_path)
     session_id = _old_session(workspace, agent_name)
@@ -101,9 +100,9 @@ async def test_a_snapshot_that_cannot_be_restored_still_loads(tmp_path, caplog):
 
 @pytest.mark.parametrize("recorded", ["../", ".", "../../dev/"])
 async def test_an_old_session_with_a_relative_working_directory_is_listed(tmp_path, recorded):
-    """The old TUI recorded the directory as typed; a relative record hides nothing."""
+    """Older hosts recorded the directory as typed; a relative record hides nothing."""
     workspace = _workspace(tmp_path)
-    session_id = _old_session(workspace, "TUIAgent", working_directory=recorded)
+    session_id = _old_session(workspace, "CodingAgent", working_directory=recorded)
     store = SessionStore(sessions_root(workspace))
 
     [info] = store.list(workspace=workspace)
