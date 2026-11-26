@@ -72,7 +72,14 @@ from nooa._platform import require_posix
 from nooa_atom.acp.framing import FRAME_LIMIT, Frame, encode, read_frame
 from nooa_atom.acp.listing import list_sessions
 from nooa_atom.acp.protocol import initialize_response
-from nooa_atom.acp.v2 import V2, initialize_params_to_v1, initialize_result_to_v2, negotiate
+from nooa_atom.acp.v2 import (
+    V2,
+    initialize_params_to_v1,
+    initialize_result_to_v2,
+    is_probe,
+    negotiate,
+    with_probe_answer,
+)
 from nooa_atom.session.store import (
     InvalidSessionIdError,
     SessionNotFoundError,
@@ -481,7 +488,11 @@ class Router:
         result = response.model_dump(
             mode="json", by_alias=True, exclude_none=True, exclude_unset=True
         )
-        self._answer(frame, initialize_result_to_v2(result) if v2 else result)
+        if v2:
+            result = initialize_result_to_v2(result)
+        elif is_probe(params):
+            result = with_probe_answer(result)
+        self._answer(frame, result)
 
     async def _list_sessions(self, frame: Frame) -> None:
         try:

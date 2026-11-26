@@ -83,7 +83,7 @@ from nooa_atom.acp.protocol import (
 )
 from nooa_atom.acp.recover import COMMAND as RECOVER
 from nooa_atom.acp.recover import recover
-from nooa_atom.acp.v2 import ACCEPTED_METHOD, META_KEY, serve_v2_edge
+from nooa_atom.acp.v2 import ACCEPTED_METHOD, META_KEY, is_probe, serve_v2_edge, with_probe_answer
 from nooa_atom.agent.slash_commands import RESERVED_COMMAND_NAMES
 from nooa_atom.session.items import (
     CommandInfo,
@@ -370,7 +370,13 @@ class AtomACPAgent:
         self._pool_dialects = pool_dialects(client_info)
         self._pool_client = bool(self._pool_dialects)
         self._pool_forms = self._pool_client
-        return initialize_response(protocol_version, client_info)
+        response = initialize_response(protocol_version, client_info)
+        if not self._v2 and is_probe({"_meta": {META_KEY: v2}}):
+            result = response.model_dump(
+                mode="json", by_alias=True, exclude_none=True, exclude_unset=True
+            )
+            response = InitializeResponse.model_validate(with_probe_answer(result))
+        return response
 
     def _use_pool_dialect(self, dialect: PoolDialect) -> None:
         """Speak only ``dialect`` from now on: the client just used its steer method.

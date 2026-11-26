@@ -200,6 +200,29 @@ def initialize_result_to_v2(result: dict[str, Any]) -> dict[str, Any]:
     return v2
 
 
+def is_probe(params: Any) -> bool:
+    """A v1 ``initialize`` that also asks what Atom would answer a v2 client.
+
+    The installer's routers (``acp --sbx``, plain ``acp``) answer
+    ``initialize`` themselves from a cached answer and need to know whether
+    the Atom they run speaks v2: they ask with
+    ``_meta["dev.nooa/v2"] = {"probe": true}``.
+    """
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    own = meta.get(META_KEY) if isinstance(meta, dict) else None
+    return isinstance(own, dict) and own.get("probe") is True
+
+
+def with_probe_answer(result: dict[str, Any]) -> dict[str, Any]:
+    """A v1 ``initialize`` answer carrying its v2 form in ``_meta`` (see ``is_probe``)."""
+    meta = dict(result.get("_meta") or {}) if isinstance(result.get("_meta"), dict) else {}
+    meta[META_KEY] = {
+        "protocolVersions": list(SUPPORTED),
+        "initialize": initialize_result_to_v2(result),
+    }
+    return {**result, "_meta": meta}
+
+
 def _auth_method_to_v2(method: dict[str, Any]) -> dict[str, Any]:
     out = {key: value for key, value in method.items() if key != "id"}
     out["methodId"] = method.get("id")

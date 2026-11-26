@@ -219,3 +219,25 @@ async def test_v1_client_still_gets_v1(mode, servers, workspace):
     kinds = {update["sessionUpdate"] for update in updates(server, session_id)}
     assert "state_update" not in kinds and "user_message" not in kinds
     assert await server.finish() == 0
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_v1_probe_carries_the_v2_answer(mode, servers):
+    """The installer's routers ask with a probe marker: a v1 answer plus its v2 form."""
+    server = await servers(mode)
+    probe = {
+        "protocolVersion": 1,
+        "clientCapabilities": {
+            "fs": {"readTextFile": True, "writeTextFile": True},
+            "terminal": True,
+        },
+        "_meta": {"dev.nooa/v2": {"probe": True}},
+    }
+    init = (await server.call("initialize", probe)).message["result"]
+    assert init["protocolVersion"] == 1 and "agentCapabilities" in init
+    own = init["_meta"]["dev.nooa/v2"]
+    assert own["protocolVersions"] == [1, 2]
+    assert own["initialize"]["protocolVersion"] == 2
+    assert own["initialize"]["capabilities"]["session"]["delete"] == {}
+    assert own["initialize"]["info"]["name"] == "nooa-atom"
+    assert await server.finish() == 0
