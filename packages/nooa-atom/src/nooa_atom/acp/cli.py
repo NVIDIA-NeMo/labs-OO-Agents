@@ -164,14 +164,13 @@ def _resolve_agent_spec(_ctx: click.Context, _param: click.Parameter, value: str
     help=f"With --http on a loopback address, accept connections without the {TOKEN_ENV} token.",
 )
 @click.option(
-    "--end-turn-on-waiting/--keep-prompt-open-on-waiting",
-    default=True,
-    show_default=True,
-    envvar="NOOA_ATOM_END_TURN_ON_WAITING",
+    "--keep-prompt-open-on-waiting",
+    is_flag=True,
+    default=False,
+    envvar="NOOA_ATOM_KEEP_PROMPT_OPEN_ON_WAITING",
     help=(
-        "End a session/prompt with end_turn when the turn ends Waiting (the default). "
-        "--keep-prompt-open-on-waiting (or NOOA_ATOM_END_TURN_ON_WAITING=0) keeps it open "
-        "until a later turn ends."
+        "Keep a session/prompt open when its turn ends Waiting, until a later turn ends "
+        "(or NOOA_ATOM_KEEP_PROMPT_OPEN_ON_WAITING=1). By default it ends with end_turn."
     ),
 )
 @click.option("--worker-fd", type=int, default=None, hidden=True)
@@ -189,7 +188,7 @@ def command(
     port: int,
     allowed_origins: tuple[str, ...],
     no_auth: bool,
-    end_turn_on_waiting: bool,
+    keep_prompt_open_on_waiting: bool,
     worker_fd: int | None,
     id_base: int | None,
 ) -> None:
@@ -262,7 +261,7 @@ def command(
         sessions_dir=sessions_dir,
         tee=tee,
         single_process=single_process,
-        end_turn_on_waiting=end_turn_on_waiting,
+        end_turn_on_waiting=not keep_prompt_open_on_waiting,
         worker_fd=worker_fd,
         id_base=id_base,
         http=HttpOptions(

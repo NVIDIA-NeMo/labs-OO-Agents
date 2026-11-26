@@ -103,19 +103,22 @@ def test_sessions_dir_and_tee_are_passed_on(served, tmp_path):
     assert served["tee"] == tmp_path / "t.jsonl"
 
 
-def test_end_turn_on_waiting_is_on_unless_the_flag_or_environment_opts_out(served, monkeypatch):
-    monkeypatch.delenv("NOOA_ATOM_END_TURN_ON_WAITING", raising=False)
+def test_end_turn_on_waiting_is_on_unless_the_flag_or_environment_keeps_the_prompt_open(
+    served, monkeypatch
+):
+    monkeypatch.delenv("NOOA_ATOM_KEEP_PROMPT_OPEN_ON_WAITING", raising=False)
     assert _invoke([]).exit_code == 0
     assert served["end_turn_on_waiting"] is True
     assert _invoke(["--keep-prompt-open-on-waiting"]).exit_code == 0
     assert served["end_turn_on_waiting"] is False
-    assert _invoke(["--end-turn-on-waiting"]).exit_code == 0
-    assert served["end_turn_on_waiting"] is True
-    monkeypatch.setenv("NOOA_ATOM_END_TURN_ON_WAITING", "0")
+    monkeypatch.setenv("NOOA_ATOM_KEEP_PROMPT_OPEN_ON_WAITING", "1")
     assert _invoke([]).exit_code == 0
     assert served["end_turn_on_waiting"] is False
-    assert _invoke(["--end-turn-on-waiting"]).exit_code == 0
+    monkeypatch.setenv("NOOA_ATOM_KEEP_PROMPT_OPEN_ON_WAITING", "0")
+    assert _invoke([]).exit_code == 0
     assert served["end_turn_on_waiting"] is True
+    result = _invoke(["--end-turn-on-waiting"])
+    assert result.exit_code != 0  # the old flag is gone
 
 
 def test_the_command_is_the_nooa_atom_plugin():

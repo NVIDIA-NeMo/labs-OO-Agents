@@ -268,7 +268,7 @@ class AtomACPAgent:
         end_turn_on_waiting: bool = True,
     ) -> None:
         self._new_registry = new_registry
-        # Default (``--end-turn-on-waiting``): a Waiting turn answers its prompt
+        # Default: a Waiting turn answers its prompt
         # end_turn. False (``--keep-prompt-open-on-waiting``) keeps it open.
         self._end_turn_on_waiting = end_turn_on_waiting
         self._sessions_dir = sessions_dir

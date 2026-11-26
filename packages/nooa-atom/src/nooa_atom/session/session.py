@@ -312,7 +312,7 @@ class Session:
         self._consumed: list[str] = []  # consumed since the last turn settled
         self._waiting: list[str] = []  # items whose prompt stays open over a Waiting
         # True: a Waiting outcome resolves the items its turn consumed, as Done
-        # does, so nothing stays in _waiting (the ACP --end-turn-on-waiting).
+        # does, so nothing stays in _waiting (ACP's default; --keep-prompt-open-on-waiting turns it off).
         self.waiting_ends_outcome = False
         self._recording_error: BaseException | None = None
         self._started = False

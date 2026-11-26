@@ -13,7 +13,7 @@ based on [Keep a Changelog](https://keepachangelog.com/).
   `session/update` notifications. This suits ACP clients such as T3 Code
   that show an open prompt as running and send the next message as a steer.
   Opt out with `--keep-prompt-open-on-waiting` (or
-  `NOOA_ATOM_END_TURN_ON_WAITING=0`); `--end-turn-on-waiting` is the default.
+  `NOOA_ATOM_KEEP_PROMPT_OPEN_ON_WAITING=1`).
   `AtomACPAgent(end_turn_on_waiting=True)` is the server default;
   `Session.waiting_ends_outcome` (still `False` on a bare Session) is the
   Session side.
