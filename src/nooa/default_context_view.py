@@ -6,7 +6,7 @@ import ast
 import inspect
 import logging
 import warnings
-from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from nooa.context_blocks import BlockMetadata, Context, DynamicContext, Role
@@ -151,6 +151,18 @@ def _source_error(key: str, exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+async def _guarded[T](key: str, produce: Callable[[], Awaitable[T]]) -> T | str:
+    """Run one source of a view block; if it raises, return its error text instead.
+
+    One failing source then shows up as that block's content, and the request
+    still goes out with every other block.
+    """
+    try:
+        return await produce()
+    except Exception as exc:
+        return _source_error(key, exc)
+
+
 _EVENTS_API_PROMPT = """self.events: Query past events by type, tag, text, or call ID. Like a database, not an array.
 BEFORE starting any task, check if this skill applies.
 You MUST call doc(self.events) before using it — do not assume you know the API.
@@ -160,10 +172,7 @@ Inspect in REPL: print(doc(self.events))
 
 async def system_prompt_block(agent: "Agent", call: "CurrentCall") -> Block | None:
     """Build the default system prompt directly from the agent."""
-    try:
-        content = context_text(resolve_agent_system_prompt(agent), call=call)
-    except Exception as exc:
-        content = _source_error("system_prompt", exc)
+    content = context_text(resolve_agent_system_prompt(agent), call=call)
     return _block("system_prompt", content, BlockMetadata(static=True))
 
 
@@ -171,13 +180,9 @@ async def agent_interface_block(agent: "Agent", call: "CurrentCall") -> Block | 
     """Build the default documented agent interface directly from the agent."""
     from nooa.agentdoc import doc
 
-    try:
-        content = doc(type(agent))
-    except Exception as exc:
-        content = _source_error("self", exc)
     return _block(
         "self",
-        content,
+        doc(type(agent)),
         BlockMetadata(expr="doc(type(self))", static=True),
     )
 
@@ -195,13 +200,9 @@ async def agent_state_block(agent: "Agent", call: "CurrentCall") -> Block | None
     """Build the default visible agent state directly from the agent."""
     from nooa.agentdoc import pformat
 
-    try:
-        content = pformat(agent, max_length=50, max_string=500, max_depth=4)
-    except Exception as exc:
-        content = _source_error("state", exc)
     return _block(
         "state",
-        content,
+        pformat(agent, max_length=50, max_string=500, max_depth=4),
         BlockMetadata(
             expr="pformat(self, max_length=50, max_string=500, max_depth=4)",
             user_block=False,
@@ -412,14 +413,21 @@ class ManagedContextView(ContextView["Agent"]):
         """
         from nooa.agent import Agent
 
-        builders = []
+        builders = {}
         if isinstance(owner, Agent):
-            builders = [system_prompt_block, agent_interface_block]
+            builders = {"system_prompt": system_prompt_block, "self": agent_interface_block}
             if self.events_api:
-                builders.append(events_api_block)
+                builders["events_api"] = events_api_block
             if self.state:
-                builders.append(agent_state_block)
-        blocks = [block for build in builders if (block := await build(owner, call)) is not None]
+                builders["state"] = agent_state_block
+        blocks = []
+        for key, build in builders.items():
+            block = await _guarded(key, lambda build=build: build(owner, call))
+            if isinstance(block, str):
+                # Error text is not stable, so it stays out of the cached prefix.
+                block = _block(key, block, BlockMetadata(static=False))
+            if block is not None:
+                blocks.append(block)
         return await apply_block_overrides(
             blocks, await self.instruction_blocks(owner, call), agent=owner, call=call
         )
@@ -474,8 +482,14 @@ class CodeActView(ManagedContextView):
         strategy, runtime = call.strategy, owner.runtime
         assert strategy is not None
         return {
-            "strategy_prompt": Context(await strategy.strategy_instructions(runtime), prefix=True),
-            "execution_context": Context(await strategy.execution_context(runtime), prefix=True),
+            "strategy_prompt": Context(
+                await _guarded("strategy_prompt", lambda: strategy.strategy_instructions(runtime)),
+                prefix=True,
+            ),
+            "execution_context": Context(
+                await _guarded("execution_context", lambda: strategy.execution_context(runtime)),
+                prefix=True,
+            ),
             **await _sandbox_block(strategy, runtime),
         }
 
@@ -483,7 +497,8 @@ class CodeActView(ManagedContextView):
 async def _sandbox_block(strategy: Any, runtime: Any) -> dict[str, Context]:
     config = strategy.config
     if config.execution_backend == "sandbox" and config.sandbox.context_block:
-        return {"sandbox": Context(await strategy.sandbox_context(runtime), prefix=True)}
+        sandbox = await _guarded("sandbox", lambda: strategy.sandbox_context(runtime))
+        return {"sandbox": Context(sandbox, prefix=True)}
     return {}
 
 
@@ -496,8 +511,11 @@ class PredictView(ManagedContextView):
     events_api = False
 
     async def instruction_blocks(self, owner: "Agent", call: "CurrentCall") -> Mapping[str, Any]:
-        assert call.strategy is not None
-        instructions = await call.strategy.strategy_instructions(owner.runtime)
+        strategy, runtime = call.strategy, owner.runtime
+        assert strategy is not None
+        instructions = await _guarded(
+            "strategy_prompt", lambda: strategy.strategy_instructions(runtime)
+        )
         return {"strategy_prompt": Context(instructions, prefix=True)}
 
 
@@ -518,9 +536,16 @@ class CodeActV2View(CodeActView):
         return {
             **await _sandbox_block(strategy, runtime),
             "python_cell_context": Context(
-                await strategy.python_cell_context(runtime), prefix=True
+                await _guarded(
+                    "python_cell_context", lambda: strategy.python_cell_context(runtime)
+                ),
+                prefix=True,
             ),
-            "python_cell_state": Context(await strategy.python_cell_state_context(runtime)),
+            "python_cell_state": Context(
+                await _guarded(
+                    "python_cell_state", lambda: strategy.python_cell_state_context(runtime)
+                )
+            ),
         }
 
 

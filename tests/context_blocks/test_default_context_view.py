@@ -9,6 +9,7 @@ import pytest
 from nooa import Agent, Block, Context, DynamicContext, collect_context_items
 from nooa.context_blocks import Role
 from nooa.default_context_view import (
+    CodeActView,
     ManagedContextView,
     agent_interface_block,
     agent_state_block,
@@ -195,20 +196,47 @@ async def test_custom_view_replaces_the_system_prompt():
     assert [prompt.content for prompt in prompts] == ["custom prompt"]
 
 
-async def test_interface_and_state_failures_are_materialized_as_errors():
+async def test_interface_and_state_failures_are_materialized_as_errors(monkeypatch):
+    import nooa.agentdoc
+
     class BrokenInterfaceAgent(ExampleAgent):
         @classmethod
         def __type_info__(cls):
             raise RuntimeError("broken interface")
 
-    class BrokenStateAgent(ExampleAgent):
-        def __instance_values__(self):
-            raise RuntimeError("broken state")
+    def broken_pformat(*args, **kwargs):
+        raise RuntimeError("broken state")
 
-    interface = await agent_interface_block(BrokenInterfaceAgent(), _call(ExampleAgent()))
-    state = await agent_state_block(BrokenStateAgent(), _call(ExampleAgent()))
+    async def blocks(agent):
+        items = await collect_context_items(ManagedContextView(), agent, _call(agent))
+        return {item.key: item for item in items if isinstance(item, Block)}
+
+    interface = (await blocks(BrokenInterfaceAgent()))["self"]
+    monkeypatch.setattr(nooa.agentdoc, "pformat", broken_pformat)
+    state = (await blocks(ExampleAgent()))["state"]
     assert interface.content == "RuntimeError: broken interface"
     assert state.content == "RuntimeError: broken state"
+    assert not interface.metadata.static
+
+
+async def test_a_failing_strategy_source_becomes_its_block_and_the_request_goes_out():
+    class BrokenStrategy:
+        config = SimpleNamespace(execution_backend="local")
+
+        async def strategy_instructions(self, runtime):
+            return "instructions"
+
+        async def execution_context(self, runtime):
+            raise RuntimeError("no sandbox")
+
+    agent = ExampleAgent()
+    call = _call(agent)
+    call.strategy = BrokenStrategy()
+    items = await collect_context_items(CodeActView(), agent, call)
+    by_key = {item.key: item for item in items if isinstance(item, Block)}
+    assert by_key["execution_context"].content == "RuntimeError: no sandbox"
+    assert by_key["strategy_prompt"].content == "instructions"
+    assert {"system_prompt", "self", "state"} <= by_key.keys()
 
 
 async def test_default_source_precedence_and_removal_are_visible_policy():
