@@ -20,6 +20,7 @@ from pydantic import BaseModel
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig, PredictConfig
 from nooa.errors import GenerationError
+from nooa.events import Error
 from nooa.strategies.codeact import CodeActStrategy
 from nooa.strategies.predict import PredictStrategy
 from nooa.strategies.pure_python import PurePythonStrategy
@@ -95,6 +96,24 @@ class ErrorAfterNFakeLLM(FakeLLMClient):
         # If the queue is empty, raise instead of returning the default empty response.
         if not self._response_queue:
             raise RuntimeError(self._error_message)
+        return await super().acall(messages, tools, output_model, **kwargs)
+
+
+class FlakyFakeLLM(FakeLLMClient):
+    """FakeLLMClient that raises RuntimeError on the given 0-based call indices."""
+
+    def __init__(self, scripted_responses: list[LLMResponse], failing_calls: set[int]):
+        super().__init__(scripted_responses=scripted_responses)
+        self._failing_calls = failing_calls
+        self.attempts = 0
+
+    async def acall(
+        self, messages: list[dict], tools=None, output_model=None, **kwargs
+    ) -> LLMResponse:
+        index = self.attempts
+        self.attempts += 1
+        if index in self._failing_calls:
+            raise RuntimeError("Simulated transient LLM API failure")
         return await super().acall(messages, tools, output_model, **kwargs)
 
 
@@ -181,6 +200,33 @@ class TestCodeActLLMApiErrorExhaustion:
         err = str(exc_info.value)
         # Must mention "LLM API error after 2 retries" — the exact phrase from codeact.py line 697
         assert "LLM API error after 2 retries" in err
+
+    @pytest.mark.asyncio
+    async def test_successful_call_resets_api_error_budget(self):
+        """Non-consecutive API errors must not add up across a long turn.
+
+        Calls 0, 2 and 4 fail and each retry succeeds. With max_retries=2 the
+        turn must still finish: only consecutive API errors count.
+        """
+
+        class TestAgent(Agent, llm=_DUMMY_LLM):
+            @strategy(CodeActStrategy(config=CodeActConfig(max_retries=2, max_iterations=10)))
+            async def compute(self, x: int) -> int:
+                """Compute {x}."""
+                ...
+
+        fake_llm = FlakyFakeLLM(
+            scripted_responses=[
+                _resp(tool_calls=[_exec_python("y = 1", call_id="c1")]),
+                _resp(tool_calls=[_exec_python("y = 2", call_id="c2")]),
+                _resp(tool_calls=[_return_result(42)]),
+            ],
+            failing_calls={0, 2, 4},
+        )
+
+        agent = TestAgent(llm=fake_llm)
+        assert await agent.compute(5) == 42
+        assert fake_llm.attempts == 6
 
 
 # ---------------------------------------------------------------------------
@@ -474,6 +520,59 @@ class TestPurePythonLLMApiError:
         # pure_python.py line 343: "LLM API error after {max_retries} retries."
         assert "llm api error after 2 retries" in err
 
+    @pytest.mark.asyncio
+    async def test_successful_call_resets_api_error_budget(self):
+        """Non-consecutive API errors must not add up across a long run.
+
+        Calls 0, 2 and 4 fail and each retry succeeds. With max_retries=2 the
+        run must still finish: only consecutive API errors count.
+        """
+
+        class TestAgent(Agent, llm=_DUMMY_LLM):
+            @strategy(PurePythonStrategy(max_iterations=10, max_retries=2))
+            async def compute(self, x: int) -> int:
+                """Compute {x}."""
+                ...
+
+        fake_llm = FlakyFakeLLM(
+            scripted_responses=[
+                _resp("y = 1"),
+                _resp("y = 2"),
+                _resp("return 42"),
+            ],
+            failing_calls={0, 2, 4},
+        )
+
+        agent = TestAgent(llm=fake_llm)
+        assert await agent.compute(5) == 42
+        assert fake_llm.attempts == 6
+
+    @pytest.mark.asyncio
+    async def test_xml_format_error_resets_api_error_budget(self):
+        """An XML format error is a model reply, so it clears the API-error count.
+
+        API error, XMLFormatError, API error, success: with max_retries=2 the two
+        API errors are not consecutive and the run must finish.
+        """
+
+        class TestAgent(Agent, llm=_DUMMY_LLM):
+            @strategy(PurePythonStrategy(max_iterations=10, max_retries=2))
+            async def compute(self, x: int) -> int:
+                """Compute {x}."""
+                ...
+
+        fake_llm = FlakyFakeLLM(
+            scripted_responses=[
+                _resp("<tool_code><code>return 1</code></tool_code>"),
+                _resp("return 42"),
+            ],
+            failing_calls={0, 2},
+        )
+
+        agent = TestAgent(llm=fake_llm)
+        assert await agent.compute(5) == 42
+        assert fake_llm.attempts == 4
+
 
 # ---------------------------------------------------------------------------
 # PurePythonStrategy — code validation errors (pure_python.py lines 671-679)
@@ -534,69 +633,37 @@ class TestPurePythonCodeValidation:
 
 
 # ---------------------------------------------------------------------------
-# PurePythonStrategy — helper method binding errors (pure_python.py lines 720-728)
+# PurePythonStrategy — a cell function named like the target method
 # ---------------------------------------------------------------------------
 
 
-class TestPurePythonHelperMethodErrors:
-    """PurePythonStrategy: helper method binding hits rejected/errors path.
+class TestPurePythonHelperNamedLikeTheTarget:
+    """A cell function named like the target method is an ordinary cell name.
 
-    Exercises pure_python.py lines 710-728:
-        if helper_result.rejected:
-            session.record_error()
-            ...  # lines 710-719
-        if helper_result.errors:
-            session.record_error()
-            ...  # lines 721-728
-
-    The HelperFunctionManager rejects helper methods that would overwrite the
-    target method. Since PurePythonStrategy calls _execute_code() which calls
-    HelperFunctionManager.apply(), and rejected increments error_count, after
-    max_retries rejections, session is exhausted and GenerationError is raised.
-
-    Note: The function-body-extraction step runs BEFORE helper processing, so
-    code like `def target(self): return 42` is EXTRACTED (body runs). To hit
-    the `rejected` path, we need a code block where a NON-target method named
-    the same as the target is defined alongside other code. Alternatively, we
-    can trigger `helper_result.errors` with invalid helper code.
+    Nothing rejects it: the cell engine (``nooa.runtime.execution_namespace``)
+    binds ``process`` in the call's namespace only, never on the agent, so the
+    agent's method is untouched. The function-body extraction step skips this
+    cell because it has a plain statement too.
     """
 
     @pytest.mark.asyncio
-    async def test_helper_with_same_name_as_other_method_triggers_rejected(self):
-        """LLM defines helper named 'process' but 'process' is the target → rejected.
-
-        The LLM generates a code block that includes BOTH a helper function
-        named 'process' (= the target) AND some plain code. Since there are
-        non-function nodes in the body, _extract_function_body_if_wrapped()
-        returns the code unchanged. Then HelperFunctionManager finds 'process' in
-        the rejected list, calls session.record_error(), and returns empty result.
-        After max_retries=2, GenerationError is raised.
-
-        This exercises pure_python.py lines 710-719.
-        """
-
+    async def test_a_cell_function_named_like_the_target_stays_in_the_namespace(self):
         class TestAgent(Agent, llm=_DUMMY_LLM):
             @strategy(PurePythonStrategy(max_iterations=10, max_retries=2))
             async def process(self, x: int) -> int:
                 """Process {x}."""
                 ...
 
-        # Define a helper named 'process' (same as target) WITH a plain statement
-        # so _extract_function_body_if_wrapped does NOT extract (other_nodes is non-empty)
-        # Note: the tree has both the function and a plain statement → other_nodes non-empty
-        # → extraction skipped → HelperFunctionManager sees def process(self, ...) → rejected
+        # ``x = 1`` rebinds the argument (an ordinary name in PurePython).
         conflicting_code = "x = 1\ndef process(self, x: int) -> int:\n    return x * 3"
-
         fake_llm = FakeLLMClient(
-            scripted_responses=[
-                _resp(conflicting_code),
-                _resp(conflicting_code),
-                _resp(conflicting_code),  # Should not be reached
-            ]
+            scripted_responses=[_resp(conflicting_code), _resp("return process(self, x)")]
         )
         agent = TestAgent(llm=fake_llm)
-        with pytest.raises(GenerationError):
-            await agent.process(7)
+        assert await agent.process(7) == 3
+        assert "process" not in vars(agent)  # the agent's method is not replaced
+        errors = [event for event in agent.event_manager.values() if isinstance(event, Error)]
+        assert errors == []
 
 
 # ---------------------------------------------------------------------------
@@ -800,3 +867,27 @@ class TestPredictModelRebuild:
         agent = TestAgent(llm=fake_llm)
         result = await agent.is_positive("I love this!")
         assert result is True
+
+
+class TestReturnResultToolCallHint:
+    """A failed direct return_result tool call gets a JSON example, not only Python."""
+
+    @pytest.mark.asyncio
+    async def test_direct_tool_call_hint_names_json_arguments(self):
+        class TestAgent(Agent, llm=_DUMMY_LLM):
+            @strategy(CodeActStrategy(config=CodeActConfig(max_iterations=3, max_retries=5)))
+            async def analyse(self, text: str) -> StrictIntModel:
+                """Analyse."""
+                ...
+
+        fake_llm = FakeLLMClient(
+            scripted_responses=[
+                _resp(tool_calls=[_return_result({"wrong": 1}, call_id="r1")]),
+                _resp(tool_calls=[_return_result({"required_field": 7}, call_id="r2")]),
+            ]
+        )
+        agent = TestAgent(llm=fake_llm)
+        assert await agent.analyse("x") == StrictIntModel(required_field=7)
+        sent = json.dumps([str(call) for call in fake_llm.calls], default=str)
+        assert "In execute_python code, call it as return_result(StrictIntModel(" in sent
+        assert "As a direct return_result tool call, pass JSON arguments" in sent

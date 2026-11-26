@@ -6,28 +6,28 @@ import ast
 import asyncio
 import contextvars
 import copy
+import hashlib
 import inspect
 import io
-import linecache
 import logging
 import math
 import re as _re
-import tokenize
+import time
 import types
 import warnings
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import contextmanager
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Any, Literal, cast, get_type_hints
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import uuid4
 
 from nooa.agentdoc import FileBackedTruncatingStringIO, TruncatingStringIO
 from nooa.agentdoc.introspect import methods, variables
-from nooa.context_blocks import render_context
+from nooa.context_blocks import EventBase, render_context
 from nooa.context_blocks.scoped import _scoped_blocks_var
 
 if TYPE_CHECKING:
-    from nooa.config.truncation_config import TruncationConfig
+    from nooa.config.truncation_config import CaptureConfig, TruncationConfig
     from nooa.context_blocks.models import ContextWindowStats
     from nooa.decisions import (
         DecisionRequest,
@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     )
     from nooa.runtime.restrictions import RestrictionsConfig
 
+from nooa.errors.formatting import rewrite_never_awaited_warnings
 from nooa.events import (
     DecisionCallEnd,
     DecisionCallStart,
@@ -47,23 +48,36 @@ from nooa.events import (
     SystemPrompt,
 )
 from nooa.llm_types import CacheBoundary, LLMResponse, LLMUsage
+from nooa.runtime.cell_deadline import run_with_deadline
 from nooa.runtime.context_vars import (
     _current_event_format_var,
     _in_exec_middleware,
     _in_generation_session,
     _parent_agent_var,
 )
+from nooa.runtime.execution_namespace import RUNTIME_NAMES, ExecutionNamespace
 from nooa.runtime.harness_metrics import (
     HarnessMetrics,
     get_harness_metrics,
+    llm_metric_event_handler,
     restore_harness_metrics,
     start_harness_metrics,
 )
-from nooa.runtime.hooks import call_after_hook, call_before_hook
+from nooa.runtime.hooks import call_after_hook, call_before_hook, call_on_llm_call
+from nooa.runtime.request_recovery import RequestRecovery, request_recoveries_for
 
 logger = logging.getLogger(__name__)
 
 _MISSING = object()
+
+
+def _derive_prompt_cache_key(agent_id: str, strategy_tag: str) -> str:
+    """Return a stable cache shard key within the OpenAI 64-character limit."""
+    digest = hashlib.blake2s(
+        f"{agent_id}-{strategy_tag}".encode(),
+        digest_size=16,
+    ).hexdigest()
+    return f"nooa-{digest}"
 
 
 @contextmanager
@@ -128,6 +142,10 @@ def _make_llm_metrics_bridge(hm: "HarnessMetrics") -> Callable[[str, Any], None]
         handler = _dispatch.get(event)
         if handler:
             handler(detail)
+            return
+        registered = llm_metric_event_handler(event)  # a package's event (e.g. media)
+        if registered is not None:
+            registered(hm, detail)
         else:
             logger.debug("[HARNESS_METRICS] Unknown LLM metric event: %s", event)
 
@@ -457,15 +475,6 @@ _stderr_buffer_var: contextvars.ContextVar[io.StringIO | TruncatingStringIO | No
 # Re-export image buffer ContextVar so it's set alongside stdout/stderr
 # Agent call stack - defined in context_vars.py to avoid circular imports.
 from nooa.runtime.context_vars import _get_agent_call_stack  # noqa: E402
-from nooa.runtime.media_capture import (  # noqa: E402
-    _media_buffer_var,
-    _MediaBuffer,
-)
-from nooa.runtime.stream_wrappers import (  # noqa: E402
-    BlockedStdinWrapper,
-    ContextVarStream,
-    _block_stdin_var,
-)
 
 # Task-local stack for generation ID tracking.
 # Uses immutable tuples for parallel task isolation (same pattern as agent call stack).
@@ -508,36 +517,10 @@ def _pop_generation_id() -> str | None:
     return popped
 
 
-def _make_capture_buffer(
-    limit: int, tail_chars: int | None, file_backed: bool
-) -> TruncatingStringIO:
-    """Create a stdout/stderr capture buffer, optionally file-backed."""
-    if file_backed:
-        return FileBackedTruncatingStringIO(limit=limit, tail_chars=tail_chars)
-    return TruncatingStringIO(limit=limit, tail_chars=tail_chars)
-
-
-def _extract_captured_locals(exec_globals: dict[str, Any]) -> dict[str, Any]:
-    """Extract captured locals from __repl_captured_locals__, filtering out bound methods.
-
-    The wrapper's finally block captures locals into exec_globals["__repl_captured_locals__"].
-    This function extracts them, filtering out bound methods. Modules are preserved
-    so that `import X` in one cell persists to subsequent cells.
-
-    Args:
-        exec_globals: The globals dict from code execution
-
-    Returns:
-        Dict of captured local variables (filtered)
-    """
-    captured: dict[str, Any] = {}
-    raw_captured = exec_globals.get("__repl_captured_locals__", {})
-    for k, v in raw_captured.items():
-        # Skip callables that are helper methods (they're handled separately)
-        if callable(v) and hasattr(v, "__self__"):
-            continue  # Skip bound methods
-        captured[k] = v
-    return captured
+def _make_capture_buffer(limit: int, capture: "CaptureConfig") -> TruncatingStringIO:
+    """Create a stdout/stderr capture buffer, file-backed if ``capture`` says so."""
+    kind = FileBackedTruncatingStringIO if capture.file_backed else TruncatingStringIO
+    return kind(limit=limit, tail_chars=capture.tail, unrecoverable_hint=capture.unrecoverable_hint)
 
 
 class _TopLevelReturnFinder(ast.NodeVisitor):
@@ -612,6 +595,8 @@ class ActorRuntime:
         """
         # Agent instance
         self.agent: Any = agent
+        # Recoveries from a refused request that packages registered (e.g. media's image limit).
+        self._request_recoveries: list[RequestRecovery] = request_recoveries_for(self)
 
         # Lock for generation serialization (only one LLM generation session at a time)
         self._generation_lock = asyncio.Lock()
@@ -634,6 +619,9 @@ class ActorRuntime:
         self._last_context_stats: ContextWindowStats | None = None
         self._last_prompt_tokens_actual: int | None = None
         self._last_dynamic_context_snapshot = ""
+        # What the last request rendered: the IDs of the events its context view
+        # yielded and the tags that were active then; None before the first request.
+        self._render_snapshot: tuple[frozenset[str], frozenset[str]] | None = None
         self._event_format_cache: dict[tuple[tuple[str, Any], ...], Any] = {}
         self._event_format_cache_max_entries = 32
         # Chars→tokens ratio, calibrated from the last provider response
@@ -792,6 +780,61 @@ class ActorRuntime:
             if isinstance(hm, HarnessMetrics):
                 hm.context_limits_events_collapsed += n_to_archive
                 hm.context_limits_tokens_archived += int(n_to_archive * avg_event_tok)
+
+    def _included_event_ids(self) -> set[str] | None:
+        """IDs of the active events the next request renders.
+
+        The context view decides membership, so this is every active event except
+        the ones the view left out of the last request; events added since then
+        count. None before any request was rendered (every event counts).
+        """
+        if self._render_snapshot is None:
+            return None
+        rendered, tags_then = self._render_snapshot
+        return {
+            event.id
+            for event in self.event_manager.values()
+            if event.id in rendered or (event.tag or event.id) not in tags_then
+        }
+
+    async def _call_with_recovery(
+        self,
+        call: Callable[[], Awaitable[Any]],
+        rebuild: Callable[[], Awaitable[None]],
+        recover_context_window: Callable[[BaseException], bool],
+    ) -> Any:
+        """``await call()``, recovering once each with the registered recoveries, then the window.
+
+        The registered recoveries (:mod:`nooa.runtime.request_recovery`, e.g.
+        media's image limit) are asked in order, then the context window:
+        ``recover_context_window(exc)`` archives events and lowers the reply
+        budget (False: re-raise). After a recovery the messages are rebuilt and
+        the call made again, so each retry is covered by the other recoveries.
+        """
+
+        def context_window(exc: BaseException) -> bool | None:
+            return recover_context_window(exc) if _is_context_window_error(exc) else None
+
+        handlers = [recovery.recover for recovery in self._request_recoveries]
+        handlers.append(context_window)
+        used = [False] * len(handlers)
+        while True:
+            try:
+                return await call()
+            except Exception as exc:
+                for index, handler in enumerate(handlers):
+                    if used[index]:
+                        continue
+                    outcome = handler(exc)
+                    if outcome is None:
+                        continue  # not this handler's error
+                    used[index] = True
+                    if not outcome:
+                        raise
+                    break
+                else:
+                    raise
+                await rebuild()
 
     @property
     def _agent_call_stack(self) -> tuple[str | None, ...]:
@@ -1060,6 +1103,9 @@ class ActorRuntime:
 
         from nooa.unifiedllm.limits import context_limits_for, reduced_reply_params
 
+        # A limit a recovery learned earlier in this session (e.g. images): stay under it.
+        for recovery in self._request_recoveries:
+            recovery.before_request()
         # Build messages from context + events (timers inside _build_messages).
         # No proactive clamping — recovery is error-driven. If the API rejects
         # with ContextWindowExceededError, the except handler archives events,
@@ -1107,7 +1153,25 @@ class ActorRuntime:
             "turn_number": _gen_hm.turn_count if isinstance(_gen_hm.turn_count, int) else 0,
         }
 
+        _llm_started_ns = [time.time_ns()]
+
+        def _notify_llm_call(response: Any = None, exception_type: str | None = None) -> None:
+            # One observation per logical call (tracing turns it into an llm_call span).
+            call_on_llm_call(
+                agent=self.agent,
+                method_name=_llm_event_meta["method_name"],
+                generation_id=_llm_event_meta["generation_id"],
+                start_time_ns=_llm_started_ns[0],
+                end_time_ns=time.time_ns(),
+                response=response,
+                exception_type=exception_type,
+                turn_number=_llm_event_meta["turn_number"],
+                strategy=_llm_event_meta["strategy"],
+                llm_client=llm_client,
+            )
+
         def _emit_llm_start() -> None:
+            _llm_started_ns[0] = time.time_ns()
             em.add(LLMCallStart(**_llm_event_meta), record=False)
 
         def _emit_llm_end(*, success: bool, exception_type: str | None = None) -> None:
@@ -1115,6 +1179,8 @@ class ActorRuntime:
                 LLMCallEnd(**_llm_event_meta, success=success, exception_type=exception_type),
                 record=False,
             )
+            if not success:
+                _notify_llm_call(exception_type=exception_type)
 
         has_mw = bool(em._middleware.get("llm_call"))
         with _gen_hm.timer("time_llm_call"):
@@ -1155,7 +1221,8 @@ class ActorRuntime:
                         type(_mw_strategy).__name__ if _mw_strategy is not None else "default"
                     )
                     ctx.params.setdefault(
-                        "prompt_cache_key", f"{self.agent._agent_id}-{_mw_strategy_tag}"
+                        "prompt_cache_key",
+                        _derive_prompt_cache_key(self.agent._agent_id, _mw_strategy_tag),
                     )
                     call_params["prompt_cache_key"] = ctx.params["prompt_cache_key"]
                     ctx.response = await llm_client.acall(
@@ -1166,49 +1233,51 @@ class ActorRuntime:
                     return ctx
 
                 _emit_llm_start()
+
+                async def _rebuild_middleware_messages() -> None:
+                    nonlocal _dynamic_context
+                    ctx.messages = await self._build_messages(
+                        self._current_method,
+                        call_args=self._current_call.args if self._current_call else (),
+                        call_kwargs=self._current_call.kwargs if self._current_call else {},
+                        tools=ctx.params.get("tools"),
+                        request_params=ctx.params,
+                        llm_client=ctx.client,
+                    )
+                    _dynamic_context = _snapshot_llm_request(
+                        self.event_manager,
+                        ctx.messages,
+                        current_generation_id or "",
+                        self._last_dynamic_context_snapshot,
+                    )
+
+                async def _run_middleware() -> LLMCallContext:
+                    return await em.run_middleware("llm_call", ctx, _core_llm)
+
+                def _recover_middleware_window(_cw_exc: BaseException) -> bool:
+                    # Always archive first — even if we can't reduce max_tokens,
+                    # shedding events lets the retry (or caller's next attempt) succeed.
+                    _ctx_window = _context_window_for_error(ctx.client, _cw_exc, ctx.params)
+                    self._archive_on_context_error(_ctx_window, exc=_cw_exc)
+                    _reduced = _compute_reduced_max_tokens(
+                        _cw_exc,
+                        _ctx_window,
+                        context_limits_for(ctx.client, ctx.params).reserved_output_tokens,
+                    )
+                    if _reduced is None:
+                        return False
+                    logger.warning(
+                        "context-window recovery (middleware): reducing max_tokens %s -> %d",
+                        ctx.params.get("max_tokens"),
+                        _reduced,
+                    )
+                    ctx.params = reduced_reply_params(ctx.client, ctx.params, _reduced)
+                    return True
+
                 try:
-                    try:
-                        ctx = await em.run_middleware("llm_call", ctx, _core_llm)
-                    except Exception as _cw_exc:
-                        if not _is_context_window_error(_cw_exc):
-                            raise
-                        # Always archive first — even if we can't reduce max_tokens,
-                        # shedding events lets the retry (or caller's next attempt) succeed.
-                        _ctx_window = _context_window_for_error(ctx.client, _cw_exc, ctx.params)
-                        self._archive_on_context_error(
-                            _ctx_window,
-                            exc=_cw_exc,
-                        )
-                        _reduced = _compute_reduced_max_tokens(
-                            _cw_exc,
-                            _ctx_window,
-                            context_limits_for(ctx.client, ctx.params).reserved_output_tokens,
-                        )
-                        if _reduced is None:
-                            raise
-                        logger.warning(
-                            "context-window recovery (middleware): reducing max_tokens %s -> %d",
-                            ctx.params.get("max_tokens"),
-                            _reduced,
-                        )
-                        # Re-build messages after archival so the retry sees the
-                        # reduced event store.
-                        ctx.params = reduced_reply_params(ctx.client, ctx.params, _reduced)
-                        ctx.messages = await self._build_messages(
-                            self._current_method,
-                            call_args=self._current_call.args if self._current_call else (),
-                            call_kwargs=self._current_call.kwargs if self._current_call else {},
-                            tools=ctx.params.get("tools"),
-                            request_params=ctx.params,
-                            llm_client=ctx.client,
-                        )
-                        _dynamic_context = _snapshot_llm_request(
-                            self.event_manager,
-                            ctx.messages,
-                            current_generation_id or "",
-                            self._last_dynamic_context_snapshot,
-                        )
-                        ctx = await em.run_middleware("llm_call", ctx, _core_llm)
+                    ctx = await self._call_with_recovery(
+                        _run_middleware, _rebuild_middleware_messages, _recover_middleware_window
+                    )
                 except Exception as _exc:
                     _emit_llm_end(success=False, exception_type=type(_exc).__name__)
                     raise
@@ -1232,7 +1301,8 @@ class ActorRuntime:
                 # Default prompt_cache_key to per-(agent, strategy) so:
                 #   - Parallel agents (same prefix) get distinct shards by
                 #     agent_id, avoiding the cybergym multi-trial collision
-                #     above the ~15 req/min per-shard ceiling.
+                #     above the ~15 req/min per-key routing guidance for
+                #     OpenAI models before GPT-5.6.
                 #   - Within one agent, calls that use different strategies
                 #     (e.g. CodeAct vs Predict) get separate shards because
                 #     their cacheable prefixes diverge anyway — preventing
@@ -1245,68 +1315,65 @@ class ActorRuntime:
                 _strategy_tag = (
                     type(_current_strategy).__name__ if _current_strategy is not None else "default"
                 )
-                _kwargs.setdefault("prompt_cache_key", f"{self.agent._agent_id}-{_strategy_tag}")
+                _kwargs.setdefault(
+                    "prompt_cache_key",
+                    _derive_prompt_cache_key(self.agent._agent_id, _strategy_tag),
+                )
                 _emit_llm_start()
+
+                async def _rebuild_messages() -> None:
+                    nonlocal messages, _dynamic_context
+                    messages = await self._build_messages(
+                        self._current_method,
+                        call_args=self._current_call.args if self._current_call else (),
+                        call_kwargs=self._current_call.kwargs if self._current_call else {},
+                        tools=tools,
+                        request_params=_kwargs,
+                    )
+                    _dynamic_context = _snapshot_llm_request(
+                        self.event_manager,
+                        messages,
+                        current_generation_id or "",
+                        self._last_dynamic_context_snapshot,
+                    )
+
+                async def _call_llm() -> Any:
+                    return await llm_client.acall(
+                        messages, tools=tools, output_model=output_model, **_kwargs
+                    )
+
+                def _recover_window(_cw_exc: BaseException) -> bool:
+                    nonlocal _kwargs
+                    # Always archive first — even if we can't reduce max_tokens,
+                    # shedding events lets the retry (or caller's next attempt) succeed.
+                    _ctx_window = _context_window_for_error(llm_client, _cw_exc, _kwargs)
+                    self._archive_on_context_error(_ctx_window, exc=_cw_exc)
+                    _reduced = _compute_reduced_max_tokens(
+                        _cw_exc,
+                        _ctx_window,
+                        context_limits_for(llm_client, _kwargs).reserved_output_tokens,
+                    )
+                    if _reduced is None:
+                        # Archival already ran: the caller (e.g. CodeAct) retries
+                        # with fresh messages.
+                        return False
+                    logger.warning(
+                        "context-window recovery: reducing max_tokens %s -> %d "
+                        "(prompt=%s, ctx_window=%s)",
+                        kwargs.get("max_tokens"),
+                        _reduced,
+                        _parse_prompt_tokens(_cw_exc),
+                        _ctx_window,
+                    )
+                    # _kwargs keeps the per-(agent, strategy) cache key, so the
+                    # retry lands on the same shard as the original attempt.
+                    _kwargs = reduced_reply_params(llm_client, _kwargs, _reduced)
+                    return True
+
                 try:
-                    try:
-                        response = await llm_client.acall(
-                            messages,
-                            tools=tools,
-                            output_model=output_model,
-                            **_kwargs,
-                        )
-                    except Exception as _cw_exc:
-                        if not _is_context_window_error(_cw_exc):
-                            raise
-                        # Always archive first — even if we can't reduce max_tokens,
-                        # shedding events lets the retry (or caller's next attempt) succeed.
-                        _ctx_window = _context_window_for_error(llm_client, _cw_exc, _kwargs)
-                        self._archive_on_context_error(
-                            _ctx_window,
-                            exc=_cw_exc,
-                        )
-                        _reduced = _compute_reduced_max_tokens(
-                            _cw_exc,
-                            _ctx_window,
-                            context_limits_for(llm_client, _kwargs).reserved_output_tokens,
-                        )
-                        if _reduced is None:
-                            # Can't compute a reduced max_tokens, but archival already ran.
-                            # Re-raise so the caller (e.g. CodeAct) retries with fresh messages.
-                            raise
-                        logger.warning(
-                            "context-window recovery: reducing max_tokens %s -> %d "
-                            "(prompt=%s, ctx_window=%s)",
-                            kwargs.get("max_tokens"),
-                            _reduced,
-                            _parse_prompt_tokens(_cw_exc),
-                            _ctx_window,
-                        )
-                        # Re-build messages after archival so the retry sees the
-                        # reduced event store. Retrying with the same messages would
-                        # fail again when input tokens exceed the context window.
-                        _recovery_kw = reduced_reply_params(llm_client, _kwargs, _reduced)
-                        messages = await self._build_messages(
-                            self._current_method,
-                            call_args=self._current_call.args if self._current_call else (),
-                            call_kwargs=self._current_call.kwargs if self._current_call else {},
-                            tools=tools,
-                            request_params=_recovery_kw,
-                        )
-                        _dynamic_context = _snapshot_llm_request(
-                            self.event_manager,
-                            messages,
-                            current_generation_id or "",
-                            self._last_dynamic_context_snapshot,
-                        )
-                        # Reuse _kwargs (already has the per-(agent, strategy) key set)
-                        # so recovery lands on the same shard as the original attempt.
-                        response = await llm_client.acall(
-                            messages,
-                            tools=tools,
-                            output_model=output_model,
-                            **_recovery_kw,
-                        )
+                    response = await self._call_with_recovery(
+                        _call_llm, _rebuild_messages, _recover_window
+                    )
                 except Exception as _exc:
                     _emit_llm_end(success=False, exception_type=type(_exc).__name__)
                     raise
@@ -1323,6 +1390,7 @@ class ActorRuntime:
         response.model_name = getattr(llm_client, "model", "") or response.model_name
         response.generation_id = current_generation_id or ""
         response.dynamic_context = _dynamic_context
+        _notify_llm_call(response=response)
         usage = response.usage
         if usage is not None and usage.input_tokens > 0:
             self._last_prompt_tokens_actual = usage.input_tokens
@@ -1358,6 +1426,8 @@ class ActorRuntime:
         execution_count: int = 1,
         restrictions: "RestrictionsConfig | None" = None,
         sandbox_executor: Any = None,
+        execution_namespace: ExecutionNamespace | None = None,
+        framework_bindings: dict[str, Any] | None = None,
     ) -> "ExecutionResult":
         """Execute Python code with namespace + strategy builtins (RuntimeServices protocol).
 
@@ -1365,7 +1435,9 @@ class ActorRuntime:
             code: Python code to execute.
             builtins: Strategy-provided functions (return_result, message, method args, etc.)
             validate: Run planning language validation first.
-            wrap_in_function: If True, wrap code in async function and capture return value.
+            wrap_in_function: If True, return the value of a final expression (REPL
+                style). A cell always runs as an async body: top-level ``await``
+                and ``return`` work either way.
             timeout: Maximum execution time in seconds (default 30s). None to disable.
             tool_call_id: LLM's tool call ID for trace correlation (OpenAI format).
             execution_count: Execution number for Jupyter-style "Cell In[N]" filename.
@@ -1375,10 +1447,34 @@ class ActorRuntime:
                 guarded worker process instead of in-process. The surrounding
                 middleware pipeline, before/after_code_execution hooks and events
                 still run here on the parent, so the sandbox composes with them.
+            execution_namespace: The namespace the cell runs in (its globals
+                persist across the call's cells). None (in-process): a fresh
+                namespace for this one cell. The sandbox backend takes none; its
+                worker owns the namespace.
 
         Returns:
             ExecutionResult with stdout, error, defined_methods, and optionally returned_value.
         """
+        if execution_namespace is None and sandbox_executor is None:
+            # One in-process engine: a direct call without a namespace runs in
+            # a fresh one (pass a namespace to keep the names a cell binds).
+            execution_namespace = ExecutionNamespace(reserved=RUNTIME_NAMES)
+            with execution_namespace.enter({}):
+                return await self.execute_code(
+                    code,
+                    builtins=builtins,
+                    validate=validate,
+                    wrap_in_function=wrap_in_function,
+                    timeout=timeout,
+                    tool_call_id=tool_call_id,
+                    execution_count=execution_count,
+                    restrictions=restrictions,
+                    execution_namespace=execution_namespace,
+                    framework_bindings=framework_bindings,
+                )
+        if execution_namespace is not None and sandbox_executor is not None:
+            raise ValueError("A sandbox cell runs in its worker's namespace, not an owned one")
+
         # --- Middleware: execute_python --------------------------------------
         em = self.event_manager
         mid = em._middleware_id
@@ -1396,6 +1492,8 @@ class ActorRuntime:
                 "execution_count": execution_count,
                 "restrictions": restrictions,
                 "sandbox_executor": sandbox_executor,
+                "execution_namespace": execution_namespace,
+                "framework_bindings": framework_bindings,
             }
             ep_ctx = ExecutePythonContext(
                 code=code,
@@ -1450,16 +1548,13 @@ class ActorRuntime:
 
         result: ExecutionResult | None = None
         execution_exception: BaseException | None = None
-        stdout_token: contextvars.Token[Any] | None = None  # Track for cleanup in finally
-        stderr_token: contextvars.Token[Any] | None = None
-        stdin_token: contextvars.Token[Any] | None = None
-        media_token: contextvars.Token[Any] | None = None
         # Initialize buffer vars so the finally block can safely
         # isinstance-check them even if an early validation return
         # exited before they were assigned (caught by NameError previously).
         stdout_buffer: Any = None
         stderr_buffer: Any = None
         media_buffer: Any = None
+        capture_scope: Any = None
         # Set parent agent context for LLM inheritance by subagents
         parent_token = _parent_agent_var.set(self.agent)
         try:
@@ -1471,61 +1566,13 @@ class ActorRuntime:
 
             exec_globals = filter_mro_module_globals(type(self.agent))
 
-            # Import agentdoc functions for use in generated code
-            # Import decorators and strategies for use in generated code
-            # NOTE: stdout/stderr capture is handled by ContextVarStream wrappers
-            # installed below.
-            import typing as _typing
+            # The names every cell sees (core, media, strategies...): one registry,
+            # shared with the sandbox worker. NOTE: stdout/stderr capture is
+            # installed below by CaptureScope (runtime/capture_scope.py).
+            from nooa.runtime.namespace_providers import cell_namespace_names
 
-            from nooa.agentdoc import doc
-            from nooa.decorators import strategy
-            from nooa.media import Audio, File, Image, Media, Video
-            from nooa.runtime.media_capture import show
-            from nooa.runtime.pprint import pprint
-            from nooa.strategies import (
-                CodeActStrategy,
-                CompositeStrategy,
-                PredictStrategy,
-                ReflexionStrategy,
-                TemplateStrategy,
-            )
-            from nooa.strategies.pure_python import PurePythonStrategy
-
-            exec_globals.update(
-                {
-                    "self": self.agent,
-                    "asyncio": asyncio,
-                    "typing": _typing,
-                    # Common typing constructs — LLMs use these constantly
-                    "Annotated": _typing.Annotated,
-                    "Any": _typing.Any,
-                    "Literal": _typing.Literal,
-                    "Optional": _typing.Optional,
-                    "Union": _typing.Union,
-                    # agentdoc introspection (doc respects hidden fields)
-                    "doc": doc,
-                    "methods": methods,
-                    "variables": variables,
-                    "help": doc,  # Shadow built-in help() to prevent blocking on stdin
-                    # Pretty printing with Rich-compatible API
-                    "pprint": pprint,
-                    # Media display for multimodal models
-                    "show": show,
-                    "Media": Media,
-                    "Image": Image,
-                    "Audio": Audio,
-                    "Video": Video,
-                    "File": File,
-                    # decorators and strategies for LLM-generated methods
-                    "strategy": strategy,
-                    "PurePythonStrategy": PurePythonStrategy,
-                    "CodeActStrategy": CodeActStrategy,
-                    "ReflexionStrategy": ReflexionStrategy,
-                    "PredictStrategy": PredictStrategy,
-                    "TemplateStrategy": TemplateStrategy,
-                    "CompositeStrategy": CompositeStrategy,
-                }
-            )
+            core_globals = {"self": self.agent, "asyncio": asyncio, **cell_namespace_names()}
+            exec_globals.update(core_globals)
 
             # Add strategy builtins (includes reasoning, message, method args)
             if builtins:
@@ -1552,10 +1599,37 @@ class ActorRuntime:
                 exec_globals, effective_restrictions.blocked_modules
             )
 
+            # In-process only (the sandbox worker seeds its own namespace).
+            if execution_namespace is not None:
+                if framework_bindings is not None:
+                    execution_namespace.update_framework(
+                        _strip_blocked_modules(
+                            framework_bindings, effective_restrictions.blocked_modules
+                        )
+                    )
+                execution_namespace.initialize(exec_globals, static_names=core_globals)
+                import builtins as python_builtins
+
+                exec_globals["print"] = python_builtins.print
+                execution_namespace.bind_call(exec_globals)
+                exec_globals = execution_namespace.globals
+
             # 3. Strip redundant imports (from typing import Literal, etc.)
             from nooa.runtime.code_validator import strip_redundant_imports
 
-            code, stripped_imports = strip_redundant_imports(code, set(exec_globals.keys()))
+            # Imports are real writes in the owned engine; removing one based on
+            # a prior binding would silently change rebinding/del semantics, so
+            # only imports that could not run (no such module) are stripped.
+            code, stripped_imports = strip_redundant_imports(
+                code,
+                set(exec_globals.keys())
+                | (
+                    set(execution_namespace.reserved) | set(execution_namespace.framework)
+                    if execution_namespace is not None
+                    else set()
+                ),
+                only_unresolvable=execution_namespace is not None,
+            )
             for stmt in stripped_imports:
                 hm.import_stripped(stmt)
 
@@ -1588,7 +1662,13 @@ class ActorRuntime:
                         context = ValidationContext(
                             code=code,
                             agent_class=type(self.agent),
-                            available_names=set(exec_globals.keys()),
+                            available_names=set(exec_globals.keys())
+                            | (
+                                set(execution_namespace.reserved)
+                                | set(execution_namespace.framework)
+                                if execution_namespace is not None
+                                else set()
+                            ),
                             importable_modules=importable_modules,
                             restricted_imports=effective_restrictions.restricted_imports,
                             blocked_modules=effective_restrictions.blocked_modules,
@@ -1614,15 +1694,17 @@ class ActorRuntime:
             # still wrap the cell on the parent. The worker owns the namespace,
             # stdout capture and wrapper, so we skip the in-process exec below.
             if sandbox_executor is not None:
-                sandbox_result = cast(
+                # Bind ``result``: the finally block below finalizes its stderr
+                # (never-awaited warning rewrite) for every backend.
+                result = cast(
                     ExecutionResult,
                     await sandbox_executor.run_cell(code, execution_count=execution_count),
                 )
                 from nooa.agentdoc._format_observation import record_truncation
 
-                for reason in sandbox_result.truncation_reasons:
+                for reason in result.truncation_reasons:
                     record_truncation(reason)
-                return sandbox_result
+                return result
 
             # Set up stdout/stderr capture BEFORE ast.parse/compile so that
             # SyntaxWarnings (e.g. invalid escape sequences in LLM-generated code)
@@ -1632,47 +1714,23 @@ class ActorRuntime:
             # Each async task gets its own buffers via contextvars, so parallel
             # executions are isolated. TruncatingStringIO prevents LLMs from
             # filling the context window.
-            truncation_config = self.truncation_config
-            stdout_buffer = _make_capture_buffer(
-                limit=truncation_config.capture.max_stdout,
-                tail_chars=truncation_config.capture.tail,
-                file_backed=truncation_config.capture.file_backed,
-            )
-            stderr_buffer = _make_capture_buffer(
-                limit=truncation_config.capture.max_stderr,
-                tail_chars=truncation_config.capture.tail,
-                file_backed=truncation_config.capture.file_backed,
-            )
-            stdout_token = _stdout_buffer_var.set(stdout_buffer)
-            stderr_token = _stderr_buffer_var.set(stderr_buffer)
-            # Block stdin reads for this async task (prevents hangs from input(), etc.)
-            stdin_token = _block_stdin_var.set(True)
-            # Media capture buffer for show() calls; scoped per cell by design.
-            media_buffer = _MediaBuffer(
-                max_attachments=truncation_config.media_capture.max_attachments_per_execution
-            )
-            media_token = _media_buffer_var.set(media_buffer)
+            from nooa.runtime.capture_scope import CaptureScope
 
-            # Install stream wrappers around the CURRENT sys.stdout/sys.stderr/sys.stdin
-            # (which may have been replaced by pytest or other tools)
-            # We only wrap if not already wrapped, and we NEVER restore - the wrappers
-            # are transparent (fall through to original when no buffer/block is set) and
-            # must persist for parallel async executions to work correctly.
-            import sys
-
-            if not isinstance(sys.stdout, ContextVarStream):
-                sys.stdout = ContextVarStream(sys.stdout, _stdout_buffer_var, "stdout")
-            if not isinstance(sys.stderr, ContextVarStream):
-                sys.stderr = ContextVarStream(sys.stderr, _stderr_buffer_var, "stderr")
-            if not isinstance(sys.stdin, BlockedStdinWrapper):
-                sys.stdin = BlockedStdinWrapper(sys.stdin)
+            capture_scope = CaptureScope(self.truncation_config)
+            capture_scope.__enter__()
+            stdout_buffer, stderr_buffer = capture_scope.stdout, capture_scope.stderr
+            media_buffer = capture_scope.media
 
             # Use the execution-cell filename for parser diagnostics as well as
             # compiled runtime tracebacks.
-            cell_filename = f"Cell In[{execution_count}]"
+            # A retained helper must keep its original source even when a later
+            # handle restarts the visible execution counter at one.
+            cell_filename = (
+                f"Cell In[{execution_count}]"
+                f" [ns:{execution_namespace.identity}:{execution_namespace.epoch + 1}]"
+            )
 
             # Parse AST to find method definitions
-            source_code = code
             try:
                 tree = ast.parse(code, filename=cell_filename)
             except SyntaxError as e:
@@ -1720,199 +1778,43 @@ class ActorRuntime:
                         get_harness_metrics().implicit_return()
 
             returned_value = _NO_RETURN
-            captured_locals: dict[str, Any] = {}
-            wrapper_line_offset = 0  # Lines of wrapper before user code (for error adjustment)
+
+            def _frozen_output() -> dict[str, Any]:
+                """Freeze the capture scope, then read this cell's captured output.
+
+                The single place a result's output is taken: ``finish()`` runs
+                first so no late (descendant) write can land after the read.
+                The scope's ``__exit__`` in the ``finally`` below closes it.
+                """
+                if capture_scope is not None:
+                    capture_scope.finish()
+                return {
+                    "stdout": stdout_buffer.getvalue(),
+                    "stderr": stderr_buffer.getvalue(),
+                    "images": media_buffer.blocks if media_buffer is not None else [],
+                }
 
             try:
-                if wrap_in_function:
-                    # REPL mode: wrap entire code in async function to capture return
-                    # Use try/finally to capture locals regardless of how function exits
-                    indented = self._indent_code(code, "        ")
-                    # Initialize the captured locals dict in exec_globals
-                    exec_globals["__repl_captured_locals__"] = {}
+                from nooa.runtime.async_safety import agent_async_safety_context
 
-                    # Build global declarations for session variables (REPL persistence)
-                    # This allows code like `x = x + 5` to work when x was defined in a prior call
-                    # Without this, Python sees `x = ...` and marks x as local, failing on the RHS
-                    # We need to declare as global any variable that was passed in builtins
-                    global_vars = [
-                        name
-                        for name, val in (builtins or {}).items()
-                        if (
-                            not name.startswith("_")
-                            and name not in ("self", "asyncio", "__builtins__")
-                            and not callable(val)
-                            and not isinstance(val, types.ModuleType)
-                        )
-                    ]
-                    global_decl = f"    global {', '.join(global_vars)}\n" if global_vars else ""
+                async def run_owned_cell():
+                    # Authorize the task actually executing the cell. wait_for
+                    # may use this same task (e.g. positive timeouts on 3.13),
+                    # so completion also checks the actual generation identity.
+                    with execution_namespace.executing_cell(), agent_async_safety_context():
+                        return await execution_namespace.cell(code, cell_filename)
 
-                    # Build the set of global var names for the finally block
-                    global_var_set = set(global_vars)
-
-                    # Calculate wrapper header line count for error line adjustment
-                    # User code starts after: "async def __repl_wrapper__():\n" + global_decl + "    try:\n"
-                    wrapper_header = f"async def __repl_wrapper__():\n{global_decl}    try:\n"
-                    wrapper_line_offset = wrapper_header.count("\n")
-
-                    wrapper = f"""async def __repl_wrapper__():
-{global_decl}    try:
-{indented}
-    finally:
-        # Capture locals for REPL persistence (exclude internals and builtins)
-        # Also capture updated global variables that were declared global
-        __repl_captured_locals__.update({{
-            k: v for k, v in locals().items()
-            if not k.startswith('_') and k not in ('self', 'asyncio')
-        }})
-        # Capture updated values of global variables we declared
-        for _gvar in {repr(global_var_set)}:
-            if _gvar in globals():
-                __repl_captured_locals__[_gvar] = globals()[_gvar]
-"""
-                    # Register wrapper with linecache so traceback can show source lines
-                    linecache.cache[cell_filename] = (
-                        len(wrapper),
-                        None,
-                        wrapper.splitlines(keepends=True),
-                        cell_filename,
-                    )
-
-                    exec(compile(wrapper, cell_filename, "exec"), exec_globals)
-                    # Execute with async safety (blocks Future.result() etc from event loop)
-                    from nooa.runtime.async_safety import agent_async_safety_context
-
-                    coro = exec_globals["__repl_wrapper__"]()
-                    with agent_async_safety_context():
-                        if timeout is not None:
-                            try:
-                                result_value = await asyncio.wait_for(coro, timeout=timeout)
-                            except TimeoutError:
-                                raise TimeoutError(
-                                    f"Code execution timed out after {timeout} seconds. "
-                                    "Check for infinite loops or blocking operations."
-                                ) from None
-                        else:
-                            result_value = await coro
-
-                    # Extract captured locals (filter out non-serializable/internal items)
-                    captured_locals = _extract_captured_locals(exec_globals)
-
-                    # Capture return value based on return type:
-                    # - Explicit return: always capture (even None)
-                    # - Implicit return: only capture non-None (like IPython)
-                    if has_explicit_return:
-                        returned_value = result_value
-                    elif implicit_return_added and result_value is not None:
-                        # Suppress None from implicit returns (matches IPython behavior)
-                        returned_value = result_value
-
-                    # Still extract method definitions for helper functions
-                    # Re-execute just the function defs to bind them
-                    func_defs: list[ast.stmt] = [
-                        n
-                        for n in tree.body
-                        if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
-                    ]
-                    if func_defs:
-                        func_tree = ast.Module(body=func_defs, type_ignores=[])
-                        exec(compile(func_tree, cell_filename, "exec"), exec_globals)
-                        # Persisted helpers are compiled directly from the cell
-                        # AST, not through the async wrapper. Keep their source
-                        # cache aligned with those original line numbers.
-                        linecache.cache[cell_filename] = (
-                            len(source_code),
-                            None,
-                            source_code.splitlines(keepends=True),
-                            cell_filename,
-                        )
-                        # The wrapper's finally block captured the wrapped
-                        # function objects. Persist the direct-compiled versions
-                        # instead so later calls use source-relative line numbers.
-                        for node in func_defs:
-                            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-                                if node.name in exec_globals:
-                                    captured_locals[node.name] = exec_globals[node.name]
-
-                    # Attach source code to defined functions for has_ellipsis_body() detection
-                    for method_name, method_code in method_sources.items():
-                        if method_name in exec_globals and callable(exec_globals[method_name]):
-                            try:
-                                exec_globals[method_name]._generated_source = method_code
-                            except (AttributeError, TypeError):
-                                # Some built-in functions don't allow attribute assignment
-                                pass
+                if timeout is None:
+                    result_value = await run_owned_cell()
                 else:
-                    # Original mode: separate function defs from other statements
-                    func_defs = [
-                        n
-                        for n in tree.body
-                        if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
-                    ]
-                    other_stmts: list[ast.stmt] = [
-                        n
-                        for n in tree.body
-                        if not isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
-                    ]
+                    result_value = await run_with_deadline(run_owned_cell(), timeout)
+                # Explicit return: always capture (even None); implicit: non-None only.
+                if has_explicit_return or (implicit_return_added and result_value is not None):
+                    returned_value = result_value
 
-                    # Execute function definitions
-                    if func_defs:
-                        func_tree = ast.Module(body=func_defs, type_ignores=[])
-                        exec(compile(func_tree, cell_filename, "exec"), exec_globals)
-
-                    # Execute other statements
-                    if other_stmts:
-                        other_tree = ast.Module(body=other_stmts, type_ignores=[])
-                        has_await = any(isinstance(n, ast.Await) for n in ast.walk(other_tree))
-                        if has_await:
-                            other_code = ast.unparse(other_tree)
-                            indented = "\n".join("    " + line for line in other_code.split("\n"))
-                            wrapper = f"async def __wrapper__():\n{indented}"
-                            # Register wrapper with linecache so traceback can show source lines
-                            linecache.cache[cell_filename] = (
-                                len(wrapper),
-                                None,
-                                wrapper.splitlines(keepends=True),
-                                cell_filename,
-                            )
-                            exec(compile(wrapper, cell_filename, "exec"), exec_globals)
-                            # Execute with async safety (blocks Future.result() etc)
-                            from nooa.runtime.async_safety import (
-                                agent_async_safety_context,
-                            )
-
-                            coro = exec_globals["__wrapper__"]()
-                            with agent_async_safety_context():
-                                if timeout is not None:
-                                    try:
-                                        await asyncio.wait_for(coro, timeout=timeout)
-                                    except TimeoutError:
-                                        raise TimeoutError(
-                                            f"Code execution timed out after {timeout} seconds. "
-                                            "Check for infinite loops or blocking operations."
-                                        ) from None
-                                else:
-                                    await coro
-                        else:
-                            # Sync code execution - enable async safety for Future.result() etc
-                            from nooa.runtime.async_safety import (
-                                agent_async_safety_context,
-                            )
-
-                            with agent_async_safety_context():
-                                exec(compile(other_tree, cell_filename, "exec"), exec_globals)
-
-                # Attach source code to defined functions for has_ellipsis_body() detection
-                for method_name, method_code in method_sources.items():
-                    if method_name in exec_globals and callable(exec_globals[method_name]):
-                        try:
-                            exec_globals[method_name]._generated_source = method_code
-                        except (AttributeError, TypeError):
-                            # Some built-in functions don't allow attribute assignment
-                            pass
-
-                # Helpers stay as REPL locals (captured via __repl_captured_locals__).
-                # The names list is kept in ExecutionResult.defined_methods for feedback only.
+                # The owned compiler attaches ``_generated_source`` by lexical
+                # definition (nested/class methods included). The names list
+                # is kept in ExecutionResult.defined_methods for feedback only.
                 defined_methods: dict[str, Any] = {
                     method_name: exec_globals[method_name]
                     for method_name in method_sources
@@ -1920,36 +1822,22 @@ class ActorRuntime:
                 }
 
                 result = ExecutionResult(
-                    stdout=stdout_buffer.getvalue(),
-                    stderr=stderr_buffer.getvalue(),
+                    **_frozen_output(),
                     error=None,
                     defined_methods=defined_methods,
                     returned_value=returned_value,
                     explicit_return=has_explicit_return,
-                    captured_locals=captured_locals,
-                    wrapper_line_offset=wrapper_line_offset,
-                    images=media_buffer.blocks,
                 )
                 return result
 
             except ExecutionSignal as sig:
-                # Extract captured locals even on signal (IPython behavior).
-                # The wrapper function's finally block still runs before this handler,
-                # populating exec_globals["__repl_captured_locals__"] with all variables
-                # that were defined before the signal was raised.
-                captured_locals = _extract_captured_locals(exec_globals)
-
                 result = ExecutionResult(
-                    stdout=stdout_buffer.getvalue(),
-                    stderr=stderr_buffer.getvalue(),
+                    **_frozen_output(),
                     error=None,  # NOT an error
                     signal=sig,  # Store signal separately
                     defined_methods={},
                     returned_value=_NO_RETURN,
                     explicit_return=False,
-                    captured_locals=captured_locals,
-                    wrapper_line_offset=wrapper_line_offset,
-                    images=media_buffer.blocks,
                 )
                 return result
 
@@ -1962,8 +1850,6 @@ class ActorRuntime:
                 # ordinary execution error so one cell cannot terminate the parent run.
                 # NOTE: asyncio.CancelledError (also BaseException) is deliberately NOT
                 # caught here — real cancellation must still propagate.
-                captured_locals = _extract_captured_locals(exec_globals)
-
                 # ExecutionResult.error is typed Exception | None, so wrap the
                 # BaseException in a RuntimeError (original kept as __cause__).
                 wrapped = RuntimeError(
@@ -1974,35 +1860,21 @@ class ActorRuntime:
                 wrapped.__cause__ = e
 
                 result = ExecutionResult(
-                    stdout=stdout_buffer.getvalue(),
-                    stderr=stderr_buffer.getvalue(),
+                    **_frozen_output(),
                     error=wrapped,
                     defined_methods={},
                     returned_value=_NO_RETURN,
                     explicit_return=False,
-                    captured_locals=captured_locals,
-                    wrapper_line_offset=wrapper_line_offset,
-                    images=media_buffer.blocks,
                 )
                 return result
 
             except Exception as e:
-                # Extract captured locals even on error (IPython behavior).
-                # The wrapper function's finally block still runs before this handler,
-                # populating exec_globals["__repl_captured_locals__"] with all variables
-                # that were defined before the exception was raised.
-                captured_locals = _extract_captured_locals(exec_globals)
-
                 result = ExecutionResult(
-                    stdout=stdout_buffer.getvalue(),
-                    stderr=stderr_buffer.getvalue(),
+                    **_frozen_output(),
                     error=e,
                     defined_methods={},
                     returned_value=_NO_RETURN,
                     explicit_return=False,
-                    captured_locals=captured_locals,
-                    wrapper_line_offset=wrapper_line_offset,
-                    images=media_buffer.blocks,
                 )
                 return result
 
@@ -2021,47 +1893,30 @@ class ActorRuntime:
                 if results is None:
                     results = []
                     error.execution_results = results  # type: ignore[attr-defined]
-                results.append(
-                    ExecutionResult(
-                        stdout=stdout_buffer.getvalue(),
-                        stderr=stderr_buffer.getvalue(),
-                        cancelled=True,
-                        images=media_buffer.blocks if media_buffer is not None else [],
-                    )
-                )
+                results.append(ExecutionResult(**_frozen_output(), cancelled=True))
             raise
         finally:
             # NOTE: We do NOT restore sys.stdout/sys.stderr here.
             # The ContextVarStream wrappers are transparent (fall through to original
             # when no buffer is set) and must persist for parallel async executions.
 
-            if isinstance(stdout_buffer, TruncatingStringIO) and stdout_buffer.was_truncated:
-                from nooa.agentdoc._format_observation import record_truncation
+            # A capture scope leases the buffer: check the buffer it wraps.
+            if capture_scope is not None:
+                captured = capture_scope.stdout.buffer
+                if isinstance(captured, TruncatingStringIO) and captured.was_truncated:
+                    from nooa.agentdoc._format_observation import record_truncation
 
-                record_truncation("capture.max_stdout")
-
-            # Reset task-local stdout/stderr buffers and stdin blocking (only if they were set)
-            if stdout_token is not None:
-                _stdout_buffer_var.reset(stdout_token)
-            if stderr_token is not None:
-                _stderr_buffer_var.reset(stderr_token)
-            if stdin_token is not None:
-                _block_stdin_var.reset(stdin_token)
-            if media_token is not None:
-                _media_buffer_var.reset(media_token)
-            # Close file handles for file-backed buffers (but keep files on disk
-            # so the LLM can reference the full output via the path in the notice).
-            # stdout_buffer/stderr_buffer may not be defined if an early return
-            # (validation, SyntaxError) exited before buffer creation.
-            try:
-                if isinstance(stdout_buffer, FileBackedTruncatingStringIO):
-                    stdout_buffer.close()
-                if isinstance(stderr_buffer, FileBackedTruncatingStringIO):
-                    stderr_buffer.close()
-            except NameError:
-                pass
+                    record_truncation("capture.max_stdout")
+                capture_scope.__exit__(None, None, None)
             # Reset parent agent context
             _parent_agent_var.reset(parent_token)
+            # The one place a cell's stderr is finalized, for every backend
+            # (in-process and sandbox) and every outcome, including the partial
+            # result this frame appended for a cancelled cell.
+            partial_results = getattr(execution_exception, "execution_results", None) or []
+            for finished in (result, *partial_results[-1:]):
+                if finished is not None and finished.stderr:
+                    finished.stderr = rewrite_never_awaited_warnings(finished.stderr, self.agent)
             # Call after_code_execution hook
             call_after_hook(
                 "after_code_execution",
@@ -2935,54 +2790,24 @@ class ActorRuntime:
             # Strategy must be a GenerationStrategy instance
             if isinstance(strategy, GenerationStrategyABC):
                 # Use strategy's execute() method directly
-                from nooa.strategies.current_call import CurrentCall
+                from nooa.strategies.current_call import CurrentCall, merge_call_arguments
+
+                sig = inspect.signature(method)
+                merged_kwargs = merge_call_arguments(sig, args, kwargs)
 
                 # Expand {placeholders} in method docstring using call arguments
                 raw_docstring = getattr(method, "__doc__", None)
                 expanded_docstring = None
                 if raw_docstring:
-                    # Build context: map parameter names to argument values
-                    sig = inspect.signature(method)
-                    param_names = list(sig.parameters.keys())[1:]  # Skip 'self'
-                    arg_context = dict(zip(param_names, args, strict=False))
-                    arg_context.update(kwargs)
                     expanded_docstring = await self.expand_variables(
-                        raw_docstring, extra_context=arg_context, error_mode="silent"
+                        raw_docstring, extra_context=merged_kwargs, error_mode="silent"
                     )
 
-                # Build CurrentCall for the strategy
-                # Map positional args to parameter names for kwargs (like from_method does)
-                sig = inspect.signature(method)
-                param_names = [p for p in sig.parameters.keys() if p != "self"]
-                merged_kwargs = dict(kwargs)
-                for i, value in enumerate(args):
-                    if i < len(param_names):
-                        param_name = param_names[i]
-                        if param_name not in merged_kwargs:
-                            merged_kwargs[param_name] = value
-
-                # Extract return type annotation — use get_type_hints to
-                # resolve PEP 563 stringified annotations.
-                return_type = None
-                try:
-                    hints = get_type_hints(method, include_extras=True)
-                    return_annotation = hints.get("return", inspect.Signature.empty)
-                except (NameError, TypeError, AttributeError):
-                    return_annotation = sig.return_annotation
-                if return_annotation is not inspect.Signature.empty:
-                    return_type = return_annotation
-
-                # Extract pre-ellipsis code (setup code before ... marker)
-                # Use _original if method was wrapped by metaclass
-                from nooa.ellipsis_detection import get_pre_ellipsis_code
-
-                original_method = getattr(method, "_original", method)
-                pre_ellipsis_code = get_pre_ellipsis_code(original_method)
-
-                # Use the call_id already pushed by the wrapper so events added
-                # during this call have call_id matching the agent
-                # call stack and runtime.current_call.id. CodeAct stores its
-                # display-only Task event tag separately on call.task_tag.
+                # Use the shared builder so Annotated parameter specs reach
+                # prefill rendering on agent calls as well as nested strategy calls.
+                # Pass runtime identity, expanded instructions and caller state at
+                # construction. Events must match the wrapper's call ID, not a
+                # builder-generated one.
                 call_id = self._agent_call_id or str(uuid4())
 
                 # Snapshot inherited + local context before CurrentCall is built.
@@ -2992,24 +2817,20 @@ class ActorRuntime:
                 if parent_ctx or own_ctx:
                     merged_ctx = {**(parent_ctx or {}), **(own_ctx or {})}
 
-                call = CurrentCall(
-                    id=call_id,
-                    method_name=method_name,
-                    decorator="plan",
-                    signature=str(sig),
-                    docstring=expanded_docstring,
+                call = CurrentCall.from_method(
+                    method,
                     args=args,
-                    kwargs=merged_kwargs,
-                    parent_id=self._agent_call_stack[-2]
-                    if len(self._agent_call_stack) >= 2
-                    else None,
-                    is_async=inspect.iscoroutinefunction(method),
-                    return_type=return_type,
-                    pre_ellipsis_code=pre_ellipsis_code,
+                    kwargs=kwargs,
+                    parent_id=(
+                        self._agent_call_stack[-2] if len(self._agent_call_stack) >= 2 else None
+                    ),
+                    call_id=call_id,
+                    method_name=method_name,
+                    docstring=expanded_docstring,
                     session_locals=call_session_locals,
-                    # Authoritative ordered names from the live signature (excludes
-                    # 'self') so format_parameters_as_code never re-parses the string.
-                    param_names=[p for p in sig.parameters if p != "self"],
+                    # Resolved per-request facts for the context view: the owner,
+                    # strategy, model identity and assembly support, never the
+                    # client or credentials.
                     agent=self.agent,
                     strategy=strategy,
                     model=(
@@ -3027,9 +2848,6 @@ class ActorRuntime:
                     _decorator_context=merged_ctx,
                     _scoped_context=_scoped_blocks_var.get(),
                     _context_call_id=call_id,
-                    # Preserve Annotated parameter overrides on top-level calls,
-                    # just as the nested method wrapper does.
-                    param_specs=CurrentCall.from_method(method).param_specs,
                 )
 
                 # Store current call context in context vars for RuntimeServices.generate()
@@ -3114,48 +2932,6 @@ class ActorRuntime:
             # Restore previous context variable value
             # (handles nested generation sessions correctly)
             _in_generation_session.set(prev_in_session)
-
-    def _indent_code(self, code: str, indent: str) -> str:
-        """Indent each line of code, preserving multiline string indentation."""
-        lines = code.split("\n")
-        try:
-            # Tokenize to find string literals
-            tokens = list(tokenize.generate_tokens(io.StringIO(code).readline))
-
-            # Track which lines are continuation lines of multiline strings
-            # Uses 0-indexed line numbers to match enumerate(lines)
-            string_ranges = set()
-            fstring_middle_type = getattr(tokenize, "FSTRING_MIDDLE", None)
-
-            for token in tokens:
-                # Check for STRING tokens or FSTRING_MIDDLE (Python 3.12+)
-                if token.type == tokenize.STRING or (
-                    fstring_middle_type and token.type == fstring_middle_type
-                ):
-                    # Convert 1-based tokenizer positions to 0-indexed
-                    start_line = token.start[0] - 1
-                    end_line = token.end[0] - 1
-
-                    # Check if this token spans multiple lines
-                    if end_line > start_line:
-                        # Mark continuation lines (not the first line, but include the last)
-                        for line_idx in range(start_line + 1, end_line + 1):
-                            string_ranges.add(line_idx)
-
-            # Indent normal lines, preserve string continuation lines
-            result_lines = []
-            for idx, line in enumerate(lines):
-                if idx in string_ranges:
-                    # String continuation - keep as-is
-                    result_lines.append(line)
-                else:
-                    # Normal code - add indent
-                    result_lines.append(indent + line)
-
-            return "\n".join(result_lines)
-        except (tokenize.TokenError, IndentationError):
-            # Fallback to simple indentation if tokenization fails
-            return "\n".join(indent + line for line in lines)
 
     async def _prepare_context(
         self,
@@ -3377,6 +3153,11 @@ class ActorRuntime:
         # generate() writes that actual value back into _last_context_stats after
         # the call. Until then, keep render_context's local estimate as a fallback
         # for diagnostics and context-window error recovery.
+        # keys() lists active tags without loading history again.
+        self._render_snapshot = (
+            frozenset(item.id for item in blocks if isinstance(item, EventBase)),
+            frozenset(self.event_manager.keys()),
+        )
         self._last_dynamic_context_snapshot = _dynamic_context_trace_snapshot(
             tuple(blocks), result.messages
         )

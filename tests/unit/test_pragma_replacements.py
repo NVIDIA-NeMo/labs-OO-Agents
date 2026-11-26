@@ -8,7 +8,6 @@ proving the code path is exercisable and correct.
 
 from __future__ import annotations
 
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -683,41 +682,3 @@ class TestInstanceValuesExceptionHandling:
 # =============================================================================
 # Task 11: Helper method binding failure in pure_python.py
 # =============================================================================
-
-
-class TestHelperMethodBindingFailure:
-    """HelperFunctionManager.apply() reports binding errors."""
-
-    def test_errors_list_populated_on_exec_failure(self):
-        from nooa.strategies.generated_code import HelperFunctionManager
-
-        manager = HelperFunctionManager()
-
-        # Code that defines a helper with a decorator that doesn't exist
-        code = "def helper(self):\n    return self.tool()\n"
-
-        agent = MagicMock()
-        agent.__class__.__name__ = "TestAgent"
-        session_locals: dict[str, Any] = {}
-        namespace: dict[str, Any] = {}
-
-        result = manager.apply(
-            code,
-            agent,
-            session_locals,
-            namespace=namespace,
-        )
-
-        # The function should be successfully installed (no decorator issues)
-        # Let's try with code that genuinely fails to exec
-        bad_code = "@nonexistent_decorator\ndef helper(self):\n    return 1\n"
-
-        result = manager.apply(
-            bad_code,
-            agent,
-            session_locals,
-            namespace=namespace,
-        )
-
-        assert len(result.errors) > 0
-        assert "helper" in result.errors[0]

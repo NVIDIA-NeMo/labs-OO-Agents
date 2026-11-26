@@ -151,10 +151,14 @@ self.context["project_state"] = Context(expr="self.format_project_state()")
 
 ### Model onboarding and media
 
-- Recommend `uv add "nooa[cli]"` then `uv run nooa connect` for model setup;
-  use saved aliases in agent code. Get permission before inference checks,
-  especially noninteractive stages. Offline setup and diagnostics belong in
+- Recommend `uv add "nooa[cli]"` for model setup; humans can use
+  `uv run nooa connect`. Agents follow the canonical headless workflow in
+  [nooa-connect](skills/nooa-connect/SKILL.md): obtain permission for configuration,
+  network checks and writes, then use stages. Use saved aliases in agent code.
+  Registry semantics and offline setup also belong in
   `skills/nooa-model-configuration/SKILL.md` and `docs/model-connect.md`.
+  On Windows, run nooa inside WSL 2: native Windows stops at `import nooa`
+  unless `NOOA_SKIP_PLATFORM_CHECK=1` is set.
 - Import `Image`, `Audio`, `Video`, and `File` from `nooa.media`. Pass them as
   method arguments or use `show()` while CodeAct runs. Configure `media_inputs`
   for each model; formats left out are replaced with text notices. `File`
@@ -218,6 +222,22 @@ Two limits worth knowing:
   indistinguishable from the outside — so leave trace-sensitive generator
   methods undecorated.
 
+### Bounded values and output
+
+Never write a new way to truncate, preview or cap a value or output. Use
+`nooa.snapshot` (see `docs/snapshot-model.md`): `capture` + `render_python` /
+`render_json` / `render_trace` for values, `TextStream` + `render_output` for
+output streams. The whole output goes to files only through `nooa.overflow`
+(`OverflowDir`, see `docs/overflow.md`). Each public name's docstring documents it (`print(doc(...))`).
+
+If your code limits size for another reason (rejecting an oversized request,
+paginating a query, a protocol limit), mark the line with the reason:
+
+    raw = f.read(MAX_BODY + 1)  # snapshot: allow reject oversized uploads; nothing is shown
+
+The reason is required. Existing truncation code is being moved onto
+`nooa.snapshot` in follow-up pull requests; don't add more of it.
+
 ### Quality & Testing
 
 - **Evidence before assertions.** Run tests/verification before claiming work is done. Enforce in the orchestrator.
@@ -252,6 +272,12 @@ For deeper authoring guidance, see `skills/nooa-agent-authoring/SKILL.md`.
 - Sync lockfile: `uv sync`
 - Run scripts: `uv run python <script>.py`
 - Run tests: `uv run pytest`
+- **POSIX-only code** (`fcntl`, `resource`, `termios`, POSIX signals,
+  `os.killpg`, fork, `/bin/bash`): import those modules inside the function that
+  uses them, never at module level, and call
+  `nooa._platform.require_posix("<feature>")` where the feature starts. Don't
+  port POSIX-only features to native Windows; WSL 2 is the supported path. See
+  CONTRIBUTING.md, "Platform support".
 
 ## Experiments
 

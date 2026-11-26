@@ -151,6 +151,46 @@ class TestCurrentCallFromMethod:
 
         assert call.parent_id == "parent_call_789"
 
+    def test_from_method_runtime_overrides_set_exactly(self):
+        """Keyword overrides replace the computed id, name, docstring, parent and locals."""
+        from nooa.strategies.current_call import CurrentCall
+
+        def method(self, value: int) -> int:
+            """Raw {value} docstring."""
+            ...
+
+        session_locals = {"seed": 1}
+        call = CurrentCall.from_method(
+            method,
+            args=(3,),
+            parent_id="parent-1",
+            call_id="wrapper-call-id",
+            method_name="renamed",
+            docstring="Expanded 3 docstring.",
+            session_locals=session_locals,
+        )
+
+        assert call.id == "wrapper-call-id"
+        assert call.method_name == "renamed"
+        assert call.docstring == "Expanded 3 docstring."
+        assert call.parent_id == "parent-1"
+        assert call.session_locals is session_locals
+        assert call.kwargs == {"value": 3}
+
+    def test_from_method_docstring_override_accepts_none(self):
+        """An explicit docstring=None is kept, not replaced by the method docstring."""
+        from nooa.strategies.current_call import CurrentCall
+
+        def method(self):
+            """Has a docstring."""
+
+        assert CurrentCall.from_method(method, docstring=None).docstring is None
+        defaults = CurrentCall.from_method(method)
+        assert defaults.docstring == "Has a docstring."
+        assert defaults.method_name == "method"
+        assert defaults.session_locals is None
+        assert defaults.id.startswith("call_")
+
 
 class TestCurrentCallBoundParameters:
     """Tests for CurrentCall.bound_parameters() — effective inputs, each once.
@@ -193,7 +233,7 @@ class TestCurrentCallBoundParameters:
         assert bound == {"data": "hello", "count": 5}
 
     def test_var_positional_args_each_appear_once(self):
-        """*args: extra positionals land under arg_<i>; none are duplicated."""
+        """*args values are preserved once as the tuple visible to the method."""
         from nooa.strategies.current_call import CurrentCall
 
         def analyze(self, *imgs) -> dict:
@@ -204,10 +244,7 @@ class TestCurrentCallBoundParameters:
         call = CurrentCall.from_method(analyze, args=(a, b), kwargs={})
 
         bound = call.bound_parameters()
-        # First positional maps to the var-positional name; the rest get arg_<i>.
-        assert list(bound.values()) == [a, b]
-        # No object appears twice.
-        assert len(bound) == 2
+        assert bound == {"imgs": (a, b)}
 
     def test_keyword_only_param(self):
         """Keyword-only param: no stray '*' key leaks into the mapping."""

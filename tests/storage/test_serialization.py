@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 from pydantic import BaseModel, ConfigDict
 
+from nooa.config.model_config import ModelConfig
 from nooa.errors.storage import DeserializationError, SerializationError
 from nooa.storage.markers import snapshotable
 from nooa.storage.serialization import SKIP, deserialize, serialize
@@ -32,6 +33,19 @@ class MyModel(BaseModel):
 class NestedModel(BaseModel):
     inner: MyModel
     tags: list[str] = []
+
+
+class HookedExtraModel(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    name: str
+
+    def __snapshot_data__(self):
+        return {"saved_name": self.name}
+
+    @classmethod
+    def __restore_snapshot__(cls, data):
+        return cls(name=data["saved_name"], restored=True)
 
 
 @dataclasses.dataclass
@@ -170,7 +184,59 @@ class TestNoSnapshot:
 
 
 class TestPydantic:
+    def test_snapshot_hooks_take_precedence_over_allowed_extras(self):
+        """Custom snapshot hooks own the schema even when a model allows extras."""
+        model = HookedExtraModel(name="test", transient=UnsupportedThing())
+        blob, allowlist = serialize(model)
+        assert blob["data"] == {"saved_name": "test"}
+        restored = deserialize(blob, allowlist)
+        assert isinstance(restored, HookedExtraModel)
+        assert restored.name == "test"
+        assert restored.model_extra == {"restored": True}
+
+    def test_model_config_preserves_provider_extras(self):
+        """Snapshot round trips retain provider options stored as allowed model extras."""
+        model = ModelConfig(model_name="test", num_retries=7, custom={"stops": ("a", "b")})
+        blob, allowlist = serialize(model)
+        restored = deserialize(blob, allowlist)
+        assert restored == model
+        assert restored.model_extra == model.model_extra
+
+    def test_extra_values_use_recursive_serialization(self):
+        """Nested dataclasses and snapshotable values in extras retain their types."""
+        model = ModelConfig(custom={"point": Point(1, 2), "config": Config("localhost")})
+        blob, allowlist = serialize(model)
+        restored = deserialize(blob, allowlist)
+        assert restored.model_extra["custom"]["point"] == Point(1, 2)
+        config = restored.model_extra["custom"]["config"]
+        assert isinstance(config, Config)
+        assert config.host == "localhost"
+
+    def test_nested_extra_class_requires_allowlist(self):
+        """Allowing extra fields does not bypass the nested-class restoration allowlist."""
+        model = ModelConfig(custom=Point(1, 2))
+        blob, allowlist = serialize(model)
+        with pytest.raises(DeserializationError, match="not in the allowlist"):
+            deserialize(blob, allowlist - {f"{Point.__module__}.Point"})
+
+    def test_nosnapshot_extra_is_skipped(self):
+        """Opted-out extra values are skipped without losing serializable sibling options."""
+        model = ModelConfig(custom=_NoSnapshotThing(), num_retries=7)
+        blob, allowlist = serialize(model)
+        assert deserialize(blob, allowlist).model_extra == {"num_retries": 7}
+
+    @pytest.mark.parametrize("value", [{"secret": "private"}, ["private"], ("private",)])
+    def test_nosnapshot_collection_extras_are_skipped(self, value):
+        """Marked collections are omitted directly and inside nested extra values."""
+        marked_type = type("PrivateCollection", (type(value),), {"__nosnapshot__": True})
+        marked = marked_type(value)
+        assert serialize(marked)[0] is SKIP
+        model = ModelConfig(custom={"hidden": marked, "visible": value}, private=marked)
+        blob, allowlist = serialize(model)
+        assert deserialize(blob, allowlist).model_extra == {"custom": {"visible": value}}
+
     def test_simple_model_roundtrip(self):
+        """Ordinary declared Pydantic fields still survive a snapshot round trip."""
         m = MyModel(name="test", value=42)
         blob, al = serialize(m)
         assert blob["__type__"] == "pydantic"
@@ -757,6 +823,30 @@ class StrictModel(BaseModel):
 
 
 class TestPydanticExtraForbid:
+    @pytest.mark.parametrize("model_cls", [MyModel, StrictModel])
+    @pytest.mark.parametrize("allow_retired_class", [False, True])
+    def test_obsolete_envelopes_are_discarded_before_restoration(
+        self, model_cls, allow_retired_class
+    ):
+        """Ignored extras need neither an allowlist entry nor an importable class."""
+        blob, allowlist = serialize(model_cls(name="saved", value=7))
+        retired_class = "retired_snapshot_module.Payload"
+        blob["data"]["obsolete"] = {
+            "__type__": "dataclass",
+            "__class__": retired_class,
+            "data": {"value": "old"},
+        }
+        if allow_retired_class:
+            allowlist.add(retired_class)
+        assert deserialize(blob, allowlist) == model_cls(name="saved", value=7)
+
+    def test_known_nested_fields_still_require_allowlist(self):
+        """Filtering obsolete fields must not bypass checks on retained fields."""
+        blob, allowlist = serialize(NestedModel(inner=MyModel(name="saved")))
+        allowlist.remove(f"{MyModel.__module__}.{MyModel.__qualname__}")
+        with pytest.raises(DeserializationError, match="not in the allowlist"):
+            deserialize(blob, allowlist)
+
     def test_pydantic_extra_forbid_lenient_restore(self):
         """Model with extra='forbid' deserializes when extra fields exist in blob."""
         blob = {
@@ -870,3 +960,86 @@ class TestAdditionalEdgeCases:
         assert isinstance(restored.payload.config, DeepConfig)
         assert restored.payload.config.host == "db.local"
         assert restored.payload.config.port == 5432
+
+
+# ---------------------------------------------------------------------------
+# Plain dicts shaped like envelopes are escaped (PR #451 review 3, finding 1)
+# ---------------------------------------------------------------------------
+
+
+class SnapshotOwned(BaseModel):
+    """A model that writes its own snapshot data, like LLMResponse and ChildRef."""
+
+    payload: dict[str, Any]
+
+    def __snapshot_data__(self) -> dict[str, Any]:
+        return self.model_dump(mode="json")
+
+
+class TestEnvelopeShapedPlainDicts:
+    def test_snapshot_data_with_an_envelope_shaped_dict_comes_back_as_that_dict(self):
+        plain = {"__type__": "pydantic", "__class__": f"{__name__}.MyModel", "data": {"name": "x"}}
+        blob, al = serialize(SnapshotOwned(payload={"native": plain}))
+        restored = deserialize(blob, al)
+        assert isinstance(restored, SnapshotOwned)
+        assert restored.payload == {"native": plain}
+
+    def test_a_plain_dict_shaped_like_a_pydantic_envelope_comes_back_as_that_dict(self):
+        plain = {"__type__": "pydantic", "__class__": f"{__name__}.MyModel", "data": {"name": "x"}}
+        blob, al = serialize({"x": plain})
+        assert deserialize(blob, al) == {"x": plain}
+
+    def test_a_plain_dict_naming_a_class_outside_the_allowlist_still_loads(self):
+        plain = {"__type__": "pydantic", "__class__": "os.system", "data": {}}
+        blob, al = serialize([plain, {"__class__": "x"}, {"__type__": "tuple", "data": [1]}])
+        assert deserialize(blob, al) == [
+            plain,
+            {"__class__": "x"},
+            {"__type__": "tuple", "data": [1]},
+        ]
+
+    def test_escaped_dict_values_are_still_restored(self):
+        value = {"__type__": "mine", "point": Point(1.0, 2.0), "pair": (1, 2)}
+        blob, al = serialize(value)
+        assert deserialize(blob, al) == value
+
+    def test_an_escaped_dict_inside_an_escaped_dict_round_trips(self):
+        value = {"__type__": "plain_dict", "data": {"__type__": "plain_dict", "data": {}}}
+        blob, al = serialize(value)
+        assert deserialize(blob, al) == value
+
+    def test_a_blob_written_before_the_escape_still_loads(self):
+        # A blob as serialize() wrote it before plain_dict existed.
+        old_blob = {
+            "model": {
+                "__type__": "pydantic",
+                "__class__": f"{__name__}.MyModel",
+                "data": {"name": "a", "value": 2},
+            },
+            "pair": {"__type__": "tuple", "data": [1, 2]},
+            "plain": {"a": [1, {"b": None}]},
+        }
+        restored = deserialize(old_blob, {f"{__name__}.MyModel"})
+        assert restored["model"] == MyModel(name="a", value=2)
+        assert restored["pair"] == (1, 2)
+        assert restored["plain"] == {"a": [1, {"b": None}]}
+
+
+def test_another_package_old_class_path_does_not_restore():
+    """Only core's own rename is mapped; another package's old class path fails to restore."""
+    from nooa.storage import serialization
+
+    assert not hasattr(serialization, "register_legacy_module_prefix")
+    fqn = "nooa_coder.storage.snapshot_vars.SnapshotVars"
+    blob = {"__type__": "dict_class", "__class__": fqn, "data": {"_data": {"answer": 42}}}
+    with pytest.raises(DeserializationError, match="Cannot import class"):
+        deserialize(blob, {fqn})
+
+
+def test_core_serializer_holds_no_atom_legacy_prefixes():
+    from pathlib import Path
+
+    from nooa.storage import serialization
+
+    source = Path(serialization.__file__).read_text()
+    assert "nooa_coder" not in source and "nooa_atom" not in source

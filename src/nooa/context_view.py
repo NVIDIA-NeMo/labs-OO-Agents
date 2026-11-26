@@ -117,10 +117,15 @@ def apply_context_budget(
 
         counter = char_approximate_token_counter
 
+    # Measure the text the renderer sends: a lone surrogate is escaped to six
+    # characters on the wire, so the budget counts the escaped form.
+    from nooa.context_blocks.renderer import _utf8_safe_text
+
+    def measure(value: Any) -> int:
+        return counter(_utf8_safe_text(context_text(value, call=call)))
+
     result = list(items)
-    total = sum(
-        counter(context_text(item.content, call=call)) for item in result if isinstance(item, Block)
-    )
+    total = sum(measure(item.content) for item in result if isinstance(item, Block))
     if total <= limit:
         return tuple(result)
 
@@ -134,7 +139,7 @@ def apply_context_budget(
         block = result[index]
         if not isinstance(block, Block):
             continue
-        size = counter(context_text(block.content, call=call))
+        size = measure(block.content)
         replacement = f"EVICTED: over context budget (block_tokens={size:,})"
         update: dict[str, Any] = {"content": replacement}
         metadata = block.metadata if block.metadata is not None else BlockMetadata()

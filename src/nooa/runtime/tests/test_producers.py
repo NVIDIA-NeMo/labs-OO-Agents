@@ -8,7 +8,7 @@ import asyncio
 
 import pytest
 
-from nooa.runtime.channels import QueueManager, StreamEnd
+from nooa.runtime.channels import QueueManager
 from nooa.runtime.producers import after, cron, monitor, run_job, tail
 
 
@@ -42,7 +42,6 @@ async def test_after_with_spawn():
     assert result is None
     await asyncio.sleep(0.05)
     assert h.state == "done"
-    assert any(isinstance(e, StreamEnd) for e in em.events)
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +167,6 @@ async def test_monitor_with_spawn_and_buffer():
     assert lines == ["step 1", "step 2", "step 3"]
     assert h.state == "done"
     assert h.values == ["step 1", "step 2", "step 3"]
-    assert any(isinstance(e, StreamEnd) for e in em.events)
 
 
 @pytest.mark.asyncio

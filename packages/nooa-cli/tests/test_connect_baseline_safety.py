@@ -94,13 +94,26 @@ def test_failed_configured_baseline_stops_before_save(monkeypatch, tmp_path, edi
         args += ["--budget-tokens", "1"]
     if yes:
         args += ["--yes"]
-    # Extra default-yes answers must not be consumed by ordinary save/key prompts.
+    # Decline the restart offer; extra default answers must not reach save/key prompts.
     result = CliRunner().invoke(
-        command, args, input=("" if yes else "y\n") + "PRIVATE-KEY\n" + "\n" * 12
+        command,
+        args,
+        input="PRIVATE-KEY\n"
+        + (
+            ""
+            if yes
+            else ("" if editing else "262144\n262144\n")
+            + "test\n"
+            + ("\n" if editing else "")
+            # Decline "Start over?" after the failed test.
+            + "n\n"
+        )
+        + "\n" * 12,
     )
-    assert result.exit_code == 0, result.output
+    assert result.exit_code != 0, result.output
     assert "Nothing was saved" in result.output
-    assert "--no-probe" in result.output and "unverified" in result.output
+    assert "Approved connection test failed" in result.output
+    assert "explicitly saving untested" in " ".join(result.output.split())
     assert "Write model entry" not in result.output
     assert "Save this key" not in result.output and "Save model" not in result.output
     assert "PRIVATE-ANSWER" not in result.output and "PRIVATE-KEY" not in result.output
@@ -157,10 +170,22 @@ def test_missing_baseline_evidence_cannot_reach_wizard_save(
     result = CliRunner().invoke(
         command,
         args + (["--yes"] if yes else []),
-        input=("" if yes else "y\n") + "PRIVATE-KEY\n" + "\n" * 12,
+        input="PRIVATE-KEY\n"
+        + (
+            ""
+            if yes
+            else ("" if editing else "262144\n262144\n")
+            + "test\n"
+            + ("\n" if editing else "")
+            # Decline "Start over?" after the failed test.
+            + "n\n"
+        )
+        + "\n" * 12,
     )
-    assert result.exit_code == 0, result.output
-    assert "Nothing was saved" in result.output and "--no-probe" in result.output
+    assert result.exit_code != 0, result.output
+    assert (
+        "Nothing was saved" in result.output and "Approved connection test failed" in result.output
+    )
     assert "Save model" not in result.output and "Write model entry" not in result.output
     assert path.read_bytes() == before if editing else not path.exists()
 
@@ -171,6 +196,10 @@ def test_defensive_save_guard_precedes_prompts_and_writes(monkeypatch, tmp_path,
         "provenance": {"probes": {} if record is None else {"routing": record}},
         "media_inputs": [],
     }
+    entry = connect.configure_entry(entry)
+    if record == GOOD:
+        # This case simulates a fresh baseline execution, not imported legacy proof.
+        connect.stamp_verification(entry["provenance"]["probes"]["routing"], entry, "routing")
     state = wizard.WizardState(
         approval="all",
         yes=True,
@@ -199,10 +228,13 @@ def test_explicit_manual_offline_save_remains_available(monkeypatch, tmp_path, f
     result = CliRunner().invoke(
         command,
         args + flag + ["--media-inputs", "image,pdf"] + (["--yes"] if yes else []),
-        input=("\n\n\nuse\ny\ny\n" if editing else "y\n"),
+        input=("save\ny\ny\n" if editing else "262144\n262144\nsave\ny\n"),
     )
     assert result.exit_code == 0, result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["media_inputs"] == ["image", "pdf"]
     assert "provenance" not in entry
-    assert "Saved local" in result.output and "unverified" in result.output
+    assert (
+        "Alias: local" in " ".join(result.output.split())
+        and "not tested (manual setup)" in result.output
+    )

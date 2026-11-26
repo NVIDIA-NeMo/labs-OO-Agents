@@ -41,7 +41,7 @@ class Notifier(Agent, llm=llm):
 | Knob | Default | Verified semantics |
 |---|---|---|
 | `max_iterations` | `None` | **Unlimited.** The loop then stops only on completion, the error budget, or a hard abort. |
-| `max_retries` | `3` | **Cumulative session error budget, not consecutive** (the counter is never reset). LLM API errors, bad tool JSON, empty code, and `return_result` validation failures all count. |
+| `max_retries` | `3` | Error budget with two counters. **LLM API errors count only while consecutive**: any model response (including a malformed one) resets them. **Other errors are cumulative** across the call (never reset): bad tool JSON, unknown tools, empty code, empty replies, and `return_result` validation failures. Either counter reaching `max_retries` fails the call. |
 | `max_consecutive_text_only` | `3` | Consecutive no-tool-call text replies before hard abort; `0` disables. Any real tool call resets the counter. |
 | `cell_timeout` | `None` | Per-cell `asyncio.wait_for` limit in seconds; `None` = unlimited. Cannot interrupt a truly blocking sync syscall — that's what the blocking-call AST validation is for. |
 | `max_tokens` / `temperature` / `top_p` | `None` | Passed to every generation call when set (model defaults otherwise). On empty responses with `finish_reason="length"` CodeAct aborts and tells you to raise `max_tokens` (16384+ for reasoning models). |

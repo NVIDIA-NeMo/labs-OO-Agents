@@ -14,6 +14,7 @@ from nooa.decisions.client import (
     InvalidDecisionResponseError,
     UnifiedDecisionModel,
 )
+from nooa.decisions.media import DecisionAttachment
 from nooa.decisions.types import (
     BooleanDecision,
     ChoiceDecision,
@@ -30,6 +31,7 @@ __all__ = [
     "ChoiceDecision",
     "Criteria",
     "Decision",
+    "DecisionAttachment",
     "DecisionAuthenticationError",
     "DecisionClient",
     "DecisionClientError",

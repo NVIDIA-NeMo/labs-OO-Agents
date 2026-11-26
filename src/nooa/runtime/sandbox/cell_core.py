@@ -2,16 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """Cell execution core used inside the sandbox worker.
 
-``run_cell_source`` reproduces the REPL semantics of
-``ActorRuntime.execute_code`` (the ``wrap_in_function=True`` path): an async
-wrapper that captures the last-expression / explicit ``return`` value, persists
-locals into the namespace, registers the cell with ``linecache`` for accurate
-tracebacks, and surfaces ``return_result()`` as an ``ExecutionSignal``.
+``run_cell_source`` is the sandbox's own implementation of the cell contract
+of ``ActorRuntime.execute_code`` (the in-process engine is
+``nooa.runtime.execution_namespace``): an async wrapper that captures the
+last-expression (``wrap_in_function=True``) / explicit ``return`` value,
+persists locals into the namespace, registers the cell with ``linecache`` for
+accurate tracebacks, and surfaces ``return_result()`` as an ``ExecutionSignal``.
 
 It runs *inside the worker*, on a plain namespace dict, with no dependency on the
-live agent or the parent event loop — those concerns stay on the parent. Keeping
-the wrapper string byte-for-byte aligned with the actor preserves
-``wrapper_line_offset`` so error line numbers match the in-process backend.
+live agent or the parent event loop — those concerns stay on the parent. The
+wrapper adds header lines before the user's code; ``wrapper_line_offset``
+reports them so the parent's error formatter shows the user's line numbers
+(the in-process engine adds none: its offset is 0).
 """
 
 from __future__ import annotations
@@ -77,6 +79,7 @@ async def run_cell_source(
     execution_count: int = 1,
     stdout_hook: Callable[[str], None] | None = None,
     stderr_hook: Callable[[str], None] | None = None,
+    max_attachments: int = 100,
 ) -> ExecutionResult:
     """Execute ``code`` in ``namespace`` with REPL semantics; never raises.
 
@@ -90,7 +93,7 @@ async def run_cell_source(
 
     stdout_buf = _HookedBuffer(stdout_hook)
     stderr_buf = _HookedBuffer(stderr_hook)
-    media_buffer = _MediaBuffer(max_attachments=100)
+    media_buffer = _MediaBuffer(max_attachments=max_attachments)
     media_token = _media_buffer_var.set(media_buffer)
     truncation_reasons: set[str] = set()
     truncation_token = _truncation_reasons.set(truncation_reasons)
@@ -208,18 +211,18 @@ async def run_cell_source(
                 n for n in tree.body if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
             ]
             if func_defs:
-                exec(
-                    compile(ast.Module(body=func_defs, type_ignores=[]), cell_filename, "exec"),
-                    namespace,
-                )
                 # Persisted helpers are compiled directly from the cell AST, not
                 # through the async wrapper. Keep their source cache aligned with
-                # those original line numbers for later-cell tracebacks.
+                # those original line numbers before decorators inspect bodies.
                 linecache.cache[cell_filename] = (
                     len(source_code),
                     None,
                     source_code.splitlines(keepends=True),
                     cell_filename,
+                )
+                exec(
+                    compile(ast.Module(body=func_defs, type_ignores=[]), cell_filename, "exec"),
+                    namespace,
                 )
             for name, src in method_sources.items():
                 fn = namespace.get(name)

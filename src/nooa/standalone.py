@@ -57,7 +57,8 @@ _agent_cls_cache: dict[str, type] = {}
 #   keeps shared-prefix cache hits.
 # - Two separate Python processes running the same code get different shards
 #   — 50 parallel benchmark trials (cybergym-style) spread across 50 shards
-#   instead of compounding load on one (the ~15 req/min per-shard ceiling).
+#   instead of compounding load on one (OpenAI recommends ~15 req/min per
+#   key for cache routing on models before GPT-5.6).
 #
 # Caveat: ``multiprocessing.fork`` workers inherit the parent's token; they
 # would collide on shards. Spawn-style multiprocessing and separate

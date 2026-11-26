@@ -16,9 +16,9 @@ dicts (see ``unifiedllm/registry.py``); this model is the first step.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, StrictBool, model_validator
 
 from nooa.media_inputs import MediaInputs
 
@@ -45,12 +45,26 @@ class ModelConfig(BaseModel):
     api_style: str | None = None
     context_window: int | None = None
     media_inputs: MediaInputs = ()
+    decision_image_transport: Literal["json", "typesafe_multipart"] = "json"
+    typesafe_danger_zone_images: StrictBool = False
+    structured_output_mode: Literal["auto", "anthropic"] | None = None
     max_tokens: int | None = None
     temperature: float | None = None
     top_p: float | None = None
     reasoning_levels: dict[str, dict[str, Any]] | None = None
     reasoning_default: str | None = None
     reasoning_level: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_structured_output_route(self):
+        if self.structured_output_mode == "anthropic" and (
+            self.client_type not in {None, "completion"}
+            or self.api_style not in {None, "chat", "anthropic"}
+        ):
+            raise ValueError(
+                "structured_output_mode='anthropic' requires a Chat/Messages completion route"
+            )
+        return self
 
     @classmethod
     def from_registry(cls, name: str, raw: dict[str, Any]) -> ModelConfig:

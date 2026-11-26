@@ -1,6 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Chat-model adapter behind ``DecisionModel.from_llm``."""
+"""Answer decision questions with a chat model; used by ``DecisionModel.from_llm``.
+
+The chat model is asked for one structured reply that picks an answer for
+every question. Because a chat model gives a single answer and no
+probabilities, results that need probabilities (detailed decisions and
+thresholds) are not available with this model.
+"""
 
 from __future__ import annotations
 
@@ -60,6 +66,7 @@ class LLMDecisionModel(DecisionModel):
         """
         if max_attempts < 1:
             raise ValueError("max_attempts must be at least 1")
+        self.media_inputs = ()  # Images are not supported, whatever the chat model allows.
         self.llm = llm
         self.model = getattr(llm, "model", "") or ""
         self.max_attempts = max_attempts
@@ -67,9 +74,17 @@ class LLMDecisionModel(DecisionModel):
     async def adecide(self, request: DecisionRequest) -> DecisionResponse:
         """Ask the chat model to answer every question in one structured reply.
 
+        A reply that does not match the response schema is retried, up to
+        ``max_attempts`` calls in total.
+
         Raises:
+            ValueError: If the request has image attachments.
             InvalidDecisionResponseError: If no reply matches the response schema.
         """
+        if request.attachments:
+            raise ValueError(
+                "DecisionModel.from_llm does not support decision image attachments; use a native decision client"
+            )
         output_model = _answer_model(request)
         messages: list[Any] = [
             {"role": "system", "content": _SYSTEM_PROMPT},
@@ -116,7 +131,11 @@ class LLMDecisionModel(DecisionModel):
 
 
 def _answer_model(request: DecisionRequest) -> type[BaseModel]:
-    """Build the structured-output schema for one request's questions."""
+    """Build a Pydantic model with one field per question, used as ``output_model``.
+
+    Boolean questions become ``bool`` fields, choice questions a ``Literal`` of
+    the option IDs, and score questions an ``int`` level index.
+    """
     fields: dict[str, Any] = {}
     for name, question in request.questions.items():
         if isinstance(question, BooleanQuestion):
@@ -130,7 +149,11 @@ def _answer_model(request: DecisionRequest) -> type[BaseModel]:
 
 
 def _parse_reply(response: Any, output_model: type[BaseModel]) -> BaseModel:
-    """Validate a chat reply against the answer schema."""
+    """Validate a chat reply against the answer model, from parsed output or text.
+
+    Raises:
+        ValidationError, ValueError: If the reply is empty or does not match.
+    """
     if isinstance(response.parsed, output_model):
         return response.parsed
     if isinstance(response.parsed, BaseModel):

@@ -38,6 +38,7 @@ _KINDS: dict[str, Literal["image", "audio", "video", "file"]] = {
     "input_image": "image",
     "image": "image",
     "input_audio": "audio",
+    "audio_url": "audio",
     "audio": "audio",
     "output_audio": "audio",
     "video_url": "video",
@@ -60,6 +61,7 @@ def _mime_hints(block: Mapping[str, Any]) -> set[str]:
         "video_url": ("video_url",),
         "video": ("source",),
         "input_audio": ("input_audio",),
+        "audio_url": ("audio_url",),
         "audio": ("source",),
         "file": ("file",),
         "document": ("source",),
@@ -75,7 +77,7 @@ def _mime_hints(block: Mapping[str, Any]) -> set[str]:
                 hints.add(value.lower())
         for key in ("url", "file_data", "image_url", "file_url", "video_url"):
             value = node.get(key)
-            if isinstance(value, str) and value.startswith("data:"):
+            if isinstance(value, str) and value[:5].lower() == "data:":
                 hints.add(value[5:].split(";", 1)[0].split(",", 1)[0].lower())
     return hints
 

@@ -389,6 +389,9 @@ def init_db() -> int:
         _db.execute("ALTER TABLE llm_calls ADD COLUMN span_id TEXT")
     # Always ensure the span index exists (safe to re-create)
     _db.execute("CREATE INDEX IF NOT EXISTS idx_llm_calls_span ON llm_calls(span_id)")
+    # Free-form JSON a client attaches to its call record (journal_llm_call(extra=...)).
+    if not _has_column(_db, "llm_calls", "extra"):
+        _db.execute("ALTER TABLE llm_calls ADD COLUMN extra TEXT")
 
     # FTS5 index for fast text search across span content
     _db.execute("""
@@ -1745,7 +1748,9 @@ def ingest_journal_messages(items: list[dict[str, Any]]) -> dict[str, Any]:
     return {"stored": 0}
 
 
-def ingest_journal_blocks(session_id: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+def ingest_journal_blocks(
+    session_id: str, items: list[dict[str, Any]], *, commit: bool = True
+) -> dict[str, Any]:
     """Persist a batch of content-addressed blocks for *session_id*.
 
     Each item is ``{"hash": "<sha256:...>", "content": "<utf-8 string>"}``.
@@ -1771,7 +1776,8 @@ def ingest_journal_blocks(session_id: str, items: list[dict[str, Any]]) -> dict[
         "INSERT OR IGNORE INTO msg_blocks (session_id, hash, content) VALUES (?, ?, ?)",
         rows,
     )
-    db.commit()
+    if commit:
+        db.commit()
     return {"stored": len(rows)}
 
 
@@ -1794,12 +1800,13 @@ def get_session_blocks(session_id: str) -> dict[str, str]:
     return {r["hash"]: r["content"] for r in rows}
 
 
-def ingest_journal_call(call: dict[str, Any]) -> dict[str, Any]:
+def ingest_journal_call(call: dict[str, Any], *, commit: bool = True) -> dict[str, Any]:
     """Upsert a single LLM call record.
 
     Expected keys: ``call_id``, ``session_id``, ``model``, ``ts_start``,
     ``ts_end``, ``input_skeleton`` (list), ``output_messages`` (list),
-    ``tokens`` (dict or None), ``span_id`` (str or None).
+    ``tokens`` (dict or None), ``span_id`` (str or None), ``extra`` (JSON
+    object or None, e.g. an external response id).
 
     Called from the single-writer executor thread via main.py.
     """
@@ -1815,6 +1822,7 @@ def ingest_journal_call(call: dict[str, Any]) -> dict[str, Any]:
         tokens_json = (
             json.dumps(call["tokens"], separators=(",", ":")) if call.get("tokens") else None
         )
+        extra_json = json.dumps(call["extra"], separators=(",", ":")) if call.get("extra") else None
     except (TypeError, ValueError) as e:
         log.warning(
             "ingest_journal_call: JSON serialization failed for call_id=%s: %s",
@@ -1824,27 +1832,40 @@ def ingest_journal_call(call: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Invalid call data: {e}") from e
     import time as _time
 
+    columns = [
+        "call_id",
+        "session_id",
+        "span_id",
+        "model",
+        "ts_start",
+        "ts_end",
+        "input_skeleton",
+        "output_messages",
+        "tokens",
+    ]
+    values: list[Any] = [
+        call["call_id"],
+        call["session_id"],
+        call.get("span_id"),
+        call.get("model", ""),
+        call.get("ts_start"),
+        call.get("ts_end"),
+        input_skeleton_json,
+        output_messages_json,
+        tokens_json,
+    ]
+    if extra_json is not None:
+        columns.append("extra")
+        values.append(extra_json)
+
     t0 = _time.monotonic()
     db.execute(
-        """
-        INSERT OR REPLACE INTO llm_calls
-            (call_id, session_id, span_id, model, ts_start, ts_end,
-             input_skeleton, output_messages, tokens)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            call["call_id"],
-            call["session_id"],
-            call.get("span_id"),
-            call.get("model", ""),
-            call.get("ts_start"),
-            call.get("ts_end"),
-            input_skeleton_json,
-            output_messages_json,
-            tokens_json,
-        ),
+        f"INSERT OR REPLACE INTO llm_calls ({', '.join(columns)}) "
+        f"VALUES ({', '.join('?' * len(columns))})",
+        values,
     )
-    db.commit()
+    if commit:
+        db.commit()
     elapsed_ms = (_time.monotonic() - t0) * 1000
     if elapsed_ms > 200:
         log.warning(
@@ -1853,6 +1874,34 @@ def ingest_journal_call(call: dict[str, Any]) -> dict[str, Any]:
             call.get("call_id", "?"),
         )
     return {"ok": True}
+
+
+def ingest_session_with_journal(body: dict, journals: list[dict[str, Any]]) -> dict[str, Any]:
+    """Publish a complete imported trace atomically on the writer executor.
+
+    Reject cross-session journal call collisions, including collisions with
+    native calls, before replacing any records. All failures roll back so an
+    interrupted import can retry without holding a SQLite write lock.
+    """
+    db = _get_write_db()
+    try:
+        for journal in journals:
+            if journal["type"] == "blocks":
+                ingest_journal_blocks(journal["session_id"], journal["blocks"], commit=False)
+            else:
+                call = journal["call"]
+                existing = db.execute(
+                    "SELECT session_id FROM llm_calls WHERE call_id = ?", (call["call_id"],)
+                ).fetchone()
+                if existing and existing["session_id"] != call["session_id"]:
+                    raise ValueError("Imported journal call belongs to another session")
+                ingest_journal_call(call, commit=False)
+        result = _ingest_one(body, db)
+        db.commit()
+        return result
+    except BaseException:
+        db.rollback()
+        raise
 
 
 def get_session_calls(session_id: str) -> list[dict[str, Any]]:
@@ -1891,6 +1940,8 @@ def get_session_calls(session_id: str) -> list[dict[str, Any]]:
         }
         if row["span_id"]:
             rec["span_id"] = row["span_id"]
+        if "extra" in row.keys() and row["extra"]:
+            rec["extra"] = json.loads(row["extra"])
         result.append(rec)
     return result
 

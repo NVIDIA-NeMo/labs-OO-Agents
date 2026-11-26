@@ -12,7 +12,8 @@ import pytest
 
 from nooa.agentdoc import pformat
 from nooa.agentdoc._format_observation import observe_truncation
-from nooa.runtime.actor import ContextVarStream, _stderr_buffer_var
+from nooa.runtime.actor import _stderr_buffer_var
+from nooa.runtime.stream_wrappers import ContextVarStream
 from nooa.strategies.current_call import CurrentCall
 from nooa.strategies.prefill import PrefillTruncationWarning, warn_on_prefill_truncation
 
@@ -64,6 +65,33 @@ def test_structured_fields_report_omissions():
     with observe_truncation() as reasons:
         pformat(Data(), max_string=3, max_length=1)
     assert reasons == {"max_string", "max_length"}
+
+
+def test_skipped_empty_fields_are_not_omissions():
+    """A field hidden by hide_empty after the length limit omits nothing."""
+    from typing import Annotated
+
+    from nooa.agentdoc import spec
+
+    @dataclass
+    class Data:
+        first: int = 1
+        empty: Annotated[str | None, spec(hide_empty=True)] = None
+
+    with observe_truncation() as reasons:
+        text = pformat(Data(), max_length=1)
+    assert reasons == set()
+    assert "..." not in text
+
+    @dataclass
+    class Fuller:
+        first: int = 1
+        empty: Annotated[str | None, spec(hide_empty=True)] = None
+        second: int = 2
+
+    with observe_truncation() as reasons:
+        pformat(Fuller(), max_length=1)
+    assert reasons == {"max_length"}
 
 
 def test_dictionary_key_warning_explains_fixed_limit():

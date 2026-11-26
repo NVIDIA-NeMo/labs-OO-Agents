@@ -138,7 +138,10 @@ def resolve_agent_system_prompt(agent: "Agent") -> str:
     """Resolve the nearest agent class docstring as a prompt template."""
     import string
 
-    prompt = next((cls.__doc__ for cls in type(agent).__mro__ if cls.__doc__), "")
+    # cleandoc: Python 3.13+ strips docstring indentation at compile time and
+    # 3.12 keeps it, so the raw ``__doc__`` would make the prompt depend on the
+    # interpreter version.
+    prompt = next((inspect.cleandoc(cls.__doc__) for cls in type(agent).__mro__ if cls.__doc__), "")
     if not prompt or "{" not in prompt:
         return prompt
 
@@ -384,10 +387,16 @@ class ManagedContextView(ContextView["Agent"]):
 
     block_order: tuple[str, ...] | None = None
     static_keys: frozenset[str] = frozenset()
+    # Framework blocks this view never includes, on top of the manager's disabled keys.
+    excluded_keys: frozenset[str] = frozenset()
 
     def instruction_blocks(self, call: "CurrentCall") -> Mapping[str, Any]:
         """Return this view's instruction declarations."""
         return {}
+
+    def select_events(self, owner: "Agent", call: "CurrentCall") -> Sequence[EventBase]:
+        """Return the history this view shows; the default is every active model-visible event."""
+        return visible_events(owner)
 
     async def _materialize_agent_blocks(
         self,
@@ -464,7 +473,7 @@ class ManagedContextView(ContextView["Agent"]):
 
     async def assemble(self, owner: "Agent", call: "CurrentCall") -> AsyncIterator[ContextItem]:
         manager = owner.context_manager
-        disabled = manager.disabled()
+        disabled = manager.disabled() | self.excluded_keys
         from nooa.agentdoc.visibility import is_hidden_field
 
         if is_hidden_field(owner, "events"):
@@ -495,7 +504,7 @@ class ManagedContextView(ContextView["Agent"]):
         prefix, trailing = partition_blocks(blocks)
 
         items: list[ContextItem] = [*prefix]
-        items.extend(visible_events(owner))
+        items.extend(self.select_events(owner, call))
         if items:
             items.append(CacheBoundary())
         items.extend(trailing)
@@ -530,6 +539,10 @@ class CodeActView(ManagedContextView):
 
 class PredictView(ManagedContextView):
     """Structured-answer instructions, agent context, and active history."""
+
+    # One structured response, no REPL: the events guidance tells the model to
+    # run print(doc(self.events)), which it cannot do here.
+    excluded_keys = frozenset({"events_api"})
 
     def instruction_blocks(self, call: "CurrentCall") -> Mapping[str, Any]:
         return {"strategy_prompt": DynamicContext("strategy.strategy_instructions(runtime)")}

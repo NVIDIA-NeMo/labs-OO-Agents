@@ -627,6 +627,26 @@ def test_budget_helper_allows_adaptation_before_budgeting():
     assert apply_context_budget((adapted,), call=call, evictable=(adapted,)) == (adapted,)
 
 
+def test_budget_measures_escaped_block_content():
+    """Eviction sees the escaped text, which is longer than the original (lone surrogates)."""
+    from nooa.context_blocks import BlockMetadata
+
+    status = "\ud800" * 100  # 100 chars before escaping, 600 after
+    persona = Block(key="persona", content="Be helpful.")
+    block = Block(key="todo_status", content=status, metadata=BlockMetadata(user_block=True))
+    call = CurrentCall(
+        id="c",
+        method_name="m",
+        decorator="plan",
+        context_budget=200,
+        _context_token_counter=len,
+    )
+    result = apply_context_budget((persona, block), call=call, evictable=(block,))
+    assert result[0] is persona
+    assert "EVICTED" in result[1].content
+    assert result[1].metadata is not None and result[1].metadata.truncated
+
+
 def test_budget_counts_replacement_notice_and_ignores_boundary():
     counted: list[str] = []
 

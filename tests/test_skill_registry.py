@@ -84,7 +84,15 @@ class TestDiscovery:
 class TestRegistration:
     @pytest.mark.parametrize("second", ["support.search", "research.search-tool"])
     @pytest.mark.parametrize("active", [False, True])
-    def test_distinct_names_cannot_replace_skill_identity(self, registry, agent, second, active):
+    def test_distinct_names_cannot_replace_skill_identity(self, second, active):
+        """A declared tool attribute keeps its first registry owner (hyphen/underscore included)."""
+
+        class _Agent:
+            __protected_skill_attrs__ = frozenset({"search", "search_tool"})
+
+        agent = _Agent()
+        with patch("nooa.skill_registry.entry_points", return_value=[]):
+            registry = SkillRegistry(agent)
         first_name = "research.search" if second == "support.search" else "research.search_tool"
         first, rejected = FakeSkill(), FakeSkill()
         registry.register(first_name, first)
@@ -123,7 +131,11 @@ class TestRegistration:
 
 
 class TestLoading:
-    def test_load_skips_conflicting_leaf(self, agent, caplog):
+    def test_load_skips_conflicting_leaf(self, caplog):
+        class _Agent:
+            __protected_skill_attrs__ = frozenset({"search"})
+
+        agent = _Agent()
         entries = []
         for name in ("research.search", "support.search"):
             entry = MagicMock(name=name)
@@ -205,6 +217,19 @@ class TestActivation:
         assert "nemo.a" in registry.activated()
         assert "nemo.b" in registry.activated()
         assert "super.c" not in registry.activated()
+
+    def test_activate_a_mapping_registers_and_activates_exactly_those(self, registry, agent):
+        registry.register("nemo.other", FakeSkill())
+        a, b = FakeSkill(), FakeSkill()
+        registry.activate({"nemo.a": a, "nemo.b": b})
+        assert agent.a is a and agent.b is b
+        assert registry.activated() == ["nemo.a", "nemo.b"]
+        assert "nemo.other" in registry.loaded()
+
+    def test_activate_a_mapping_takes_names_literally(self, registry):
+        registry.register("nemo.ab", FakeSkill())
+        registry.activate({"nemo.[ab]": FakeSkill()})
+        assert registry.activated() == ["nemo.[ab]"]
 
     def test_activate_auto_loads(self, agent):
         ep = MagicMock()
@@ -405,8 +430,13 @@ def test_load_also_refuses_to_take_over_a_protected_attribute():
     assert "mcp.notes" in registry.loaded()
 
 
-def test_registry_ownership_protects_ordinary_skill_attributes():
-    """Full-name identity applies even without explicit attribute protection."""
+def test_an_undeclared_attribute_is_still_freely_overwritten():
+    """The guard must apply only to declared attributes.
+
+    Negative control for the two tests above: without it, deleting the
+    `__protected_skill_attrs__` opt-in — which turns a long-standing warning
+    into a hard ValueError for every ordinary skill — leaves them all green.
+    """
 
     class _Agent:
         __protected_skill_attrs__ = frozenset({"shell"})
@@ -419,9 +449,9 @@ def test_registry_ownership_protects_ordinary_skill_attributes():
     registry.register("nemo.notes", _Tool())
     first = agent.notes
 
-    with pytest.raises(ValueError, match="already provided by"):
-        registry.register("mcp.notes", _Tool())
-    assert agent.notes is first
+    # 'notes' is not declared, so a second claimant is allowed as before.
+    registry.register("mcp.notes", _Tool())
+    assert agent.notes is not first
 
 
 def test_a_directly_assigned_undeclared_attribute_is_not_protected():
@@ -440,3 +470,75 @@ def test_a_directly_assigned_undeclared_attribute_is_not_protected():
     registry = SkillRegistry(agent)
     registry.register("mcp.notes", _Tool())
     assert isinstance(agent.notes, _Tool)
+
+
+# ---------------------------------------------------------------------------
+# Tests: name conflicts (every load path)
+# ---------------------------------------------------------------------------
+
+
+def _conflict_line(leaf: str) -> str:
+    return (
+        f"skill {leaf!r} not loaded: the agent already has an attribute named {leaf}; "
+        "rename the skill"
+    )
+
+
+def test_an_entry_point_skill_whose_attribute_is_taken_is_not_loaded():
+    class _Agent:
+        def __init__(self):
+            self.fake = "mine"
+
+    agent = _Agent()
+    ep = MagicMock()
+    ep.name = "nemo.fake"
+    ep.load.return_value = FakeSkill
+    with patch("nooa.skill_registry.entry_points", return_value=[ep]):
+        reg = SkillRegistry(agent)
+    reg.load(["nemo.fake"])
+    assert "nemo.fake" not in reg.loaded()
+    assert agent.fake == "mine"
+    assert reg.name_conflicts() == [_conflict_line("fake")]
+
+
+def _write_package(root, name: str) -> None:
+    pkg = root / name
+    (pkg / name).mkdir(parents=True)
+    (pkg / "pyproject.toml").write_text(
+        f'[project]\nname = "{name}"\n[project.entry-points."nooa.skills"]\n'
+        f'"local.{name}" = "{name}"\n'
+    )
+    (pkg / name / "__init__.py").write_text(
+        "from nooa.skill import Skill\n\n\nclass Tool(Skill):\n"
+        "    def hi(self) -> str:\n        return 'hi'\n"
+    )
+
+
+def test_a_libs_package_skill_whose_attribute_is_taken_is_not_loaded(tmp_path, agent):
+    _write_package(tmp_path, "pkgconflict")
+    agent.pkgconflict = "mine"
+    with patch("nooa.skill_registry.entry_points", return_value=[]):
+        reg = SkillRegistry(agent)
+    reg.discover_libs(tmp_path)
+    assert "local.pkgconflict" not in reg.loaded()
+    assert agent.pkgconflict == "mine"
+    assert reg.name_conflicts() == [_conflict_line("pkgconflict")]
+
+
+def test_a_text_skill_registers_from_any_libs_dir(tmp_path, registry, agent):
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "SKILL.md").write_text("---\nname: notes\ndescription: d\n---\nbody\n")
+    registry.discover_libs(tmp_path)
+    assert "local.notes" in registry.loaded()
+    assert registry.name_conflicts() == []
+
+
+async def test_reloading_a_skill_is_not_a_name_conflict(tmp_path, registry, agent):
+    (tmp_path / "notes").mkdir()
+    (tmp_path / "notes" / "SKILL.md").write_text("---\nname: notes\ndescription: d\n---\nbody\n")
+    registry.discover_libs(tmp_path)
+    result = await registry.reload("local.notes")
+    assert result.startswith("Reloaded "), result
+    registry.discover_libs(tmp_path)  # rediscovering its own directory is no conflict either
+    assert "local.notes" in registry.loaded()
+    assert registry.name_conflicts() == []
