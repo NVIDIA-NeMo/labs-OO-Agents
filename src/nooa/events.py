@@ -794,7 +794,12 @@ class ExecutionResult(BaseModel):
 
     @field_serializer("error", when_used="json")
     def _serialize_error(self, value: Exception | None) -> str | None:
-        return None if value is None else f"{type(value).__name__}: {value}"
+        if value is None:
+            return None
+        # An exception message can hold a lone surrogate (a surrogateescape
+        # filename); escape it as ``\udcff`` so the dump stays valid UTF-8.
+        text = f"{type(value).__name__}: {value}"
+        return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
     def has_method(self, name: str) -> bool:
         """Check if a specific method was defined."""

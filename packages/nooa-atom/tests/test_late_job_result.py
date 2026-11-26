@@ -56,6 +56,13 @@ def test_an_execution_result_with_an_unencodable_return_value_dumps_to_json():
     )
 
 
+def test_an_error_message_with_a_lone_surrogate_dumps_to_json():
+    result = ExecutionResult(error=ValueError("bad \udcff name"))
+
+    assert result.model_dump(mode="json")["error"] == "ValueError: bad \\udcff name"
+    assert '"error":"ValueError: bad \\\\udcff name"' in result.model_dump_json()
+
+
 async def test_a_job_delivered_after_done_leaves_the_done_and_json_events(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
