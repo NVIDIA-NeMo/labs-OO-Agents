@@ -597,7 +597,7 @@ def _resolve_client_config(
         params: dict[str, Any] = {"model": model, "endpoint": endpoint}
         if "api_style" in config and "api_style" not in overrides:
             params["api_style"] = config["api_style"]
-        # media_inputs and the image transport settings describe this model
+        # media_inputs, media_capabilities and the image transport settings describe this model
         # entry's endpoint. When the overrides send the call to a different
         # model, endpoint, API style, client or client type, they are dropped.
         route_changed = (
@@ -620,7 +620,12 @@ def _resolve_client_config(
             )
             or (client_type is not None and client_type != config.get("client_type", "completion"))
         )
-        for key in ("media_inputs", "decision_image_transport", "typesafe_danger_zone_images"):
+        for key in (
+            "media_inputs",
+            "media_capabilities",
+            "decision_image_transport",
+            "typesafe_danger_zone_images",
+        ):
             if not route_changed and key in config and key not in overrides:
                 params[key] = config[key]
         if "api_key" not in overrides:
@@ -711,6 +716,7 @@ def _resolve_client_config(
         "structured_output_mode",
         "output_config",
         "media_inputs",
+        "media_capabilities",
         *CAPABILITY_KEYS,
     ):
         if key == "base_url" and endpoint_override is not None:
@@ -758,6 +764,7 @@ def _resolve_client_config(
             "reasoning_default",
             "reasoning_level",
             "media_inputs",
+            "media_capabilities",
             "structured_output_mode",
             *CAPABILITY_KEYS,
         ):

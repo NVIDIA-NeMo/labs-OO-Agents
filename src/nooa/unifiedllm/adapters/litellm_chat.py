@@ -69,7 +69,14 @@ def client_capabilities(client: "UnifiedLLM") -> Capabilities:
         context_window=client.context_window,
         max_output_tokens=None,
         developer_role=getattr(client, "developer_role", None),
+        media_capabilities=_client_media_capabilities(client),
     )
+
+
+def _client_media_capabilities(client: Any):
+    """The client's declared media capabilities; None for foreign clients."""
+    declared = getattr(client, "_request_media_capabilities", None)
+    return declared() if callable(declared) and client.media_inputs else None
 
 
 def _call_output_format(client: Any, call_config: dict[str, Any]) -> str:

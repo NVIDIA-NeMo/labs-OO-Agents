@@ -18,8 +18,13 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, StrictBool, model_validator
+from pydantic import BaseModel, ConfigDict, StrictBool, field_validator, model_validator
 
+from nooa.media_capabilities import (
+    MediaCapabilities,
+    resolve_media_capabilities,
+    validate_media_capabilities,
+)
 from nooa.media_inputs import MediaInputs
 
 
@@ -45,6 +50,8 @@ class ModelConfig(BaseModel):
     api_style: str | None = None
     context_window: int | None = None
     media_inputs: MediaInputs = ()
+    # Per-kind MIME types, transports and size limits; None: provider default.
+    media_capabilities: dict[str, dict[str, Any]] | None = None
     decision_image_transport: Literal["json", "typesafe_multipart"] = "json"
     typesafe_danger_zone_images: StrictBool = False
     structured_output_mode: Literal["auto", "anthropic"] | None = None
@@ -54,6 +61,22 @@ class ModelConfig(BaseModel):
     reasoning_levels: dict[str, dict[str, Any]] | None = None
     reasoning_default: str | None = None
     reasoning_level: str | None = None
+
+    @field_validator("media_capabilities", mode="before")
+    @classmethod
+    def _validate_media_capabilities(cls, value: object) -> dict[str, dict[str, Any]] | None:
+        return validate_media_capabilities(value)
+
+    def resolved_media_capabilities(self) -> MediaCapabilities:
+        """This model's media capabilities: its provider default plus ``media_capabilities``.
+
+        The provider default is chosen by the request interface the entry
+        sends through (``nooa.request_interface.entry_input_interface``).
+        """
+        from nooa.request_interface import entry_input_interface
+
+        interface = entry_input_interface(self.model_dump(exclude_none=True))
+        return resolve_media_capabilities(interface, self.media_capabilities)
 
     @model_validator(mode="after")
     def _validate_structured_output_route(self):

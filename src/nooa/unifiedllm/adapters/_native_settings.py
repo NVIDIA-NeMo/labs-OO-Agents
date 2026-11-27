@@ -6,6 +6,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from nooa.media_capabilities import resolve_media_capabilities
 from nooa.media_inputs import validate_media_inputs
 from nooa.unifiedllm.capability_settings import (
     CAPABILITY_KEYS,
@@ -102,11 +103,13 @@ _ROUTE = {
     "structured_output_mode",
     "client_type",
     "tools_supported",
+    "media_capabilities",
     *CAPABILITY_KEYS,
 }
 _FACTS = {
     "context_window",
     "media_inputs",
+    "media_capabilities",
     "reasoning_levels",
     "reasoning_default",
     "reasoning_level",
@@ -115,6 +118,14 @@ _FACTS = {
     "structured_output_mode",
     "tools_supported",
     *CAPABILITY_KEYS,
+}
+
+
+# The request interface (nooa.request_interface) whose media defaults a family uses.
+_MEDIA_INTERFACE = {
+    "openai-chat": "chat",
+    "openai-responses": "responses",
+    "anthropic-messages": "anthropic",
 }
 
 
@@ -501,6 +512,9 @@ def _resolve_native(family, name, config, overrides):
             levels=params.get("reasoning_levels"), default=params.get("reasoning_default")
         )
         enabled = tuple(validate_media_inputs(params.get("media_inputs", [])))
+        media_caps = resolve_media_capabilities(
+            _MEDIA_INTERFACE[family], params.get("media_capabilities")
+        )
     except (ValueError, TypeError) as exc:
         raise _config("Invalid native capability declaration") from exc
     supported = {"image", "pdf"} if family != "openai-chat" else {"image"}
@@ -545,6 +559,7 @@ def _resolve_native(family, name, config, overrides):
         window,
         None,
         developer,
+        None if media_caps.unrestricted else media_caps,
     )
     cache = params.get("cache_breakpoint")
     expected = "anthropic" if family == "anthropic-messages" else "openai"

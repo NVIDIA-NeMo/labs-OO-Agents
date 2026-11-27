@@ -26,6 +26,7 @@ _FIXED = frozenset(
         "http_config",
         "retry_config",
         "media_inputs",
+        "media_capabilities",
         "context_window",
         "reasoning_levels",
         "reasoning_default",

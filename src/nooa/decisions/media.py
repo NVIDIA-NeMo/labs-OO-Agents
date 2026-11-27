@@ -36,13 +36,20 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel
 
 from nooa.media import Image, Media
+from nooa.media_capabilities import (
+    DECISION_IMAGE_MIME_TYPES,
+    DECISION_MAX_IMAGE_BYTES,
+    PROVIDER_MEDIA_DEFAULTS,
+    MediaCapabilities,
+)
 from nooa.media_inputs import MediaInput, validate_media_inputs
 
-MAX_DECISION_IMAGE_BYTES = 20 * 1024 * 1024
+MAX_DECISION_IMAGE_BYTES = DECISION_MAX_IMAGE_BYTES
 MAX_DECISION_TOTAL_IMAGE_BYTES = 50 * 1024 * 1024
 MAX_DECISION_IMAGES = 16
 MAX_DECISION_IMAGE_URL_LENGTH = 8192
-_IMAGE_MIMES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+# The decision provider default; a model entry's media_capabilities may change it.
+_IMAGE_MIMES = DECISION_IMAGE_MIME_TYPES
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,45 +70,68 @@ class DecisionAttachment:
     media_type: str
     detail: str | None = None
 
-    def decoded_bytes(self) -> bytes | None:
+    def decoded_bytes(self, capabilities: MediaCapabilities | None = None) -> bytes | None:
         """Validate the image URL and MIME type and return the image bytes.
+
+        ``capabilities`` are the model's declared media capabilities; the
+        default is the decision provider default (PNG, JPEG, WebP or GIF,
+        inline or HTTP(S), at most 20 MiB).
 
         Returns:
             The decoded bytes for a base64 ``data:`` URL, or ``None`` for an
             HTTP(S) URL (remote images are checked but not downloaded).
 
         Raises:
-            ValueError: If the MIME type is unsupported, the data URL is
-                malformed or larger than 20 MiB, or the HTTP(S) URL is too
-                long, contains credentials or a fragment, or is otherwise
-                invalid.
+            ValueError: If the MIME type or transport is not accepted, the data
+                URL is malformed or larger than the size limit, or the HTTP(S)
+                URL is too long, contains credentials or a fragment, or is
+                otherwise invalid.
 
         Only the URL and the base64 encoding are checked; the image content
         itself is not decoded.
         """
-        if self.media_type not in _IMAGE_MIMES:
+        # Without declared capabilities the module limits apply (as before).
+        caps = (capabilities or PROVIDER_MEDIA_DEFAULTS["decision"]).image
+        accepted = caps.mime_types if capabilities is not None else _IMAGE_MIMES
+        # Exact match, as before: the endpoint receives media_type unchanged.
+        if accepted is not None and self.media_type not in accepted:
+            if accepted == DECISION_IMAGE_MIME_TYPES:
+                raise ValueError(
+                    "Decision image MIME must be image/png, image/jpeg, image/webp or image/gif"
+                )
             raise ValueError(
-                "Decision image MIME must be image/png, image/jpeg, image/webp or image/gif"
+                "Decision image MIME must be one of this model's media_capabilities "
+                "image.mime_types: " + ", ".join(sorted(accepted))
             )
         url = self.image_url
         if not isinstance(url, str):
             raise ValueError("Decision image URI must be a string")
+        limit = (
+            caps.max_bytes
+            if capabilities is not None and caps.max_bytes is not None
+            else MAX_DECISION_IMAGE_BYTES
+        )
+        size = f"{limit / (1024 * 1024):g} MiB" if limit % (256 * 1024) == 0 else f"{limit} bytes"
         if url.startswith("data:"):
+            if "inline" not in caps.transports:
+                raise ValueError("This decision model does not accept inline (data URL) images")
             prefix = f"data:{self.media_type};base64,"
             if not url.startswith(prefix):
                 raise ValueError(
                     "Decision image data URI must have matching MIME and base64 encoding"
                 )
             encoded = url[len(prefix) :]
-            if len(encoded) > 4 * ((MAX_DECISION_IMAGE_BYTES + 2) // 3):
-                raise ValueError("Decision image exceeds the 20 MiB size limit")
+            if len(encoded) > 4 * ((limit + 2) // 3):
+                raise ValueError(f"Decision image exceeds the {size} size limit")
             try:
                 data = base64.b64decode(encoded, validate=True)
             except (ValueError, binascii.Error) as exc:
                 raise ValueError("Decision image contains invalid base64") from exc
-            if not data or len(data) > MAX_DECISION_IMAGE_BYTES:
-                raise ValueError("Decision image must be nonempty and at most 20 MiB")
+            if not data or len(data) > limit:
+                raise ValueError(f"Decision image must be nonempty and at most {size}")
             return data
+        if "url" not in caps.transports:
+            raise ValueError("This decision model does not accept remote image URLs")
         if len(url) > MAX_DECISION_IMAGE_URL_LENGTH or any(
             char.isspace() or ord(char) < 32 or ord(char) == 127 or char == "\\" for char in url
         ):
@@ -137,7 +167,9 @@ def decision_media_inputs(value: object) -> tuple[MediaInput, ...]:
 
 
 def validate_attachments(
-    attachments: tuple[DecisionAttachment, ...], media_inputs: object
+    attachments: tuple[DecisionAttachment, ...],
+    media_inputs: object,
+    capabilities: MediaCapabilities | None = None,
 ) -> tuple[bytes | None, ...]:
     """Check attachments against the media permission and the request limits.
 
@@ -145,7 +177,8 @@ def validate_attachments(
     rather than through ``collect_decision_attachments``. It checks that
     images are permitted, that there are at most 16, that aliases and input
     names are unique, that the detail hint is valid, and that the total size
-    stays within 50 MiB.
+    stays within 50 MiB. Each image's MIME type, transport and size are
+    checked against ``capabilities`` (default: the decision provider default).
 
     Returns:
         The decoded bytes of each attachment, in order (``None`` for HTTP(S)
@@ -188,7 +221,7 @@ def validate_attachments(
         names.update(attachment.input_names)
         if attachment.detail not in (None, "low", "high", "auto", "original"):
             raise ValueError("Decision image detail must be low, high, auto or original")
-        data = attachment.decoded_bytes()
+        data = attachment.decoded_bytes(capabilities)
         total += len(data) if data is not None else 0
         if total > MAX_DECISION_TOTAL_IMAGE_BYTES:
             raise ValueError("Decision images exceed the 50 MiB total size limit")
