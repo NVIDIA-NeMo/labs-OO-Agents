@@ -48,7 +48,79 @@ JSONL traces can be archived, imported into the viewer, or inspected by other
 OpenTelemetry-compatible tooling. Set a stable session ID when an evaluation
 harness must associate files with a particular task.
 
-### Journal calls from clients that bypass LiteLLM
+## Export recorded token usage
+
+Use the existing `trace-explorer` command to export a completed-call usage series
+from a local OpenInference OTLP JSONL file or portable `.nooa.jsonl` journal file:
+
+```bash
+uv run trace-explorer traces/my-run.jsonl --usage --until-seconds 7200 > usage.json
+uv run trace-explorer traces/my-run.jsonl --usage --usage-format csv --until-seconds 7200 > usage.csv
+uv run trace-explorer traces/my-run.nooa.jsonl --usage --until-seconds 7200 > journal-usage.json
+```
+
+`--usage` defaults to JSON. Omit `--until-seconds` to include all completed calls.
+Time zero is the start of the first recorded LLM call, not the program launch.
+Earlier non-LLM spans, including orchestrators or spans with skewed timestamps,
+do not move that origin. With no LLM spans, the earliest positive span start
+anchors the zero-call summary. Recorded duration extends from the origin to
+the latest recorded span timestamp.
+Completion at the cutoff is inclusive. All traces in the file participate;
+session/root-generation selection and other Explorer views cannot be combined
+with this mode.
+
+The Python API returns the same data without building a session tree:
+
+```python
+from nooa.trace_explorer import load_usage_report
+
+report = load_usage_report("traces/my-run.jsonl", until_seconds=7200)
+print(report.totals.known_total_tokens)
+print(report.totals.missing_usage_calls)
+print(report.by_model)
+data = report.to_dict()   # schema_version=1; summary + chronological timeline
+csv_text = report.to_csv()
+```
+
+Each timeline point preserves nullable input/output/total/cache-read counts and
+a cumulative snapshot. `known_*` aggregates sum available counts, not estimates
+for missing fields. `missing_usage_calls` counts completed calls missing any
+input/output/total count; absent cache telemetry has its own counter. A missing
+total is derived only when both input and output are present. A provider-reported
+total takes precedence, so known input plus known output need not equal the
+known total when telemetry is partial or inconsistent. Cache/reasoning subsets
+are never added again. Recorded zeros are preserved; this report cannot reverse
+normalization already performed by an upstream collector. Only `LLM`-kind spans
+count; parent rollups do not.
+Identical accounting for a repeated trace/span ID counts once; conflicts raise.
+
+Per-model summaries (`by_model`) are available in JSON and the Python API only;
+CSV retains each call's model name but does not emit per-model summary rows.
+CSV contains `call` rows with cumulative known totals and a final `summary` row
+even when no calls completed. That row carries the time origin, recorded duration,
+missing-data counts and `in_flight_calls`. Unknown per-call values are empty
+fields. Text fields starting with `=`, `+`, `-`, `@`, `|`, or full-width `＝`
+(including after whitespace), or starting with a tab or line break, are
+apostrophe-prefixed for spreadsheet safety. JSON preserves their original text.
+
+`in_flight_calls` counts recorded calls crossing the cutoff or lacking an end
+timestamp. It does **not** estimate tokens consumed partway through those calls.
+Exporters may not record running calls at all; absent/unexported calls cannot be
+detected. A cutoff beyond the recorded duration does not establish observation
+coverage up to that time. This is recorded usage, not a provider bill, answer
+quality measurement, or hard spending limit.
+
+Accounting mode rejects malformed/truncated records and empty captures with a
+non-zero CLI exit, rather than silently skipping data. Ordinary Explorer loading
+remains unchanged. For `exporters.journal_file(...)` captures, accounting reads
+the ordinary OTLP span records and skips `nooaJournal` manifest, block and call
+records. Journal `call.tokens` are never counted again or used to fill missing
+span usage. Message reconstruction remains separate work in #205. A journal-only
+capture without OTLP spans fails clearly instead of reporting zero usage.
+The reader loads spans into memory; this is not a streaming analyzer for
+arbitrarily large files.
+
+## Journal calls from clients that bypass LiteLLM
 
 `exporters.journal_file(...)` and the live viewer's journal record each model
 call's messages through LiteLLM callbacks. A `UnifiedLLM` subclass that talks to
