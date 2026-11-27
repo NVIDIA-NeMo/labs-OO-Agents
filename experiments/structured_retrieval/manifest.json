@@ -1,0 +1,32 @@
+{
+  "dataset": "meghanadh/SearchTome",
+  "revision": "48d3b3545950b3857dc3657fb22e4b79b8ed8df5",
+  "license": "CC-BY-SA-4.0",
+  "source": "https://huggingface.co/datasets/meghanadh/SearchTome",
+  "files": {
+    "education/corpus.jsonl": "33c1701fc870b7978d7b3a8b754b9cf0ee62432e98e10bcec6219a2d2767969b",
+    "education/dev.jsonl": "7e66e32c7ec7460ec60eca42ee95234b359318221eb9b335fab8805c9ff95a0b",
+    "education/test.jsonl": "88773cf2bae4d81f4f2e8092eb57a476ae274b2930c5f3ff570d8ea022974dc7",
+    "education/train.jsonl": "70ab6df54c6cc959299348f0b6c4954315dcb3a619e6e7e63fc66032363a9b46",
+    "finance/corpus.jsonl": "0a1ef89aaa2d4f2a983ea2538443981be92a4284a18fd6cd41395cc7902f4597",
+    "finance/dev.jsonl": "9e0ab5db603b18813ed62bf901202b8eddd863b35e36f2f4b3fb0c9b45f089ac",
+    "finance/test.jsonl": "c82ad05946727b6bf56d71039264a520159e362eab4460ae6217fa030414aeaa",
+    "finance/train.jsonl": "ff702d5db7d9f086f3d328c4ab7aae4f4bd3552a295c789212b3248da71527d6",
+    "law/corpus.jsonl": "a7920f15cfe5fd06f7f5075c856625b310d03e3f563882ab705d3164f18e3aa4",
+    "law/dev.jsonl": "476eb796842b7a05bb8f58b600da683a42ba7bf71456d90fd4acc7c7ed48bb73",
+    "law/test.jsonl": "65ecae97ca23052c0a0466ab60a40fa9ca0e24aa99b6947e311aed1327ebf59b",
+    "law/train.jsonl": "e0c83f2154a60e170cdbed790b88f48cf653a393b8cc78322ae9e3c52ea1df23",
+    "medicine/corpus.jsonl": "a45b98525f2623b7d9599aacf24874a677f2ac6ef1715acb130a69442d8fe6d4",
+    "medicine/dev.jsonl": "38f70ff7397bfd7e05e25d920662d6520ca8f97ab60dc0b00f11d9a19e6e62ac",
+    "medicine/test.jsonl": "329b8a2cc3b392ee9358373694ce1ae097cb50c5c6a6fee3664239adcd7265dd",
+    "medicine/train.jsonl": "da1f2960646ef13b3704d11827711b0696399ca2b8db8894c93fa1b6ce2bd2f1",
+    "natural_sciences/corpus.jsonl": "366df2e3022099a753ace6c11dd999e4fc51d3035cbef68e42fd372e257f48ba",
+    "natural_sciences/dev.jsonl": "c9d1a076be4d8ac41aa0f966d25752c4ebe90926fdd69d0f11d474a0e9a90d8e",
+    "natural_sciences/test.jsonl": "7bc9804bfd6d63f169e9da3e455d98da2da462f0d583b394c3cf83000223fcbc",
+    "natural_sciences/train.jsonl": "108d1e97711bd87bace3f840b8329eb1e376379f15d91f6ee54c8941494e3ac5",
+    "social_sciences/corpus.jsonl": "89150e6cc66f4c58997c470d6cee6e2d37491d64e3fdef54d42fa808710449d3",
+    "social_sciences/dev.jsonl": "e54dd3b902c9b4c8817be4514520da18663e5fd0ec456486e3c9d1a3a636bebe",
+    "social_sciences/test.jsonl": "4dfe8e7404187742b9645aac993e170c9a833825cb0623cdb4c9c7e961708b1f",
+    "social_sciences/train.jsonl": "8789dc9a8d909afa4c0a7955645ec50d6d2553cadfcf525d2b54d6cf9413efa9"
+  }
+}

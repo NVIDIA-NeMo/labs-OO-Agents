@@ -1,0 +1,297 @@
+{
+  "dataset_revision": "48d3b3545950b3857dc3657fb22e4b79b8ed8df5",
+  "split": "test",
+  "nooa_commit": "4684ce047ad1ae2b3194ef060190b1b67f705da6",
+  "benchmark_sha256": "7dc9bf06ddd1d29df2b20780fedef74f856461b75e1210910eb831cbabbc9ce4",
+  "manifest_sha256": "ea1d7d6d807b00938a0ea5ccd2a2060ba0a25388c1b8f3e4b0cada87262afa45",
+  "predictions_sha256": null,
+  "protocol": {
+    "k1": 1.2,
+    "b": 0.75,
+    "tokenizer": "casefold Unicode words",
+    "tuning": "none",
+    "ties": "corpus order"
+  },
+  "prediction_run": null,
+  "results": {
+    "title": {
+      "micro": {
+        "queries": 6005,
+        "recall_at_1": 0.19700249791840133,
+        "recall_at_3": 0.3310574521232306,
+        "ndcg_at_3": 0.2745610442922588,
+        "invalid_ids": 0,
+        "duplicate_ids": 0,
+        "returned_ids": 18015,
+        "empty": 0,
+        "over_k": 0
+      },
+      "macro": {
+        "recall_at_1": 0.19888170359786428,
+        "recall_at_3": 0.3533379264039234,
+        "ndcg_at_3": 0.2880374438585692
+      },
+      "domains": {
+        "education": {
+          "queries": 437,
+          "recall_at_1": 0.2128146453089245,
+          "recall_at_3": 0.5606407322654462,
+          "ndcg_at_3": 0.41279379533344807,
+          "invalid_ids": 0,
+          "duplicate_ids": 0,
+          "returned_ids": 1311,
+          "empty": 0,
+          "over_k": 0
+        },
+        "finance": {
+          "queries": 1214,
+          "recall_at_1": 0.16886326194398682,
+          "recall_at_3": 0.27677100494233936,
+          "ndcg_at_3": 0.23036662500000166,
+          "invalid_ids": 0,
+          "duplicate_ids": 0,
+          "returned_ids": 3642,
+          "empty": 0,
+          "over_k": 0
+        },
+        "law": {
+          "queries": 820,
+          "recall_at_1": 0.09146341463414634,
+          "recall_at_3": 0.22439024390243903,
+          "ndcg_at_3": 0.16702804384582082,
+          "invalid_ids": 0,
+          "duplicate_ids": 0,
+          "returned_ids": 2460,
+          "empty": 0,
+          "over_k": 0
+        },
+        "medicine": {
+          "queries": 1996,
+          "recall_at_1": 0.22144288577154309,
+          "recall_at_3": 0.33617234468937873,
+          "ndcg_at_3": 0.2889094098446916,
+          "invalid_ids": 0,
+          "duplicate_ids": 0,
+          "returned_ids": 5988,
+          "empty": 0,
+          "over_k": 0
+        },
+        "natural_sciences": {
+          "queries": 579,
+          "recall_at_1": 0.29015544041450775,
+          "recall_at_3": 0.3696027633851468,
+          "ndcg_at_3": 0.33756755029607866,
+          "invalid_ids": 0,
+          "duplicate_ids": 0,
+          "returned_ids": 1737,
+          "empty": 0,
+          "over_k": 0
+        },
+        "social_sciences": {
+          "queries": 959,
+          "recall_at_1": 0.20855057351407716,
+          "recall_at_3": 0.3524504692387904,
+          "ndcg_at_3": 0.2915592388313744,
+          "invalid_ids": 0,
+          "duplicate_ids": 0,
+          "returned_ids": 2877,
+          "empty": 0,
+          "over_k": 0
+        }
+      },
+      "missing_predictions": 0,
+      "usage_totals": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "model_calls": 0,
+        "latency_ms": null
+      }
+    },
+    "content": {
+      "micro": {
+        "queries": 6005,
+        "recall_at_1": 0.6091590341382181,
+        "recall_at_3": 0.8046627810158201,
+        "ndcg_at_3": 0.7245717069763331,
+        "invalid_ids": 0,
+        "duplicate_ids": 0,
+        "returned_ids": 18015,
+        "empty": 0,
+        "over_k": 0
+      },
+      "macro": {
+        "recall_at_1": 0.6093533151377732,
+        "recall_at_3": 0.8094884250692821,
+        "ndcg_at_3": 0.7273875993885854
+      },
+      "domains": {
+        "education": {
+          "queries": 437,
+          "recall_at_1": 0.528604118993135,
+          "recall_at_3": 0.7963386727688787,
+          "ndcg_at_3": 0.6855413982265497,
+          "invalid_ids": 0,
+          "duplicate_ids": 0,
+          "returned_ids": 1311,
+          "empty": 0,
+          "over_k": 0
+        },
+        "finance": {
+          "queries": 1214,
+          "recall_at_1": 0.4958813838550247,
+          "recall_at_3": 0.7512355848434926,
+          "ndcg_at_3": 0.6465305086579246,
+          "invalid_ids": 0,
+          "duplicate_ids": 0,
+          "returned_ids": 3642,
+          "empty": 0,
+          "over_k": 0
+        },
+        "law": {
+          "queries": 820,
+          "recall_at_1": 0.7707317073170732,
+          "recall_at_3": 0.9060975609756098,
+          "ndcg_at_3": 0.8519866207970413,
+          "invalid_ids": 0,
+          "duplicate_ids": 0,
+          "returned_ids": 2460,
+          "empty": 0,
+          "over_k": 0
+        },
+        "medicine": {
+          "queries": 1996,
+          "recall_at_1": 0.6533066132264529,
+          "recall_at_3": 0.8226452905811623,
+          "ndcg_at_3": 0.7533910281008479,
+          "invalid_ids": 0,
+          "duplicate_ids": 0,
+          "returned_ids": 5988,
+          "empty": 0,
+          "over_k": 0
+        },
+        "natural_sciences": {
+          "queries": 579,
+          "recall_at_1": 0.7081174438687392,
+          "recall_at_3": 0.8652849740932642,
+          "ndcg_at_3": 0.8004951899272175,
+          "invalid_ids": 0,
+          "duplicate_ids": 0,
+          "returned_ids": 1737,
+          "empty": 0,
+          "over_k": 0
+        },
+        "social_sciences": {
+          "queries": 959,
+          "recall_at_1": 0.4994786235662148,
+          "recall_at_3": 0.7153284671532847,
+          "ndcg_at_3": 0.6263808506219318,
+          "invalid_ids": 0,
+          "duplicate_ids": 0,
+          "returned_ids": 2877,
+          "empty": 0,
+          "over_k": 0
+        }
+      },
+      "missing_predictions": 0,
+      "usage_totals": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "model_calls": 0,
+        "latency_ms": null
+      }
+    },
+    "title_content": {
+      "micro": {
+        "queries": 6005,
+        "recall_at_1": 0.6093255620316403,
+        "recall_at_3": 0.8046627810158201,
+        "ndcg_at_3": 0.7247857916593354,
+        "invalid_ids": 0,
+        "duplicate_ids": 0,
+        "returned_ids": 18015,
+        "empty": 0,
+        "over_k": 0
+      },
+      "macro": {
+        "recall_at_1": 0.6090186175353793,
+        "recall_at_3": 0.8094949118024835,
+        "ndcg_at_3": 0.7273461072946452
+      },
+      "domains": {
+        "education": {
+          "queries": 437,
+          "recall_at_1": 0.5263157894736842,
+          "recall_at_3": 0.7963386727688787,
+          "ndcg_at_3": 0.6846968438868963,
+          "invalid_ids": 0,
+          "duplicate_ids": 0,
+          "returned_ids": 1311,
+          "empty": 0,
+          "over_k": 0
+        },
+        "finance": {
+          "queries": 1214,
+          "recall_at_1": 0.4950576606260296,
+          "recall_at_3": 0.7495881383855024,
+          "ndcg_at_3": 0.6456184734525823,
+          "invalid_ids": 0,
+          "duplicate_ids": 0,
+          "returned_ids": 3642,
+          "empty": 0,
+          "over_k": 0
+        },
+        "law": {
+          "queries": 820,
+          "recall_at_1": 0.7707317073170732,
+          "recall_at_3": 0.9060975609756098,
+          "ndcg_at_3": 0.8519866207970413,
+          "invalid_ids": 0,
+          "duplicate_ids": 0,
+          "returned_ids": 2460,
+          "empty": 0,
+          "over_k": 0
+        },
+        "medicine": {
+          "queries": 1996,
+          "recall_at_1": 0.655811623246493,
+          "recall_at_3": 0.8236472945891784,
+          "ndcg_at_3": 0.7552101311837995,
+          "invalid_ids": 0,
+          "duplicate_ids": 0,
+          "returned_ids": 5988,
+          "empty": 0,
+          "over_k": 0
+        },
+        "natural_sciences": {
+          "queries": 579,
+          "recall_at_1": 0.7098445595854922,
+          "recall_at_3": 0.8670120898100173,
+          "ndcg_at_3": 0.8019961748087866,
+          "invalid_ids": 0,
+          "duplicate_ids": 0,
+          "returned_ids": 1737,
+          "empty": 0,
+          "over_k": 0
+        },
+        "social_sciences": {
+          "queries": 959,
+          "recall_at_1": 0.49635036496350365,
+          "recall_at_3": 0.7142857142857143,
+          "ndcg_at_3": 0.6245683996387649,
+          "invalid_ids": 0,
+          "duplicate_ids": 0,
+          "returned_ids": 2877,
+          "empty": 0,
+          "over_k": 0
+        }
+      },
+      "missing_predictions": 0,
+      "usage_totals": {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "model_calls": 0,
+        "latency_ms": null
+      }
+    }
+  }
+}
