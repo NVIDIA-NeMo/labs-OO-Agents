@@ -3214,7 +3214,7 @@ def save_model(state: WizardState) -> bool:
                 )
             )
             save_key = not state.yes and prompts.confirm(
-                f"Save this key as environment variable {state.api_key_env} for future NOOA runs?",
+                f"Save this key in secrets.yaml as {state.api_key_env} for future NOOA runs?",
                 default=True,
             )
         if state.result.entry != reviewed_entry:
