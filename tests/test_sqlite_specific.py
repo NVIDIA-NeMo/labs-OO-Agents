@@ -256,3 +256,21 @@ def test_insert_active_tag_uses_list_index(sqlite_conn):
     backend.insert_active_tag("y", 99)  # past the end: last
     backend.insert_active_tag("z", 0)  # first
     assert backend.active_tags() == ["z", "1", "x", "4", "5", "y"]
+
+
+def test_insert_active_tag_index_rules_match_list_insert(sqlite_conn):
+    """Negative and out-of-range indexes behave like list.insert, also on an empty list."""
+    backend = SQLiteEventBackend(sqlite_conn)
+    expected: list[str] = []
+    backend.insert_active_tag("a", -1)  # empty list
+    expected.insert(-1, "a")
+    assert backend.active_tags() == expected == ["a"]
+    for i in range(1, 6):
+        backend.store(str(i), UserEvent(content=f"msg {i}"))
+        expected.append(str(i))
+    backend.remove_active_tag("3")
+    expected.remove("3")
+    for tag, index in (("b", -1), ("c", -100), ("d", 2), ("e", 100), ("f", -3)):
+        backend.insert_active_tag(tag, index)
+        expected.insert(index, tag)
+        assert backend.active_tags() == expected

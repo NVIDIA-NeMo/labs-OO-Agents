@@ -559,13 +559,19 @@ class SQLiteEventBackend:
                 # in-memory backend), not a stored position: positions have
                 # gaps once a collapse removed tags. Insert at the position of
                 # the tag now at ``index`` (after the last tag when past the end).
-                rows = self._conn.execute(
-                    "SELECT position FROM active_tags ORDER BY position"
-                ).fetchall()
-                if index < len(rows):
-                    position = rows[max(index, 0)][0]
+                # Same index rules as list.insert: negative counts from the end.
+                count, last = self._conn.execute(
+                    "SELECT COUNT(*), MAX(position) FROM active_tags"
+                ).fetchone()
+                if index < 0:
+                    index = max(count + index, 0)
+                if index >= count:
+                    position = last + 1 if count else 0
                 else:
-                    position = rows[-1][0] + 1 if rows else 0
+                    position = self._conn.execute(
+                        "SELECT position FROM active_tags ORDER BY position LIMIT 1 OFFSET ?",
+                        (index,),
+                    ).fetchone()[0]
                 self._conn.execute(
                     "UPDATE active_tags SET position = position + 1 WHERE position >= ?",
                     (position,),
