@@ -68,7 +68,6 @@ def client_capabilities(client: "UnifiedLLM") -> Capabilities:
         tools=True,
         context_window=client.context_window,
         max_output_tokens=None,
-        structured_output_formats=getattr(client, "structured_output_formats", None),
         developer_role=getattr(client, "developer_role", None),
     )
 

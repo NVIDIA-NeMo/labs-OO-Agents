@@ -9,14 +9,17 @@ the Chat Completions and Responses interfaces:
   (Responses: ``text.format``).
 - ``format:json_object``: JSON mode (``{"type": "json_object"}``). Sent only
   when the endpoint rejected ``json_schema`` as unsupported, or when the entry
-  explicitly selects ``structured_output_format: json_object``.
+  selects ``structured_output_format: json_object``.
 - ``role:developer``: one ``developer`` message before the user message.
 
 A rejection counts as "unsupported" only for HTTP 400/422 whose error names the
 tested feature (the format field, or the developer role) together with a
-refusal phrase. Any other failure leaves the fact unknown. Results are written
-to ``structured_output_formats`` / ``developer_role`` with a ``provenance``
-note; provider error text is never stored. Other interfaces (Anthropic
+refusal phrase. Any other failure leaves the fact unknown. The entry gets one
+``structured_output_format`` value: ``json_schema`` when it was accepted, else
+``json_object`` when that was accepted, else no key. Each format's check result
+is recorded only in ``provenance["structured_output_format"]``. The role result
+is written to ``developer_role`` with a ``provenance`` note. Provider error
+text is never stored. Other interfaces (Anthropic
 Messages) record ``developer_role: false`` without a call and have no
 ``json_object`` format to test.
 """
@@ -161,11 +164,16 @@ def json_object_skip_reason(entry: dict, records: dict) -> str | None:
 
 
 def apply_capability_results(entry: dict, records: dict) -> None:
-    """Write the detected facts from the check records into ``entry`` (in place).
+    """Write the detected settings from the check records into ``entry`` (in place).
 
-    Inconclusive checks leave the entry's existing value. The evidence is kept
-    under ``provenance["structured_output_formats"]`` and
-    ``provenance["developer_role"]``.
+    ``structured_output_format`` gets ONE value: ``json_schema`` when that
+    check was accepted, else ``json_object`` when that was accepted. When
+    both were rejected as unsupported the key is removed. Inconclusive checks
+    leave the entry's existing value. A conclusive result replaces any
+    existing value, whoever set it.
+    Each format's result is recorded only under
+    ``provenance["structured_output_format"]``; ``developer_role`` evidence
+    under ``provenance["developer_role"]``.
     """
     provenance = entry.setdefault("provenance", {})
     now = datetime.now(UTC).isoformat()
@@ -173,25 +181,27 @@ def apply_capability_results(entry: dict, records: dict) -> None:
         name.removeprefix("format:"): (records.get(name) or {}).get("outcome", "not_probed")
         for name in ("format:json_schema", "format:json_object")
     }
-    formats = None
+    detected: str | None = None
+    settled = True
     if outcomes["json_schema"] == "accepted":
-        formats = ["json_schema"] + (
-            ["json_object"] if outcomes["json_object"] == "accepted" else []
-        )
-    elif outcomes["json_schema"] == "unsupported" and outcomes["json_object"] in (
-        "accepted",
-        "unsupported",
+        detected = "json_schema"
+    elif outcomes["json_schema"] == "unsupported" and outcomes["json_object"] == "accepted":
+        detected = "json_object"
+    elif not (
+        outcomes["json_schema"] == "unsupported" and outcomes["json_object"] == "unsupported"
     ):
-        formats = ["json_object"] if outcomes["json_object"] == "accepted" else []
+        settled = False  # Inconclusive: neither format is known to work or fail.
     if any(name in records for name in ("format:json_schema", "format:json_object")):
-        provenance["structured_output_formats"] = {
+        if detected is not None:
+            entry["structured_output_format"] = detected
+        elif settled:
+            entry.pop("structured_output_format", None)
+        provenance["structured_output_format"] = {
             "source": "connect",
             "checks": outcomes,
-            "value": formats,
+            "value": detected,
             "checked_at": now,
         }
-        if formats is not None:
-            entry["structured_output_formats"] = formats
     role = (records.get("role:developer") or {}).get("outcome")
     if role is not None:
         value = True if role == "accepted" else False if role == "unsupported" else None

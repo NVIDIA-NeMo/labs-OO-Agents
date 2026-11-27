@@ -241,6 +241,17 @@ def test_canonical_snapshot_resolves_selected_patch_shadowed_defaults_and_proven
     assert snapshot == json.loads(json.dumps(snapshot))
 
 
+def test_structured_output_format_is_not_part_of_the_snapshot():
+    # Connect writes the format after its own format checks ran, so writing
+    # (or changing) it does not make earlier check results out of date.
+    from nooa.unifiedllm.connect._verification import effective_config_fingerprint
+
+    entry = plan().entry
+    before = effective_config_fingerprint(entry)
+    for value in ("json_schema", "json_object"):
+        assert effective_config_fingerprint({**entry, "structured_output_format": value}) == before
+
+
 def test_level_checks_have_independent_dependencies():
     entry = connect.configure_entry(
         {

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Detected structured-output formats / developer role, and the settings that use them.
+"""The structured_output_format setting, detected developer role, and instruction_role.
 
 Request shapes are checked on the prepared provider parameters (LiteLLM) and
 on the native projection; no network.
@@ -36,7 +36,7 @@ MESSAGES = [
     {"role": "user", "content": "hi"},
     {"role": "developer", "content": "dev"},
 ]
-NEUTRAL = {"structured_output_format": "auto", "instruction_role": "auto"}
+NEUTRAL = {"structured_output_format": "json_schema", "instruction_role": "auto"}
 
 
 def _client(style="completion", **entry):
@@ -72,30 +72,17 @@ def _schema_text(content):
 
 
 @pytest.mark.parametrize(
-    "setting,detected,expected",
-    [
-        (None, None, "json_schema"),
-        ("auto", None, "json_schema"),
-        ("auto", ["json_schema"], "json_schema"),
-        ("auto", ["json_schema", "json_object"], "json_schema"),
-        ("auto", ["json_object"], "json_object"),
-        ("auto", [], "json_schema"),
-        ("json_object", None, "json_object"),
-        ("json_object", ["json_object", "json_schema"], "json_object"),
-        ("json_schema", ["json_schema"], "json_schema"),
-    ],
+    "setting,expected",
+    [(None, "json_schema"), ("json_schema", "json_schema"), ("json_object", "json_object")],
 )
-def test_structured_output_format_resolution(setting, detected, expected):
-    assert resolve_structured_output_format(setting, detected) == expected
+def test_structured_output_format_resolution(setting, expected):
+    assert resolve_structured_output_format(setting) == expected
 
 
-@pytest.mark.parametrize(
-    "setting,detected",
-    [("json_object", ["json_schema"]), ("json_schema", ["json_object"]), ("json_object", [])],
-)
-def test_explicit_format_outside_known_set_is_config_error(setting, detected):
-    with pytest.raises(CapabilitySettingError, match="not supported by this route") as info:
-        resolve_structured_output_format(setting, detected)
+@pytest.mark.parametrize("setting", ["auto", "xml", ["json_schema"], ""])
+def test_structured_output_format_rejects_other_values(setting):
+    with pytest.raises(CapabilitySettingError, match="'json_schema' or 'json_object'") as info:
+        resolve_structured_output_format(setting)
     assert info.value.kind is FailureKind.CONFIG
 
 
@@ -123,9 +110,9 @@ def test_explicit_developer_on_route_without_support_is_config_error():
     "key,value",
     [
         ("structured_output_format", "xml"),
+        ("structured_output_format", "auto"),
+        ("structured_output_format", ["json_schema"]),
         ("instruction_role", "assistant"),
-        ("structured_output_formats", ["yaml"]),
-        ("structured_output_formats", "json_schema"),
         ("developer_role", "yes"),
     ],
 )
@@ -147,24 +134,18 @@ def test_chat_default_and_neutral_settings_send_identical_requests():
     assert baseline["messages"] == MESSAGES
     assert baseline["response_format"] is Answer
     assert _wire(_client(**NEUTRAL)) == baseline
-    # Unknown/positive facts with auto settings keep today's request too.
-    assert _wire(_client(structured_output_formats=["json_schema", "json_object"])) == baseline
+    # Unknown developer role with the auto role keeps today's request too.
     assert _wire(_client(developer_role=None)) == baseline
 
 
 def test_chat_json_object_sends_json_mode_and_schema_last():
-    params = _wire(_client(structured_output_formats=["json_object"]))
+    params = _wire(_client(structured_output_format="json_object"))
     assert params["response_format"] == {"type": "json_object"}
     assert params["messages"][:3] == MESSAGES  # cacheable prefix unchanged
     final = params["messages"][-1]
     assert final["role"] == "system" and "JSON" in final["content"]
     assert _schema_text(final["content"]) == Answer.model_json_schema()
     assert final == json_object_instruction(Answer)
-
-
-def test_chat_explicit_json_object_without_detection():
-    params = _wire(_client(structured_output_format="json_object"))
-    assert params["response_format"] == {"type": "json_object"}
 
 
 def test_chat_json_object_only_for_typed_calls():
@@ -208,26 +189,24 @@ def test_registry_override_of_model_drops_entry_facts():
             "model_name": "openai/model",
             "api_base": "https://fixture.invalid/v1",
             "api_key": "fixture-key",
-            "structured_output_formats": ["json_object"],
+            "structured_output_format": "json_object",
             "developer_role": False,
         },
         model="openai/other",
     )
-    assert client.structured_output_formats is None and client.developer_role is None
-    assert "structured_output_formats" not in client.config
+    assert client._output_format == "json_schema" and client.developer_role is None
+    assert "structured_output_format" not in client.config
 
 
 def test_capability_keys_never_reach_provider_params():
     params = _wire(
         _client(
-            structured_output_formats=["json_schema"],
             developer_role=True,
             structured_output_format="json_schema",
             instruction_role="system",
         )
     )
     for key in (
-        "structured_output_formats",
         "developer_role",
         "structured_output_format",
         "instruction_role",
@@ -259,7 +238,7 @@ def test_responses_default_and_neutral_settings_send_identical_requests():
 
 
 def test_responses_json_object_uses_text_format_and_final_instruction():
-    params = _wire(_client("responses", structured_output_formats=["json_object"]))
+    params = _wire(_client("responses", structured_output_format="json_object"))
     assert params["text"] == {"format": {"type": "json_object"}}
     assert "text_format" not in params
     assert params["instructions"] == "sys"
@@ -296,10 +275,9 @@ def _entry(**extra):
 
 def test_loaded_llm_exposes_detected_facts():
     llm = load_llm_from_config(
-        "alias", _entry(structured_output_formats=["json_schema"], developer_role=True)
+        "alias", _entry(structured_output_format="json_schema", developer_role=True)
     )
     try:
-        assert llm.capabilities.structured_output_formats == frozenset({"json_schema"})
         assert llm.capabilities.developer_role is True
     finally:
         llm.close()
@@ -308,7 +286,6 @@ def test_loaded_llm_exposes_detected_facts():
 def test_loaded_llm_without_facts_reports_unknown():
     llm = load_llm_from_config("alias", _entry())
     try:
-        assert llm.capabilities.structured_output_formats is None
         assert llm.capabilities.developer_role is None
     finally:
         llm.close()
@@ -317,11 +294,11 @@ def test_loaded_llm_without_facts_reports_unknown():
 @pytest.mark.parametrize(
     "extra",
     [
-        {"structured_output_formats": ["json_schema"], "structured_output_format": "json_object"},
+        {"structured_output_format": "auto"},
         {"developer_role": False, "instruction_role": "developer"},
     ],
 )
-def test_load_rejects_choice_contradicting_detected_fact(extra):
+def test_load_rejects_invalid_or_contradicted_choice(extra):
     with pytest.raises(LLMFailure) as info:
         load_llm_from_config("alias", _entry(**extra))
     assert info.value.kind is FailureKind.CONFIG
@@ -354,10 +331,7 @@ def test_native_neutral_settings_project_identical_requests(family):
 
 
 def test_native_chat_json_object_and_developer():
-    settings = _native(
-        "openai-chat", structured_output_formats=["json_object"], developer_role=True
-    )
-    assert settings.capabilities.structured_output_formats == frozenset({"json_object"})
+    settings = _native("openai-chat", structured_output_format="json_object", developer_role=True)
     assert settings.capabilities.developer_role is True
     params = _project_request(LLMRequest(messages=list(MESSAGES), output_type=Answer), settings)
     assert params["response_format"] == {"type": "json_object"}
@@ -392,17 +366,17 @@ def test_native_responses_json_object():
     [
         ({"structured_output_format": "json_object"}, "json_object"),
         ({"instruction_role": "developer"}, "developer"),
-        (
-            {
-                "structured_output_formats": ["json_schema"],
-                "structured_output_format": "json_object",
-            },
-            "not supported",
-        ),
     ],
 )
-def test_native_load_rejections(options, match):
-    family = "anthropic-messages" if len(options) == 1 else "openai-chat"
+def test_native_anthropic_load_rejections(options, match):
+    family = "anthropic-messages"
     with pytest.raises(LLMFailure, match=match) as info:
         _native(family, **options)
+    assert info.value.kind is FailureKind.CONFIG
+
+
+@pytest.mark.parametrize("family", ["openai-chat", "openai-responses", "anthropic-messages"])
+def test_native_load_rejects_auto_format(family):
+    with pytest.raises(LLMFailure, match="not 'auto'") as info:
+        _native(family, structured_output_format="auto")
     assert info.value.kind is FailureKind.CONFIG

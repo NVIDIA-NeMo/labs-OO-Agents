@@ -1,23 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Detected structured-output formats and developer-role support, and the settings that use them.
+"""Structured-output format and developer-role settings.
 
-Connect detects two per-route facts and writes them into the model entry:
+Two settings choose how requests are sent:
 
-- ``structured_output_formats``: the ``response_format`` types the endpoint
-  accepts, from ``{"json_schema", "json_object"}``. Absent means unknown.
-- ``developer_role``: whether the endpoint accepts ``developer`` messages.
-  Absent means unknown.
-
-Two user settings choose how requests use them:
-
-- ``structured_output_format``: ``auto`` (default), ``json_schema`` or
-  ``json_object``. ``auto`` uses ``json_schema`` unless the only detected
-  format is ``json_object``.
+- ``structured_output_format``: ``json_schema`` or ``json_object``; absent
+  (None) keeps the request format entries had before this setting existed
+  (``json_schema``, or the native mode). Connect writes it after its
+  capability check: ``json_schema`` when the endpoint accepts it, else
+  ``json_object`` when that works, else no key. The per-format check results
+  are kept only in the entry's ``provenance``. ``json_object`` sends JSON mode
+  and the return type's schema as a final instruction message.
 - ``instruction_role``: ``auto`` (default), ``system`` or ``developer``.
   ``auto`` uses ``developer`` only when ``developer_role`` was detected True.
 
-An explicit choice that contradicts a known fact fails at load. Entries
+Connect also records one detected fact, ``developer_role``: whether the
+endpoint accepts ``developer`` messages (absent means unknown). An explicit
+``instruction_role: developer`` that contradicts it fails at load. Entries
 without these keys send exactly the requests they sent before.
 """
 
@@ -29,12 +28,10 @@ from pydantic import BaseModel
 from .errors import FailureKind, LLMFailure
 
 STRUCTURED_OUTPUT_FORMATS = ("json_schema", "json_object")
-STRUCTURED_OUTPUT_FORMAT_SETTINGS = ("auto", *STRUCTURED_OUTPUT_FORMATS)
 INSTRUCTION_ROLE_SETTINGS = ("auto", "system", "developer")
 # Entry keys this module owns. They describe one route, so a route override
 # drops them like media_inputs and structured_output_mode.
 CAPABILITY_KEYS = (
-    "structured_output_formats",
     "developer_role",
     "structured_output_format",
     "instruction_role",
@@ -48,22 +45,6 @@ class CapabilitySettingError(LLMFailure, ValueError):
         super().__init__(FailureKind.CONFIG, message)
 
 
-def validate_structured_output_formats(value: object) -> frozenset[str] | None:
-    """Return the detected formats as a frozenset, or None when unknown."""
-    if value is None:
-        return None
-    if isinstance(value, (str, bytes)) or not isinstance(value, (list, tuple, set, frozenset)):
-        raise CapabilitySettingError(
-            "structured_output_formats must be a list of json_schema/json_object or None"
-        )
-    formats = frozenset(value)
-    if not formats <= set(STRUCTURED_OUTPUT_FORMATS) or any(type(f) is not str for f in value):
-        raise CapabilitySettingError(
-            "structured_output_formats may contain only json_schema and json_object"
-        )
-    return formats
-
-
 def validate_developer_role(value: object) -> bool | None:
     """Return the detected developer-role support (True/False), or None when unknown."""
     if value is not None and type(value) is not bool:
@@ -72,10 +53,15 @@ def validate_developer_role(value: object) -> bool | None:
 
 
 def validate_structured_output_format(value: object) -> str | None:
-    """Return a valid ``structured_output_format`` setting (None means auto)."""
-    if value is not None and value not in STRUCTURED_OUTPUT_FORMAT_SETTINGS:
+    """Return a valid ``structured_output_format`` setting, or None when absent.
+
+    Raises:
+        CapabilitySettingError: For any other value, including ``auto``.
+    """
+    if value is not None and value not in STRUCTURED_OUTPUT_FORMATS:
         raise CapabilitySettingError(
-            "structured_output_format must be 'auto', 'json_schema' or 'json_object'"
+            f"structured_output_format must be 'json_schema' or 'json_object' "
+            f"(or absent), not {value!r}"
         )
     return value
 
@@ -87,30 +73,16 @@ def validate_instruction_role(value: object) -> str | None:
     return value
 
 
-def resolve_structured_output_format(setting: object, detected: object) -> str:
+def resolve_structured_output_format(setting: object) -> str:
     """Choose the format typed requests use: ``json_schema`` or ``json_object``.
 
-    ``auto``/None picks ``json_schema`` when it is supported or support is
-    unknown, and ``json_object`` only when that is the only detected format.
-    An explicit choice must be in the detected set when the set is known.
+    Absent (None) means ``json_schema``, the request format used before this
+    setting existed.
 
     Raises:
-        CapabilitySettingError: For invalid values or a contradicted choice.
+        CapabilitySettingError: For an invalid value.
     """
-    setting = validate_structured_output_format(setting)
-    formats = validate_structured_output_formats(detected)
-    if setting in (None, "auto"):
-        if formats is not None and "json_schema" not in formats and "json_object" in formats:
-            return "json_object"
-        return "json_schema"
-    if formats is not None and setting not in formats:
-        known = ", ".join(sorted(formats)) or "none"
-        raise CapabilitySettingError(
-            f"structured_output_format {setting!r} is not supported by this route "
-            f"(detected structured_output_formats: {known}); "
-            "choose a detected format, use 'auto', or run Connect again"
-        )
-    return setting
+    return validate_structured_output_format(setting) or "json_schema"
 
 
 def resolve_instruction_role(setting: object, detected: object) -> str:

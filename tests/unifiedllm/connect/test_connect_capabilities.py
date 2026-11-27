@@ -91,12 +91,16 @@ async def test_responses_accepts_schema_and_developer(monkeypatch):
     kinds = [_probe_kind(body) for body in bodies]
     assert kinds == [None, "format:json_schema", "role:developer"]  # json_object not needed
     entry = result.entry
-    assert entry["structured_output_formats"] == ["json_schema"]
+    assert entry["structured_output_format"] == "json_schema"
+    assert [k for k in entry if k.startswith("structured_output_format")] == [
+        "structured_output_format"
+    ]  # one key
     assert entry["developer_role"] is True
-    assert entry["provenance"]["structured_output_formats"]["checks"] == {
+    assert entry["provenance"]["structured_output_format"]["checks"] == {
         "json_schema": "accepted",
         "json_object": "not_probed",
     }
+    assert entry["provenance"]["structured_output_format"]["value"] == "json_schema"
     assert entry["provenance"]["developer_role"]["value"] is True
     assert "format:json_object" not in entry["provenance"]["probes"]
     verdict = connect.verdict(entry)
@@ -125,7 +129,7 @@ async def test_schema_rejected_as_unsupported_probes_json_object(monkeypatch):
     probes = result.entry["provenance"]["probes"]
     assert probes["format:json_schema"]["outcome"] == "unsupported"
     assert probes["format:json_object"]["outcome"] == "accepted"
-    assert result.entry["structured_output_formats"] == ["json_object"]
+    assert result.entry["structured_output_format"] == "json_object"
     assert "unavailable now" not in repr(result)  # provider text is never stored
 
 
@@ -144,7 +148,58 @@ async def test_schema_rejected_without_explicit_setting_still_probes_json_object
         plan("responses", capability_checks=True), "capabilities", api_key="fake"
     )
     assert "format:json_object" in [_probe_kind(body) for body in bodies]
-    assert result.entry["structured_output_formats"] == ["json_object"]
+    assert result.entry["structured_output_format"] == "json_object"
+    assert result.entry["provenance"]["structured_output_format"]["checks"] == {
+        "json_schema": "unsupported",
+        "json_object": "accepted",
+    }
+
+
+async def test_both_formats_unsupported_writes_no_key(monkeypatch):
+    unsupported = (400, "Invalid parameter: text.format json_schema is not supported")
+    serve(
+        monkeypatch,
+        "responses",
+        {
+            "format:json_schema": unsupported,
+            "format:json_object": (400, "response_format json_object is not supported"),
+        },
+    )
+    result = await connect.check_stage(
+        plan("responses", capability_checks=True), "capabilities", api_key="fake"
+    )
+    assert "structured_output_format" not in result.entry
+    note = result.entry["provenance"]["structured_output_format"]
+    assert note["value"] is None
+    assert note["checks"] == {"json_schema": "unsupported", "json_object": "unsupported"}
+
+
+async def test_conclusive_detection_overwrites_an_existing_value(monkeypatch):
+    # Connect writes what it detected, whoever set the existing value.
+    serve(monkeypatch, "responses")
+    existing = {**plan("responses").entry, "structured_output_format": "json_object"}
+    proposal = plan("responses", capability_checks=True, existing_entry=existing)
+    result = await connect.check_stage(proposal, "capabilities", api_key="fake")
+    assert result.entry["structured_output_format"] == "json_schema"
+    note = result.entry["provenance"]["structured_output_format"]
+    assert note["value"] == "json_schema"
+    assert set(note) == {"source", "checks", "value", "checked_at"}
+
+
+async def test_inconclusive_detection_leaves_an_existing_value(monkeypatch):
+    serve(
+        monkeypatch,
+        "responses",
+        {
+            "format:json_schema": (500, "internal error"),
+            "format:json_object": (500, "internal error"),
+        },
+    )
+    existing = {**plan("responses").entry, "structured_output_format": "json_object"}
+    proposal = plan("responses", capability_checks=True, existing_entry=existing)
+    result = await connect.check_stage(proposal, "capabilities", api_key="fake")
+    assert result.entry["structured_output_format"] == "json_object"
+    assert result.entry["provenance"]["structured_output_format"]["value"] is None
 
 
 @pytest.mark.parametrize(
@@ -162,8 +217,8 @@ async def test_other_failures_leave_formats_unknown(monkeypatch, status, message
         plan("responses", capability_checks=True), "capabilities", api_key="fake"
     )
     assert "format:json_object" not in [_probe_kind(body) for body in bodies]
-    assert "structured_output_formats" not in result.entry
-    assert result.entry["provenance"]["structured_output_formats"]["value"] is None
+    assert "structured_output_format" not in result.entry
+    assert result.entry["provenance"]["structured_output_format"]["value"] is None
 
 
 @pytest.mark.parametrize(
@@ -194,7 +249,7 @@ async def test_litellm_chat_rewrites_developer_so_support_stays_unknown(monkeypa
     record = result.entry["provenance"]["probes"]["role:developer"]
     assert record["outcome"] == "not_confirmed"
     assert "developer_role" not in result.entry
-    assert result.entry["structured_output_formats"] == ["json_schema"]
+    assert result.entry["structured_output_format"] == "json_schema"
     assert len(bodies) == 3
 
 
@@ -204,7 +259,7 @@ async def test_anthropic_records_no_developer_role_without_probing(monkeypatch):
     assert not any(p.name.startswith(("format:", "role:")) for p in proposal.probes)
     assert proposal.entry["developer_role"] is False
     assert proposal.entry["provenance"]["developer_role"]["check"] == "not_applicable"
-    assert "structured_output_formats" not in proposal.entry
+    assert "structured_output_format" not in proposal.entry
     result = await connect.run(proposal, approved="minimal", api_key="fake")
     assert len(bodies) == 1
     assert result.entry["developer_role"] is False

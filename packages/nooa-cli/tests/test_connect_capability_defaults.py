@@ -102,7 +102,10 @@ def test_wizard_runs_capability_checks_and_saves_the_facts(monkeypatch, tmp_path
     assert "Structured output (JSON schema)" in result.output
     assert "Structured output (JSON mode)" in result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]
-    assert entry["structured_output_formats"] == ["json_object"]
+    assert entry["structured_output_format"] == "json_object"
+    assert [k for k in entry if k.startswith("structured_output_format")] == [
+        "structured_output_format"
+    ]
     # LiteLLM sends the developer message as system on this Chat route, so
     # developer support stays unknown and is not saved; it is not a failure.
     assert "developer_role" not in entry
@@ -125,8 +128,11 @@ def test_stage_runs_capability_checks_and_reports_the_facts(monkeypatch, stage, 
     assert [kind(body) for body in sent if kind(body)] == ["format:json_schema", "role:developer"]
     assert {"format:json_schema", "role:developer"} <= set(report["checks"])
     entry = report["data"]["entry"]
-    assert entry["structured_output_formats"] == ["json_schema"]
-    assert entry["provenance"]["structured_output_formats"]["source"] == "connect"
+    assert entry["structured_output_format"] == "json_schema"
+    assert [k for k in entry if k.startswith("structured_output_format")] == [
+        "structured_output_format"
+    ]
+    assert entry["provenance"]["structured_output_format"]["source"] == "connect"
     assert entry["provenance"]["developer_role"]["source"] == "connect"
     # Responses sends the developer message as is, so support is detected;
     # LiteLLM sends it as system on this Chat route, so it stays unknown.

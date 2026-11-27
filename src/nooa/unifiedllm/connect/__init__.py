@@ -1738,8 +1738,10 @@ def plan(
     - ``capability_checks``: also test which structured-output formats
       (``json_schema``, ``json_object``) and whether the ``developer`` role
       the endpoint accepts (Chat and Responses only; see ``_capabilities``).
-      Results are saved as ``structured_output_formats`` and
-      ``developer_role``. Other interfaces record ``developer_role: false``.
+      Results are saved as one ``structured_output_format`` value
+      (``json_schema`` preferred, else ``json_object``, else no key; each
+      format's result only in ``provenance``) and ``developer_role``. Other
+      interfaces record ``developer_role: false``.
 
     Budget: each test call reserves its reply cap plus an input estimate of
     512 tokens (4,096 for media test calls). Usage reported by the server can
@@ -2184,7 +2186,7 @@ def plan(
             for field in CAPABILITY_KEYS:
                 if field in existing_entry:
                     entry[field] = deepcopy(existing_entry[field])
-            for field in ("structured_output_formats", "developer_role"):
+            for field in ("structured_output_format", "developer_role"):
                 if field in existing_entry.get("provenance", {}):
                     provenance[field] = deepcopy(existing_entry["provenance"][field])
     if capability_checks:

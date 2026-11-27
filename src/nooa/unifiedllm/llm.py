@@ -56,19 +56,6 @@ def _snapshot_capabilities(facts: Capabilities) -> Capabilities:
         value = getattr(facts, name)
         if value is not None and (type(value) is not int or value <= 0):
             raise LLMFailure(FailureKind.CONFIG, f"Capability {name} must be positive or unknown")
-    formats = facts.structured_output_formats
-    if formats is not None:
-        try:
-            formats = frozenset(formats)
-        except TypeError as exc:
-            raise LLMFailure(
-                FailureKind.CONFIG, "Invalid capability structured output formats", cause=exc
-            ) from exc
-        if isinstance(facts.structured_output_formats, str) or not formats <= {
-            "json_schema",
-            "json_object",
-        }:
-            raise LLMFailure(FailureKind.CONFIG, "Unknown capability structured output format")
     if facts.developer_role is not None and type(facts.developer_role) is not bool:
         raise LLMFailure(
             FailureKind.CONFIG, "Capability developer_role must be bool or unknown (None)"
@@ -79,15 +66,9 @@ def _snapshot_capabilities(facts: Capabilities) -> Capabilities:
         type(facts) is Capabilities
         and type(facts.media_kinds) is frozenset
         and (facts.reasoning_levels is None or type(facts.reasoning_levels) is tuple)
-        and (
-            facts.structured_output_formats is None
-            or type(facts.structured_output_formats) is frozenset
-        )
     ):
         return facts  # Already immutable, still defensively validated above.
-    return replace(
-        facts, media_kinds=media, reasoning_levels=levels, structured_output_formats=formats
-    )
+    return replace(facts, media_kinds=media, reasoning_levels=levels)
 
 
 def _portable_media(messages):

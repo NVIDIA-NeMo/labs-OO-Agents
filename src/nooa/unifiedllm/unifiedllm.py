@@ -1049,7 +1049,6 @@ class UnifiedLLM(ABC):
         reasoning_level: str | None = None,
         media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
         context_window: int | None = None,
-        structured_output_formats: list[str] | tuple[str, ...] | None = None,
         developer_role: bool | None = None,
         structured_output_format: str | None = None,
         instruction_role: str | None = None,
@@ -1065,18 +1064,12 @@ class UnifiedLLM(ABC):
             resolve_instruction_role,
             resolve_structured_output_format,
             validate_developer_role,
-            validate_structured_output_formats,
         )
 
-        # Detected route facts (from Connect) and the settings that use them.
-        # They are NOOA settings, never LiteLLM parameters.
-        self.structured_output_formats = validate_structured_output_formats(
-            structured_output_formats
-        )
+        # The detected developer-role fact (from Connect) and the request
+        # settings. They are NOOA settings, never LiteLLM parameters.
         self.developer_role = validate_developer_role(developer_role)
-        self._output_format = resolve_structured_output_format(
-            structured_output_format, self.structured_output_formats
-        )
+        self._output_format = resolve_structured_output_format(structured_output_format)
         self._instruction_role = resolve_instruction_role(instruction_role, self.developer_role)
         if self._output_format == "json_object" and self.structured_output_mode not in (
             None,
