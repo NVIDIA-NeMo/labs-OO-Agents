@@ -291,3 +291,58 @@ async def test_retry_exhaustion_retains_feedback_for_every_rejected_todo_call():
         assert visible == {f"bad-{index}" for index in range(9)}
     finally:
         await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_calls_between_executed_cells_do_not_end_the_run():
+    """An executed cell resets the error count: only consecutive errors count."""
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _call("files.read", json.dumps({"path": "a"}), "bad-1"),
+            _cell("x = 1", "cell-1"),
+            _call("files.read", json.dumps({"path": "b"}), "bad-2"),
+            _cell("x += 1", "cell-2"),
+            _call("files.read", json.dumps({"path": "c"}), "bad-3"),
+            _cell("return_result(f'done {x}')", "cell-3"),
+        ]
+    )
+
+    class FeedbackAgent(Agent, llm=llm):
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None, max_retries=3)))
+        async def answer(self) -> str:
+            """Return a result."""
+            ...
+
+    agent = FeedbackAgent()
+    try:
+        assert await agent.answer() == "done 2"
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+async def test_consecutive_unknown_tool_calls_still_end_the_run():
+    """max_retries unknown-tool calls in a row end the run, even after a cell."""
+    from nooa.errors import GenerationError
+
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _call("files.read", json.dumps({"path": "a"}), "bad-0"),
+            _cell("x = 1", "cell-1"),
+            *[_call("files.read", json.dumps({"path": "b"}), f"bad-{i}") for i in range(1, 4)],
+            _cell("return_result('too late')", "cell-2"),
+        ]
+    )
+
+    class FeedbackAgent(Agent, llm=llm):
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None, max_retries=3)))
+        async def answer(self) -> str:
+            """Return a result."""
+            ...
+
+    agent = FeedbackAgent()
+    try:
+        with pytest.raises(GenerationError, match=r"after 3 errors \(max_retries=3\)"):
+            await agent.answer()
+    finally:
+        await agent.aclose()

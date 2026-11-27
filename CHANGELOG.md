@@ -6,6 +6,13 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- CodeAct `max_retries` now counts only consecutive harness errors (unknown
+  tools, invalid tool arguments, empty code, empty or cut-off replies): a code
+  cell the harness runs resets the count. Previously the count added up over
+  the whole call, so a model that made an unknown-tool call a few times in a
+  long run, far apart and with correct work in between, had its run ended.
+  `max_retries` consecutive errors still end the run. Invalid `return_result`
+  values keep their own budget (`max_result_retries`), which does not reset.
 - The NeMo Relay middleware works with nemo-relay 0.9: the `nemo-relay` extra
   requires `>=0.9.3,<0.10` (was `>=0.6,<0.7`). Code cells run through Relay
   again (0.9 failed every one), with the model's `tool_call_id`.
