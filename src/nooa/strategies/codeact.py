@@ -521,6 +521,10 @@ class CodeActSession:
     def record_error(self) -> None:
         self.error_count += 1
 
+    def reset_errors(self) -> None:
+        """Clear the error count after the harness runs a model's code cell."""
+        self.error_count = 0
+
     def record_api_error(self) -> None:
         """Count an LLM API error toward the consecutive-failure budget."""
         self.consecutive_api_errors += 1
@@ -641,7 +645,7 @@ class CodeActStrategy(CompositeStrategy):
 
     Configuration (fields of CodeActConfig, passed via config=):
         max_iterations: Maximum number of tool call iterations
-        max_retries: Error budget; LLM API errors count only while consecutive
+        max_retries: Error budget; errors count only while consecutive
 
     Example:
         @strategy(CodeActStrategy())
@@ -2311,6 +2315,12 @@ Standard Python builtins and agent instance (`self`) are available."""
                 )
             finally:
                 _current_cell.reset(token)
+
+        # The harness accepted and ran this cell, so the error budget starts
+        # again: max_retries counts errors in a row, and a few invalid calls
+        # far apart in a long run must not end it. An error raised by the code
+        # is the cell's output, not a harness error.
+        session.reset_errors()
 
         # Determine final status
         final_status = ResultStatus.ERROR if result.error else ResultStatus.COMPLETE

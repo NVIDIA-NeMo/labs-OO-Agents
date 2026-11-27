@@ -64,9 +64,11 @@ class CodeActConfig(BaseModel):
     model_config = ConfigDict(frozen=True, arbitrary_types_allowed=True)
 
     max_iterations: int | None = None
-    # Error budget per call. LLM API errors are counted only while
-    # consecutive (a successful LLM call resets them); other errors such as
-    # invalid tool calls and failed result validation accumulate.
+    # Error budget per call; errors count only while consecutive. LLM API
+    # errors reset when the model responds. Other harness errors (unknown
+    # tools, invalid tool arguments, empty code, empty or cut-off replies)
+    # reset when the harness runs a code cell. Invalid return_result values
+    # have their own budget (max_result_retries).
     max_retries: int = 3
     # Retries allowed after an invalid return_result value (failed validation
     # or postconditions); None: as ``max_retries`` counts errors, its N
