@@ -147,6 +147,9 @@ finally:
             elif not cancel and phase == 2 and "Writemodelentryto" in compact:
                 os.write(master, b"y\r")
                 phase = 3
+            elif not cancel and phase == 3 and "Alsosavethecheckresults" in compact:
+                os.write(master, b"\r")  # Default: no check results.
+                phase = 4
         process.wait(timeout=60)
     finally:
         if process.poll() is None:
@@ -158,7 +161,7 @@ finally:
     assert "SOCKET_ATTEMPTS=0" in transcript
     assert target.exists() is not cancel
     if not cancel:
-        assert phase == 3, transcript
+        assert phase == 4, transcript
         assert "F1Closehelp" in "".join(re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", transcript).split())
         entry = yaml.safe_load(target.read_text())["models"]["local"]
         assert entry["media_inputs"] == []

@@ -221,6 +221,11 @@ class ConnectCommand(click.Command):
     is_flag=True,
     help="Stage save only: acknowledge a failed input report; writing does not verify it.",
 )
+@click.option(
+    "--save-checks",
+    is_flag=True,
+    help="Also save the check results in the saved entry (under checks), for debugging. Makes the entry much longer. Wizard and --stage save only.",
+)
 @click.option("--show-config", is_flag=True, help="Show full YAML details before saving.")
 @click.option(
     "--show-diagnostics",
@@ -291,6 +296,7 @@ def command(
     decision_image_transport,
     typesafe_danger_zone_images,
     allow_unverified,
+    save_checks,
     show_config,
     show_diagnostics,
     output,
@@ -403,6 +409,7 @@ def command(
                 output=output,
                 yes=yes,
                 allow_unverified=allow_unverified,
+                save_checks=save_checks,
                 prompt_key=prompt_key,
                 catalogue_file=catalogue_file,
                 catalogue_model=catalogue_model,
@@ -478,4 +485,5 @@ def command(
             output=output,
             working_dir=working_dir,
             yes=yes,
+            save_checks=save_checks,
         )

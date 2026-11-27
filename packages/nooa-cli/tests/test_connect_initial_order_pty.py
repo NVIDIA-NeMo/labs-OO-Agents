@@ -106,6 +106,7 @@ def test_real_guided_blank_catalogue_order_and_early_cancel(tmp_path, cancel):
         ("SpaceToggle", b"\r"),
         ("Wouldyouliketotestthesesettings?", b"\r"),
         ("Writemodelentryto", b"y\r"),
+        ("Alsosavethecheckresults", b"\r"),  # Default: no check results.
     ]
     phase, output = 0, bytearray()
     deadline = time.monotonic() + 120

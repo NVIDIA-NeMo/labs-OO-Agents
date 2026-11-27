@@ -3823,7 +3823,14 @@ def registry_write_lock(path: Path):
         yield path
 
 
-def write(entry: dict, path: Path, *, alias: str, expected_alias=ALIAS_UNCONDITIONAL) -> None:
+def write(
+    entry: dict,
+    path: Path,
+    *,
+    alias: str,
+    expected_alias=ALIAS_UNCONDITIONAL,
+    save_checks: bool = False,
+) -> None:
     """Save ``entry`` as ``alias`` in the registry file ``path``, under its write lock.
 
     ``expected_alias`` is the value from ``alias_target`` that the user saw
@@ -3838,6 +3845,12 @@ def write(entry: dict, path: Path, *, alias: str, expected_alias=ALIAS_UNCONDITI
     comments are kept as they are, and the file is replaced atomically.
     Raises ValueError if the entry is invalid or if normalising it for the
     save would change the settings that were tested.
+
+    By default only the settings are saved. ``save_checks=True`` also saves
+    the entry's check results and their sources (its ``provenance``) under a
+    top-level ``checks`` key, for debugging. This makes the entry much longer;
+    the registry ignores it when loading. Because the whole alias is replaced,
+    saving again without ``save_checks`` removes an older ``checks`` section.
     """
     candidate = configure_entry(entry)
     from ._verification import effective_config_snapshot
@@ -3853,10 +3866,32 @@ def write(entry: dict, path: Path, *, alias: str, expected_alias=ALIAS_UNCONDITI
     # Save the settings only. Test results, request bodies, catalogue data and
     # warnings belong to the Connect session (shown by
     # ``nooa connect check --json``); saving them would write the whole history
-    # of the Connect run into the registry.
-    entry.pop("provenance", None)
+    # of the Connect run into the registry. ``save_checks`` keeps them, under
+    # ``checks``, for debugging. An older ``checks`` section is never carried
+    # over: it would describe a different run.
+    provenance = entry.pop("provenance", None)
+    entry.pop("checks", None)
+    if save_checks and provenance:
+        entry["checks"] = _saved_checks(provenance, entry)
     with registry_write_lock(path) as path:
         _write_entry(entry, path, alias=alias, expected_alias=expected_alias)
+
+
+def _saved_checks(provenance: dict, entry: dict) -> dict:
+    """Return ``provenance`` as plain YAML data for the ``checks`` section.
+
+    ``configure_entry`` already rejects credential fields anywhere in the
+    entry. As a second guard, refuse to save when the current value of the
+    entry's ``api_key_env`` variable appears anywhere in the checks.
+    """
+    # A JSON round trip turns tuples into lists, so the alias loads back
+    # exactly as written (the write verifies that).
+    text = json.dumps(provenance, default=str)
+    key_env = entry.get("api_key_env")
+    key = os.environ.get(key_env) if isinstance(key_env, str) and key_env else None
+    if key and len(key) >= 8 and key in text:
+        raise ValueError("Check results contain the API key; not saving them")
+    return json.loads(text)
 
 
 def _write_entry(
