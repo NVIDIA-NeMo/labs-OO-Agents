@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""``--save-checks`` and the wizard question keep check results only when asked (offline)."""
+"""``--save-checks`` keeps check results in the saved entry only when given (offline)."""
 
 import json
 
@@ -14,7 +14,6 @@ from nooa import llm_config
 from nooa.unifiedllm.registry import load_model_entries
 from tests.unifiedllm.connect.connect_http import mock_http
 
-QUESTION = "Also save the check results in the config (for debugging)?"
 SECRET = "sk-save-checks-private-value"
 
 
@@ -60,93 +59,26 @@ def saved(path):
     return yaml.safe_load(path.read_text())["models"]["local"]
 
 
-@pytest.mark.parametrize(
-    "answers,expected",
-    [
-        ("262144\n262144\nsave\ny\n\n", False),  # Enter: default No
-        ("262144\n262144\nsave\ny\nn\n", False),
-        # Older scripts that end at the save question still save, without checks.
-        ("262144\n262144\nsave\ny\n", False),
-        ("262144\n262144\nsave\ny\ny\n", True),
-        ("262144\n262144\nsave\ny\nY\n", True),
-        ("262144\n262144\nsave\ny\nyes\n", True),
-    ],
-)
-def test_wizard_asks_before_saving_check_results(tmp_path, answers, expected):
+@pytest.mark.parametrize("flag", [[], ["--save-checks"]])
+@pytest.mark.parametrize("yes", [[], ["--yes"]])
+def test_wizard_saves_check_results_only_with_the_flag(tmp_path, flag, yes):
     path = tmp_path / "models.yaml"
-    result = wizard(path, answers=answers)
+    answers = "262144\n262144\n" if yes else "262144\n262144\nsave\ny\n"
+    result = wizard(path, *yes, *flag, answers=answers)
     assert result.exit_code == 0, result.output
-    assert QUESTION + " [y/N]" in " ".join(result.output.split())
+    # The wizard never asks about check results; only the option saves them.
+    assert "check results" not in result.output
     entry = saved(path)
-    assert ("checks" in entry) is expected
+    assert ("checks" in entry) is bool(flag)
     assert "provenance" not in entry
     assert SECRET not in path.read_text()
-    if expected:
+    if flag:
         assert entry["checks"]["probes"]["routing"]["outcome"] == "not_probed"
         # The registry loads the alias with its checks; the settings are unchanged.
         loaded = load_model_entries(path)["local"]
         assert {k: v for k, v in loaded.items() if k != "checks"} == {
             k: v for k, v in entry.items() if k != "checks"
         }
-
-
-def test_save_checks_flag_skips_the_question(tmp_path):
-    path = tmp_path / "models.yaml"
-    result = wizard(path, "--save-checks", answers="262144\n262144\nsave\ny\n")
-    assert result.exit_code == 0, result.output
-    assert QUESTION not in result.output
-    entry = saved(path)
-    assert entry["checks"]["probes"]["routing"]["outcome"] == "not_probed"
-    assert SECRET not in path.read_text()
-
-
-@pytest.mark.parametrize("flag", [[], ["--save-checks"]])
-def test_yes_never_asks(tmp_path, flag):
-    path = tmp_path / "models.yaml"
-    result = wizard(path, "--yes", *flag, answers="262144\n262144\n")
-    assert result.exit_code == 0, result.output
-    assert QUESTION not in result.output
-    assert ("checks" in saved(path)) is bool(flag)
-
-
-def test_ctrl_c_at_the_question_cancels_the_save(tmp_path, monkeypatch):
-    def interrupted(prompt):
-        if "check results" in prompt:
-            raise KeyboardInterrupt
-        return original(prompt)
-
-    import click.termui
-
-    path = tmp_path / "models.yaml"
-    runner = CliRunner()
-    # CliRunner installs its own input function; wrap it while the command runs.
-    with runner.isolation(input="262144\n262144\nsave\ny\n"):
-        original = click.termui.visible_prompt_func
-        monkeypatch.setattr(click.termui, "visible_prompt_func", interrupted)
-        with pytest.raises(SystemExit) as exit_info:
-            command.main(
-                [
-                    "model",
-                    "--as",
-                    "local",
-                    "--endpoint",
-                    "https://api.test/v1",
-                    "--api-style",
-                    "chat",
-                    "--api-key-env",
-                    "SAVE_CHECKS_KEY",
-                    "--max-tokens",
-                    "1000",
-                    "--no-catalogue",
-                    "--no-probe",
-                    "--media-inputs",
-                    "",
-                    "--output",
-                    str(path),
-                ]
-            )
-    assert exit_info.value.code == 1
-    assert not path.exists()
 
 
 def stage_input(tmp_path):

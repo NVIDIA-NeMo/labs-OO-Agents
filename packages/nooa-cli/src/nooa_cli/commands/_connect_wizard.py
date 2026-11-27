@@ -3220,18 +3220,9 @@ def save_model(state: WizardState) -> bool:
             save_key = not state.yes and prompts.confirm(
                 "Save this key for future NOOA runs?", default=True
             )
-        # Check results stay out of the saved entry unless asked for: they make
-        # it much longer and only help debugging. --yes never adds them.
-        save_checks = bool(state.save_checks) or (
-            not state.yes
-            and prompts.confirm(
-                "Also save the check results in the config (for debugging)?",
-                default=False,
-                # Scripts that pipe answers ending at the save question keep
-                # saving as before, without the check results.
-                end_of_input=False,
-            )
-        )
+        # Check results stay out of the saved entry unless --save-checks is
+        # given: they make it much longer and only help debugging.
+        save_checks = bool(state.save_checks)
         if state.result.entry != reviewed_entry:
             raise ValueError("Model settings changed after review; review and retest before saving")
         if not baseline_allows_save(state):

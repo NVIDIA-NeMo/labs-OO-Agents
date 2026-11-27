@@ -227,36 +227,12 @@ def prompt(
         raise click.Abort() from None
 
 
-def confirm(text, *, default, end_of_input=None):
+def confirm(text, *, default):
     """Ask a yes/no question and return the answer as a bool.
 
     Empty input returns ``default``. Completion only fills in text; the user
     must still press Enter, so an answer is never submitted automatically.
-
-    When input is piped (not a terminal) and ends before this question,
-    setup is cancelled (``click.Abort``), unless ``end_of_input`` is a bool:
-    then that answer is returned. Use it for optional questions added later,
-    so scripts that pipe their answers keep working. Ctrl-C still cancels.
     """
-    if not sys.stdin.isatty() and end_of_input is not None:
-        prompt_text = view.prompt_text(text + (" [Y/n]" if default else " [y/N]"), answer_width=3)
-        while True:
-            try:
-                # Read like click.confirm (the same function prints the prompt),
-                # but tell the end of the input apart from Ctrl-C.
-                value = click.termui.visible_prompt_func(prompt_text + ": ").lower().strip()
-            except EOFError:
-                click.echo()
-                return end_of_input
-            except KeyboardInterrupt:
-                raise click.Abort() from None
-            if value in ("y", "yes"):
-                return True
-            if value in ("n", "no"):
-                return False
-            if value == "":
-                return default
-            click.echo("Error: invalid input")
     if not sys.stdin.isatty():
         return click.confirm(
             # Leave room for Click's echoed answer, including the full "yes".

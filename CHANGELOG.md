@@ -8,9 +8,9 @@ to follow semantic versioning.
 
 - `nooa connect --save-checks` (wizard or `--stage save`) also saves the
   entry's check results and their sources under a top-level `checks` key, for
-  debugging; entries get much longer. The wizard asks before writing (default
-  No; not asked with `--save-checks` or `--yes`). Library: `connect.write(...,
-  save_checks=True)`. Without it nothing changes. Loading ignores `checks`, and
+  debugging; entries get much longer. There is no wizard question for it; only
+  the option saves them. Library: `connect.write(..., save_checks=True)`.
+  Without it nothing changes. Loading ignores `checks`, and
   saving the alias again without the flag removes it.
 
 - Model entries can declare `media_capabilities` per media kind: accepted

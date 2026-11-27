@@ -752,8 +752,7 @@ export NEMO_OO_LLM_CONFIG="$PWD/llm_config.yaml"
 - `--save-checks` (wizard or `--stage save`) also writes the check results and
   their sources (the entry's provenance) under a top-level `checks` key of the
   saved alias. Use it for debugging only: it makes entries much longer. The
-  wizard asks "Also save the check results in the config (for debugging)?"
-  before writing (default No; not asked with `--save-checks` or `--yes`).
+  wizard never asks about it; only the option saves check results.
   Credentials are never saved there. NOOA ignores `checks` when it loads the
   registry; the settings stay the source of truth. Saving the alias again
   without the flag removes the section.
