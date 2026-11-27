@@ -86,6 +86,24 @@ to follow semantic versioning.
   `filesystem=True` (the default) Landlock denies the worker that read, but with
   `filesystem=False` a cell can still read the parent's variables there.
   The default (`None`) keeps the current behaviour, inheriting everything.
+- Security: restoring a stored snapshot can no longer run arbitrary code.
+  Before, an envelope such as `{"__type__": "dataclass", "__class__":
+  "subprocess.Popen", ...}` called the named class (or function) if the
+  snapshot's own `type_allowlist` listed it, so a session store shipped in a
+  cloned repository (`<workspace>/.nooa/sessions`) ran a command when the
+  session was loaded. Now each envelope builds only its own kind (`pydantic`:
+  a `BaseModel` subclass, `dataclass`: a dataclass, `dict_class`: an
+  `@snapshotable` class), and an `@snapshotable` envelope cannot set dunder
+  attributes. Restoring never imports a module: a class is looked up only in
+  modules already in `sys.modules`, because any import (even a submodule of a
+  loaded package, through a namespace package such as `opentelemetry` or a
+  `pkgutil.extend_path` package) could run a file from the current directory.
+  The stored allowlist can only narrow this. A
+  refused attribute or static context block is skipped with a warning, as for
+  any attribute that fails to restore. Compatibility: an attribute or context
+  block whose class lives in a package the process has not imported at restore
+  time (for example a model from a library a cell imported in the earlier
+  process) is now dropped; import the package before restoring to keep it.
 - An inline image in a format models do not accept (anything but PNG, JPEG,
   GIF or WebP, for example SVG from `show(Image.from_file("chart.svg"))`) is now
   replaced by a note before each request, instead of being sent. Every MIME
