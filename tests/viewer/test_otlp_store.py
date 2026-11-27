@@ -469,6 +469,29 @@ class TestIngestNewSession:
         }
 
 
+class TestFailedPayloadIsNotPartiallyWritten:
+    """A payload that raises partway through must leave no rows behind."""
+
+    def test_failed_payload_does_not_inflate_span_count(self):
+        """_ingest_one writes the session row before the spans; if the span
+        insert then fails, the session row must not survive the next commit."""
+        store.ingest(_make_body(session_id="sess-1"))
+
+        bad = _make_body(session_id="sess-1")
+        # sqlite3 cannot bind a dict, so this raises at the span insert —
+        # after the sessions row has already been updated.
+        bad["resourceSpans"][0]["scopeSpans"][0]["spans"][0]["kind"] = {"unbindable": True}
+        with pytest.raises(sqlite3.Error):
+            store.ingest(bad)
+
+        # An unrelated, valid payload: its commit is what would otherwise
+        # flush the failed payload's leftovers to disk.
+        store.ingest(_make_body(session_id="sess-2"))
+
+        counts = {s["id"]: s["span_count"] for s in store.list_sessions()}
+        assert counts["sess-1"] == len(store.get_session_spans("sess-1"))
+
+
 # ---------------------------------------------------------------------------
 # ingest — re-ingest (session merge)
 # ---------------------------------------------------------------------------
