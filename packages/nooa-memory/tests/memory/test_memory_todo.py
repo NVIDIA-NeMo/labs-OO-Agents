@@ -192,6 +192,23 @@ def test_always_mode_caps_todo_section(agent):
     assert text.count("[todo:open#") == 2
 
 
+def test_always_mode_todo_survives_a_full_associative_block(agent):
+    """The 'always' section claims budget first; a tail cut used to drop it."""
+    budget = 260  # smaller than the five baking hits plus the todo section
+    mgr = _install(
+        agent,
+        embedding=_HIDIM,
+        spontaneous=SpontaneousConfig(inject_open_todos="always", context_char_budget=budget),
+    )
+    mid = agent.remember("update the README after the migration lands", type="todo")
+    _fill_baking(agent)
+    agent.event_manager.add(Task(prompt="bake a chocolate cake"))
+    text = mgr.recall_for_context()
+    assert len(text) <= budget
+    assert f"[todo:open#{mid[:8]}]" in text
+    assert text.index("## Recalled memories") < text.index("## Open todos")
+
+
 # --------------------------------------------------------------------------
 # forgetting guard
 # --------------------------------------------------------------------------
