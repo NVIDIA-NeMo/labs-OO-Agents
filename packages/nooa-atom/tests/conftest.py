@@ -18,6 +18,19 @@ def _user_dir(tmp_path, monkeypatch):
     return user_dir
 
 
+@pytest.fixture(autouse=True)
+def _isolated_host(tmp_path, monkeypatch):
+    """Keep the developer's machine out of the tests.
+
+    A reachable trace viewer would turn tracing on for the whole process, and
+    its export thread would then hit offline-network fixtures. Files under the
+    checkout's ``.nooa`` (an old ``libs`` directory, say) would change status
+    text. Neither is under test here.
+    """
+    monkeypatch.setattr("nooa.agent._auto_tracing_attempted", True)
+    monkeypatch.setenv("NEMO_OO_PROJECT_DIR", str(tmp_path / ".nooa"))
+
+
 @pytest.fixture
 def sessions_dir(tmp_path):
     """Where sessions of the ``tmp_path`` workspace live by default."""
