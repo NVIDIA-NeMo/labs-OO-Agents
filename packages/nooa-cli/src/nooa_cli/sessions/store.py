@@ -168,6 +168,19 @@ class SessionStore:
     def __init__(self, root: str | Path | None = None) -> None:
         self.root = Path(root) if root is not None else get_project_dir("sessions")
 
+    GITIGNORE = "# NOOA session store; keep it out of version control.\n*\n"
+
+    def _ignore_in_git(self) -> None:
+        """Keep the store out of git: it lives in the project (``.nooa/sessions``),
+        so without this every turn shows up as changed files in git and editors.
+        Writes ``.gitignore`` only if missing; never fails session creation."""
+        ignore = self.root / ".gitignore"
+        try:
+            if not ignore.exists():
+                ignore.write_text(self.GITIGNORE)
+        except OSError:
+            pass
+
     def path_for(self, session_id: str) -> Path:
         session_id = self._validate_id(session_id)
         return self.root / f"{session_id}.db"
@@ -184,6 +197,7 @@ class SessionStore:
     ) -> SessionHandle:
         session_id = self._validate_id(session_id or str(uuid.uuid4()))
         self.root.mkdir(parents=True, exist_ok=True)
+        self._ignore_in_git()
         path = self.path_for(session_id)
         if path.exists():
             raise FileExistsError(f"Session {session_id!r} already exists")

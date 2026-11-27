@@ -268,3 +268,16 @@ def test_reads_legacy_tui_session_events(tmp_path):
         ("user", "old user"),
         ("agent", "old agent"),
     ]
+
+
+def test_store_is_ignored_by_git_and_keeps_an_existing_gitignore(tmp_path):
+    root = tmp_path / ".nooa" / "sessions"
+    store = SessionStore(root)
+    store.create(model="m").close()
+    ignore = root / ".gitignore"
+    assert ignore.read_text() == SessionStore.GITIGNORE
+    assert ignore.read_text().splitlines()[-1] == "*"
+
+    ignore.write_text("custom\n")
+    store.create(model="m").close()
+    assert ignore.read_text() == "custom\n"
