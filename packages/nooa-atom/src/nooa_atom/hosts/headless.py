@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from nooa.interactive import Done
+from nooa.runtime.channels import ChannelItemConsumed, ChannelItemsDiscarded
+from nooa.runtime.turn_loop import TurnBegan, TurnSettled
 from nooa_atom.session.items import (
     AgentEventUpdate,
     SessionEvent,
@@ -34,6 +36,11 @@ from nooa_atom.session.session import Session, TurnFailedError
 from nooa_atom.session.store import SessionStore, sessions_root
 
 DEFAULT_MAX_TURNS = 10
+# Turn-loop and channel events carry live inputs, results and exceptions (a
+# job's JobEvent, a turn's Done, a GenerationError). They are never recorded
+# and no trajectory export reads them, so ``TaskRun.events`` leaves them out:
+# its events must serialize, e.g. with ``model_dump(mode="json")``.
+_LIVE_PAYLOAD_EVENTS = (TurnBegan, TurnSettled, ChannelItemConsumed, ChannelItemsDiscarded)
 # The turn methods an unattended root can run; run_task picks one of these.
 UNATTENDED_TURN_METHODS = ("handle_batch", "handle_orchestrate")
 
@@ -102,7 +109,9 @@ class TaskRun:
     without one; ``stopped`` then says why (a limit, a cancel, a failed
     turn). ``usage`` is the root session's usage, its children's
     attributed usage included. ``events`` are the root agent's events in
-    order, for trajectory exports.
+    order, for trajectory exports, without the turn loop's live-payload
+    events (``TurnBegan``, ``TurnSettled``, ``ChannelItemConsumed``,
+    ``ChannelItemsDiscarded``).
     """
 
     session_id: str
@@ -160,18 +169,26 @@ async def run_task(
     waiting_on: list[str] = []
     limit_reached = asyncio.Event()
 
+    root_session: list[Any] = []
+
     def listen(update: SessionEvent) -> None:
         nonlocal turns
         if isinstance(update, AgentEventUpdate):
-            events.append(update.event)
+            if not isinstance(update.event, _LIVE_PAYLOAD_EVENTS):
+                events.append(update.event)
         elif isinstance(update, TurnEndedUpdate):
             turns += 1
+            if update.outcome_kind == "done" and root_session:
+                # The run is over once the root is done: input that is still queued (a job's
+                # late delivery) must not start another turn before the tree closes.
+                root_session[0].pause_dispatch()
             if update.outcome_kind == "waiting" and turns >= max_turns:
                 waiting_on[:] = update.outcome.get("on", [])
                 limit_reached.set()
 
     async with open_tree(options, agent_factory=agent_factory, llm_factory=llm_factory) as tree:
         root = tree.root
+        root_session.append(root)
         root.subscribe(listen)
         prompt = asyncio.ensure_future(root.prompt(task))
         limit = asyncio.ensure_future(limit_reached.wait())

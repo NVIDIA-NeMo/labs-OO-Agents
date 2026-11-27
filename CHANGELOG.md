@@ -6,6 +6,11 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `ExecutionResult.model_dump(mode="json")` no longer raises: a result without
+  a return value dumps `returned_value` as `None`, a return value JSON cannot
+  encode (such as a user class instance) dumps as a bounded `pformat` string,
+  as `PythonOutput.value` does, and `error` dumps as `"Type: message"`.
+  Python-mode `model_dump()` is unchanged.
 - The NeMo Relay middleware works with nemo-relay 0.9: the `nemo-relay` extra
   requires `>=0.9.3,<0.10` (was `>=0.6,<0.7`). Code cells run through Relay
   again (0.9 failed every one), with the model's `tool_call_id`.

@@ -7,6 +7,14 @@ based on [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- `nooa-atom`: `run_task` keeps its result when a job's outcome is delivered
+  after the root returned `Done`. The queued `JobEvent` used to start a late
+  turn, and `TaskRun.events` then held the turn loop's live-payload events
+  (`TurnBegan`, `TurnSettled`, `ChannelItemConsumed`,
+  `ChannelItemsDiscarded`), which do not serialize, so a host dumping the
+  events with `model_dump(mode="json")` failed and lost the `Done`. `run_task`
+  now starts no turn once the root is done and leaves those events out of
+  `TaskRun.events`.
 - `nooa-atom`: with `NEMO_RELAY_PLUGIN_CONFIG_PATH` naming a NeMo Relay
   `plugins.toml`, each turn of an ACP session is one Relay trace
   (`invoke_agent atom` over `chat` and `execute_tool` spans, a delegated
