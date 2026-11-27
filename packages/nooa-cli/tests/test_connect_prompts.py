@@ -142,6 +142,47 @@ def test_secret_prompt_has_no_completer_or_history(monkeypatch):
     assert list(seen["history"].get_strings()) == []
 
 
+@pytest.mark.parametrize(
+    "typed,expected",
+    [
+        ("nemo 3.5 sup", True),
+        ("NEMO 3.5 SUP", True),
+        ("sup nemo", True),  # Fragments may come in any order.
+        ("tron-3.5", True),
+        ("", True),
+        ("nemo 4", False),
+        ("nemo3.5", False),
+    ],
+)
+def test_fragment_match(typed, expected):
+    assert prompts.fragment_match(typed, "nemotron-3.5-super-vl") is expected
+
+
+def test_search_completes_from_name_fragments(monkeypatch):
+    import prompt_toolkit
+    from prompt_toolkit.document import Document
+
+    monkeypatch.setattr(prompts.sys.stdin, "isatty", lambda: True)
+    seen = {}
+
+    def capture(*args, **kwargs):
+        seen.update(kwargs)
+        return "nemotron-3.5-super-vl"
+
+    monkeypatch.setattr(prompt_toolkit, "prompt", capture)
+    choices = ["nemotron-3.5-super-vl", "nemotron-3.5-nano", "llama-3.3-70b"]
+    prompts.prompt("Search", choices=choices, searchable=True)
+    found = [
+        completion.text
+        for completion in seen["completer"].get_completions(Document("nemo 3.5 sup"), None)
+    ]
+    assert found == ["nemotron-3.5-super-vl"]
+    found = [
+        completion.text for completion in seen["completer"].get_completions(Document("3.5"), None)
+    ]
+    assert found == ["nemotron-3.5-super-vl", "nemotron-3.5-nano"]
+
+
 def test_cancel_uses_click_abort(monkeypatch):
     import click
 

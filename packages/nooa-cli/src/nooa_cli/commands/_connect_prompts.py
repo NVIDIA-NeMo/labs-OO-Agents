@@ -21,6 +21,16 @@ import click
 from . import _connect_view as view
 
 
+def fragment_match(typed, value):
+    """Return True when every space-separated fragment of ``typed`` is in ``value``.
+
+    Matching ignores case and the order of the fragments, so "nemo 3.5 sup"
+    matches "nemotron-3.5-super-vl". Empty input matches every value.
+    """
+    value = value.lower()
+    return all(fragment in value for fragment in typed.lower().split())
+
+
 def choose_structured_output_mode(current=None):
     """Ask how NOOA should request structured (typed JSON) answers from this endpoint.
 
@@ -103,7 +113,7 @@ def prompt(
 
     from prompt_toolkit import prompt as terminal_prompt
     from prompt_toolkit.application import get_app
-    from prompt_toolkit.completion import WordCompleter
+    from prompt_toolkit.completion import Completer, Completion
     from prompt_toolkit.filters import Condition
     from prompt_toolkit.formatted_text import FormattedText
     from prompt_toolkit.history import DummyHistory
@@ -113,13 +123,21 @@ def prompt(
     from prompt_toolkit.validation import Validator
 
     words = list(dict.fromkeys(choices or suggestions))
-    completer = (
-        WordCompleter(
-            words, ignore_case=True, match_middle=True, sentence=True, display_dict=labels
-        )
-        if words and not hide_input
-        else None
-    )
+
+    class FragmentCompleter(Completer):
+        """Offer every word that contains all typed fragments (see ``fragment_match``)."""
+
+        def get_completions(self, document, complete_event):
+            typed = document.text_before_cursor
+            for word in words:
+                if fragment_match(typed, word):
+                    yield Completion(
+                        word,
+                        start_position=-len(typed),
+                        display=(labels or {}).get(word, word),
+                    )
+
+    completer = FragmentCompleter() if words and not hide_input else None
     default_text = "" if default is None else str(default)
 
     def effective(value):
