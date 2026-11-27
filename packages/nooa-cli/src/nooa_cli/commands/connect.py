@@ -19,7 +19,7 @@ class ConnectCommand(click.Command):
     """Click command whose ``--help`` output uses the same look as the connect screens.
 
     Parsing and behaviour are those of ``click.Command``; only the help text is
-    re-wrapped to the terminal width, indented, and has its headings coloured.
+    laid out for the terminal width, indented, and has its headings coloured.
     """
 
     def get_help(self, ctx):
@@ -30,16 +30,38 @@ class ConnectCommand(click.Command):
         """
         from . import _connect_view as view
 
-        rendered = []
+        # Let Click lay out the help at the width left after our two-space
+        # margin, so option rows and their wrapped descriptions keep Click's
+        # column alignment. Re-wrapping each line here would drop it.
         width = max(8, view.shutil.get_terminal_size((80, 24)).columns - 2)
-        for row in super().get_help(ctx).splitlines():
+        formatter = click.HelpFormatter(width=width)
+        self.format_help(ctx, formatter)
+        rendered = []
+        for row in formatter.getvalue().rstrip("\n").splitlines():
             if not row:
                 rendered.append("")
                 continue
             heading = not row.startswith(" ") and (row.startswith("Usage:") or row.endswith(":"))
-            for part in view.textwrap.wrap(row.strip(), width=width, break_on_hyphens=False):
-                if "NO_COLOR" not in view.os.environ:
-                    part = click.style(part, bold=heading, fg="bright_cyan" if heading else None)
+            # Click never breaks a long word such as the --stage choice list,
+            # and keeps its columns even on very narrow terminals. Only such
+            # rows are wrapped again, keeping their own indent where it fits.
+            indent = row[: len(row) - len(row.lstrip())]
+            if len(indent) > width // 2:
+                indent = indent[: width // 2]
+            parts = (
+                view.textwrap.wrap(
+                    row.strip(),
+                    width=width,
+                    initial_indent=indent,
+                    subsequent_indent=indent,
+                    break_on_hyphens=False,
+                )
+                if len(row) > width
+                else [row]
+            )
+            for part in parts:
+                if heading and "NO_COLOR" not in view.os.environ:
+                    part = click.style(part, bold=True, fg="bright_cyan")
                 rendered.append("  " + part)
         return "\n".join(rendered)
 

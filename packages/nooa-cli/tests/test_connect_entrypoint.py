@@ -30,6 +30,22 @@ def test_connect_help_lists_options():
     assert "--stage" in result.output
 
 
+def test_connect_help_keeps_option_columns(monkeypatch):
+    monkeypatch.setenv("COLUMNS", "80")
+    monkeypatch.setenv("NO_COLOR", "1")
+    result = CliRunner().invoke(command, ["--help"])
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    options = [line for line in lines[lines.index("  Options:") + 1 :] if line]
+    # Option names stay indented under the heading, and wrapped descriptions
+    # stay in the description column instead of starting at the margin.
+    assert all(line.startswith("    ") for line in options)
+    edit = options.index(next(line for line in options if line.lstrip().startswith("--edit-model")))
+    column = options[edit].index("Edit an existing alias")
+    assert options[edit + 1][:column].strip() == ""
+    assert options[edit + 1][column] != " "
+
+
 def test_connect_plan_uses_library_without_http():
     result = CliRunner().invoke(
         command,
