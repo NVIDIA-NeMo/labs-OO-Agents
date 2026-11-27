@@ -128,6 +128,13 @@ _POOL_STEER_METHODS = {
 """``_poolside/session_steer`` and ``_pool/session_steer`` as ``ext_method``
 receives them (without the underscore), whatever the client's dialect."""
 
+_POOL_SHELL_METHOD = "pool/execute_shell"
+"""Pool 2's ``!`` shortcut as ``ext_method`` receives it. Atom does not run it."""
+
+_POOL_SHELL_UNSUPPORTED = (
+    "NOOA Atom does not support ! shell commands. Ask the agent to run the command instead."
+)
+
 SOURCE = "acp"
 """Already-visible client prompts/Pool inputs and permission answers; do not echo."""
 
@@ -517,7 +524,8 @@ class AtomACPAgent:
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """``_nooa/session/inject``, ``revoke_inject`` (see ``_inject``), Pool's
         ``_poolside/session_steer`` or ``_pool/session_steer`` (see
-        ``_pool_steer``) and ``delete``.
+        ``_pool_steer``) and ``delete``. Pool's ``_pool/execute_shell`` (its ``!``
+        shortcut) is refused with a message saying so.
 
         ``_nooa/session/delete``: ``sessionId``, optional ``keepFiles`` and ``cwd``.
 
@@ -531,6 +539,9 @@ class AtomACPAgent:
         dialect = _POOL_STEER_METHODS.get(method)
         if dialect is not None:
             return await self._pool_steer(params, dialect)
+        if method == _POOL_SHELL_METHOD:
+            # Still "method not found", with a message Pool shows to the user.
+            raise RequestError(-32601, _POOL_SHELL_UNSUPPORTED, {"method": f"_{method}"})
         if method != _DELETE_METHOD:
             raise RequestError.method_not_found(f"_{method}")
         session_id = params.get("sessionId")

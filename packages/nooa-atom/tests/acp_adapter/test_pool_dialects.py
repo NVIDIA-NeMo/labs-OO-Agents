@@ -243,3 +243,16 @@ async def test_a_failed_pool_2_form_falls_back_to_text(make_adapter, workspace, 
     assert response.stop_reason == "end_turn"
     assert "Usage: /verbosity" in client.texts(AgentMessageChunk, session_id)[-1]
     assert not adapter._pool_forms
+
+
+async def test_a_pool_shell_command_is_refused_with_a_clear_message(make_adapter, workspace):
+    # Pool 2 sends its ``!`` shortcut as ``_pool/execute_shell`` (issue #619).
+    adapter = await make_adapter(ScriptedModels(), client_info=POOL_2)
+    session_id = await _new(adapter, workspace)
+    with pytest.raises(RequestError) as refused:
+        await adapter.ext_method("pool/execute_shell", {"sessionId": session_id, "command": "pwd"})
+    error = refused.value.to_error_obj()
+    assert error["code"] == RequestError.method_not_found("").code
+    assert "does not support ! shell commands" in error["message"]
+    assert "Ask the agent to run the command" in error["message"]
+    assert error["data"] == {"method": "_pool/execute_shell"}
