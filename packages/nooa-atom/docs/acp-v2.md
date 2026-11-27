@@ -41,29 +41,58 @@ subagents and MCP-over-ACP.
 
 ## Design
 
-v2 is a protocol adapter at the edge of each ACP connection, over the
-existing v1 implementation, so the session layer, the event bridge and
-every v1 client stay as they are.
+v2 is Atom's native ACP. v1 is a thin shim over it, kept for v1 clients
+(T3 Code, Pool, Zed by default) and meant to be deleted.
 
-- `nooa_atom.acp.v2` holds the v1↔v2 wire mapping (pure functions over JSON
-  objects) and `V2Translator`, the per-connection state (negotiated
-  version, prompt acknowledgements, message ids, foreground state,
-  children, background items).
-- `serve_connection` (plain `nooa-atom acp` and each router worker) puts
-  the translator between the stream and the `acp` library connection. On a
-  v1 `initialize` it is a pass-through: v1 frames are forwarded byte for byte.
-- The router answers `initialize` with the v2 shape when v2 is
-  negotiated, routes `session/resume` like `session/load` and
-  `session/delete` like `_nooa/session/delete`, and maps announced child
-  sessions to their root's worker so `session/cancel` reaches them.
-- `AtomACPAgent` learns the negotiated version from `initialize`'s
-  `_meta` and, on v2 connections only, (a) acknowledges a prompt as soon as
-  `Session.submit` inserted it, with the receipt's item id as the
-  `messageId`, (b) returns the session's commands with the setup response,
-  (c) has its bridges send turn and child hints in `_meta` that the
-  translator turns into `state_update`, `subagent_update`, child-scoped
-  updates and background items, and (d) cancels a child session on
-  `session/cancel`.
+- `nooa_atom.acp.v2`: the protocol module: negotiation, the v2
+  `initialize` answer and the installer probe, builders for v2 updates
+  (messages with ids, `tool_call_update`, git-patch diffs, plans, state,
+  config options, commands), request checks, `V2Peer` and `V2Dispatcher` /
+  `serve_v2` (the JSON-RPC dispatch of a v2 connection).
+- `AtomACPAgent` (`server.py`) is the v2 core. Its methods take and return
+  v2 JSON objects (`new_session`, `resume_session`, `prompt` → `{messageId}`,
+  `set_config_option`, `delete_session`, `cancel`...). It talks to the
+  client through a `Peer` (`update(session_id, update)`, `request(method,
+  params)`), never through the `acp` library's v1 types.
+- `ACPEventBridge` emits v2 updates only: `state_update` for the
+  foreground state, `subagent_update` and child-scoped updates for
+  children, background jobs as `job:<name>` tool calls, whole messages on
+  replay followed by `replay_complete`.
+- `nooa_atom.acp.v1_shim`: everything v1. `V1Agent` is the `acp` library
+  `Agent` for a v1 connection over the core (holds the v1 prompt open
+  until its turn ends, maps modes, `session/load` → resume with replay,
+  config options and MCP servers); `V1Peer` converts each v2 update to its
+  v1 form (first `tool_call_update` → `tool_call`, git patch →
+  `{path, oldText, newText}`, `plan_update` → `plan`, child cards mirrored
+  into the parent under `<child>:<id>`) and drops what v1 lacks
+  (`state_update`, `subagent_update`, `replay_complete`, background jobs);
+  `initialize_response` is the v1 `initialize` answer.
+- `serve_connection` reads the first frame and negotiates: v2 →
+  `v2.serve_v2`; otherwise it imports the shim and serves v1. The router
+  answers `initialize` itself the same way (`v2.initialize_result` or
+  `v1_shim.initialize_result`).
+- Negotiation: v2 only for a v2-shaped request (`protocolVersion` ≥ 2,
+  `info`, no `clientCapabilities`/`clientInfo`); T3 Code sends 2 in v1
+  shape and gets v1. A v1 `initialize` with
+  `_meta["dev.nooa/v2"] = {"probe": true}` (the installer's `acp --sbx` /
+  `acp` routers) also gets `_meta["dev.nooa/v2"] = {"protocolVersions":
+  [1, 2], "initialize": <v2 answer>}`.
+
+### Removing v1
+
+When no client needs v1 (Zed's default is still v1 as of Zed main
+b47d9288, Nov 2026):
+
+1. Delete `acp/v1_shim.py`.
+2. In `server.py` `serve_connection`, answer a non-v2 `initialize` with
+   `-32022` instead of importing the shim; in `router.py` `_initialize`,
+   do the same instead of `v1_shim.initialize_result`.
+3. Drop `V1_ONLY` (`current_mode_update`) from `v2.py` and the
+   `ModeChangedUpdate` branch in the bridge, and `set_mode`/`MODES` in the
+   core.
+4. Move the v1 suites (`tests/acp_adapter` through `make_adapter`, which
+   wraps the core in `V1Agent`, and the v1 router tests) to v2 or delete
+   them.
 
 Mapping of turn outcomes to `idle` stop reasons: `done` / `need_input` →
 `end_turn`; `cancelled` → `cancelled`; generation limits →
@@ -86,7 +115,9 @@ tool calls until a later turn ends.
 6. Background work: waiting turns end foreground work; jobs listed in
    `background`.
 7. Router: v2 initialize, routing of the renamed methods, child routing.
-8. Tests in `packages/nooa-atom/tests/acp_v2/`; an end-to-end check with Roy.
+8. Tests: the v1 suites run through the shim; `tests/acp_adapter/test_v2.py`
+   and `tests/acp_router/test_router_v2.py` are native v2; an end-to-end
+   check with Roy.
 
 Not in this change: MCP-over-ACP (`mcp/message`, draft), `tool_call/cancel`
 and `terminal/cancel` (not advertised: Atom cannot yet stop one job or

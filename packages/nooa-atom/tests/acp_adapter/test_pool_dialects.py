@@ -8,12 +8,8 @@ import pytest
 from acp import PROTOCOL_VERSION, RequestError, text_block
 from acp.schema import AgentMessageChunk, Implementation, SessionInfoUpdate
 from atom_test_agents import BLOCKING_CELL, ScriptedModels, cell, fresh_events, reply
-from nooa_atom.acp.protocol import (
-    POOL_DIALECT,
-    POOLSIDE_DIALECT,
-    initialize_response,
-    pool_dialects,
-)
+from nooa_atom.acp.protocol import POOL_DIALECT, POOLSIDE_DIALECT, pool_dialects
+from nooa_atom.acp.v1_shim import initialize_response
 
 TIMEOUT = 30
 POOL_1 = Implementation(name="pool", version="1.0.16")

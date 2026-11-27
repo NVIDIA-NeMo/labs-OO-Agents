@@ -82,8 +82,9 @@ async def test_the_model_option_reports_the_chosen_model_at_once_and_after_a_loa
     session_id = (await adapter.new_session(str(workspace))).session_id
     await adapter.set_config_option("model", session_id, "smart")
     session = adapter.registry_for(workspace).get(session_id)
-    option = next(o for o in adapter._config_options(session) if o.id == "model")
-    assert option.current_value == "smart"  # before any turn used it
+    # The core's options are v2 objects.
+    option = next(o for o in adapter._config_options(session) if o["configId"] == "model")
+    assert option["currentValue"] == "smart"  # before any turn used it
     await adapter.close_session(session_id)
     loaded = await adapter.load_session(str(workspace), session_id)
     option = next(o for o in loaded.config_options or [] if o.id == "model")

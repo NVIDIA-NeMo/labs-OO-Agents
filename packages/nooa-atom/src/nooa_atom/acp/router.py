@@ -65,21 +65,14 @@ from typing import Any, NamedTuple
 
 from acp import PROTOCOL_VERSION, RequestError
 from acp.connection import StreamDirection, StreamEvent
-from acp.schema import InitializeRequest, ListSessionsRequest
+from acp.schema import ListSessionsRequest
 from pydantic import ValidationError
 
 from nooa._platform import require_posix
+from nooa_atom.acp import v1_shim
 from nooa_atom.acp.framing import FRAME_LIMIT, Frame, encode, read_frame
 from nooa_atom.acp.listing import list_sessions
-from nooa_atom.acp.protocol import initialize_response
-from nooa_atom.acp.v2 import (
-    V2,
-    initialize_params_to_v1,
-    initialize_result_to_v2,
-    is_probe,
-    negotiate,
-    with_probe_answer,
-)
+from nooa_atom.acp.v2 import V2, initialize_result, negotiate
 from nooa_atom.session.store import (
     InvalidSessionIdError,
     SessionNotFoundError,
@@ -103,7 +96,7 @@ STOP_GRACE = 5.0
 STDOUT_QUEUE_SIZE = 1000
 
 _DELETE_METHOD = "_nooa/session/delete"
-# ``session/resume`` and ``session/delete`` are their ACP v2 names.
+# ``session/resume`` and ``session/delete`` are ACP v2's; ``session/load`` is v1's.
 _LOAD_METHODS = ("session/load", "session/resume")
 _DELETE_METHODS = (_DELETE_METHOD, "session/delete")
 _ROUTED_BY_STORE = (*_LOAD_METHODS, *_DELETE_METHODS)
@@ -474,24 +467,16 @@ class Router:
 
     def _initialize(self, frame: Frame) -> None:
         params = frame.message.get("params")
-        v2 = negotiate(params) == V2
-        try:
-            request = InitializeRequest.model_validate(
-                initialize_params_to_v1(params) if v2 else params
-            )
-        except ValidationError as exc:
-            self._fail(frame.id, RequestError.invalid_params({"errors": exc.errors()}))
-            return
+        if negotiate(params) == V2:
+            result = initialize_result(params.get("info"))
+        else:
+            try:
+                result = v1_shim.initialize_result(params)
+            except RequestError as exc:
+                self._fail(frame.id, exc)
+                return
         # Replayed unchanged: each worker negotiates the same version.
         self._init_params = params
-        response = initialize_response(request.protocol_version, request.client_info)
-        result = response.model_dump(
-            mode="json", by_alias=True, exclude_none=True, exclude_unset=True
-        )
-        if v2:
-            result = initialize_result_to_v2(result)
-        elif is_probe(params):
-            result = with_probe_answer(result)
         self._answer(frame, result)
 
     async def _list_sessions(self, frame: Frame) -> None:

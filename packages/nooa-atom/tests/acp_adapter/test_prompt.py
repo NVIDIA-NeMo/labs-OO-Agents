@@ -484,7 +484,7 @@ async def _inject(adapter, session_id, mode, text):
 
 async def test_inject_is_advertised_for_the_router_too():
     from acp import PROTOCOL_VERSION
-    from nooa_atom.acp.server import initialize_response
+    from nooa_atom.acp.v1_shim import initialize_response
 
     meta = initialize_response(PROTOCOL_VERSION).agent_capabilities.field_meta
     assert meta == {

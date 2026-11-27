@@ -16,7 +16,6 @@ import pytest
 from acp import PROTOCOL_VERSION
 from acp.client.connection import ClientSideConnection
 from acp.connection import StreamDirection
-from acp.schema import AllowedOutcome, PermissionOption, RequestPermissionResponse, ToolCallUpdate
 from atom_test_agents import ScriptedModels
 from nooa_atom.acp.framing import FRAME_LIMIT
 from nooa_atom.acp.server import AtomACPAgent
@@ -29,29 +28,22 @@ ID_BASE = 1 << 32
 
 
 class AskingAgent(AtomACPAgent):
-    """The adapter plus a test extension method that asks the client for permission."""
+    """The adapter plus a test extension method that sends the client a request."""
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if method != "test/ask":
             return await super().ext_method(method, params)
-        response = await self._require_conn().request_permission(
-            session_id=params["sessionId"],
-            tool_call=ToolCallUpdate(tool_call_id="t1", title="Run it?"),
-            options=[PermissionOption(option_id="allow", name="Allow", kind="allow_once")],
-        )
-        return {"outcome": response.outcome.outcome}
+        return await self._require_conn().request("_test/confirm", params)
 
 
 class Client:
-    """A client that allows every permission request."""
+    """A client that confirms every request."""
 
     def __init__(self) -> None:
         self.updates: list[Any] = []
 
-    async def request_permission(self, **kwargs: Any) -> RequestPermissionResponse:
-        return RequestPermissionResponse(
-            outcome=AllowedOutcome(option_id="allow", outcome="selected")
-        )
+    async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        return {"outcome": "selected"}
 
     async def session_update(self, session_id: str, update: Any, **kwargs: Any) -> None:
         self.updates.append((session_id, update))
@@ -100,9 +92,7 @@ async def test_worker_requests_start_at_the_id_base(worker, workspace):
             conn.ext_method("test/ask", {"sessionId": session.session_id}), TIMEOUT
         )
         assert answer == {"outcome": "selected"}
-    ids = [
-        frame["id"] for frame in frames_in if frame.get("method") == "session/request_permission"
-    ]
+    ids = [frame["id"] for frame in frames_in if frame.get("method") == "_test/confirm"]
     assert ids == [ID_BASE, ID_BASE + 1]
 
 

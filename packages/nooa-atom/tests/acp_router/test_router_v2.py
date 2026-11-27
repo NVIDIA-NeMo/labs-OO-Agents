@@ -139,7 +139,7 @@ async def test_v2_initialize_new_prompt_resume(mode, servers, workspace):
     users = [
         update
         for update in replayed[: kinds.index("replay_complete")]
-        if update["sessionUpdate"] == "user_message_chunk"
+        if update["sessionUpdate"] == "user_message"  # a replay sends whole messages
     ]
     assert users and users[0]["messageId"] == message_id
 
@@ -240,4 +240,23 @@ async def test_v1_probe_carries_the_v2_answer(mode, servers):
     assert own["initialize"]["protocolVersion"] == 2
     assert own["initialize"]["capabilities"]["session"]["delete"] == {}
     assert own["initialize"]["info"]["name"] == "nooa-atom"
+    assert await server.finish() == 0
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_a_v1_probe_also_gets_the_v2_answer(mode, servers):
+    """The installer's routers ask with a v1 ``initialize`` whether this Atom speaks v2."""
+    server = await servers(mode)
+    params = {
+        "protocolVersion": 1,
+        "clientCapabilities": {},
+        "clientInfo": {"name": "acp-sbx", "version": "0"},
+        "_meta": {"dev.nooa/v2": {"probe": True}},
+    }
+    init = (await server.call("initialize", params)).message["result"]
+    assert init["protocolVersion"] == 1 and "agentCapabilities" in init
+    probe = init["_meta"]["dev.nooa/v2"]
+    assert probe["protocolVersions"] == [1, 2]
+    assert probe["initialize"]["protocolVersion"] == 2
+    assert "session" in probe["initialize"]["capabilities"]
     assert await server.finish() == 0

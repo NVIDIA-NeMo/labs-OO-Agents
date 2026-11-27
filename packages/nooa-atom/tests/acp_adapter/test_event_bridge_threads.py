@@ -6,7 +6,9 @@ import asyncio
 
 import pytest
 from acp.schema import AgentMessageChunk, ToolCallProgress, ToolCallStart
+from nooa_atom.acp import v2
 from nooa_atom.acp.event_bridge import ACPEventBridge
+from nooa_atom.acp.v1_shim import V1Peer
 from nooa_atom.agent import AtomAgent
 from nooa_atom.session.items import AgentEventUpdate, CancelledUpdate
 
@@ -28,7 +30,7 @@ async def thread_bridge(tmp_path, monkeypatch):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     session = _FakeSession(agent)
     client = _RecordingClient()
-    bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(session, V1Peer(client))  # type: ignore[arg-type]
     owner = threading.get_ident()
     put = bridge._queue.put_nowait
 
@@ -126,6 +128,8 @@ async def test_owner_cleanup_follows_an_admitted_worker_start(thread_bridge, bar
 async def test_worker_child_activity_is_mirrored_on_owner_loop(thread_bridge):
     session, client, bridge = thread_bridge
     child = _FakeSession(session._agent, "child")
+    # The v1 shim shows a child's cards in its parent once the child is announced.
+    bridge.publish({"sessionUpdate": "subagent_update", "sessionId": "child", "title": "child"})
     bridge._mirror(child)  # type: ignore[arg-type]
 
     def emit():
@@ -159,13 +163,11 @@ async def test_worker_child_activity_is_mirrored_on_owner_loop(thread_bridge):
 
 
 async def test_worker_publishes_after_close_are_ignored(thread_bridge):
-    from acp import text_block, update_agent_message
-
     _, client, bridge = thread_bridge
     await bridge.close()
     before = list(client.updates)
-    await asyncio.to_thread(bridge.publish, update_agent_message(text_block("late")))
-    await asyncio.to_thread(bridge.publish_best_effort, update_agent_message(text_block("late")))
+    await asyncio.to_thread(bridge.publish, v2.message("agent_message", "late"))
+    await asyncio.to_thread(bridge.publish_best_effort, v2.message("agent_message", "late")[0])
     await asyncio.sleep(0)
     assert client.updates == before
     assert bridge._queue.empty()
@@ -175,11 +177,9 @@ async def test_worker_publishes_after_close_are_ignored(thread_bridge):
 async def test_worker_publications_are_included_in_flush(thread_bridge, best_effort):
     import threading
 
-    from acp import text_block, update_agent_message
-
     _, client, bridge = thread_bridge
     publish = bridge.publish_best_effort if best_effort else bridge.publish
-    worker = threading.Thread(target=publish, args=(update_agent_message(text_block("published")),))
+    worker = threading.Thread(target=publish, args=(v2.message("agent_message", "published")[0],))
     worker.start()
     worker.join(3)
     assert not worker.is_alive()

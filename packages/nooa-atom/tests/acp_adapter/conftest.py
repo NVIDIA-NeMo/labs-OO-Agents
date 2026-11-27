@@ -108,6 +108,7 @@ async def make_adapter(client):
     """
     from acp import PROTOCOL_VERSION
     from nooa_atom.acp.server import AtomACPAgent
+    from nooa_atom.acp.v1_shim import V1Agent
     from nooa_atom.session.registry import SessionRegistry
 
     built: list[Any] = []
@@ -125,7 +126,8 @@ async def make_adapter(client):
         def new_registry(store: Any) -> SessionRegistry:
             return SessionRegistry(store, agent_factory=models, llm_factory=llm_factory)
 
-        adapter = AtomACPAgent(new_registry, agent_spec=agent_spec, model=model)
+        # The v1 suites drive the v2 core through the v1 shim, as a v1 client does.
+        adapter = V1Agent(AtomACPAgent(new_registry, agent_spec=agent_spec, model=model))
         adapter.on_connect(client_ or client)
         await adapter.initialize(
             PROTOCOL_VERSION, client_capabilities=capabilities, client_info=client_info

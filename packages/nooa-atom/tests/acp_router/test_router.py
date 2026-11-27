@@ -22,7 +22,7 @@ import pytest
 from acp import PROTOCOL_VERSION
 from nooa_atom.acp.framing import FRAME_LIMIT, Frame, encode, read_frame
 from nooa_atom.acp.router import INIT_REQUEST_ID, Router, WorkerProcess
-from nooa_atom.acp.server import initialize_response
+from nooa_atom.acp.v1_shim import initialize_response
 from nooa_atom.session.store import SessionStore, sessions_root
 
 TIMEOUT = 10

@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""What the router and the adapter both need from ACP: the ``initialize`` answer and stdio.
+"""What the router and the adapter both need: client dialects, capabilities and stdio.
 
 Imports only the ``acp`` library, so the router can use it without loading
 the adapter and the agent stack behind it.
@@ -12,18 +12,9 @@ import asyncio
 import os
 import re
 from dataclasses import dataclass
-from importlib.metadata import PackageNotFoundError, version
+from typing import Any
 
-from acp import PROTOCOL_VERSION, InitializeResponse
 from acp.core import DEFAULT_STDIO_BUFFER_LIMIT_BYTES
-from acp.schema import (
-    AgentCapabilities,
-    Implementation,
-    McpCapabilities,
-    SessionCapabilities,
-    SessionCloseCapabilities,
-    SessionListCapabilities,
-)
 
 INJECT_CAPABILITY = {"dev.nooa/inject": {"queue": {}, "steer": {}, "revoke": {}}}
 """``agentCapabilities._meta`` for ``_nooa/session/inject`` and ``revoke_inject``.
@@ -78,8 +69,11 @@ POOL_DIALECT = PoolDialect(
 _POOL_MAJOR = re.compile(r"v?(\d+)\.")
 
 
-def pool_dialects(client_info: Implementation | None) -> tuple[PoolDialect, ...]:
+def pool_dialects(client_info: Any) -> tuple[PoolDialect, ...]:
     """The Pool dialects to speak to the client named in ``initialize``.
+
+    ``client_info`` is the client's ``info`` (v2) or ``clientInfo`` (v1), a
+    dict or a model with ``name`` and ``version``.
 
     Both Pool generations send ``clientInfo.name == "pool"``; the version
     (``1.0.16``, ``v2.0.0-alpha``) tells them apart. ``()`` for a client
@@ -87,9 +81,14 @@ def pool_dialects(client_info: Implementation | None) -> tuple[PoolDialect, ...]
     number (a local build reports ``untagged``): Pool reads these meta keys
     by name and ignores the others.
     """
-    if client_info is None or client_info.name != "pool":
+    if isinstance(client_info, dict):
+        name, client_version = client_info.get("name"), client_info.get("version")
+    else:
+        name = getattr(client_info, "name", None)
+        client_version = getattr(client_info, "version", None)
+    if name != "pool":
         return ()
-    match = _POOL_MAJOR.match(client_info.version or "")
+    match = _POOL_MAJOR.match(str(client_version or ""))
     if match is None:
         return (POOLSIDE_DIALECT, POOL_DIALECT)
     return (POOL_DIALECT,) if int(match.group(1)) >= 2 else (POOLSIDE_DIALECT,)
@@ -109,44 +108,6 @@ def steer_capability(dialects: tuple[PoolDialect, ...]) -> dict[str, bool]:
     if not dialects:
         return dict(POOL_STEER_CAPABILITY)
     return {dialect.steer_capability: True for dialect in dialects}
-
-
-def initialize_response(
-    protocol_version: int, client_info: Implementation | None = None
-) -> InitializeResponse:
-    """The static answer to ``initialize``: what this agent supports.
-
-    ``session/delete`` and ``logout`` are not advertised: the 0.12 library
-    does not route them, so a client calling them would get "method not
-    found". Deleting is the ``_nooa/session/delete`` extension method.
-    """
-    try:
-        package_version = version("nooa-atom")
-    except PackageNotFoundError:
-        package_version = "0.0.0"
-    return InitializeResponse(
-        protocol_version=min(protocol_version, PROTOCOL_VERSION),
-        agent_capabilities=AgentCapabilities(
-            load_session=True,
-            # McpCapabilities defaults to all-false, and a client that honours
-            # the handshake then filters its HTTP/SSE servers out of
-            # session/new. _create_mcp_tools connects both transports, so say
-            # so. `acp` stays off: it is unstable in the spec and not
-            # implemented here.
-            mcp_capabilities=McpCapabilities(http=True, sse=True),
-            session_capabilities=SessionCapabilities(
-                list=SessionListCapabilities(),
-                close=SessionCloseCapabilities(),
-            ),
-            field_meta={**INJECT_CAPABILITY, **steer_capability(pool_dialects(client_info))},
-        ),
-        auth_methods=[],
-        agent_info=Implementation(
-            name="nooa-atom",
-            title="NVIDIA Labs Object Oriented Agents (NOOA)",
-            version=package_version,
-        ),
-    )
 
 
 class _WritePipeProtocol(asyncio.BaseProtocol):
@@ -207,7 +168,6 @@ __all__ = [
     "POOL_DIALECT",
     "POOL_STEER_CAPABILITY",
     "PoolDialect",
-    "initialize_response",
     "open_stdio",
     "pool_dialects",
     "steer_capability",
