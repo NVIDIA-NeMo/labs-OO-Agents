@@ -210,6 +210,35 @@ deliberately not a model-registry or `UnifiedLLM` construction property, so
 route overrides cannot accidentally inherit a stale group and the same base
 client can be wrapped differently for separate uses.
 
+### Optional broker handshake deadline
+
+An application can set `AdmissionBroker(handshake_timeout=10)` to bound an
+unconfirmed lease exchange. The value must be a finite positive number of
+seconds, or `None` (the default, preserving the existing unbounded behavior).
+Choose a window that accommodates scheduling delays on the worker host; this
+is an application resilience policy, not a production latency guarantee.
+
+The single window starts when the broker begins sending an offer and covers
+both client acknowledgements and the intervening broker writes. Waiting in the
+FIFO queue is outside this window. A still-connected worker whose event loop
+stops progressing can therefore lose its unconfirmed offer without blocking
+healthy workers indefinitely. Expiry closes that connection and returns its
+reservation without committing the call budget. The client normally receives
+`AdmissionUnavailableError`; its own elapsed `queue_timeout` can instead
+produce `AdmissionTimeoutError`.
+
+Only the uncommitted exchange is timed. Confirmed leases, slow provider
+attempts, and shielded work after caller cancellation are
+never expired by this setting. A commitment already made is not refunded if a
+client subsequently times out or disconnects. Authenticated idle pooled
+connections and initial connections that have not requested an offer are also
+outside this window. This does not bound connection counts or all broker memory.
+
+This is an owner-only setting, not a field in the serialized worker configuration
+or the model registry. It uses the existing wire protocol and failure outcomes;
+there is no mixed-version protocol migration for this option. The broker event
+loop must remain responsive for its deadline to run.
+
 Configured attempts add an `llm.queue` event to the active trace span with the
 group, outcome, queued flag, wait duration, queue depth, and limit. Generation
 harness metrics aggregate admissions, queued attempts, call-cap rejections,
