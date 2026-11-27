@@ -555,14 +555,24 @@ class SQLiteEventBackend:
     def insert_active_tag(self, tag: str, index: int) -> None:
         with self._lock:
             with self._conn:
-                # Shift existing positions >= index up by 1
+                # ``index`` is a list index into active_tags() (as in the
+                # in-memory backend), not a stored position: positions have
+                # gaps once a collapse removed tags. Insert at the position of
+                # the tag now at ``index`` (after the last tag when past the end).
+                rows = self._conn.execute(
+                    "SELECT position FROM active_tags ORDER BY position"
+                ).fetchall()
+                if index < len(rows):
+                    position = rows[max(index, 0)][0]
+                else:
+                    position = rows[-1][0] + 1 if rows else 0
                 self._conn.execute(
                     "UPDATE active_tags SET position = position + 1 WHERE position >= ?",
-                    (index,),
+                    (position,),
                 )
                 self._conn.execute(
                     "INSERT INTO active_tags (position, tag) VALUES (?, ?)",
-                    (index, tag),
+                    (position, tag),
                 )
 
     def remove_active_tag(self, tag: str) -> bool:
