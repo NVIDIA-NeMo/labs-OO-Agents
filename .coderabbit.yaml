@@ -8,6 +8,24 @@ reviews:
   path_instructions:
     - path: "{src,packages/*/src}/**/*.py"
       instructions: |
+        NOOA configures an agent behaviour through the config object that owns
+        the concern: `RenderConfig` (rendering), `TruncationConfig`,
+        `SummarizationConfig`, `HttpConfig` / `RetryConfig` / `ReasoningConfig`
+        (model clients), and Atom's `AtomOptions` (workspace settings). The
+        surfaces that construct agents (`Agent` subclasses' `__init__`, Atom's
+        `SessionOptions` and session factory, `BenchAgent`, Gym `init_kwargs`)
+        pass those objects through; they do not mirror single fields.
+        Flag a NEW constructor parameter, `SessionOptions` / `AtomOptions`
+        field, or settings key whose name or meaning duplicates a field of one
+        of those objects, or that configures rendering, truncation,
+        summarization, retries or HTTP without being that object. Ask the
+        author to accept or pass the config object instead (see AGENTS.md,
+        "Configuration"; tests/test_config_convention.py enforces the
+        name-level rule).
+        Only flag parameters, fields or keys the pull request adds or changes.
+        Comment only; do not request changes for this rule alone.
+    - path: "{src,packages/*/src}/**/*.py"
+      instructions: |
         NOOA has one way to shorten values and output for a reader: `nooa.snapshot`
         (see docs/snapshot-model.md). Values: `capture` + `render_python` /
         `render_json` / `render_trace`. Output streams: `TextStream` + `merge` +
