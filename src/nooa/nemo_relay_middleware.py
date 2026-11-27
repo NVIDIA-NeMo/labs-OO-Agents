@@ -254,6 +254,29 @@ async def nemo_relay_llm_middleware(
     )
 
 
+# Relay 0.9 re-raises a tool callback's exception as a new RuntimeError with this
+# message and no cause, and wraps it the same way in each tool execution intercept
+# it passes through.
+_RELAY_RERAISE = "internal error: {}: {}"
+_RELAY_WRAP = _RELAY_RERAISE.format("RuntimeError", "")
+
+
+def _is_relay_reraise(error: Exception, reraise: str) -> bool:
+    text = str(error)
+    while text != reraise and text.startswith(_RELAY_WRAP):
+        text = text.removeprefix(_RELAY_WRAP)
+    return text == reraise
+
+
+def _error_message(error: BaseException) -> str:
+    try:
+        message = str(error)
+    except Exception:
+        message = "<exception str() failed>"
+    # Relay replaces lone surrogates, so its re-raise would no longer match.
+    return message.encode(errors="backslashreplace").decode()
+
+
 async def nemo_relay_tool_middleware(
     ctx: ExecutePythonContext,
     nxt: ExecutePythonNext,
@@ -273,9 +296,10 @@ async def nemo_relay_tool_middleware(
     codec = nemo_relay.typed.BestEffortAnyCodec()  # type: ignore[union-attr]
 
     captured_ctx: ExecutePythonContext | None = None
+    reraise: str | None = None
 
     async def _wrapper(inner_args: Any) -> Any:
-        nonlocal captured_ctx
+        nonlocal captured_ctx, reraise
         # Apply request intercept modifications back to ctx.
         # NeMo Relay tool request intercepts can transform args (e.g. rewrite code,
         # modify timeout).  The modified args are passed here as `inner_args`;
@@ -291,6 +315,11 @@ async def nemo_relay_tool_middleware(
         result = captured_ctx.result
         if result is None:
             return nemo_relay.ToolExecutionResult(codec.to_json(None))  # type: ignore[union-attr]
+        if result.error is not None:
+            # Relay ends the span as an error only if this callback raises.
+            name, message = type(result.error).__name__, _error_message(result.error)
+            reraise = _RELAY_RERAISE.format(name, message)
+            raise type(name, (Exception,), {})(message)
 
         # Extract meaningful return value (returned_value > signal > stdout)
         from nooa.events import _NO_RETURN
@@ -318,9 +347,13 @@ async def nemo_relay_tool_middleware(
     call_id = ctx.params.get("tool_call_id")
     if isinstance(call_id, str) and call_id.startswith("prefill_"):
         call_id = None
-    await nemo_relay.tools.execute(  # type: ignore[union-attr]
-        "execute_python", args, _wrapper, tool_call_id=call_id
-    )
+    try:
+        await nemo_relay.tools.execute(  # type: ignore[union-attr]
+            "execute_python", args, _wrapper, tool_call_id=call_id
+        )
+    except Exception as error:
+        if reraise is None or not _is_relay_reraise(error, reraise):
+            raise
 
     if captured_ctx is not None:
         return captured_ctx
