@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal
 
 from nooa.agentdoc._pformat import _pformat_to_str as _pformat
 from nooa.agentdoc._structured import format_type as _format_type_impl
+from nooa.agentdoc._structured import is_compiled_callable
 from nooa.agentdoc.doc_config import DocConfig
 from nooa.agentdoc.format import (
     format_value_summary,
@@ -33,6 +34,8 @@ def _is_documentable_collection(obj: list | tuple) -> bool:
         if isinstance(item, type):
             continue
         if inspect.isfunction(item) or inspect.ismethod(item):
+            continue
+        if is_compiled_callable(item):
             continue
         if inspect.ismodule(item):
             continue
@@ -129,7 +132,12 @@ def _doc_multiple(
     for obj in objs:
         if isinstance(obj, type):
             seen_types.add(obj)
-        elif not (inspect.isfunction(obj) or inspect.ismethod(obj) or inspect.ismodule(obj)):
+        elif not (
+            inspect.isfunction(obj)
+            or inspect.ismethod(obj)
+            or inspect.ismodule(obj)
+            or is_compiled_callable(obj)
+        ):
             obj_type = type(obj)
             if obj_type.__module__ != "builtins":
                 seen_types.add(obj_type)

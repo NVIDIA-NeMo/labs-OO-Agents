@@ -30,7 +30,88 @@ __all__ = [
     "extract_callable_info",
     "extract_module_info",
     "format_type",
+    "is_compiled_callable",
 ]
+
+
+_COMPILED_CALLABLE_TYPES: tuple[type, ...] = (
+    types.BuiltinFunctionType,  # also covers bound builtin methods
+    types.MethodDescriptorType,
+    types.ClassMethodDescriptorType,
+    types.WrapperDescriptorType,
+    types.MethodWrapperType,
+)
+
+
+def is_compiled_callable(obj: Any) -> bool:
+    """Return True for callables implemented in C or C++ (no Python code object).
+
+    Covers builtin functions and methods, method/slot descriptors, and
+    Boost.Python functions (type ``Boost.Python.function``).
+    """
+    if isinstance(obj, _COMPILED_CALLABLE_TYPES):
+        return True
+    obj_type = type(obj)
+    return (
+        getattr(obj_type, "__name__", None) == "function"
+        and getattr(obj_type, "__module__", None) == "Boost.Python"
+    )
+
+
+def is_compiled_type(cls: type) -> bool:
+    """Return True for classes implemented in C or C++ (C types, Boost.Python classes).
+
+    Python classes (heap types with a Python metaclass) return False, also when
+    they subclass a C type.
+    """
+    if getattr(type(cls), "__module__", None) == "Boost.Python":
+        return True
+    flags = getattr(cls, "__flags__", 0)
+    if not flags & (1 << 9):  # Py_TPFLAGS_HEAPTYPE: static C types
+        return True
+    if flags & (1 << 8):  # Py_TPFLAGS_IMMUTABLETYPE: C heap types (PyType_FromSpec)
+        return True
+    # A mutable heap type is a Python class unless its own attributes are compiled
+    # callables only (C heap types created without the immutable flag).
+    try:
+        own = list(vars(cls).values())
+    except TypeError:
+        return False
+    if any(
+        inspect.isfunction(v) or isinstance(v, (classmethod, staticmethod, property)) for v in own
+    ):
+        return False
+    return any(is_compiled_callable(v) for v in own)
+
+
+def compiled_callable_owner(obj: Any) -> str | None:
+    """Name the class or module a compiled callable belongs to, if known.
+
+    Reads attributes only; the callable is never called.
+    """
+    objclass = getattr(obj, "__objclass__", None)
+    if isinstance(objclass, type):
+        return objclass.__qualname__
+    owner = getattr(obj, "__self__", None)
+    if inspect.ismodule(owner):
+        return owner.__name__
+    if isinstance(owner, type):
+        return owner.__qualname__
+    module = getattr(obj, "__module__", None)
+    if isinstance(module, str) and module and module != "builtins":
+        return module
+    return None
+
+
+def compiled_callable_note(obj: Any) -> str:
+    """Return the hint shown when a compiled callable has no docstring or signature."""
+    owner = compiled_callable_owner(obj)
+    target = f"doc({owner})" if owner else "doc() of its class or module"
+    return (
+        "No docstring or signature is available for this compiled function.\n"
+        f"{target} lists related names; dir() shows all; a call with wrong argument "
+        "types usually reports the expected signature in its error."
+    )
 
 
 class _ClassRef:
@@ -254,7 +335,8 @@ def extract_callable_info(obj: Any) -> CallableInfo:
     except (ValueError, TypeError):
         # Fallback for built-ins or C functions
         signature_str = "(...)"
-        return_type = "Any"
+        # Compiled callables carry no return information: show ``name(...)``.
+        return_type = "" if is_compiled_callable(obj) else "Any"
 
     return CallableInfo(
         name=name,
@@ -1553,17 +1635,37 @@ def _extract_methods(obj: type) -> list[CallableInfo]:
 
     methods = []
     seen_names = set()
+    # Names already defined by a more derived class in the MRO. Recorded before any
+    # filtering, so a derived attribute of any kind (``None``, a hidden override, a
+    # property) shadows a base-class method of the same name.
+    defined_names: set[str] = set()
+    # Compiled methods are listed only for compiled classes (pxr, C types), so a
+    # Python subclass of a C type keeps listing only its own Python methods.
+    list_compiled = is_compiled_type(obj)
 
     # Walk the MRO dictionaries directly instead of inspect.getmembers().
     # inspect.getmembers() calls getattr() for every name and can execute arbitrary
     # descriptors while formatting an object.
     for klass in obj.__mro__:
         for name, raw in vars(klass).items():
+            if name in defined_names:
+                continue
+            defined_names.add(name)
             value = raw
             if isinstance(raw, (classmethod, staticmethod)):
                 value = raw.__func__
+            compiled = False
             if not inspect.isfunction(value) and not inspect.ismethod(value):
-                continue
+                # Compiled methods (builtin methods, method descriptors, Boost.Python
+                # functions) count only for compiled classes and never from builtins
+                # bases (object/dict/str methods are not listed).
+                if (
+                    not list_compiled
+                    or klass.__module__ == "builtins"
+                    or not is_compiled_callable(value)
+                ):
+                    continue
+                compiled = True
 
             explicitly_shown = (
                 getattr(value, "_agentdoc_hidden", None) is False
@@ -1582,6 +1684,10 @@ def _extract_methods(obj: type) -> list[CallableInfo]:
             info = extract_callable_info(value)
             if isinstance(raw, classmethod):
                 info = dataclasses.replace(info, is_classmethod=True)
+            if compiled:
+                # Show compiled methods under their attribute name: Boost.Python
+                # functions lack __qualname__, and an aliased builtin keeps its own.
+                info = dataclasses.replace(info, name=f"{klass.__qualname__}.{name}")
             methods.append(info)
 
     # Third pass: class-level metadata (covers C-extension methods that can't have
@@ -1620,6 +1726,8 @@ def _extract_methods(obj: type) -> list[CallableInfo]:
             if qualname not in source_order:
                 source_order[qualname] = idx
                 idx += 1
+            # Compiled methods are named ``Class.attr`` (see above).
+            source_order.setdefault(f"{klass.__qualname__}.{name}", idx - 1)
 
     return sorted(methods, key=lambda m: source_order.get(m.name, idx))
 
