@@ -1,10 +1,15 @@
-import type { PluginProps } from './registry';
-import { CodeBox } from '@/components/shared/CodeBox';
-import { ContextBlockRenderer } from '@/components/shared/ContextBlockRenderer';
-import { usePlayground } from '@/components/playground/PlaygroundContext';
+import type { PluginProps } from "./registry";
+import { CodeBox } from "@/components/shared/CodeBox";
+import { ContextBlockRenderer } from "@/components/shared/ContextBlockRenderer";
+import { usePlayground } from "@/components/playground/PlaygroundContext";
+import {
+  MediaGallery,
+  extractMessageMedia,
+} from "@/components/shared/MediaGallery";
+import type { MediaItem } from "@/components/shared/MediaGallery";
 
 function formatDuration(ns: number): string {
-  if (ns <= 0) return '';
+  if (ns <= 0) return "";
   const ms = ns / 1e6;
   if (ms < 1000) return `${ms.toFixed(0)}ms`;
   return `${(ms / 1000).toFixed(2)}s`;
@@ -21,6 +26,7 @@ interface Message {
   content: string | null;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
+  media?: MediaItem[];
 }
 
 function extractInputMessages(attrs: Record<string, unknown>): Message[] {
@@ -32,22 +38,30 @@ function extractInputMessages(attrs: Record<string, unknown>): Message[] {
       role: attrs[`llm.input_messages.${i}.message.role`] as string,
       content:
         (attrs[`llm.input_messages.${i}.message.content`] as string) ||
-        (attrs[`llm.input_messages.${i}.message.contents.0.message_content.text`] as string) ||
+        (attrs[
+          `llm.input_messages.${i}.message.contents.0.message_content.text`
+        ] as string) ||
         null,
     };
 
     const toolCalls: ToolCall[] = [];
     let j = 0;
-    while (attrs[`llm.input_messages.${i}.message.tool_calls.${j}.tool_call.function.name`]) {
+    while (
+      attrs[
+        `llm.input_messages.${i}.message.tool_calls.${j}.tool_call.function.name`
+      ]
+    ) {
       const name = attrs[
         `llm.input_messages.${i}.message.tool_calls.${j}.tool_call.function.name`
       ] as string;
       const argsStr =
         (attrs[
           `llm.input_messages.${i}.message.tool_calls.${j}.tool_call.function.arguments`
-        ] as string) || '{}';
+        ] as string) || "{}";
       const id =
-        (attrs[`llm.input_messages.${i}.message.tool_calls.${j}.tool_call.id`] as string) || null;
+        (attrs[
+          `llm.input_messages.${i}.message.tool_calls.${j}.tool_call.id`
+        ] as string) || null;
       let args: Record<string, unknown> | string;
       try {
         args = JSON.parse(argsStr);
@@ -59,8 +73,13 @@ function extractInputMessages(attrs: Record<string, unknown>): Message[] {
     }
     if (toolCalls.length > 0) msg.tool_calls = toolCalls;
 
-    const toolCallId = attrs[`llm.input_messages.${i}.message.tool_call_id`] as string | undefined;
+    const toolCallId = attrs[`llm.input_messages.${i}.message.tool_call_id`] as
+      | string
+      | undefined;
     if (toolCallId) msg.tool_call_id = toolCallId;
+
+    const media = extractMessageMedia(attrs, `llm.input_messages.${i}.message`);
+    if (media.length > 0) msg.media = media;
 
     messages.push(msg);
     i++;
@@ -68,27 +87,35 @@ function extractInputMessages(attrs: Record<string, unknown>): Message[] {
   if (messages.length > 0) return messages;
 
   // Method 2: input.value (OpenInference nested format)
-  if (attrs['input.value']) {
+  if (attrs["input.value"]) {
     try {
-      let parsed = attrs['input.value'];
-      if (typeof parsed === 'string') parsed = JSON.parse(parsed);
-      if (parsed && typeof parsed === 'object' && 'messages' in (parsed as Record<string, unknown>)) {
+      let parsed = attrs["input.value"];
+      if (typeof parsed === "string") parsed = JSON.parse(parsed);
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        "messages" in (parsed as Record<string, unknown>)
+      ) {
         const msgs = (parsed as Record<string, unknown>).messages;
         if (Array.isArray(msgs)) return msgs as Message[];
       }
       if (Array.isArray(parsed) && parsed.length > 0 && parsed[0]?.role) {
         return parsed as Message[];
       }
-    } catch { /* not parseable */ }
+    } catch {
+      /* not parseable */
+    }
   }
 
   // Method 3: llm.input_messages as JSON string or array
-  if (attrs['llm.input_messages']) {
+  if (attrs["llm.input_messages"]) {
     try {
-      let val = attrs['llm.input_messages'];
-      if (typeof val === 'string') val = JSON.parse(val);
+      let val = attrs["llm.input_messages"];
+      if (typeof val === "string") val = JSON.parse(val);
       if (Array.isArray(val)) return val as Message[];
-    } catch { /* not parseable */ }
+    } catch {
+      /* not parseable */
+    }
   }
 
   return [];
@@ -97,16 +124,22 @@ function extractInputMessages(attrs: Record<string, unknown>): Message[] {
 function extractOutputToolCalls(attrs: Record<string, unknown>): ToolCall[] {
   const toolCalls: ToolCall[] = [];
   let i = 0;
-  while (attrs[`llm.output_messages.0.message.tool_calls.${i}.tool_call.function.name`]) {
+  while (
+    attrs[
+      `llm.output_messages.0.message.tool_calls.${i}.tool_call.function.name`
+    ]
+  ) {
     const name = attrs[
       `llm.output_messages.0.message.tool_calls.${i}.tool_call.function.name`
     ] as string;
     const argsStr =
       (attrs[
         `llm.output_messages.0.message.tool_calls.${i}.tool_call.function.arguments`
-      ] as string) || '{}';
+      ] as string) || "{}";
     const id =
-      (attrs[`llm.output_messages.0.message.tool_calls.${i}.tool_call.id`] as string) || null;
+      (attrs[
+        `llm.output_messages.0.message.tool_calls.${i}.tool_call.id`
+      ] as string) || null;
     let args: Record<string, unknown> | string;
     try {
       args = JSON.parse(argsStr);
@@ -120,54 +153,61 @@ function extractOutputToolCalls(attrs: Record<string, unknown>): ToolCall[] {
 }
 
 function extractOutput(attrs: Record<string, unknown>): string | null {
-  if (attrs['llm.output.content']) {
-    return attrs['llm.output.content'] as string;
+  if (attrs["llm.output.content"]) {
+    return attrs["llm.output.content"] as string;
   }
 
-  if (attrs['output.value']) {
+  if (attrs["output.value"]) {
     try {
-      const raw = attrs['output.value'] as string;
-      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      const raw = attrs["output.value"] as string;
+      const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
       if (Array.isArray(parsed) && parsed[0]?.contents) {
         const text = parsed[0].contents
           .filter((c: { text?: string }) => c.text)
           .map((c: { text: string }) => c.text)
-          .join('\n');
+          .join("\n");
         if (text) return text;
       }
     } catch {
       // not JSON — use as plain string below
     }
-    const val = attrs['output.value'];
-    if (typeof val === 'string' && val.trim()) {
+    const val = attrs["output.value"];
+    if (typeof val === "string" && val.trim()) {
       return val;
     }
   }
 
-  if (attrs['llm.output_messages.0.message.content']) {
-    return attrs['llm.output_messages.0.message.content'] as string;
+  if (attrs["llm.output_messages.0.message.content"]) {
+    return attrs["llm.output_messages.0.message.content"] as string;
   }
 
-  if (attrs['llm.output_messages.0.message.contents.0.message_content.text']) {
-    return attrs['llm.output_messages.0.message.contents.0.message_content.text'] as string;
+  if (attrs["llm.output_messages.0.message.contents.0.message_content.text"]) {
+    return attrs[
+      "llm.output_messages.0.message.contents.0.message_content.text"
+    ] as string;
   }
 
   return null;
 }
 
-function formatToolCallContent(tc: ToolCall): { content: string; lang: string } {
+function formatToolCallContent(tc: ToolCall): {
+  content: string;
+  lang: string;
+} {
   if (
-    ['execute_python', 'python_cell'].includes(tc.name) &&
-    typeof tc.arguments === 'object' &&
+    ["execute_python", "python_cell"].includes(tc.name) &&
+    typeof tc.arguments === "object" &&
     tc.arguments !== null &&
-    'code' in tc.arguments
+    "code" in tc.arguments
   ) {
-    return { content: String(tc.arguments.code).trim(), lang: 'python' };
+    return { content: String(tc.arguments.code).trim(), lang: "python" };
   }
   return {
     content:
-      typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments, null, 2),
-    lang: 'json',
+      typeof tc.arguments === "string"
+        ? tc.arguments
+        : JSON.stringify(tc.arguments, null, 2),
+    lang: "json",
   };
 }
 
@@ -181,13 +221,13 @@ function MessageBox({
   toolCallId?: string;
 }) {
   const borderColor =
-    role === 'system'
-      ? 'border-gray-600'
-      : role === 'assistant'
-        ? 'border-indigo-700'
-        : role === 'tool'
-          ? 'border-amber-700'
-          : 'border-sky-700';
+    role === "system"
+      ? "border-gray-600"
+      : role === "assistant"
+        ? "border-indigo-700"
+        : role === "tool"
+          ? "border-amber-700"
+          : "border-sky-700";
 
   let label = role;
   if (toolCallId) label += ` [${toolCallId.slice(-8)}]`;
@@ -195,7 +235,7 @@ function MessageBox({
   return (
     <div className={`p-3 bg-gray-900 rounded border-l-4 ${borderColor} mb-2`}>
       <div className="text-xs text-gray-500 mb-1">{label}</div>
-      {role === 'system' || role === 'user' ? (
+      {role === "system" || role === "user" ? (
         <ContextBlockRenderer content={content} />
       ) : (
         <CodeBox code={content} language="markdown" showLineNumbers={false} />
@@ -204,9 +244,17 @@ function MessageBox({
   );
 }
 
-function ToolCallBox({ tc, index, total }: { tc: ToolCall; index: number; total: number }) {
+function ToolCallBox({
+  tc,
+  index,
+  total,
+}: {
+  tc: ToolCall;
+  index: number;
+  total: number;
+}) {
   const { content, lang } = formatToolCallContent(tc);
-  const idSuffix = tc.id ? ` [${tc.id.slice(-8)}]` : '';
+  const idSuffix = tc.id ? ` [${tc.id.slice(-8)}]` : "";
   const label =
     total > 1
       ? `Tool Call ${index + 1}/${total}: ${tc.name}${idSuffix}`
@@ -224,17 +272,19 @@ function ToolCallBox({ tc, index, total }: { tc: ToolCall; index: number; total:
   );
 }
 
-function extractReasoningContent(attrs: Record<string, unknown>): string | null {
-  if (attrs['llm.reasoning_content']) {
-    return attrs['llm.reasoning_content'] as string;
+function extractReasoningContent(
+  attrs: Record<string, unknown>,
+): string | null {
+  if (attrs["llm.reasoning_content"]) {
+    return attrs["llm.reasoning_content"] as string;
   }
 
-  if (attrs['output.value']) {
+  if (attrs["output.value"]) {
     try {
       const outputValue =
-        typeof attrs['output.value'] === 'string'
-          ? JSON.parse(attrs['output.value'] as string)
-          : attrs['output.value'];
+        typeof attrs["output.value"] === "string"
+          ? JSON.parse(attrs["output.value"] as string)
+          : attrs["output.value"];
       if (outputValue?.reasoning_content) {
         return outputValue.reasoning_content as string;
       }
@@ -246,8 +296,14 @@ function extractReasoningContent(attrs: Record<string, unknown>): string | null 
   return null;
 }
 
-function ReasoningSection({ content, defaultOpen }: { content: string; defaultOpen?: boolean }) {
-  const lineCount = content.split('\n').length;
+function ReasoningSection({
+  content,
+  defaultOpen,
+}: {
+  content: string;
+  defaultOpen?: boolean;
+}) {
+  const lineCount = content.split("\n").length;
   return (
     <details
       className="mt-2 border border-purple-700 rounded-md overflow-hidden"
@@ -266,34 +322,49 @@ function ReasoningSection({ content, defaultOpen }: { content: string; defaultOp
   );
 }
 
-export function LLMCallPlugin({ event, viewState, rawJsonOpen, viewControls }: PluginProps) {
+export function LLMCallPlugin({
+  event,
+  viewState,
+  rawJsonOpen,
+  viewControls,
+}: PluginProps) {
   const openPlayground = usePlayground();
   const attrs = event.attributes || {};
-  const model = (attrs['llm.model_name'] ??
-    attrs['gen_ai.response.model'] ??
-    attrs['llm.model'] ??
+  const model = (attrs["llm.model_name"] ??
+    attrs["gen_ai.response.model"] ??
+    attrs["llm.model"] ??
     attrs.model ??
-    'unknown') as string;
-  const shortModel = model.length > 35 ? model.substring(0, 32) + '...' : model;
+    "unknown") as string;
+  const shortModel = model.length > 35 ? model.substring(0, 32) + "..." : model;
   const durationNs = (attrs.duration_ns as number) || 0;
-  const statusCode = (attrs.status_code as string) || 'UNSET';
-  const promptTokens = (attrs['llm.token_count.prompt'] as number) || 0;
-  const completionTokens = (attrs['llm.token_count.completion'] as number) || 0;
-  const totalTokens = (attrs['llm.token_count.total'] as number) || promptTokens + completionTokens;
-  const timestamp = event.timestamp ? new Date(event.timestamp).toLocaleTimeString() : '';
+  const statusCode = (attrs.status_code as string) || "UNSET";
+  const promptTokens = (attrs["llm.token_count.prompt"] as number) || 0;
+  const completionTokens = (attrs["llm.token_count.completion"] as number) || 0;
+  const totalTokens =
+    (attrs["llm.token_count.total"] as number) ||
+    promptTokens + completionTokens;
+  const timestamp = event.timestamp
+    ? new Date(event.timestamp).toLocaleTimeString()
+    : "";
   const reasoningContent = extractReasoningContent(attrs);
 
-  if (viewState === 'collapsed') {
+  if (viewState === "collapsed") {
     return (
       <div className="flex items-center gap-2 text-sm">
         <span className="px-1.5 py-0.5 rounded bg-purple-900 text-purple-200 text-xs font-semibold">
           LLM
         </span>
         <span className="text-gray-300 font-mono">{shortModel}</span>
-        {reasoningContent && <span className="text-purple-300 text-xs">[reasoning]</span>}
-        {totalTokens > 0 && <span className="text-gray-500">({totalTokens} tokens)</span>}
-        {durationNs > 0 && <span className="text-gray-500">{formatDuration(durationNs)}</span>}
-        {statusCode === 'ERROR' && <span className="text-red-400">ERROR</span>}
+        {reasoningContent && (
+          <span className="text-purple-300 text-xs">[reasoning]</span>
+        )}
+        {totalTokens > 0 && (
+          <span className="text-gray-500">({totalTokens} tokens)</span>
+        )}
+        {durationNs > 0 && (
+          <span className="text-gray-500">{formatDuration(durationNs)}</span>
+        )}
+        {statusCode === "ERROR" && <span className="text-red-400">ERROR</span>}
       </div>
     );
   }
@@ -338,14 +409,17 @@ export function LLMCallPlugin({ event, viewState, rawJsonOpen, viewControls }: P
     </div>
   );
 
-  if (viewState === 'concise') {
+  if (viewState === "concise") {
     // Show last input message + output + tool calls
     // Separate <context> wrapper messages (from cached block formatter) into a collapsed section
-    const isContextMsg = (m: Message): boolean => m.role === 'user' && (m.content?.trimStart().startsWith('<context>\n') ?? false);
+    const isContextMsg = (m: Message): boolean =>
+      m.role === "user" &&
+      (m.content?.trimStart().startsWith("<context>\n") ?? false);
     const contextMsgs = inputMessages.filter(isContextMsg);
-    const lastMsg = inputMessages.length > 0
-      ? inputMessages.findLast(m => !isContextMsg(m)) ?? null
-      : null;
+    const lastMsg =
+      inputMessages.length > 0
+        ? (inputMessages.findLast((m) => !isContextMsg(m)) ?? null)
+        : null;
 
     return (
       <div>
@@ -359,18 +433,29 @@ export function LLMCallPlugin({ event, viewState, rawJsonOpen, viewControls }: P
           />
         )}
 
+        {lastMsg?.media && <MediaGallery items={lastMsg.media} />}
+
         {lastMsg?.tool_calls?.map((tc, i) => (
-          <ToolCallBox key={i} tc={tc} index={i} total={lastMsg.tool_calls!.length} />
+          <ToolCallBox
+            key={i}
+            tc={tc}
+            index={i}
+            total={lastMsg.tool_calls!.length}
+          />
         ))}
 
         {contextMsgs.length > 0 && (
           <details className="mb-2 rounded border border-gray-700 overflow-hidden">
             <summary className="px-3 py-1.5 text-xs text-gray-500 cursor-pointer hover:text-gray-300 bg-gray-800/40">
-              Context ({contextMsgs.length} {contextMsgs.length === 1 ? 'block' : 'blocks'})
+              Context ({contextMsgs.length}{" "}
+              {contextMsgs.length === 1 ? "block" : "blocks"})
             </summary>
             <div className="p-2">
               {contextMsgs.map((msg, i) => (
-                <MessageBox key={`ctx-${i}`} role={msg.role} content={msg.content!} />
+                <div key={`ctx-${i}`}>
+                  <MessageBox role={msg.role} content={msg.content!} />
+                  {msg.media && <MediaGallery items={msg.media} />}
+                </div>
               ))}
             </div>
           </details>
@@ -389,7 +474,12 @@ export function LLMCallPlugin({ event, viewState, rawJsonOpen, viewControls }: P
               </div>
             )}
             {outputToolCalls.map((tc, i) => (
-              <ToolCallBox key={`out-${i}`} tc={tc} index={i} total={outputToolCalls.length} />
+              <ToolCallBox
+                key={`out-${i}`}
+                tc={tc}
+                index={i}
+                total={outputToolCalls.length}
+              />
             ))}
           </div>
         )}
@@ -406,12 +496,19 @@ export function LLMCallPlugin({ event, viewState, rawJsonOpen, viewControls }: P
 
       {inputMessages.length > 0 && (
         <div className="mb-2">
-          <div className="text-xs text-gray-500 mb-1">Input Messages ({inputMessages.length})</div>
+          <div className="text-xs text-gray-500 mb-1">
+            Input Messages ({inputMessages.length})
+          </div>
           {inputMessages.map((msg, i) => (
             <div key={i}>
               {msg.content && (
-                <MessageBox role={msg.role} content={msg.content} toolCallId={msg.tool_call_id} />
+                <MessageBox
+                  role={msg.role}
+                  content={msg.content}
+                  toolCallId={msg.tool_call_id}
+                />
               )}
+              {msg.media && <MediaGallery items={msg.media} />}
               {msg.tool_calls?.map((tc, j) => (
                 <ToolCallBox
                   key={`in-${i}-${j}`}
@@ -439,12 +536,19 @@ export function LLMCallPlugin({ event, viewState, rawJsonOpen, viewControls }: P
             </div>
           )}
           {outputToolCalls.map((tc, i) => (
-            <ToolCallBox key={`out-${i}`} tc={tc} index={i} total={outputToolCalls.length} />
+            <ToolCallBox
+              key={`out-${i}`}
+              tc={tc}
+              index={i}
+              total={outputToolCalls.length}
+            />
           ))}
         </div>
       )}
 
-      {reasoningContent && <ReasoningSection content={reasoningContent} defaultOpen />}
+      {reasoningContent && (
+        <ReasoningSection content={reasoningContent} defaultOpen />
+      )}
 
       <details className="mt-2" open={rawJsonOpen}>
         <summary className="text-xs text-gray-500 cursor-pointer hover:text-gray-300">

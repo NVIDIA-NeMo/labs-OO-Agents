@@ -1,5 +1,9 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import { fetchTrace, convertOtlpSpansToEvents, otlpAttrsToDict } from "@/api/traces";
+import {
+  fetchTrace,
+  convertOtlpSpansToEvents,
+  otlpAttrsToDict,
+} from "@/api/traces";
 import {
   fetchAnnotations,
   createAnnotation,
@@ -13,6 +17,7 @@ import { AnnotationForm } from "@/components/annotations/AnnotationForm";
 import { KeyboardShortcutsHelp } from "@/components/shared/KeyboardShortcutsHelp";
 import { useKeyboardNav } from "@/hooks/useKeyboardNav";
 import { PlaygroundProvider } from "@/components/playground/PlaygroundContext";
+import { TraceSessionContext } from "@/components/shared/MediaGallery";
 import type { TraceEvent, ViewState } from "@/api/types";
 
 import "@/components/plugins";
@@ -72,7 +77,9 @@ function applyFilters(events: TraceEvent[], filter: FilterState): TraceEvent[] {
   // Call-tree order: DFS preorder, siblings by start time, so concurrent subtrees
   // stay contiguous at every depth. Degrades to a flat timestamp sort for traces
   // with no nesting. Eval-summary spans are floated to the top, as before.
-  result = [...result].sort((a, b) => (a._tree_rank ?? 0) - (b._tree_rank ?? 0));
+  result = [...result].sort(
+    (a, b) => (a._tree_rank ?? 0) - (b._tree_rank ?? 0),
+  );
   if (result.some((e) => e.type.startsWith("span.eval"))) {
     const evalEvents = result.filter((e) => e.type.startsWith("span.eval"));
     const rest = result.filter((e) => !e.type.startsWith("span.eval"));
@@ -165,9 +172,14 @@ export function TraceView({ sessionId, onBack }: TraceViewProps) {
       try {
         const data = await fetchTrace(sessionId);
         if (cancelled) return;
-        setTraceUnavailable(data.events.some((span) =>
-          otlpAttrsToDict(span._resource?.attributes ?? [])["eval.trace_available"] === false,
-        ));
+        setTraceUnavailable(
+          data.events.some(
+            (span) =>
+              otlpAttrsToDict(span._resource?.attributes ?? [])[
+                "eval.trace_available"
+              ] === false,
+          ),
+        );
         const converted = convertOtlpSpansToEvents(data.events);
         setEvents(converted);
         const types = new Set(converted.map((e) => e.type));
@@ -212,12 +224,9 @@ export function TraceView({ sessionId, onBack }: TraceViewProps) {
     });
   }, []);
 
-  const handleEventClick = useCallback(
-    (index: number) => {
-      setSelectedIndex(index);
-    },
-    [],
-  );
+  const handleEventClick = useCallback((index: number) => {
+    setSelectedIndex(index);
+  }, []);
 
   const handleQuickFeedback = useCallback(
     async (spanId: string, label: "positive" | "negative") => {
@@ -254,16 +263,19 @@ export function TraceView({ sessionId, onBack }: TraceViewProps) {
     }
   }, [sidebarCollapsed, toggleSidebar]);
 
-  const handleSetAllViewState = useCallback((state: ViewState) => {
-    const count = filteredEvents.length;
-    setEventStates((prev) => {
-      const next = new Map(prev);
-      for (let i = 0; i < count; i++) {
-        next.set(i, state);
-      }
-      return next;
-    });
-  }, [filteredEvents]);
+  const handleSetAllViewState = useCallback(
+    (state: ViewState) => {
+      const count = filteredEvents.length;
+      setEventStates((prev) => {
+        const next = new Map(prev);
+        for (let i = 0; i < count; i++) {
+          next.set(i, state);
+        }
+        return next;
+      });
+    },
+    [filteredEvents],
+  );
 
   useKeyboardNav({
     getItemCount: () => filteredEvents.length,
@@ -336,79 +348,84 @@ export function TraceView({ sessionId, onBack }: TraceViewProps) {
 
   return (
     <PlaygroundProvider sessionId={sessionId}>
-      {traceUnavailable && (
-        <div className="mb-4 rounded border border-yellow-800 bg-yellow-900/20 p-3 text-sm text-yellow-200">
-          Execution trace unavailable. This record contains task metadata but no captured execution events.
+      <TraceSessionContext.Provider value={sessionId}>
+        {traceUnavailable && (
+          <div className="mb-4 rounded border border-yellow-800 bg-yellow-900/20 p-3 text-sm text-yellow-200">
+            Execution trace unavailable. This record contains task metadata but
+            no captured execution events.
+          </div>
+        )}
+        <div className="flex items-center gap-3 mb-4">
+          <span className="text-sm text-gray-500">
+            {filterActive
+              ? `${filteredEvents.length} of ${events.length} events`
+              : `${events.length} event${events.length !== 1 ? "s" : ""}`}
+          </span>
+          <div className="ml-auto flex items-center gap-2">
+            <a
+              href={`/api/trace/export?session_id=${encodeURIComponent(sessionId)}`}
+              download
+              className="text-xs text-gray-600 hover:text-gray-400"
+              title="Export trace (.jsonl)"
+            >
+              Export
+            </a>
+            <button
+              onClick={() => setShowHelp(true)}
+              className="text-xs text-gray-600 hover:text-gray-400"
+              title="Keyboard shortcuts"
+            >
+              ?
+            </button>
+          </div>
         </div>
-      )}
-      <div className="flex items-center gap-3 mb-4">
-        <span className="text-sm text-gray-500">
-          {filterActive
-            ? `${filteredEvents.length} of ${events.length} events`
-            : `${events.length} event${events.length !== 1 ? "s" : ""}`}
-        </span>
-        <div className="ml-auto flex items-center gap-2">
-          <a
-            href={`/api/trace/export?session_id=${encodeURIComponent(sessionId)}`}
-            download
-            className="text-xs text-gray-600 hover:text-gray-400"
-            title="Export trace (.jsonl)"
-          >
-            Export
-          </a>
-          <button
-            onClick={() => setShowHelp(true)}
-            className="text-xs text-gray-600 hover:text-gray-400"
-            title="Keyboard shortcuts"
-          >
-            ?
-          </button>
-        </div>
-      </div>
 
-      <div className="flex gap-4">
-        <FilterSidebar
-          events={events}
-          filterState={filterState}
-          onChange={setFilterState}
-          collapsed={sidebarCollapsed}
-          onToggleCollapsed={toggleSidebar}
-          searchInputRef={filterSearchRef}
-          onSetAllViewState={handleSetAllViewState}
-        />
-
-        <div
-          ref={eventListRef}
-          className="flex-1 min-w-0 bg-gray-900 rounded-lg border border-gray-800"
-        >
-          <EventList
-            events={filteredEvents}
-            eventStates={eventStates}
-            defaultState="concise"
-            selectedIndex={selectedIndex}
-            searchQuery={filterState.textSearch}
-            rawJsonOpenSet={rawJsonOpenSet}
-            annotationsBySpan={annotationsBySpan}
-            sessionId={sessionId}
-            onSelect={handleEventClick}
-            onViewStateChange={setViewState}
-            onQuickFeedback={handleQuickFeedback}
-            onOpenAnnotationForm={handleOpenAnnotationForm}
+        <div className="flex gap-4">
+          <FilterSidebar
+            events={events}
+            filterState={filterState}
+            onChange={setFilterState}
+            collapsed={sidebarCollapsed}
+            onToggleCollapsed={toggleSidebar}
+            searchInputRef={filterSearchRef}
+            onSetAllViewState={handleSetAllViewState}
           />
+
+          <div
+            ref={eventListRef}
+            className="flex-1 min-w-0 bg-gray-900 rounded-lg border border-gray-800"
+          >
+            <EventList
+              events={filteredEvents}
+              eventStates={eventStates}
+              defaultState="concise"
+              selectedIndex={selectedIndex}
+              searchQuery={filterState.textSearch}
+              rawJsonOpenSet={rawJsonOpenSet}
+              annotationsBySpan={annotationsBySpan}
+              sessionId={sessionId}
+              onSelect={handleEventClick}
+              onViewStateChange={setViewState}
+              onQuickFeedback={handleQuickFeedback}
+              onOpenAnnotationForm={handleOpenAnnotationForm}
+            />
+          </div>
         </div>
-      </div>
 
-      {formSpanId !== null && (
-        <AnnotationForm
-          sessionId={sessionId}
-          spanId={formSpanId}
-          existing={annotationsBySpan.get(formSpanId) || []}
-          onClose={() => setFormSpanId(null)}
-          onSaved={loadAnnotations}
-        />
-      )}
+        {formSpanId !== null && (
+          <AnnotationForm
+            sessionId={sessionId}
+            spanId={formSpanId}
+            existing={annotationsBySpan.get(formSpanId) || []}
+            onClose={() => setFormSpanId(null)}
+            onSaved={loadAnnotations}
+          />
+        )}
 
-      {showHelp && <KeyboardShortcutsHelp onClose={() => setShowHelp(false)} />}
+        {showHelp && (
+          <KeyboardShortcutsHelp onClose={() => setShowHelp(false)} />
+        )}
+      </TraceSessionContext.Provider>
     </PlaygroundProvider>
   );
 }
