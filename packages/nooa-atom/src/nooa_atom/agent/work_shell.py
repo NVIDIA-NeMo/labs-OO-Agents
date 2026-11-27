@@ -45,11 +45,14 @@ import itertools
 import logging
 import math
 import os
+import select
 import shlex
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
+import threading
 import weakref
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -296,7 +299,21 @@ def _release(_directory: object) -> None:
 
 
 def _start_time(pid: int) -> str | None:
-    """A process's start time (Linux), so a reused pid is never mistaken for it."""
+    """A process's start identity, so a reused pid is never mistaken for it."""
+    if sys.platform != "linux":
+        # Darwin has no /proc. `ps lstart` is also what _descendants parses,
+        # so the identity comparison in _signal uses one representation.
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "lstart=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return result.stdout.strip() or None
     try:
         return Path(f"/proc/{pid}/stat").read_bytes().rsplit(b")", 1)[1].split()[19].decode("ascii")
     except (OSError, IndexError):
@@ -304,21 +321,40 @@ def _start_time(pid: int) -> str | None:
 
 
 def _descendants(pid: int) -> dict[int, str]:
-    """``pid``'s descendant processes (pid -> start time), from /proc; {} when unavailable."""
-    if sys.platform != "linux":
-        return {}
+    """``pid``'s descendants and start identities; {} when inspection is unavailable."""
     children: dict[int, list[tuple[int, str]]] = {}
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdecimal():
-            continue
+    if sys.platform != "linux":
         try:
-            # Bytes: a process name (comm) may hold bytes that are not UTF-8.
-            fields = (entry / "stat").read_bytes().rsplit(b")", 1)[1].split()
-            children.setdefault(int(fields[1]), []).append(
-                (int(entry.name), fields[19].decode("ascii"))
+            result = subprocess.run(
+                ["ps", "-ax", "-o", "pid=,ppid=,lstart="],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
             )
-        except (OSError, IndexError, ValueError):
-            continue
+        except (OSError, subprocess.SubprocessError):
+            return {}
+        for line in result.stdout.splitlines():
+            fields = line.strip().split(None, 2)
+            if len(fields) != 3:
+                continue
+            try:
+                child, parent = int(fields[0]), int(fields[1])
+            except ValueError:
+                continue
+            children.setdefault(parent, []).append((child, fields[2]))
+    else:
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdecimal():
+                continue
+            try:
+                # Bytes: a process name (comm) may hold bytes that are not UTF-8.
+                fields = (entry / "stat").read_bytes().rsplit(b")", 1)[1].split()
+                children.setdefault(int(fields[1]), []).append(
+                    (int(entry.name), fields[19].decode("ascii"))
+                )
+            except (OSError, IndexError, ValueError):
+                continue
     found: dict[int, str] = {}
     pending = list(children.get(pid, []))
     while pending:
@@ -343,12 +379,79 @@ def _close_fds(fds: set[int]) -> None:
             os.close(fds.pop())
 
 
+class _ThreadedFifoTransport(asyncio.BaseTransport):
+    """Feed a StreamReader from a named FIFO on Darwin.
+
+    On macOS, ``connect_read_pipe`` can register a FIFO without ever
+    delivering readable events (reproduced with a 92.5 KiB ``cat``: zero
+    bytes while ``select``/``os.read`` works). Anonymous pipes work. A small
+    blocking reader thread avoids that kqueue/FIFO path and preserves the
+    existing asynchronous ``_Capture.pump`` interface.
+    """
+
+    def __init__(self, fd: int, reader: asyncio.StreamReader) -> None:
+        self._fd = fd
+        self._reader = reader
+        self._loop = asyncio.get_running_loop()
+        self._closed = False
+        self._thread = threading.Thread(target=self._read, name="nooa-fifo-reader", daemon=True)
+
+    def start(self) -> _ThreadedFifoTransport:
+        self._thread.start()
+        return self
+
+    def _deliver(self, data: bytes, *, eof: bool = False) -> None:
+        def deliver() -> None:
+            if self._closed and not eof:
+                return
+            with contextlib.suppress(Exception):
+                if eof:
+                    self._reader.feed_eof()
+                else:
+                    self._reader.feed_data(data)
+
+        with contextlib.suppress(RuntimeError):  # the loop may already be closed
+            self._loop.call_soon_threadsafe(deliver)
+
+    def _read(self) -> None:
+        while not self._closed:
+            try:
+                ready = select.select([self._fd], [], [], 0.1)[0]
+            except (OSError, ValueError):
+                break
+            if not ready:
+                continue
+            try:
+                chunk = os.read(self._fd, _CHUNK_BYTES)
+            except BlockingIOError:
+                continue
+            except OSError:
+                break
+            if not chunk:
+                break
+            self._deliver(chunk)
+        self._deliver(b"", eof=True)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        with contextlib.suppress(OSError):
+            os.close(self._fd)
+
+    def is_closing(self) -> bool:
+        return self._closed
+
+
 async def _open_fifo(path: Path) -> tuple[asyncio.StreamReader, asyncio.BaseTransport, int]:
     """A FIFO read through asyncio; our own write end keeps it from ending before bash opens it."""
     os.mkfifo(path, 0o600)
     read_fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     write_fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
     reader = asyncio.StreamReader(limit=2**20)
+    if sys.platform == "darwin":
+        transport = _ThreadedFifoTransport(read_fd, reader).start()
+        return reader, transport, write_fd
     loop = asyncio.get_running_loop()
     transport, _ = await loop.connect_read_pipe(
         lambda: asyncio.StreamReaderProtocol(reader), os.fdopen(read_fd, "rb", 0)
