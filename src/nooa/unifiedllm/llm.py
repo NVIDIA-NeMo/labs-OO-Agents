@@ -56,6 +56,10 @@ def _snapshot_capabilities(facts: Capabilities) -> Capabilities:
         value = getattr(facts, name)
         if value is not None and (type(value) is not int or value <= 0):
             raise LLMFailure(FailureKind.CONFIG, f"Capability {name} must be positive or unknown")
+    if facts.developer_role is not None and type(facts.developer_role) is not bool:
+        raise LLMFailure(
+            FailureKind.CONFIG, "Capability developer_role must be bool or unknown (None)"
+        )
     # Independently advertised ceilings need not be ordered. Validate the
     # selected request budget below, rather than rejecting usable route facts.
     if (

@@ -19,6 +19,8 @@ class Capabilities:
     ``tools`` is None when unknown, False when unsupported. The True default
     preserves the historical optimistic declaration, not Connect verification.
     ``context_window`` and ``max_output_tokens`` are None when unknown.
+    ``developer_role`` is None when unknown, else whether the route accepts
+    ``developer`` messages.
     """
 
     media_kinds: frozenset[str] = frozenset()
@@ -26,6 +28,7 @@ class Capabilities:
     tools: bool | None = True
     context_window: int | None = None
     max_output_tokens: int | None = None
+    developer_role: bool | None = None
 
 
 @runtime_checkable

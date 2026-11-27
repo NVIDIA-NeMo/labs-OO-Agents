@@ -193,6 +193,17 @@ def check_status(
             return "passed" if text_baseline_passed(baseline) else "attention"
     if name.startswith("media:") and outcome == "passed":
         return "passed"
+    if name.startswith(("format:", "role:")) and outcome == "unsupported":
+        # A clear "unsupported" answer is a completed detection, not a failure.
+        return "passed"
+    if name.startswith(("format:", "role:")) and outcome in {"not_confirmed", "rejected"}:
+        # The endpoint answered, but the result does not settle the fact (for
+        # example LiteLLM sent the developer message as system, or a rejection
+        # did not name the feature). The fact stays unknown and requests stay
+        # unchanged, so this is a completed detection, not a failure. Connect
+        # runs these checks by default; errors without an answer still need
+        # attention.
+        return "passed"
     if outcome == "not_probed" and not record.get("error"):
         return "skipped"
     if outcome not in {"accepted", "confirmed", "completed", "warning"}:

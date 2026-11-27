@@ -9,7 +9,8 @@ the setup step by step: ``discover`` (model listing), ``model-info`` (server
 details for one model), ``catalogue`` (OpenRouter catalogue lookup),
 ``interfaces`` (find which API styles the endpoint accepts), ``plan`` (build
 the test calls without sending them), the test-call stages (``routing``,
-``decision``, ``tools``, ``reasoning``, ``media``, ``session``, ``all``), and
+``decision``, ``tools``, ``reasoning``, ``media``, ``session``,
+``capabilities``, ``all``), and
 ``save`` (write a planned or tested model entry to a registry file).
 
 The only prompt is the masked API key prompt enabled by ``--prompt-key``.
@@ -30,6 +31,7 @@ STAGES = (
     "reasoning",
     "media",
     "session",
+    "capabilities",
     "all",
     "save",
 )
@@ -630,6 +632,10 @@ def run_stage(
                         test_media_inputs=parse_media_inputs(test_media_inputs),
                         reasoning_levels=levels,
                         session_checks=stage in {"session", "all"}
+                        and style not in connect.DECISION_API_STYLES,
+                        # Structured-output formats and developer role; the
+                        # library sends these only on Chat and Responses routes.
+                        capability_checks=stage in {"capabilities", "all"}
                         and style not in connect.DECISION_API_STYLES,
                         endpoint_model=next((m for m in listing.models if m["id"] == model), None)
                         if listing

@@ -2565,6 +2565,9 @@ def configure_checks(state: WizardState) -> bool:
         else state.existing,
         session_checks=state.approval == "all"
         and state.api_style not in connect.DECISION_API_STYLES,
+        # Detect structured-output formats and developer-role support. The
+        # library sends these calls only on Chat and Responses routes.
+        capability_checks=state.api_style not in connect.DECISION_API_STYLES,
         reply_tokens=state.reply_tokens,
         cache_enabled=state.cache_enabled,
         # Guided setup tests only the reasoning level the user chose.

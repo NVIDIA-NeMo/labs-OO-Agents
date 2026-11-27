@@ -1049,12 +1049,35 @@ class UnifiedLLM(ABC):
         reasoning_level: str | None = None,
         media_inputs: list[MediaInput] | tuple[MediaInput, ...] | None = None,
         context_window: int | None = None,
+        developer_role: bool | None = None,
+        structured_output_format: str | None = None,
+        instruction_role: str | None = None,
         **config,
     ):
         self.structured_output_mode = validate_structured_output_mode(structured_output_mode)
         if self.structured_output_mode == "anthropic" and not isinstance(self, CompletionClient):
             raise ValueError(
                 "structured_output_mode='anthropic' requires CompletionClient, not Responses"
+            )
+        from .capability_settings import (
+            CapabilitySettingError,
+            resolve_instruction_role,
+            resolve_structured_output_format,
+            validate_developer_role,
+        )
+
+        # The detected developer-role fact (from Connect) and the request
+        # settings. They are NOOA settings, never LiteLLM parameters.
+        self.developer_role = validate_developer_role(developer_role)
+        self._output_format = resolve_structured_output_format(structured_output_format)
+        self._instruction_role = resolve_instruction_role(instruction_role, self.developer_role)
+        if self._output_format == "json_object" and self.structured_output_mode not in (
+            None,
+            "auto",
+        ):
+            raise CapabilitySettingError(
+                "structured_output_format 'json_object' conflicts with the native "
+                "structured_output_mode"
             )
         reject_legacy_cache_config(config)
         # Freeze prevents field assignment, not mutations inside nested Any
@@ -1088,6 +1111,40 @@ class UnifiedLLM(ABC):
     def reasoning_default(self) -> str | None:
         """Documented route default; not a request override."""
         return self._reasoning_config.default
+
+    def _capability_route_kept(self, call_config: dict[str, Any]) -> bool:
+        """Whether this call goes to the route the detected capability facts describe.
+
+        A call that overrides the model, endpoint, provider or SDK client goes
+        elsewhere, so ``structured_output_format`` and ``instruction_role``
+        choices (and their detected facts) do not apply to it.
+        """
+        from nooa.unifiedllm.route_identity import endpoint_changed
+
+        return not (
+            self._effective_model(call_config) != self.model
+            or endpoint_changed(self.config, call_config)
+            or (
+                any(self.config.get(key) for key in ("api_base", "base_url"))
+                and not any(call_config.get(key) for key in ("api_base", "base_url"))
+            )
+            or any(
+                call_config.get(key) != self.config.get(key)
+                for key in ("custom_llm_provider", "client")
+            )
+        )
+
+    def _call_output_format(self, call_config: dict[str, Any]) -> str:
+        """``json_object`` or ``json_schema`` for this call's typed output."""
+        if self._output_format == "json_object" and self._capability_route_kept(call_config):
+            return "json_object"
+        return "json_schema"
+
+    def _call_instruction_roles(self, call_config: dict[str, Any]) -> tuple[str, bool | None]:
+        """``(role, developer_role)`` for mapping this call's instruction messages."""
+        if self._capability_route_kept(call_config):
+            return self._instruction_role, self.developer_role
+        return "system", None
 
     def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
         """Merge the client configuration with per-call ``overrides`` for one request.

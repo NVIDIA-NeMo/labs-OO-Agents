@@ -417,7 +417,8 @@ def test_actual_guided_manual_and_listed_consent_save_and_partial_results(
     assert len(consent) == 1
     assert len(selected_prompts) == int(media_action == "manual" and selection != "-")
     posts = [r for r in calls if r.method == "POST"]
-    assert len(posts) == (0 if final_action == "save" else 3 if media_action == "test" else 6), (
+    # Includes the json_schema and developer-role checks (two each).
+    assert len(posts) == (0 if final_action == "save" else 5 if media_action == "test" else 8), (
         result.output
     )
     entry = yaml.safe_load(target.read_text())["models"]["local"]

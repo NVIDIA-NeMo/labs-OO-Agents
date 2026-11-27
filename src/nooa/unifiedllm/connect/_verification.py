@@ -9,7 +9,9 @@ reasoning level, retry policy, ...), plus a SHA-256 fingerprint of it. Later,
 the snapshot is rebuilt from the entry; if it differs, the result is out of
 date ("not current"): it is kept as history but no longer counts as passing.
 Whether media inputs are permitted is a separate setting and does not affect
-the snapshot.
+the snapshot. Neither does ``structured_output_format``: Connect sets it from
+its own ``format:json_schema`` / ``format:json_object`` checks, which send
+their format explicitly.
 
 Snapshots name the environment variable holding the API key, never the key or
 a hash of it. This module reads no environment variables, builds no clients
@@ -182,6 +184,9 @@ def effective_config_snapshot(entry: dict, check: str = "routing") -> dict:
       (an ``extra_body`` from the level replaces the entry's ``extra_body``).
     - Media checks enable just their own media kind when they run, so
       ``media_inputs`` is not part of the snapshot.
+    - ``structured_output_format`` is not part of the snapshot: each format
+      is tested by its own ``format:*`` check, and Connect writes the key
+      after the checks ran, so writing it does not make them out of date.
     - Decision entries keep only ``timeout`` and, for media checks, their
       image transport settings.
 
@@ -232,6 +237,9 @@ def effective_config_snapshot(entry: dict, check: str = "routing") -> dict:
         "drop_params": entry.get("drop_params", True),
         "retry_policy": _retry_policy(entry),
     }
+    # Request-shaping choices; recorded only when set, so older snapshots match.
+    if "instruction_role" in entry and not decision:
+        snapshot["instruction_role"] = entry["instruction_role"]
     if decision and check.startswith("media:"):
         snapshot["decision_media"] = {
             "decision_image_transport": entry.get("decision_image_transport", "json"),

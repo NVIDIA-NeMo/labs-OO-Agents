@@ -304,7 +304,8 @@ def test_every_documented_shell_command(path, expected, offline, monkeypatch, tm
         ("reasoning", 2),
         ("media", 3),
         ("session", 3),
-        ("all", 9),
+        ("capabilities", 3),  # routing, json_schema, developer role
+        ("all", 11),  # includes json_schema and developer role checks
         ("save", 0),
     ],
 )

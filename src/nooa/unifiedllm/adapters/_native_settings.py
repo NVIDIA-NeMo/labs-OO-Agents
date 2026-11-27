@@ -7,6 +7,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from nooa.media_inputs import validate_media_inputs
+from nooa.unifiedllm.capability_settings import (
+    CAPABILITY_KEYS,
+    resolve_instruction_role,
+    resolve_structured_output_format,
+    validate_developer_role,
+)
 from nooa.unifiedllm.errors import FailureKind, LLMFailure
 from nooa.unifiedllm.http_config import HttpConfig
 from nooa.unifiedllm.limits import REPLY_CAP_KEYS
@@ -96,6 +102,7 @@ _ROUTE = {
     "structured_output_mode",
     "client_type",
     "tools_supported",
+    *CAPABILITY_KEYS,
 }
 _FACTS = {
     "context_window",
@@ -107,6 +114,7 @@ _FACTS = {
     "host_profile",
     "structured_output_mode",
     "tools_supported",
+    *CAPABILITY_KEYS,
 }
 
 
@@ -133,6 +141,9 @@ class _NativeSettings:
     cache_breakpoint: str | None
     host_profile: Mapping
     replay_scope: str
+    # Resolved at load from the entry's settings and detected developer role.
+    output_format: str = "json_schema"
+    instruction_role: str = "system"
 
 
 def _compatibility_scope(family, model, route, profile, selected):
@@ -520,12 +531,20 @@ def _resolve_native(family, name, config, overrides):
     tools = params.get("tools_supported")
     if tools is not None and type(tools) is not bool:
         raise _config("tools_supported must be bool or None")
+    developer = validate_developer_role(params.get("developer_role"))
+    output_format = resolve_structured_output_format(params.get("structured_output_format"))
+    instruction_role = resolve_instruction_role(params.get("instruction_role"), developer)
+    if family == "anthropic-messages" and output_format == "json_object":
+        raise _config("Anthropic Messages has no json_object structured output format")
+    if family == "anthropic-messages" and instruction_role == "developer":
+        raise _config("Anthropic Messages has no developer role; use instruction_role 'system'")
     caps = Capabilities(
         frozenset(enabled),
         None if declaration.levels is None else tuple(declaration.levels),
         tools,
         window,
         None,
+        developer,
     )
     cache = params.get("cache_breakpoint")
     expected = "anthropic" if family == "anthropic-messages" else "openai"
@@ -584,6 +603,8 @@ def _resolve_native(family, name, config, overrides):
         cache,
         _freeze(profile),
         _compatibility_scope(family, model, route, dict(profile), selected),
+        output_format,
+        instruction_role,
     ), params.get("retry_config")
 
 

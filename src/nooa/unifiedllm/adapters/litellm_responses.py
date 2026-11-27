@@ -25,6 +25,8 @@ from nooa.unifiedllm.adapters._numeric_usage import _numeric_usage
 from nooa.unifiedllm.adapters._provider_logging import _prepare_owned_litellm_call
 from nooa.unifiedllm.adapters.base import Capabilities
 from nooa.unifiedllm.adapters.litellm_chat import (
+    _call_instruction_roles,
+    _call_output_format,
     client_capabilities,
     named_tool_choice,
     request_options,
@@ -35,6 +37,7 @@ from nooa.unifiedllm.cache_policy import (
     reject_boundary_dict,
     wrap_responses_text,
 )
+from nooa.unifiedllm.capability_settings import json_object_instruction, map_instruction_roles
 from nooa.unifiedllm.errors import _parse_reply
 from nooa.unifiedllm.media_inputs import attachment_kind, filter_media_messages
 from nooa.unifiedllm.request import LLMRequest
@@ -401,6 +404,20 @@ class LiteLLMResponsesAdapter:
         )
 
         client._validate_implemented_media(input_messages, call_config)
+        # Leading system messages already became ``instructions``; the role
+        # choice applies to the instruction items that stay in ``input``.
+        role, developer_role = _call_instruction_roles(client, call_config)
+        input_messages = map_instruction_roles(input_messages, role, developer_role)
+        json_object = (
+            output_model is not None and _call_output_format(client, call_config) == "json_object"
+        )
+        if json_object:
+            # JSON mode: the schema travels as a final instruction item.
+            instruction = json_object_instruction(output_model)
+            input_messages = [
+                *input_messages,
+                {"role": role, "content": [{"type": "input_text", "text": instruction["content"]}]},
+            ]
 
         api_params = {
             "model": client.model,
@@ -425,7 +442,12 @@ class LiteLLMResponsesAdapter:
             api_params["tool_choice"] = api_params.get("tool_choice") or "auto"
             api_params["parallel_tool_calls"] = False
 
-        if output_model is not None:
+        if json_object:
+            api_params["text"] = {
+                **(api_params.get("text") or {}),
+                "format": {"type": "json_object"},
+            }
+        elif output_model is not None:
             api_params.update(_responses_output_params(output_model))
 
         replay_state.add_encrypted_reasoning_include(

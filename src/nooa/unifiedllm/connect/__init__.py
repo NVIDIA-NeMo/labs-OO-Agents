@@ -1687,6 +1687,7 @@ def plan(
     typesafe_danger_zone_images: bool | None = None,
     decision_checks: bool = True,
     checked_levels: list[str] | tuple[str, ...] | None = None,
+    capability_checks: bool = False,
 ) -> ConnectPlan:
     """Build the model entry and the test calls for the user to approve.
 
@@ -1734,6 +1735,13 @@ def plan(
       the kinds to test with generated attachments. Media fields from
       listings only produce suggestions and never change these settings.
       Media kinds an interface cannot send are planned as skipped.
+    - ``capability_checks``: also test which structured-output formats
+      (``json_schema``, ``json_object``) and whether the ``developer`` role
+      the endpoint accepts (Chat and Responses only; see ``_capabilities``).
+      Results are saved as one ``structured_output_format`` value
+      (``json_schema`` preferred, else ``json_object``, else no key; each
+      format's result only in ``provenance``) and ``developer_role``. Other
+      interfaces record ``developer_role: false``.
 
     Budget: each test call reserves its reply cap plus an input estimate of
     512 tokens (4,096 for media test calls). Usage reported by the server can
@@ -2162,7 +2170,30 @@ def plan(
                 skip_reason=skip,
             )
         )
+    if capability_checks:
+        from ._capabilities import capability_bodies
+
+        probes.extend(
+            Probe(name, capability_body, output_tokens + 512)
+            for name, capability_body in capability_bodies(api_style, body)
+        )
     entry["provenance"] = provenance
+    if existing_entry and same_media_route(existing_entry, entry):
+        from nooa.unifiedllm.capability_settings import CAPABILITY_KEYS
+
+        if existing_entry.get("api_key_env", "") == entry.get("api_key_env", ""):
+            # Keep the user's choices and earlier detected facts for the same route.
+            for field in CAPABILITY_KEYS:
+                if field in existing_entry:
+                    entry[field] = deepcopy(existing_entry[field])
+            for field in ("structured_output_format", "developer_role"):
+                if field in existing_entry.get("provenance", {}):
+                    provenance[field] = deepcopy(existing_entry["provenance"][field])
+    if capability_checks:
+        from ._capabilities import PROBED_STYLES, not_applicable
+
+        if api_style not in PROBED_STYLES:
+            not_applicable(entry)
     if context_window is not None:
         entry = apply_context_window(
             entry, context_window, model=model, endpoint_model=endpoint_model
@@ -2319,12 +2350,17 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
         if REPLY_CAP_KEYS & settings.keys():
             for key in REPLY_CAP_KEYS:
                 params.pop(key, None)
+    from ._capabilities import is_capability_probe, observed_on_wire, probe_entry
+
+    capability_probe = is_capability_probe(probe.name)
     client = cast(
         Any,
         client_from_config(
             alias,
             {**entry, "media_inputs": [probe.name[6:]]}
             if probe.name.startswith("media:")
+            else probe_entry(entry)
+            if capability_probe
             else entry,
             api_key=api_key,
             retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
@@ -2533,6 +2569,9 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
             )
             observed = observed and exact and not conflicts
         output_settings_sent.append(observed)
+        if capability_probe:
+            # The tested format or developer message must really be on the wire.
+            observed = observed and observed_on_wire(probe.name, wire)
         if probe.name.startswith("media:"):
             from ._media import media_on_wire
 
@@ -2743,7 +2782,8 @@ async def check_stage(
 ) -> ConnectResult:
     """Run the test calls of one stage again and return the updated entry.
 
-    ``stage`` is routing, decision, tools, reasoning, media, session or all.
+    ``stage`` is routing, decision, tools, reasoning, media, session,
+    capabilities (structured-output formats and developer role) or all.
     Calling this counts as the user's approval for that stage, within the
     plan's existing limits. It does not prompt or write the registry. Results
     of other stages are kept; the selected stage's old results are discarded
@@ -2752,7 +2792,16 @@ async def check_stage(
     Raises ValueError for an unknown stage, a stage the plan has no test calls
     for, or a missing API key.
     """
-    if stage not in {"routing", "tools", "reasoning", "media", "decision", "session", "all"}:
+    if stage not in {
+        "routing",
+        "tools",
+        "reasoning",
+        "media",
+        "decision",
+        "session",
+        "capabilities",
+        "all",
+    }:
         raise ValueError("Unknown check stage")
     if proposal.entry.get("client_type") == "decision" and stage not in {
         "routing",
@@ -2789,6 +2838,8 @@ async def check_stage(
         and (p.name == "routing" or p.name.startswith("decision:"))
         or stage == "reasoning"
         and p.name.startswith("level:")
+        or stage == "capabilities"
+        and (p.name == "routing" or p.name.startswith(("format:", "role:")))
         or stage == "media"
         and (
             p.name == "routing"
@@ -2803,6 +2854,8 @@ async def check_stage(
         raise ValueError("Media stage requires explicit test_media_inputs")
     if stage == "reasoning" and not probes:
         raise ValueError("No reasoning levels configured; provide a reasoning_levels mapping")
+    if stage == "capabilities" and not any(p.name.startswith(("format:", "role:")) for p in probes):
+        raise ValueError("Capabilities stage requires a plan made with capability_checks=True")
     entry = configure_entry(proposal.entry)
     for probe in probes:
         entry["provenance"]["probes"].pop(probe.name, None)
@@ -2996,6 +3049,14 @@ async def run_steps(
             record["reason"] = "not approved"
             yield ProbeUpdate(probe.name, deepcopy(record))
             continue
+        if probe.name == "format:json_object":
+            from ._capabilities import json_object_skip_reason
+
+            if skip := json_object_skip_reason(entry, records):
+                # Not needed: leave no record, so the verdict does not count a skip.
+                records.pop(probe.name, None)
+                yield ProbeUpdate(probe.name, {"outcome": "not_probed", "reason": skip})
+                continue
         if probe.name.startswith("media:"):
             from nooa.media_policy import entry_input_interface, implemented_input_kinds
 
@@ -3211,6 +3272,14 @@ async def run_steps(
                     if record["outcome"] == "rejected"
                     else exception_reason(record, probe.name[6:], exc)
                 )
+            if probe.name.startswith(("format:", "role:")):
+                from ._capabilities import is_capability_probe, rejected_as_unsupported
+
+                if is_capability_probe(probe.name) and rejected_as_unsupported(
+                    probe.name, exc, status
+                ):
+                    record["outcome"] = "unsupported"
+                    record["reason"] = "The endpoint rejected this as unsupported"
             if (
                 probe.name == "routing"
                 and not probe.uses_configured_cap
@@ -3270,6 +3339,12 @@ async def run_steps(
                 if settings_sent is None
                 else "Configured reply cap or settings missing from the actual request",
             )
+            if settings_sent is False and probe.name.startswith(("format:", "role:")):
+                # For example LiteLLM sends developer messages as system on
+                # most Chat Completions routes, so support stays unknown.
+                record["reason"] = (
+                    "The tested format or developer message was not in the actual request"
+                )
         if probe.name == "routing":
             record.update(response.metadata.get("connect_evidence", {}))
             if probe.uses_configured_cap:
@@ -3339,6 +3414,10 @@ async def run_steps(
         name for name, item in records.items() if item.get("reasoning_observed")
     ]
     provenance["tokens_charged_to_budget"] = spent
+    from ._capabilities import apply_capability_results, is_capability_probe
+
+    if any(is_capability_probe(probe.name) for probe in proposal.probes):
+        apply_capability_results(entry, records)
     if proposal.session_checks:
         from nooa.unifiedllm.connect._session import session_steps
 

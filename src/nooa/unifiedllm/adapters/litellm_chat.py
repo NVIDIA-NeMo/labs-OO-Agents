@@ -24,6 +24,7 @@ from nooa.unifiedllm.adapters._numeric_usage import _numeric_usage
 from nooa.unifiedllm.adapters._provider_logging import _prepare_owned_litellm_call
 from nooa.unifiedllm.adapters.base import Capabilities
 from nooa.unifiedllm.cache_policy import add_session_affinity_header
+from nooa.unifiedllm.capability_settings import json_object_instruction, map_instruction_roles
 from nooa.unifiedllm.errors import _parse_reply
 from nooa.unifiedllm.media_inputs import filter_media_messages
 from nooa.unifiedllm.request import LLMRequest
@@ -67,7 +68,20 @@ def client_capabilities(client: "UnifiedLLM") -> Capabilities:
         tools=True,
         context_window=client.context_window,
         max_output_tokens=None,
+        developer_role=getattr(client, "developer_role", None),
     )
+
+
+def _call_output_format(client: Any, call_config: dict[str, Any]) -> str:
+    """The client's typed-output format for this call; json_schema for foreign clients."""
+    chooser = getattr(client, "_call_output_format", None)
+    return chooser(call_config) if callable(chooser) else "json_schema"
+
+
+def _call_instruction_roles(client: Any, call_config: dict[str, Any]) -> tuple[str, bool | None]:
+    """The client's instruction role for this call; unchanged roles for foreign clients."""
+    chooser = getattr(client, "_call_instruction_roles", None)
+    return chooser(call_config) if callable(chooser) else ("system", None)
 
 
 def request_options(request: LLMRequest, options: Mapping[str, Any]) -> dict[str, Any]:
@@ -458,6 +472,18 @@ class LiteLLMChatAdapter:
         prepared_messages, _, _ = client._prepare_cache_boundary(
             prepared_messages, responses=False, model=effective_model
         )
+        role, developer_role = _call_instruction_roles(client, call_config)
+        prepared_messages = map_instruction_roles(prepared_messages, role, developer_role)
+        json_object = (
+            output_model is not None
+            and not native_output
+            and _call_output_format(client, call_config) == "json_object"
+        )
+        if json_object:
+            # JSON mode: the schema travels as a final instruction, after the
+            # cacheable prefix, in the role this route uses for instructions.
+            instruction = json_object_instruction(output_model)
+            prepared_messages = [*prepared_messages, {**instruction, "role": role}]
 
         api_params = {
             "model": client.model,
@@ -472,7 +498,10 @@ class LiteLLMChatAdapter:
             api_params["tool_choice"] = {"type": "function", "function": {"name": name}}
 
         client._normalize_chat_extensions(api_params, effective_model)
-        client._set_output_format(api_params, output_model, effective_model, native_output)
+        if json_object:
+            api_params["response_format"] = {"type": "json_object"}
+        else:
+            client._set_output_format(api_params, output_model, effective_model, native_output)
 
         # Bedrock/Anthropic reject messages with tool_call blocks when tools= is absent.
         if (

@@ -92,7 +92,9 @@ def test_explicit_noninteractive_test_saves_only_passed_samples(
         command, options(path) + ["--test-media-inputs", "image,video", "--yes"]
     )
     assert result.exit_code == 0, result.output
-    assert len(calls) == 3  # Routing, tools, image; video and conversation do not fit/are skipped.
+    # Routing, tools, image, json_schema and developer role; video and
+    # conversation do not fit/are skipped.
+    assert len(calls) == 5
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["media_inputs"] == enabled
     assert "provenance" not in entry
@@ -160,7 +162,7 @@ def test_interactive_test_choice_after_single_approval_review_can_manually_enabl
         command, options(path), input="262144\n262144\ntest\ntest\nmanual\nimage,pdf\ny\n"
     )
     assert result.exit_code == 0, result.output
-    assert len(calls) == 3
+    assert len(calls) == 5  # includes the json_schema and developer-role checks
     assert result.output.count("Would you like to test these settings?") == 1
     assert "Approve setup" not in result.output
     assert "Test all media inputs (generated samples)" in result.output
@@ -186,7 +188,8 @@ def test_cancel_at_review_does_not_save_or_send_extra_requests(monkeypatch, tmp_
     path = tmp_path / "models.yaml"
     result = CliRunner().invoke(command, options(path), input="262144\n262144\ntest\ntest\n")
     assert result.exit_code == 1
-    assert len(calls) == 3 and not path.exists()
+    # Includes the json_schema and developer-role checks.
+    assert len(calls) == 5 and not path.exists()
 
 
 def test_ui_edit_mode_defaults_manual_and_no_probe_never_offers_tests(monkeypatch):
@@ -349,14 +352,15 @@ def test_edit_retest_preserves_prior_permissions_even_if_not_passed(
         "audio",
         "video",
     ]
-    assert len(calls) == (0 if budget == 1 else 3)
+    # Includes the json_schema and developer-role checks.
+    assert len(calls) == (0 if budget == 1 else 5)
     if budget != 1:
         text = " ".join(re.sub(r" · \d+\.\ds", "", result.output).split())
         assert f"{'Images' if formats == 'image' else 'Video'}: enabled" in text
         assert f"{'Images' if formats == 'image' else 'Video'}: off" not in text
 
 
-@pytest.mark.parametrize("answer,budget,count", [("wrong", 12000, 3), ('{"value":true}', 1, 0)])
+@pytest.mark.parametrize("answer,budget,count", [("wrong", 12000, 5), ('{"value":true}', 1, 0)])
 def test_guided_edit_all_formats_retains_prior_declarations(
     monkeypatch, tmp_path, answer, budget, count
 ):
@@ -464,7 +468,7 @@ def test_http_failure_displays_effective_setting_without_changing_evidence(
         "Image input: Failed · Service returned HTTP 400; image support was not confirmed"
         not in text
     )
-    assert len(calls) == 3
+    assert len(calls) == 5  # includes the json_schema and developer-role checks
     assert yaml.safe_load(path.read_text())["models"]["local"]["media_inputs"] == previous
     record = next(record for record in captured if record.get("outcome") == "inconclusive")
     assert record["reason"] == "Service returned HTTP 400; image support was not confirmed"
@@ -597,7 +601,7 @@ def test_final_review_can_disable_retained_enabled_failed_input(monkeypatch, tmp
     assert "Images: enabled" in text
     assert "Images: off" in text
     assert "Images: off." in text[text.index("Images: off") :]
-    assert len(calls) == 3
+    assert len(calls) == 5  # includes the json_schema and developer-role checks
     assert yaml.safe_load(path.read_text())["models"]["local"]["media_inputs"] == []
     assert any(
         record.get("outcome") == "inconclusive"
