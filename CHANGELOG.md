@@ -17,6 +17,15 @@ to follow semantic versioning.
   `usage.prompt_tokens_details.cached_tokens` and reasoning tokens at
   `usage.completion_tokens_details.reasoning_tokens`, and a zero `cost_usd`
   is left out.
+- The NeMo Relay middleware ends a failed code cell's tool call as an error,
+  so its OpenTelemetry `execute_tool` span has status `ERROR`, `error.type`
+  `internal_error` and an `exception` event with the error's class. The
+  status description holds only the error message. Failed cells used to end
+  `OK` with no error. Breaking for Relay tool execution intercepts and the
+  ATIF exporter. The failed call now raises, so an intercept that retries on
+  errors runs the cell again. Relay records no result for the call, so a
+  failed cell's stdout is no longer in the span, and the ATIF trajectory has
+  no observation for it.
 - **Behaviour change:** the live `<context>` (state, todo status, context usage,
   `set_dynamic` blocks) is now **appended to the history at least every 5 turns**
   (exactly every 5 when nothing is archived) instead of being regenerated on

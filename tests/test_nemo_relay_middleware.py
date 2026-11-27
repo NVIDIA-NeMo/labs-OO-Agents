@@ -13,16 +13,19 @@ correctly support:
 - ATIF trajectory export
 """
 
+import contextlib
 import json
 
 import pytest
 
 nemo_relay = pytest.importorskip("nemo_relay", reason="nemo_relay not installed")
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 from unittest.mock import MagicMock
 
+from nooa.events import ExecutionResult
 from nooa.llm_types import LLMResponse
 from nooa.nemo_relay_middleware import (
     install_nemo_relay,
@@ -963,6 +966,170 @@ class TestToolMiddlewareEdgeCases:
         result = await nemo_relay_tool_middleware(ctx, nxt)
         assert result.result is not None
         assert result.result.returned_value is None
+
+
+class _BadStr(Exception):
+    def __str__(self) -> str:
+        raise RuntimeError("no str")
+
+
+async def _pass_through(context: Any, next_call: Any) -> Any:
+    result = await next_call(context.args)
+    return nemo_relay.ToolExecutionInterceptOutcome(result.result, annotation=result.annotation)
+
+
+async def _raise_in_finally(context: Any, next_call: Any) -> Any:
+    try:
+        return await _pass_through(context, next_call)
+    finally:
+        raise OSError("audit sink unavailable")
+
+
+async def _replace_with_same_message(context: Any, next_call: Any) -> Any:
+    try:
+        return await _pass_through(context, next_call)
+    except RuntimeError as e:
+        raise RuntimeError(str(e)) from e
+
+
+async def _wrap_the_error(context: Any, next_call: Any) -> Any:
+    try:
+        return await _pass_through(context, next_call)
+    except RuntimeError as e:
+        raise PermissionError(f"audit sink unavailable: {e}") from e
+
+
+class TestFailedCellSpan:
+    @staticmethod
+    @contextlib.contextmanager
+    def _intercepts(*fns: Any) -> Iterator[None]:
+        for i, fn in enumerate(fns):
+            nemo_relay.intercepts.register_tool_execution(f"failed-cell-{i}", i, fn)
+        try:
+            yield
+        finally:
+            for i in range(len(fns)):
+                nemo_relay.intercepts.deregister_tool_execution(f"failed-cell-{i}")
+
+    @staticmethod
+    async def _run(nxt: Any) -> tuple[ExecutePythonContext, Any]:
+        ends: list[Any] = []
+
+        def _spy(event: Any):
+            if isinstance(event, nemo_relay.ScopeEvent) and event.category == "tool":
+                if event.scope_category == "end":
+                    ends.append(event)
+
+        nemo_relay.subscribers.register("failed-cell-spy", _spy)
+        try:
+            out = await nemo_relay_tool_middleware(_make_exec_ctx(), nxt)
+            await nemo_relay.subscribers.flush_async()
+        finally:
+            nemo_relay.subscribers.deregister("failed-cell-spy")
+        [end] = ends
+        return out, end
+
+    @staticmethod
+    def _returning(result: ExecutionResult) -> Any:
+        async def nxt(c):
+            c.result = result
+            return c
+
+        return nxt
+
+    @pytest.mark.asyncio
+    async def test_a_failed_cell_ends_as_an_error(self):
+        error = ZeroDivisionError("division by zero")
+        result = ExecutionResult(stdout="partial\n", stderr="about to divide\n", error=error)
+
+        out, end = await self._run(self._returning(result))
+
+        assert end.metadata["otel.status_code"] == "ERROR"
+        assert end.metadata["exception.type"] == "ZeroDivisionError"
+        assert "division by zero" in end.metadata["otel.status_description"]
+        assert out.result is result
+        assert result.error is error and error.__traceback__ is None
+
+    @pytest.mark.asyncio
+    async def test_a_failed_cells_output_stays_out_of_the_span(self):
+        error = ZeroDivisionError("division by zero")
+        result = ExecutionResult(stdout="partial\n", stderr="about to divide\n", error=error)
+
+        _, end = await self._run(self._returning(result))
+
+        for text in ("partial", "about to divide"):
+            assert text not in end.metadata["otel.status_description"]
+        assert end.data is None
+
+    @pytest.mark.asyncio
+    async def test_a_successful_cell_ends_ok(self):
+        result = ExecutionResult(stdout="2\n", stderr="a warning\n")
+
+        out, end = await self._run(self._returning(result))
+
+        assert end.metadata["otel.status_code"] == "OK"
+        assert out.result is result
+
+    @pytest.mark.asyncio
+    async def test_an_error_after_a_failed_attempt_still_raises(self):
+        attempts: list[str] = []
+
+        async def nxt(c):
+            attempts.append(c.code)
+            if len(attempts) > 1:
+                raise ValueError("middleware broke")
+            c.result = ExecutionResult(error=ZeroDivisionError("division by zero"))
+            return c
+
+        async def retry(context, next_call):
+            try:
+                result = await next_call(context.args)
+            except RuntimeError:
+                result = await next_call(context.args)
+            return nemo_relay.ToolExecutionInterceptOutcome(
+                result.result, annotation=result.annotation
+            )
+
+        with self._intercepts(retry), pytest.raises(RuntimeError, match="middleware broke"):
+            await self._run(nxt)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("intercepts", [0, 1, 2])
+    @pytest.mark.parametrize(
+        "error",
+        [ZeroDivisionError("division by zero"), ValueError("caf\udce9"), _BadStr()],
+        ids=["plain", "lone-surrogate", "str-raises"],
+    )
+    async def test_a_failed_cell_returns_its_result_through_intercepts(self, error, intercepts):
+        result = ExecutionResult(error=error)
+
+        with self._intercepts(*[_pass_through] * intercepts):
+            out, end = await self._run(self._returning(result))
+
+        assert out.result is result
+        assert end.metadata["otel.status_code"] == "ERROR"
+
+    @pytest.mark.asyncio
+    async def test_a_same_message_replacement_is_treated_as_relays_propagation(self):
+        # Relay 0.9 keeps no cause, so RuntimeError(str(error)) is identical to its own wrapping.
+        result = ExecutionResult(error=ZeroDivisionError("division by zero"))
+
+        with self._intercepts(_replace_with_same_message):
+            out, end = await self._run(self._returning(result))
+
+        assert out.result is result
+        assert end.metadata["otel.status_code"] == "ERROR"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("intercept", [_raise_in_finally, _wrap_the_error])
+    async def test_an_intercepts_own_error_after_a_failed_cell_still_raises(self, intercept):
+        result = ExecutionResult(error=ZeroDivisionError("division by zero"))
+
+        with (
+            self._intercepts(intercept),
+            pytest.raises(RuntimeError, match="audit sink unavailable"),
+        ):
+            await self._run(self._returning(result))
 
 
 class TestRelayEventProfiles:
