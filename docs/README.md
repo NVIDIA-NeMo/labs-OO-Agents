@@ -70,6 +70,7 @@ First [connect a model](model-connect.md). Then:
 
 | Document | Question it answers |
 |---|---|
+| [ATOM evaluation preparation](atom-eval-author/README.md) | What behavior and source evidence should inform ATOM evaluations? (Draft for intent review.) |
 | [Agents and methods](concepts/agents-and-methods.md) | What is an agent in NOOA, and what does `...` mean? |
 | [Strategies](concepts/strategies.md) | When should a method use Predict or CodeAct? |
 | [Decision models](concepts/decisions.md) | How do I use typed probability, choice, and score decisions? |
