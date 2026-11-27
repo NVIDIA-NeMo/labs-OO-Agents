@@ -16,6 +16,7 @@ import concurrent.futures as futures
 import logging
 import multiprocessing as mp
 import os
+import secrets
 import signal
 import time
 from multiprocessing.connection import Connection
@@ -37,6 +38,7 @@ from nooa.runtime.sandbox.errors import (
 from nooa.runtime.sandbox.guards import Capabilities, probe_capabilities
 from nooa.runtime.sandbox.serialization import (
     ResultDTO,
+    _parent_error_token,
     dto_from_wire,
     dto_to_result,
     effective_error_limit,
@@ -275,6 +277,9 @@ class SandboxedExecutor:
                     )
                 )
             await self._ensure_worker()
+            # Generate AFTER fork so this cell's worker cannot inherit its secret.
+            # Local, per-cell state also bounds memory and invalidates old/late RPCs.
+            parent_error_key = secrets.token_bytes(32)
             assert self._conn is not None
             req_id = self._next_id()
             try:
@@ -291,7 +296,9 @@ class SandboxedExecutor:
                 deadline = self._cell_timeout + self._config.timeout_grace_s
             loop = asyncio.get_running_loop()
             try:
-                response = await asyncio.to_thread(self._recv_until_result, req_id, deadline, loop)
+                response = await asyncio.to_thread(
+                    self._recv_until_result, req_id, deadline, loop, parent_error_key
+                )
             except CellTimeoutError as exc:
                 await self._restart_worker()
                 return self._synth_error(exc)
@@ -305,10 +312,19 @@ class SandboxedExecutor:
                 # Only a tampered worker produces a malformed result: retire it.
                 await self._restart_worker()
                 return self._synth_error(WorkerDiedError(f"{exc}.{self._RESET_NOTE}"))
-            return dto_to_result(dto, signal_factory=self._signal_factory, codec=self._codec)
+            return dto_to_result(
+                dto,
+                signal_factory=self._signal_factory,
+                codec=self._codec,
+                parent_error_key=parent_error_key,
+            )
 
     def _recv_until_result(
-        self, req_id: int, deadline: float | None, loop: asyncio.AbstractEventLoop
+        self,
+        req_id: int,
+        deadline: float | None,
+        loop: asyncio.AbstractEventLoop,
+        parent_error_key: bytes | None = None,
     ) -> dict[str, Any]:
         """Block (in a thread) until the worker answers, servicing broker calls.
 
@@ -354,7 +370,7 @@ class SandboxedExecutor:
                 # call: the worker is idle-waiting, not running cell code, so
                 # this time must not count against the cell deadline.
                 broker_started = time.monotonic()
-                self._service_tool_call(msg, loop)
+                self._service_tool_call(msg, loop, parent_error_key=parent_error_key)
                 if end is not None:
                     end += time.monotonic() - broker_started
                 continue
@@ -363,7 +379,14 @@ class SandboxedExecutor:
             if mtype == "response" and msg.get("id") == req_id:
                 return msg
 
-    def _service_tool_call(self, msg: dict[str, Any], loop: asyncio.AbstractEventLoop) -> None:
+    def _service_tool_call(
+        self,
+        msg: dict[str, Any],
+        loop: asyncio.AbstractEventLoop,
+        *,
+        parent_error_key: bytes | None = None,
+    ) -> None:
+        """Service one RPC, keeping its error authority scoped to the originating cell."""
         try:
             call = self._decode_tool_call(msg)
         except CellSerializationError as exc:
@@ -375,7 +398,9 @@ class SandboxedExecutor:
                 "error": _bounded_text(exc, "CellSerializationError", limit=self._max_error),
             }
         else:
-            future = asyncio.run_coroutine_threadsafe(self._dispatch_tool_call(call), loop)
+            future = asyncio.run_coroutine_threadsafe(
+                self._dispatch_tool_call(call, parent_error_key=parent_error_key), loop
+            )
             # Brokered ``self.*`` work runs parent-side while the worker idles — it
             # gets its OWN bound (broker_timeout_s), not the cell deadline: killing
             # the worker because the parent was slow (e.g. memory consolidation LLM
@@ -443,7 +468,9 @@ class SandboxedExecutor:
             obj = getattr(obj, part)
         return obj
 
-    async def _dispatch_tool_call(self, msg: dict[str, Any]) -> dict[str, Any]:
+    async def _dispatch_tool_call(
+        self, msg: dict[str, Any], *, parent_error_key: bytes | None = None
+    ) -> dict[str, Any]:
         """Run a brokered ``self.<path>`` access against the parent's live agent."""
         from nooa.events import ExecutionSignal
         from nooa.runtime.media_capture import capture_media
@@ -528,6 +555,7 @@ class SandboxedExecutor:
                 # surrogate exception. Transport a bounded string hint, never the
                 # callable or traceback itself.
                 from nooa.errors.formatting import _bad_call_agentdoc
+                from nooa.unifiedllm.admission import AdmissionQueueFullError
 
                 call_hint = _bad_call_agentdoc(exc, target=target)
                 response = {
@@ -539,6 +567,14 @@ class SandboxedExecutor:
                 }
                 if call_hint:
                     response["call_hint"] = _bounded_text(call_hint, "", limit=self._max_error)
+                if parent_error_key is not None and isinstance(exc, AdmissionQueueFullError):
+                    response["error_type"] = "AdmissionQueueFullError"
+                    response["error"] = response["error"] or _bounded_text(
+                        "AdmissionQueueFullError", "Exception", limit=self._max_error
+                    )
+                    response["parent_error_token"] = _parent_error_token(
+                        response["error"], parent_error_key
+                    )
 
             if media_buf.blocks:
                 response["images"] = list(media_buf.blocks)
