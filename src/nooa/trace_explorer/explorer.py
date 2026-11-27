@@ -507,7 +507,7 @@ def _load_spans(trace_path: str | Path) -> list[dict[str, Any]]:
     """
     spans = []
     parse_errors = 0
-    with open(trace_path) as f:
+    with open(trace_path, encoding="utf-8") as f:
         for line_num, line in enumerate(f, 1):
             line = line.strip()
             if line:

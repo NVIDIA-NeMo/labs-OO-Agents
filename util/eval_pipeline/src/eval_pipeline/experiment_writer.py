@@ -147,7 +147,7 @@ class ExperimentWriter:
         metadata_line = EvalMetadataLine(metadata=metadata)
 
         # Write first line
-        with open(self.file_path, "w") as f:
+        with open(self.file_path, "w", encoding="utf-8") as f:
             f.write(metadata_line.model_dump_json(by_alias=True))
             f.write("\n")
 
@@ -176,7 +176,7 @@ class ExperimentWriter:
             result = EvalTestResult.model_validate(result)
 
         # Write as JSONL line with _type alias
-        with open(self.file_path, "a") as f:
+        with open(self.file_path, "a", encoding="utf-8") as f:
             f.write(result.model_dump_json(by_alias=True))
             f.write("\n")
 
@@ -232,7 +232,7 @@ class ExperimentWriter:
         )
 
         # Write completion line (exclude None values to keep JSON clean)
-        with open(self.file_path, "a") as f:
+        with open(self.file_path, "a", encoding="utf-8") as f:
             f.write(completion.model_dump_json(by_alias=True, exclude_none=True))
             f.write("\n")
 

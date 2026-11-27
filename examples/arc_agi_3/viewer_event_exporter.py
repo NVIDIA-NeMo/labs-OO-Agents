@@ -210,7 +210,7 @@ class ViewerEventExporter(SpanExporter):
         if not self.events_path.exists():
             return cur
         try:
-            for line in self.events_path.read_text().splitlines():
+            for line in self.events_path.read_text(encoding="utf-8").splitlines():
                 e = json.loads(line)
                 if e.get("event") == "env_step":
                     t = float(e.get("unix_time_s", 0))

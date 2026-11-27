@@ -1133,7 +1133,7 @@ class LLMJudgeScorer:
                     f"=== CODE EXTRACTED ===\n{code or '(no code)'}\n\n"
                     f"=== FULL PROMPT TO JUDGE ===\n{prompt}\n"
                 )
-                debug_file.write_text(debug_content)
+                debug_file.write_text(debug_content, encoding="utf-8")
                 # Always print file write (this is the key info users need)
                 print(f"Judge debug: {debug_file}", flush=True)
             except Exception as e:

@@ -48,7 +48,7 @@ def list_traces():
         for f in TRACE_DIR.glob("*.jsonl")
         if not f.name.endswith(".annotations.jsonl") and not f.name.endswith(".noo-eval.jsonl")
     ):
-        with open(trace_file) as f:
+        with open(trace_file, encoding="utf-8") as f:
             span_count = sum(1 for _ in f)
         print(f"  {trace_file.name:50s} ({span_count} spans)")
 

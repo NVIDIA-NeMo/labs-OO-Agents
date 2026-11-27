@@ -528,9 +528,9 @@ class ShellTools(Skill):
             if mpath not in file_cache:
                 resolved = (self.cwd / mpath).resolve()
                 try:
-                    lines = resolved.read_text().splitlines(keepends=True)
+                    lines = resolved.read_text(encoding="utf-8").splitlines(keepends=True)
                     file_cache[mpath] = (resolved, lines)
-                except OSError:
+                except (OSError, UnicodeDecodeError):
                     return None
             resolved, lines = file_cache[mpath]
             if not (1 <= line_no <= len(lines)):
@@ -659,7 +659,7 @@ class ShellTools(Skill):
         """
         resolved = (self.cwd / path).resolve()
         try:
-            content = resolved.read_text()
+            content = resolved.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             return await self.read_binary(path, lines=lines)
         all_lines = content.splitlines(keepends=True)
@@ -732,7 +732,7 @@ class ShellTools(Skill):
         if isinstance(target, Match):
             new_text = old_or_new
             resolved = Path(target.resolved_path)
-            content = resolved.read_text()
+            content = resolved.read_text(encoding="utf-8")
             all_lines = content.splitlines(keepends=True)
 
             before = all_lines[: target.start - 1]
@@ -740,7 +740,7 @@ class ShellTools(Skill):
             if new_text and not new_text.endswith("\n") and after:
                 new_text += "\n"
             new_content = "".join(before) + new_text + "".join(after)
-            resolved.write_text(new_content)
+            resolved.write_text(new_content, encoding="utf-8")
 
             diff = f"--- a/{target.path}\n+++ b/{target.path}\n"
             diff += f"@@ -{target.start},{target.end - target.start + 1} @@\n"
@@ -758,7 +758,7 @@ class ShellTools(Skill):
                 )
             old_text = old_or_new
             resolved = (self.cwd / target).resolve()
-            content = resolved.read_text()
+            content = resolved.read_text(encoding="utf-8")
 
             count = content.count(old_text)
             if count == 0:
@@ -773,7 +773,7 @@ class ShellTools(Skill):
                 )
 
             new_content = content.replace(old_text, new, 1)
-            resolved.write_text(new_content)
+            resolved.write_text(new_content, encoding="utf-8")
 
             return FileWrite(
                 path=target,
@@ -797,7 +797,7 @@ class ShellTools(Skill):
         """
         resolved = (self.cwd / path).resolve()
         resolved.parent.mkdir(parents=True, exist_ok=True)
-        resolved.write_text(content)
+        resolved.write_text(content, encoding="utf-8")
         line_count = content.count("\n") + (1 if content and not content.endswith("\n") else 0)
         return FileWrite(
             path=path,

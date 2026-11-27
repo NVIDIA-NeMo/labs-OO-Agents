@@ -294,7 +294,7 @@ async def test_workspace_shell_and_python_paths_remain_independent(tmp_path, mon
         async with Shell(workspace) as shell:
             await shell.run("cd sub")
             assert (await shell.run("cat marker")).stdout == "shell"
-            assert Path("marker").read_text() == "python"
+            assert Path("marker").read_text(encoding="utf-8") == "python"
             assert (await agent.files.read("marker")).text == "workspace"
         assert "Python paths use cell cwd, not Shell cwd." in agent.context["workspace_state"]
     finally:

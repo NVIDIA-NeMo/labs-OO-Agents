@@ -208,7 +208,7 @@ def _load_dotenv() -> None:
     f = REPO_ROOT / ".env"
     if not f.exists():
         return
-    for line in f.read_text().splitlines():
+    for line in f.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -375,7 +375,7 @@ def main() -> int:
             launcher_env["ARC_SANDBOX_REQUIRE"] = "1"
 
     launcher_err = None  # opened here so the finally below can always close it safely
-    launcher_err = open(run_dir / "launcher.err", "w")
+    launcher_err = open(run_dir / "launcher.err", "w", encoding="utf-8")
     launcher = subprocess.Popen(
         launcher_cmd,
         cwd=str(REPO_ROOT),
@@ -391,7 +391,7 @@ def main() -> int:
     if args.reasoning_effort:
         llm_uri = f"{llm_uri}#{args.reasoning_effort}"
     if not llm_uri and (REPO_ROOT / ".env").exists():
-        for line in (REPO_ROOT / ".env").read_text().splitlines():
+        for line in (REPO_ROOT / ".env").read_text(encoding="utf-8").splitlines():
             if line.startswith("ARC_LLM_MODEL="):
                 llm_uri = line.split("=", 1)[1].strip()
                 break
@@ -550,7 +550,7 @@ def main() -> int:
 
     result_path = run_dir / "result.json"
     if result_path.exists():
-        result = json.loads(result_path.read_text())
+        result = json.loads(result_path.read_text(encoding="utf-8"))
         print(
             f"[run] finished: termination={result.get('termination_reason')} "
             f"levels={result.get('levels_completed')} "

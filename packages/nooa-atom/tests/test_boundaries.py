@@ -12,7 +12,7 @@ _FORBIDDEN = ("nooa_cli", "nooa_acp")
 
 
 def _imported_modules(path: Path) -> set[str]:
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -79,7 +79,7 @@ def test_no_module_uses_private_core_names_that_have_public_replacements():
 
 def _agent_reaches(path: Path) -> list[str]:
     """Attribute reads named ``agent``/``_agent``, and ``getattr(x, "agent")``, in one file."""
-    tree = ast.parse(path.read_text(), filename=str(path))
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     names = {"agent", "_agent"}
     hits = []
     for node in ast.walk(tree):

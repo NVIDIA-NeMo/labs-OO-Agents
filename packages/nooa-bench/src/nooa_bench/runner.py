@@ -130,7 +130,7 @@ def _write_result(result: dict[str, Any], model: str, agent_type: str) -> None:
         "n_output_tokens": result.get("n_output_tokens"),
     }
     out = LOGS_DIR / "result.json"
-    out.write_text(json.dumps(payload, indent=2))
+    out.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     logger.info("Result written → %s", out)
 
 
@@ -199,7 +199,7 @@ def _write_trajectory(agent: Any, *, filename: str = "trajectory.json") -> bool:
         return False
 
     try:
-        out.write_text(json.dumps(events, indent=2, default=_public_json_default))
+        out.write_text(json.dumps(events, indent=2, default=_public_json_default), encoding="utf-8")
     except Exception as e:  # debug serialization must not invalidate a completed task
         logger.warning("Could not write %s: %s", out, e)
         return False
@@ -228,7 +228,7 @@ def _write_behavior_report(
             task_id=os.environ.get("NOOA_TASK_ID"),
         )
         out = LOGS_DIR / "behavior.json"
-        out.write_text(json.dumps(report.to_dict(), indent=2))
+        out.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
     except Exception as e:  # noqa: BLE001 - analysis must not fail the benchmark
         logger.warning("Could not write interface behavior report: %s", e)
         return
@@ -243,7 +243,7 @@ def _write_answer(result: dict[str, Any]) -> None:
         return
     try:
         ANSWER_FILE.parent.mkdir(parents=True, exist_ok=True)
-        ANSWER_FILE.write_text(str(answer))
+        ANSWER_FILE.write_text(str(answer), encoding="utf-8")
         logger.info("Answer written → %s", ANSWER_FILE)
     except OSError as e:
         logger.warning("Could not write answer file %s: %s", ANSWER_FILE, e)

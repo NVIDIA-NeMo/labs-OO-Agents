@@ -168,7 +168,7 @@ def _kill_group(pid: int) -> None:
 def _gone(pid: int) -> bool:
     """No such process, or a zombie (PID 1 in a container may not reap orphans)."""
     try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except FileNotFoundError:
         return True
     except OSError:

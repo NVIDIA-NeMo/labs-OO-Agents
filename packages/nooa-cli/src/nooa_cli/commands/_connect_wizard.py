@@ -2223,7 +2223,7 @@ def choose_reasoning(state: WizardState, *, deferred=False, edit=False) -> bool:
     same_previous_route = state.guided_reasoning_route in {None, route}
     levels = deepcopy(state.edited_level_patches) if same_previous_route else None
     if state.levels_file:
-        with Path(state.levels_file).open() as source:
+        with Path(state.levels_file).open(encoding="utf-8") as source:
             levels = yaml.safe_load(source)
     elif state.levels or state.reasoning_template:
         if not state.levels or not state.reasoning_template:
@@ -2516,7 +2516,7 @@ def configure_checks(state: WizardState) -> bool:
         if not state.levels_file:
             state.patches = {label: deepcopy(original_levels[label]) for label in labels}
     if state.levels_file:
-        with Path(state.levels_file).open() as source:
+        with Path(state.levels_file).open(encoding="utf-8") as source:
             state.patches = yaml.safe_load(source)
     if state.levels or state.reasoning_template:
         if not state.reasoning_template or not state.levels:
@@ -3235,7 +3235,7 @@ def save_model(state: WizardState) -> bool:
             # so they alone must not keep the new key after a failed save. If
             # the file cannot be read now, assume there were none (keeps the key).
             try:
-                before_document = yaml.safe_load(state.path.read_text())
+                before_document = yaml.safe_load(state.path.read_text(encoding="utf-8"))
                 earlier_references = (
                     key_references(before_document)
                     if isinstance(before_document, dict)
@@ -3250,7 +3250,7 @@ def save_model(state: WizardState) -> bool:
                 # unreadable file must not count as "model not saved", so read
                 # it directly and let errors other than a missing file propagate.
                 try:
-                    saved_document = yaml.safe_load(state.path.read_text())
+                    saved_document = yaml.safe_load(state.path.read_text(encoding="utf-8"))
                 except FileNotFoundError:
                     return False
                 if not isinstance(saved_document, dict) or not isinstance(

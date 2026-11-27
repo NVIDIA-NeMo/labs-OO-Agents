@@ -98,7 +98,7 @@ def _parse_args() -> argparse.Namespace:
 @hidden
 def _write_output(result: str) -> None:
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-    (ARTIFACTS_DIR / "output.txt").write_text(str(result) + "\n")
+    (ARTIFACTS_DIR / "output.txt").write_text(str(result) + "\n", encoding="utf-8")
     logger.debug("wrote /app/artifacts/output.txt")
 
 

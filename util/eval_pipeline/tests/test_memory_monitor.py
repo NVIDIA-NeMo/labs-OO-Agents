@@ -185,7 +185,7 @@ class TestMemoryMonitor:
         diag_path = Path(monitor.diag_file)
         assert diag_path.exists()
 
-        content = diag_path.read_text()
+        content = diag_path.read_text(encoding="utf-8")
         assert "MEMORY DIAGNOSTICS" in content
         assert "test_diag" in content
         assert "TOP 25 MEMORY ALLOCATORS" in content

@@ -262,7 +262,7 @@ def _tree_sitter_available() -> bool:
 
 def _line_match(path: Path, line_no: int) -> Match | None:
     try:
-        lines = path.read_text(errors="replace").splitlines(keepends=True)
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     except OSError:
         return None
     if not (1 <= line_no <= len(lines)):
@@ -272,7 +272,7 @@ def _line_match(path: Path, line_no: int) -> Match | None:
 
 def _symbol_anchor_pairs(path: Path, symbols: list[str]) -> list[tuple[str, Match]]:
     try:
-        lines = path.read_text(errors="replace").splitlines(keepends=True)
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     except OSError:
         return []
     pairs: list[tuple[str, Match]] = []
@@ -370,7 +370,7 @@ def _extract_symbols(path: Path, lang: str, max_symbols: int = 200) -> list[str]
         return []
 
     try:
-        text = path.read_text(errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except (OSError, PermissionError):
         return []
 
@@ -842,7 +842,7 @@ class RepoTools(Skill):
             raw_lines = []
             for fpath in self._iter_source_files(resolved, max_files=200):
                 try:
-                    text = fpath.read_text(errors="replace")
+                    text = fpath.read_text(errors="replace", encoding="utf-8")
                     for i, line in enumerate(text.splitlines(), 1):
                         if re.search(rf"\b{re.escape(name)}\b", line):
                             rel = fpath.relative_to(self._root)

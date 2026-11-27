@@ -266,7 +266,7 @@ async def main():
     trajectory_json = exporter.export_json()
     trajectory = json.loads(trajectory_json)
     trajectory_path = "/tmp/nemo_relay_trajectory_research.json"
-    with open(trajectory_path, "w") as f:
+    with open(trajectory_path, "w", encoding="utf-8") as f:
         json.dump(trajectory, f, indent=2, default=str)
     print(f"\n--- Research trajectory → {trajectory_path} ---")
 
@@ -329,7 +329,7 @@ async def main():
             print("  NeMo Relay sees: (no tool output captured)")
 
     demo_traj_path = "/tmp/nemo_relay_trajectory_demo.json"
-    with open(demo_traj_path, "w") as f:
+    with open(demo_traj_path, "w", encoding="utf-8") as f:
         json.dump(traj, f, indent=2, default=str)
     print(f"\n--- Last demo trajectory → {demo_traj_path} ---")
 

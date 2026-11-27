@@ -85,7 +85,7 @@ def scan_game(alias: str, run_dir: Path) -> dict:
         if not sr:
             continue
         step, rnd, _ = sr
-        text = f.read_text(errors="replace")
+        text = f.read_text(errors="replace", encoding="utf-8")
         for stdout, stderr in rt.iter_tool_outputs(text):
             blob = stdout + "\n" + stderr
             if not blob.strip():
@@ -153,7 +153,7 @@ def main() -> int:
                 f"{alias:6s} rule2_outputs={n2:3d}(contents={r2c}) "
                 f"rule3_outputs={n3:3d}(contents={r3c})"
             )
-    (ev / "returned_data.json").write_text(json.dumps(out, indent=2))
+    (ev / "returned_data.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
     print("\nTOTALS:", out["totals"])
     return 0
 

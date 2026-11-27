@@ -652,7 +652,7 @@ def _load_mcp_config(mcp_file: Path | None = None) -> dict[str, dict]:
     mcp_path = mcp_file or Path(".mcp.json")
     if mcp_path.exists():
         try:
-            mcp_data = json.loads(mcp_path.read_text())
+            mcp_data = json.loads(mcp_path.read_text(encoding="utf-8"))
             return mcp_data.get("mcpServers", {})
         except (json.JSONDecodeError, OSError):
             pass

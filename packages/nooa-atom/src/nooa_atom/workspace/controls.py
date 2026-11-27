@@ -108,7 +108,7 @@ class BehaviorControl:
         if not path.exists():
             return {}
         try:
-            data = yaml.safe_load(path.read_text())
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, yaml.YAMLError):
             return {}
         return data if isinstance(data, dict) else {}

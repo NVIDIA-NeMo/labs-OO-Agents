@@ -12,7 +12,7 @@ from scripts.check_license_headers import source_python_files
 
 def _python_file(path: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("print('test')\n")
+    path.write_text("print('test')\n", encoding="utf-8")
     return path
 
 

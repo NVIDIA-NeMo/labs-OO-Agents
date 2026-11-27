@@ -338,7 +338,7 @@ def _tree_sitter_available() -> bool:
 def _line_match(path: Path, line_no: int) -> Match | None:
     """Build a ``Match`` for one line of a host-readable file; None if unreadable."""
     try:
-        lines = path.read_text(errors="replace").splitlines(keepends=True)
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     except OSError:
         return None
     if not (1 <= line_no <= len(lines)):
@@ -375,7 +375,7 @@ def _line_match_from_lines(
 def _symbol_anchor_pairs(path: Path, symbols: list[str]) -> list[tuple[str, Match]]:
     """Pair formatted symbol lines with anchors read from the host filesystem."""
     try:
-        lines = path.read_text(errors="replace").splitlines(keepends=True)
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
     except OSError:
         return []
     return _symbol_anchor_pairs_from_lines(path, symbols, lines)
@@ -483,7 +483,7 @@ def _extract_symbols(
 
     try:
         if source is None:
-            text = path.read_text(errors="replace")
+            text = path.read_text(encoding="utf-8", errors="replace")
         else:
             text = source.decode("utf-8", errors="replace")
     except (OSError, PermissionError):
@@ -1198,7 +1198,7 @@ class RepoTools(Skill):
             raw_lines = []
             for fpath in self._iter_source_files(resolved, max_files=200):
                 try:
-                    text = fpath.read_text(errors="replace")
+                    text = fpath.read_text(errors="replace", encoding="utf-8")
                     for i, line in enumerate(text.splitlines(), 1):
                         if re.search(rf"\b{re.escape(name)}\b", line):
                             try:

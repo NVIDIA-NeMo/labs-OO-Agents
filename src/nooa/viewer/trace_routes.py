@@ -84,7 +84,7 @@ class CustomModel(BaseModel):
 def load_models_config() -> dict:
     """Load models configuration from YAML file."""
     if MODELS_CONFIG_FILE.exists():
-        with open(MODELS_CONFIG_FILE) as f:
+        with open(MODELS_CONFIG_FILE, encoding="utf-8") as f:
             return yaml.safe_load(f) or {}
     return {}
 
@@ -142,7 +142,7 @@ def get_known_api_key_patterns() -> list[str]:
 def load_custom_models() -> list[dict]:
     """Load custom models from file."""
     if CUSTOM_MODELS_FILE.exists():
-        with open(CUSTOM_MODELS_FILE) as f:
+        with open(CUSTOM_MODELS_FILE, encoding="utf-8") as f:
             data = json.load(f)
             if isinstance(data, list):
                 return [model for model in data if isinstance(model, dict)]
@@ -151,7 +151,7 @@ def load_custom_models() -> list[dict]:
 
 def save_custom_models(models: list[dict]):
     """Save custom models to file."""
-    with open(CUSTOM_MODELS_FILE, "w") as f:
+    with open(CUSTOM_MODELS_FILE, "w", encoding="utf-8") as f:
         json.dump(models, f, indent=2)
 
 

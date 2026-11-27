@@ -76,7 +76,7 @@ def write_viewer_messages(run_dir: Path) -> int:
         return 0
     # env_step event times → step boundaries
     steps: list[tuple[float, int]] = []
-    for line in events_path.read_text().splitlines():
+    for line in events_path.read_text(encoding="utf-8").splitlines():
         try:
             e = json.loads(line)
         except json.JSONDecodeError:
@@ -115,8 +115,12 @@ def write_viewer_messages(run_dir: Path) -> int:
             f"prompt_tok={at.get('llm.token_count.prompt', '?')} "
             f"out_tok={at.get('llm.token_count.completion', '?')} -->\n\n"
         )
-        (msgs_dir / f"step_{step:03d}_round_{rnd:02d}_user.md").write_text(hdr + user)
-        (msgs_dir / f"step_{step:03d}_round_{rnd:02d}_assistant.md").write_text(hdr + asst)
+        (msgs_dir / f"step_{step:03d}_round_{rnd:02d}_user.md").write_text(
+            hdr + user, encoding="utf-8"
+        )
+        (msgs_dir / f"step_{step:03d}_round_{rnd:02d}_assistant.md").write_text(
+            hdr + asst, encoding="utf-8"
+        )
         written += 2
     return written
 
@@ -176,10 +180,10 @@ def main() -> None:
         outs = _messages(at, "output")
         lines.append("\n".join(f"[{r}]\n{c}" for r, c in outs) if outs else "(no output content)")
         text = "\n".join(lines)
-        (out_dir / f"call_{n:04d}.txt").write_text(text)
+        (out_dir / f"call_{n:04d}.txt").write_text(text, encoding="utf-8")
         combined.append(text)
 
-    (run_dir / "llm_transcript.txt").write_text("\n".join(combined))
+    (run_dir / "llm_transcript.txt").write_text("\n".join(combined), encoding="utf-8")
     print(f"wrote {len(calls)} calls to {out_dir}/call_*.txt")
     print(f"combined transcript: {run_dir}/llm_transcript.txt")
 

@@ -47,6 +47,18 @@ to follow semantic versioning.
   first release that fixes CVE-2026-133276, CVE-2026-133421 and
   CVE-2026-133424. This applies to the root project, nooa-memory, nooa-atom
   and the cybergym example.
+- Text files are now read and written as UTF-8 regardless of the locale: the
+  library, `nooa-cli`, `nooa-bench`, the eval pipeline, scripts and examples
+  pass `encoding="utf-8"` to every text-mode `open()`, `Path.read_text()`,
+  `Path.write_text()` and `tempfile` call (configs, settings, model registry,
+  `.mcp.json`, OAuth token cache, traces, HTTP logs, viewer sources,
+  ShellTools file reads and edits, repo search). Before, these used the locale
+  default encoding, so on a non-UTF-8 locale (cp1252 on Windows, `LANG=C`
+  before Python 3.15) writes of non-ASCII text raised and reads silently
+  decoded UTF-8 wrongly. A file that an earlier version wrote in a legacy
+  codec on such a machine is now decoded as UTF-8. Ruff rule `PLW1514`
+  (unspecified-encoding) is on, so new text I/O must name its encoding.
+
 - Dependency security update. LiteLLM is now locked at 1.100.5
   (CVE-2026-114612); the `litellm` requirement starts at 1.100.4 and excludes
   the unfixed 1.101-1.103 releases. LiteLLM now requires boto3. Chat

@@ -73,7 +73,7 @@ def main() -> int:
     behav_hits = []
     for fp in logs:
         try:
-            t = open(fp, errors="ignore").read()
+            t = open(fp, encoding="utf-8", errors="ignore").read()
         except OSError:
             continue
         if BEHAV.search(t):
@@ -96,7 +96,7 @@ def main() -> int:
         ),
     }
     EVID.mkdir(exist_ok=True)
-    (EVID / "harness_exposure.json").write_text(json.dumps(result, indent=2))
+    (EVID / "harness_exposure.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
 
     print(
         f"games={len(games)}  world-readable _harness dirs={world_readable_dirs} "

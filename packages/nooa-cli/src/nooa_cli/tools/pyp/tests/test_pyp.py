@@ -276,7 +276,7 @@ async def test_tee(tmp_path):
     outfile = str(tmp_path / "tee_out.txt")
     result = await items(["a", "b", "c"]).tee(outfile).collect()
     assert result == ["a", "b", "c"]
-    content = Path(outfile).read_text()
+    content = Path(outfile).read_text(encoding="utf-8")
     assert "a\n" in content
     assert "c\n" in content
 

@@ -1041,5 +1041,5 @@ def test_core_serializer_holds_no_atom_legacy_prefixes():
 
     from nooa.storage import serialization
 
-    source = Path(serialization.__file__).read_text()
+    source = Path(serialization.__file__).read_text(encoding="utf-8")
     assert "nooa_coder" not in source and "nooa_atom" not in source

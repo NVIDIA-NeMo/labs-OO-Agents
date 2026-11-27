@@ -71,7 +71,7 @@ GRID_S = 20.0  # time-grid resolution (seconds)
 def _events(path: str, cutoff_abs: float | None):
     """Chronological events for one game; stop early once past cutoff_abs (unix s)."""
     out = []
-    for line in open(path, errors="ignore"):
+    for line in open(path, encoding="utf-8", errors="ignore"):
         if '"unix_time_s"' not in line:
             continue
         try:
@@ -95,7 +95,7 @@ def run_start(run: Path) -> float:
     """Earliest event unix time across the whole fleet = the run clock's t0."""
     t0 = None
     for fp in _game_event_files(run):
-        for line in open(fp, errors="ignore"):
+        for line in open(fp, encoding="utf-8", errors="ignore"):
             if '"unix_time_s"' in line:
                 try:
                     t = json.loads(line).get("unix_time_s")
@@ -214,7 +214,7 @@ def main() -> int:
     # B's elapsed window = last event on the B clock.
     last_b = 0.0
     for fp in _game_event_files(RUN_B):
-        for line in reversed(open(fp, errors="ignore").readlines()):
+        for line in reversed(open(fp, encoding="utf-8", errors="ignore").readlines()):
             if '"unix_time_s"' in line:
                 try:
                     last_b = max(last_b, json.loads(line)["unix_time_s"] - t0_b)
@@ -268,7 +268,9 @@ def main() -> int:
     summary = {"window_minutes": round(mins, 1), "this_run": _final(b)}
     if a:
         summary["baseline"] = _final(a)
-    (ANALYSIS_DIR / "comparison_summary.json").write_text(json.dumps(summary, indent=2))
+    (ANALYSIS_DIR / "comparison_summary.json").write_text(
+        json.dumps(summary, indent=2), encoding="utf-8"
+    )
     tr = summary["this_run"]
     base = f"  base_RHAE_L={summary['baseline']['rhae_l_final']}" if a else ""
     print(

@@ -76,7 +76,7 @@ def main() -> int:
             os.path.dirname(target), exist_ok=True
         )
         if not os.path.isdir(src) and not os.path.exists(target):
-            open(target, "a").close()
+            open(target, "a", encoding="utf-8").close()
         _mount(src, target, MS_BIND | MS_REC)
         if mode == "ro":
             _mount(src, target, MS_BIND | MS_REMOUNT | MS_RDONLY | MS_REC)

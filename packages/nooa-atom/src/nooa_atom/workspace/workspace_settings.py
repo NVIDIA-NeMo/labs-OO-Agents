@@ -313,7 +313,7 @@ class WorkspaceSettings(Skill):
         if not path.exists():
             return []
         try:
-            data = yaml.safe_load(path.read_text())
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, yaml.YAMLError):
             return []
         if not isinstance(data, dict):
