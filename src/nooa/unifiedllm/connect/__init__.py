@@ -2609,6 +2609,13 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
                     client, **({"observe_output_model": capture_output_model} if native else {})
                 )
             response.parsed = result  # Typed result, used here only; never saved.
+        elif probe.name == "role:developer":
+            from nooa.unifiedllm.adapters.litellm_chat import keep_developer_role
+
+            # LiteLLM would send the developer message as system; keep it for
+            # this check only (see keep_developer_role).
+            with keep_developer_role():
+                response = await client.acall(messages=messages, **params)
         else:
             response = await client.acall(messages=messages, **params)
         if (
@@ -3340,8 +3347,8 @@ async def run_steps(
                 else "Configured reply cap or settings missing from the actual request",
             )
             if settings_sent is False and probe.name.startswith(("format:", "role:")):
-                # For example LiteLLM sends developer messages as system on
-                # most Chat Completions routes, so support stays unknown.
+                # For example a gateway or client changed the format or the
+                # developer role before sending, so support stays unknown.
                 record["reason"] = (
                     "The tested format or developer message was not in the actual request"
                 )

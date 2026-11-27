@@ -106,10 +106,9 @@ def test_wizard_runs_capability_checks_and_saves_the_facts(monkeypatch, tmp_path
     assert [k for k in entry if k.startswith("structured_output_format")] == [
         "structured_output_format"
     ]
-    # LiteLLM sends the developer message as system on this Chat route, so
-    # developer support stays unknown and is not saved; it is not a failure.
-    assert "developer_role" not in entry
-    assert "Developer instructions: Not available" in result.output
+    # LiteLLM would send the developer message as system on this Chat route;
+    # the check keeps the role for its own request, so support is detected.
+    assert entry["developer_role"] is True
 
 
 @pytest.mark.parametrize("stage", ["capabilities", "all"])
@@ -134,12 +133,9 @@ def test_stage_runs_capability_checks_and_reports_the_facts(monkeypatch, stage, 
     ]
     assert entry["provenance"]["structured_output_format"]["source"] == "connect"
     assert entry["provenance"]["developer_role"]["source"] == "connect"
-    # Responses sends the developer message as is, so support is detected;
-    # LiteLLM sends it as system on this Chat route, so it stays unknown.
-    if style == "responses":
-        assert entry["developer_role"] is True
-    else:
-        assert "developer_role" not in entry
+    # Both routes send the developer message as is (on Chat the check keeps
+    # it despite LiteLLM's system rewrite), so support is detected.
+    assert entry["developer_role"] is True
     if stage == "capabilities":
         # Only the baseline runs besides the capability checks.
         assert len(sent) == 3
