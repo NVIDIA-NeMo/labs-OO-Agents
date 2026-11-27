@@ -125,16 +125,6 @@ def test_confirmation_accepts_yes_without_deleting_default(monkeypatch):
         assert prompts.confirm("Spend?", default=False) is True
 
 
-@pytest.mark.parametrize(
-    ("answer", "expected"), [("Y", True), ("YES", True), ("N", False), ("No", False)]
-)
-def test_confirmation_accepts_any_capitalization(monkeypatch, answer, expected):
-    monkeypatch.setattr(prompts.sys.stdin, "isatty", lambda: True)
-    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
-        pipe.send_text(answer + "\r")
-        assert prompts.confirm("Write?", default=not expected) is expected
-
-
 def test_secret_prompt_has_no_completer_or_history(monkeypatch):
     import prompt_toolkit
 

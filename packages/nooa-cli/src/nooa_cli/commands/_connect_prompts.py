@@ -243,11 +243,10 @@ def confirm(text, *, default):
     value = prompt(
         text + (" [Y/n]" if default else " [y/N]"),
         default="",
-        # Accept any capitalization, e.g. "Y" for the default shown as [Y/n].
-        choices=("yes", "no", "y", "n", "Yes", "No", "Y", "N", "YES", "NO", ""),
+        choices=("yes", "no", "y", "n", ""),
         searchable=True,
     )
-    return default if not value else value.lower() in {"yes", "y"}
+    return default if not value else value in {"yes", "y"}
 
 
 def manual_model_limits(context=None, input_limit=None, *, edit=False):
