@@ -67,8 +67,18 @@ class Peer(Protocol):
         """
         ...
 
-    async def request(self, method: str, params: dict[str, Any]) -> Any:
-        """Send a request (``elicitation/create``, an extension) and return its result."""
+    async def request(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        on_id: Callable[[Any], None] | None = None,
+    ) -> Any:
+        """Send a request and return its result; ``on_id`` observes its outer JSON-RPC id."""
+        ...
+
+    async def notify(self, method: str, params: dict[str, Any]) -> None:
+        """Send a JSON-RPC notification (for example ``$/cancel_request``)."""
         ...
 
 
@@ -148,7 +158,7 @@ def initialize_result(client_info: dict[str, Any] | None = None) -> dict[str, An
         "protocolVersion": V2,
         "info": agent_info(),
         "capabilities": {
-            "session": {"mcp": {"stdio": {}, "http": {}}, "delete": {}},
+            "session": {"mcp": {"stdio": {}, "http": {}, "acp": {}}, "delete": {}},
             "_meta": {**INJECT_CAPABILITY, **steer_capability(pool_dialects(client_info))},
         },
     }
@@ -199,6 +209,38 @@ def tool_call(tool_call_id: str, **fields: Any) -> dict[str, Any]:
         if value is not None:
             update[_camel(name)] = value
     return update
+
+
+def terminal_content(terminal_id: str) -> dict[str, Any]:
+    """A display-only reference to an agent-owned terminal."""
+    return {"type": "terminal", "terminalId": terminal_id}
+
+
+def tool_call_content_chunk(tool_call_id: str, content: dict[str, Any]) -> dict[str, Any]:
+    """Append one content item to a tool call without replacing its other content."""
+    return {
+        "sessionUpdate": "tool_call_content_chunk",
+        "toolCallId": tool_call_id,
+        "content": content,
+    }
+
+
+def terminal_update(terminal_id: str, **fields: Any) -> dict[str, Any]:
+    """A terminal upsert; unlike ``tool_call``, explicit ``None`` clears a field."""
+    update: dict[str, Any] = {"sessionUpdate": "terminal_update", "terminalId": terminal_id}
+    update.update(fields)
+    return update
+
+
+def terminal_output_chunk(terminal_id: str, data: bytes) -> dict[str, Any]:
+    """One independently base64-encoded chunk of terminal bytes."""
+    import base64
+
+    return {
+        "sessionUpdate": "terminal_output_chunk",
+        "terminalId": terminal_id,
+        "data": base64.b64encode(data).decode("ascii"),
+    }
 
 
 def _camel(name: str) -> str:
@@ -371,6 +413,7 @@ def check_mcp_servers(servers: Any) -> list[dict[str, Any]]:
     if not isinstance(servers, list):
         raise invalid("mcpServers must be an array")
     names: set[str] = set()
+    server_ids: set[str] = set()
     out: list[dict[str, Any]] = []
     for server in servers:
         if not isinstance(server, dict):
@@ -389,6 +432,13 @@ def check_mcp_servers(servers: Any) -> list[dict[str, Any]]:
                     name=name,
                     command=command_path,
                 )
+        elif kind == "acp":
+            server_id = server.get("serverId")
+            if not isinstance(server_id, str) or not server_id:
+                raise invalid(f"MCP server {name!r}: serverId must be a non-empty string")
+            if server_id in server_ids:
+                raise invalid(f"Duplicate MCP serverId {server_id!r}", serverId=server_id)
+            server_ids.add(server_id)
         elif kind != "http":
             raise invalid(f"MCP server {name!r}: unsupported transport {kind!r}", type=kind)
         out.append(server)
@@ -441,8 +491,19 @@ class V2Peer:
             "session/update", {"sessionId": session_id, "update": update}
         )
 
-    async def request(self, method: str, params: dict[str, Any]) -> Any:
+    async def request(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        on_id: Callable[[Any], None] | None = None,
+    ) -> Any:
+        if on_id is not None:
+            on_id(self._conn._next_request_id)
         return await self._conn.send_request(method, params)
+
+    async def notify(self, method: str, params: dict[str, Any]) -> None:
+        await self._conn.send_notification(method, params)
 
 
 _SESSION_METHODS = {
@@ -453,6 +514,8 @@ _SESSION_METHODS = {
     "session/delete": "delete_session",
     "session/prompt": "prompt",
     "session/set_config_option": "set_config_option",
+    "tool_call/cancel": "cancel_tool_call",
+    "terminal/cancel": "cancel_terminal",
 }
 
 
@@ -476,7 +539,7 @@ class V2Dispatcher:
             raise RequestError.method_not_found(method)
         if method in ("session/new", "session/resume"):
             params = {**params, "mcpServers": check_mcp_servers(params.get("mcpServers"))}
-        if method not in ("session/new", "session/list"):
+        if method not in ("session/new", "session/list", "tool_call/cancel", "terminal/cancel"):
             session_id = _session_id(params)
             if self._agent.is_subagent(session_id):
                 raise invalid(
@@ -491,6 +554,8 @@ class V2Dispatcher:
     async def _notification(self, method: str, params: dict[str, Any]) -> None:
         if method == "session/cancel":
             await self._agent.cancel(params)
+        elif method == "mcp/message":
+            await self._agent.mcp_notification(params)
         elif method.startswith("_"):
             await self._agent.ext_notification(method[1:], params)
 

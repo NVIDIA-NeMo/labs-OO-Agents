@@ -113,6 +113,20 @@ _current_cell: contextvars.ContextVar[tuple[Any, str] | None] = contextvars.Cont
 )
 
 
+_current_tool_call_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "nooa_current_tool_call_id", default=None
+)
+
+
+def current_tool_call_id() -> str | None:
+    """The provider tool-call id of the Python cell running now, if any.
+
+    Unlike ``current_cell_tag`` (an EventManager tag), this is the id an ACP
+    host reports for the cell and may therefore use for tool attribution.
+    """
+    return _current_tool_call_id.get()
+
+
 def current_cell_tag(agent: Any | None = None) -> str | None:
     """The event tag of the python cell running now (None outside a cell).
 
@@ -2305,11 +2319,13 @@ Standard Python builtins and agent instance (`self`) are available."""
         # Nested agent calls may add their events to the event manager during this execution
         with get_harness_metrics().timer("time_code_execution"):
             token = _current_cell.set((runtime.agent, tool_call_event_id))
+            tool_token = _current_tool_call_id.set(tool_call.id)
             try:
                 result = await self._execute_code(
                     runtime, code, builtins, session, method_name, tool_call_id=tool_call.id
                 )
             finally:
+                _current_tool_call_id.reset(tool_token)
                 _current_cell.reset(token)
 
         # Determine final status

@@ -76,7 +76,7 @@ async def test_v2_initialize_new_prompt_resume(mode, servers, workspace):
     assert init["info"]["name"] == "nooa-atom"
     assert "agentCapabilities" not in init and "agentInfo" not in init
     session_caps = init["capabilities"]["session"]
-    assert session_caps["mcp"] == {"stdio": {}, "http": {}}
+    assert session_caps["mcp"] == {"stdio": {}, "http": {}, "acp": {}}
     assert session_caps["delete"] == {}
 
     frame = await server.call("session/new", {"cwd": str(workspace)})
@@ -259,4 +259,53 @@ async def test_a_v1_probe_also_gets_the_v2_answer(mode, servers):
     assert probe["protocolVersions"] == [1, 2]
     assert probe["initialize"]["protocolVersion"] == 2
     assert "session" in probe["initialize"]["capabilities"]
+    assert await server.finish() == 0
+
+
+@pytest.mark.parametrize("mode", MODES)
+async def test_v2_mcp_over_acp_discovery(mode, servers, workspace):
+    """A declared ACP server is discovered over the same JSON-RPC connection."""
+    server = await servers(mode)
+    await server.call("initialize", V2_INIT)
+    request_id = await server.request(
+        "session/new",
+        {
+            "cwd": str(workspace),
+            "mcpServers": [{"type": "acp", "name": "roy", "serverId": "roy:test"}],
+        },
+    )
+    for _ in range(20):
+        frame = await server._next_frame()
+        assert frame is not None, "".join(server.stderr[-30:])
+        server.inbox.append(frame)
+        if frame.method == "mcp/message":
+            break
+    else:
+        raise AssertionError("no MCP discovery request")
+    params = frame.params
+    assert params["serverId"] == "roy:test"
+    assert params["method"] == "tools/list"
+    assert "sessionId" not in params and "toolCallId" not in params
+    meta = params["params"]["_meta"]
+    assert meta["io.modelcontextprotocol/protocolVersion"] == "2026-07-28"
+    await server.send(
+        {
+            "jsonrpc": "2.0",
+            "id": frame.id,
+            "result": {
+                "result": {
+                    "tools": [
+                        {
+                            "name": "echo",
+                            "description": "Echo",
+                            "inputSchema": {"type": "object", "properties": {}},
+                        }
+                    ]
+                }
+            },
+        }
+    )
+    answer = await server.response(request_id)
+    assert "result" in answer.message, answer.message
+    assert answer.message["result"]["sessionId"]
     assert await server.finish() == 0

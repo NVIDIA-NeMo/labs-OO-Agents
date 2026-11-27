@@ -34,10 +34,11 @@ The deprecated `nooa-acp` package is not changed.
 | Client fs / terminal | not used by Atom | removed |
 | Errors | | `-32601` unknown, `-32002` (+ `data.sessionId`) unknown session, `-32600` before initialize |
 
-Roy (the client this was checked against) asks every agent for v2, falls
-back to a v1 connection when the agent answers 1, and on v1 loses
-background work, single tool-call/terminal stop, agent terminals,
-subagents and MCP-over-ACP.
+Roy (the client this was checked against) asks every agent for v2 and falls
+back to a v1 connection when the agent answers 1. On v1 it loses native
+background work, single tool-call/terminal stop, agent terminals and
+subagent sessions. MCP-over-ACP is also available through v1's unstable
+`mcpCapabilities.acp` capability.
 
 ## Design
 
@@ -67,6 +68,51 @@ v2 is Atom's native ACP. v1 is a thin shim over it, kept for v1 clients
   into the parent under `<child>:<id>`) and drops what v1 lacks
   (`state_update`, `subagent_update`, `replay_complete`, background jobs);
   `initialize_response` is the v1 `initialize` answer.
+- `nooa_atom.acp.mcp_acp` is the stateless MCP-over-ACP client. It reuses
+  the ordinary `MCPTool` generation and invocation path; v1 sends the same
+  `mcp/message` method through the shim's underlying JSON-RPC connection.
+
+### Agent terminals and cancellation
+
+`work_shell.Shell` has an optional, context-local terminal observer. When an
+Atom agent runs a cell, the observer forwards command start, raw stdout and
+stderr bytes, and exit as transient runtime events; they are never recorded
+in model history. `ACPEventBridge` turns them into `terminal_update` and
+independently base64-encoded `terminal_output_chunk` updates. A
+`{type: terminal, terminalId}` content item is attached to the Python card,
+to its background `job:<name>` card, or to a standalone execute card. Card
+content replacement retains that reference, and live background terminals
+are listed in `state_update.background`.
+
+A running terminal advertises `capabilities.cancel`. `terminal/cancel`
+uses the shell's existing interrupt machinery and ends the terminal with an
+exit status; it does not cancel the cell, its tool card, or the foreground
+turn. Background `job:` cards advertise tool-call cancellation.
+`tool_call/cancel` cancels that job and finishes only its card as
+`cancelled`. Unknown, final, or unadvertised ids get `-32602`. The v1 shim
+drops terminal updates and v2-only tool-call controls.
+
+### MCP-over-ACP
+
+Both v2 (`capabilities.session.mcp.acp = {}`) and v1
+(`agentCapabilities.mcpCapabilities.acp = true`) advertise the draft
+transport. A session setup server `{type: "acp", name, serverId}` is
+validated and registered as `mcp.<name>` after discovery. There is no MCP
+initialize handshake: every `mcp/message` request has a fresh logical
+`requestId`, inner method and params, and `_meta` naming MCP `2026-07-28`,
+the client's capabilities and NOOA's client info. Discovery during setup
+has no `sessionId`; later calls use the running root or child's
+`current_port.id` and, when known, the Python cell's real tool-call id.
+Cancelling a call sends `$/cancel_request` with the outer ACP request id.
+Inner MCP errors stay distinct from outer ACP errors.
+
+MRTR `input_required` is supported for form elicitation: responses are
+mapped by input-request key and `requestState` is echoed unchanged with a
+fresh logical request id. Sampling and roots requests are rejected because
+Atom does not advertise those capabilities. Provider progress/subscription
+notifications are ignored safely because `MCPTool` has no consumer for
+them; subscriptions themselves are not exposed.
+
 - `serve_connection` reads the first frame and negotiates: v2 →
   `v2.serve_v2`; otherwise it imports the shim and serves v1. The router
   answers `initialize` itself the same way (`v2.initialize_result` or
@@ -119,8 +165,5 @@ tool calls until a later turn ends.
    and `tests/acp_router/test_router_v2.py` are native v2; an end-to-end
    check with Roy.
 
-Not in this change: MCP-over-ACP (`mcp/message`, draft), `tool_call/cancel`
-and `terminal/cancel` (not advertised: Atom cannot yet stop one job or
-command on its own), agent-owned display terminals (`terminal_update`;
-commands keep streaming as tool-call content), `auth/*` (Atom advertises no
-auth methods), prompt images/audio/embedded resources.
+Not in this change: `auth/*` (Atom advertises no auth methods), prompt
+images/audio/embedded resources, and MCP subscriptions, sampling or roots.

@@ -40,7 +40,11 @@ from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUS
 from nooa_atom.acp import v2
 from nooa_atom.acp.protocol import POOLSIDE_DIALECT, PoolDialect
 from nooa_atom.acp.v2 import Peer
+from nooa_atom.agent import work_shell
 from nooa_atom.agent.activity import (
+    AgentTerminalFinished,
+    AgentTerminalOutput,
+    AgentTerminalStarted,
     FileEdit,
     TerminalCommandFinished,
     TerminalCommandOutput,
@@ -105,6 +109,17 @@ class _OpenCard:
     wire_id: str | None = None  # concise cells replace the same rolling card
     output: str = ""  # what a terminal command has streamed so far
     note: str | None = None  # a terminal card's truncation note, kept at the top
+
+
+@dataclass
+class _AgentTerminal:
+    """A terminal's owning card and delivery target; kept after exit for card references."""
+
+    target: str | None
+    tool_call_id: str | None
+    job_name: str | None
+    exited: bool = False
+    owns_card: bool = False
 
 
 """An open tool card: (id of the session that ran it, its tool call id)."""
@@ -371,6 +386,7 @@ class ACPEventBridge:
         # wins, whoever started the close.
         self._finish_open = True
         self._open: dict[ToolKey, _OpenCard] = {}
+        self._agent_terminals: dict[str, _AgentTerminal] = {}
         self._rolling: dict[str, _RollingSlot] = {}
         self._helper_names: dict[str, str] = {}
         self._rolling_seen: set[ToolKey] = set()  # ACP execution ids must not be reused
@@ -395,6 +411,9 @@ class ACPEventBridge:
             "TerminalCommandStarted": self._on_terminal_started,
             "TerminalCommandOutput": self._on_terminal_output,
             "TerminalCommandFinished": self._on_terminal_finished,
+            "AgentTerminalStarted": self._on_agent_terminal_started,
+            "AgentTerminalOutput": self._on_agent_terminal_output,
+            "AgentTerminalFinished": self._on_agent_terminal_finished,
         }
         self._own_handlers: dict[str, Callable[[Any], None]] = {
             "AgentMessage": self._on_agent_message,
@@ -787,6 +806,14 @@ class ACPEventBridge:
                 {"type": "tool_call", "toolCallId": tool_call_id}
                 for tool_call_id in self._background
             ]
+            update["background"] += [
+                {"type": "terminal", "terminalId": terminal_id}
+                for terminal_id, terminal in self._agent_terminals.items()
+                if not terminal.exited
+                and terminal.target is None
+                and terminal.job_name is not None
+                and f"job:{terminal.job_name}" in self._background
+            ]
         self._enqueue(update, session_id)
         parent = self._parents.get(target)
         if parent is not None:
@@ -872,13 +899,25 @@ class ACPEventBridge:
         for tool_call_id in list(background):
             if tool_call_id not in wanted:
                 del background[tool_call_id]
-                self._enqueue(v2.tool_call(tool_call_id, status="completed"))
+                self._enqueue(
+                    {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": tool_call_id,
+                        "status": "completed",
+                        "capabilities": None,
+                    }
+                )
         for tool_call_id, name in wanted.items():
             if tool_call_id not in background:
                 background[tool_call_id] = name
                 self._enqueue(
                     v2.tool_call(
-                        tool_call_id, title=f"Waiting on {name}", kind="other", status="in_progress"
+                        tool_call_id,
+                        title=f"Waiting on {name}",
+                        kind="other",
+                        status="in_progress",
+                        content=self._terminal_items(tool_call_id) or None,
+                        capabilities={"cancel": {}},
                     )
                 )
 
@@ -971,18 +1010,23 @@ class ACPEventBridge:
                 v2.tool_call(
                     slot.wire_id,
                     status="completed",
-                    content=_python_content(card.code, "Continued below."),
+                    content=_python_content(card.code, "Continued below.")
+                    + self._terminal_items(slot.wire_id),
                 ),
                 target,
             )
+            previous_wire_id = slot.wire_id
             slot.wire_id = card.wire_id = f"concise-python-{uuid4()}"
+            for terminal in self._agent_terminals.values():
+                if terminal.tool_call_id == previous_wire_id:
+                    terminal.tool_call_id = slot.wire_id
             self._enqueue(
                 v2.tool_call(
                     card.wire_id,
                     title=self._card_title(slot.key, card),
                     kind="other",
                     status="in_progress",
-                    content=_python_content(card.code),
+                    content=_python_content(card.code) + self._terminal_items(card.wire_id),
                     raw_input={"code": card.code},
                 ),
                 target,
@@ -1087,7 +1131,8 @@ class ACPEventBridge:
                     card.wire_id or key[1],
                     title=title,
                     status=status,
-                    content=_python_content(code, output),
+                    content=_python_content(code, output)
+                    + self._terminal_items(card.wire_id or key[1]),
                     raw_input={"code": code},
                 ),
                 self._target(key),
@@ -1214,6 +1259,145 @@ class ACPEventBridge:
             ),
             self._target(key),
         )
+
+    # ---- agent-owned terminals ------------------------------------------
+
+    def _foreground_terminal_card(self, source_id: str) -> str | None:
+        """The newest open Python card for this source, if a cell started the command."""
+        for key, card in reversed(self._open.items()):
+            if key[0] == source_id and card.kind == "python":
+                return card.wire_id or key[1]
+        return None
+
+    def _terminal_items(self, tool_call_id: str) -> list[dict[str, Any]]:
+        """Terminal references to retain when a card replaces its whole content list."""
+        return [
+            v2.terminal_content(terminal_id)
+            for terminal_id, terminal in self._agent_terminals.items()
+            if terminal.tool_call_id == tool_call_id
+        ]
+
+    async def cancel_terminal(self, terminal_id: str) -> bool:
+        """Cancel a live terminal without changing its tool card or foreground state."""
+        terminal = self._agent_terminals.get(terminal_id)
+        if terminal is None or terminal.exited:
+            return False
+        return await work_shell.cancel_terminal(terminal_id)
+
+    async def cancel_background(self, tool_call_id: str, job: Any) -> bool:
+        """Cancel an advertised background job and finish only its own tool card."""
+        if self._background is None or tool_call_id not in self._background:
+            return False
+        if getattr(job, "status", None) != "running":
+            return False
+        await job.cancel()
+        del self._background[tool_call_id]
+        self._enqueue(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": tool_call_id,
+                "status": "cancelled",
+                "capabilities": None,
+            }
+        )
+        # Never change the foreground state. If it is already idle, refresh
+        # its background list; a running turn will publish the list at its end.
+        if self.state() == "idle":
+            self._set_state("idle", force=True)
+        return True
+
+    def _on_agent_terminal_started(self, event: EventBase, source: str | None) -> None:
+        if self.verbosity == "silent" or not isinstance(event, AgentTerminalStarted):
+            return
+        key = self._key(event.terminal_id, source)
+        target = self._target(key)
+        job_name = event.job_name
+        tool_call_id = f"job:{job_name}" if job_name else self._foreground_terminal_card(key[0])
+        owns_card = tool_call_id is None
+        if owns_card:
+            tool_call_id = f"terminal:{event.terminal_id}"
+        terminal = _AgentTerminal(target, tool_call_id, job_name, owns_card=owns_card)
+        self._agent_terminals[event.terminal_id] = terminal
+        self._enqueue(
+            v2.terminal_update(
+                event.terminal_id,
+                command=event.command,
+                cwd=event.working_directory,
+                capabilities={"cancel": {}},
+            ),
+            target,
+        )
+        reference = v2.terminal_content(event.terminal_id)
+        if owns_card:
+            self._enqueue(
+                v2.tool_call(
+                    tool_call_id,
+                    title=f"$ {event.command}",
+                    kind="execute",
+                    status="in_progress",
+                    content=[reference],
+                    raw_input={
+                        "command": event.command,
+                        "working_directory": event.working_directory,
+                    },
+                ),
+                target,
+            )
+        elif job_name is None or (
+            self._background is not None and tool_call_id in self._background
+        ):
+            self._enqueue(v2.tool_call_content_chunk(tool_call_id, reference), target)
+
+    def _on_agent_terminal_output(self, event: EventBase, source: str | None) -> None:
+        if not isinstance(event, AgentTerminalOutput):
+            return
+        terminal = self._agent_terminals.get(event.terminal_id)
+        if terminal is not None and not terminal.exited:
+            self._enqueue(v2.terminal_output_chunk(event.terminal_id, event.data), terminal.target)
+
+    def _on_agent_terminal_finished(self, event: EventBase, source: str | None) -> None:
+        if not isinstance(event, AgentTerminalFinished):
+            return
+        terminal = self._agent_terminals.get(event.terminal_id)
+        if terminal is None or terminal.exited:
+            return
+        terminal.exited = True
+        if event.error:
+            self._enqueue(
+                v2.terminal_output_chunk(event.terminal_id, (event.error + "\n").encode()),
+                terminal.target,
+            )
+        exit_status: dict[str, Any] = {}
+        if event.exit_code is not None:
+            exit_status["exitCode"] = event.exit_code
+        self._enqueue(
+            v2.terminal_update(
+                event.terminal_id,
+                exitStatus=exit_status,
+                capabilities=None,  # explicit null: cancellation ends with the terminal
+            ),
+            terminal.target,
+        )
+        if terminal.owns_card and terminal.tool_call_id is not None:
+            failed = (
+                event.cancelled
+                or event.timed_out
+                or bool(event.error)
+                or (event.exit_code is not None and event.exit_code != 0)
+            )
+            self._enqueue(
+                v2.tool_call(
+                    terminal.tool_call_id,
+                    status="failed" if failed else "completed",
+                    content=[v2.terminal_content(event.terminal_id)],
+                    raw_output={
+                        "exit_code": event.exit_code,
+                        "timed_out": event.timed_out,
+                        "cancelled": event.cancelled,
+                    },
+                ),
+                terminal.target,
+            )
 
     def _on_llm_response(self, event: EventBase) -> None:
         if self.verbosity != "verbose" or not isinstance(event, LLMResponse):

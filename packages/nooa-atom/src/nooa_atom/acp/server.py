@@ -1108,6 +1108,71 @@ class AtomACPAgent:
             session.withdraw(receipt)
         await session.cancel(by="user")
 
+    async def mcp_notification(self, params: dict[str, Any]) -> None:
+        """Receive a provider notification without ever answering or misrouting it.
+
+        ``MCPTool`` has no progress/subscription consumer. Unknown and late
+        notifications are therefore ignored; they must not be delivered to a
+        different operation. Tool results and errors use the request path.
+        """
+        logger.debug(
+            "Ignoring MCP notification %s for server %s request %s",
+            params.get("method"),
+            params.get("serverId"),
+            params.get("requestId"),
+        )
+
+    # ---- client-initiated cancellation ---------------------------------
+
+    def _activity_session(self, session_id: str) -> tuple[Session, ACPEventBridge]:
+        """A session and the bridge showing its activity (an unloaded child's ancestor's)."""
+        session = self.session(session_id)
+        if session is None:
+            raise RequestError.resource_not_found(session_id)
+        bridge = self._bridges.get(session_id)
+        parent_id = session.parent_id
+        for _ in range(64):
+            if bridge is not None:
+                return session, bridge
+            if parent_id is None:
+                break
+            bridge = self._bridges.get(parent_id)
+            parent = self.session(parent_id)
+            parent_id = parent.parent_id if parent is not None else None
+        raise RequestError.resource_not_found(session_id)
+
+    async def cancel_tool_call(self, params: dict[str, Any]) -> dict[str, Any]:
+        """``tool_call/cancel``: stop one advertised background job, not the foreground turn."""
+        session_id = params.get("sessionId")
+        tool_call_id = params.get("toolCallId")
+        if not isinstance(session_id, str) or not isinstance(tool_call_id, str):
+            raise v2.invalid("sessionId and toolCallId are required")
+        session, bridge = self._activity_session(session_id)
+        if not tool_call_id.startswith("job:"):
+            raise v2.invalid(
+                "Tool call is unknown, final, or not cancellable", toolCallId=tool_call_id
+            )
+        name = tool_call_id.removeprefix("job:")
+        job = session._agent.jobs.get(name)
+        if job is None or not await bridge.cancel_background(tool_call_id, job):
+            raise v2.invalid(
+                "Tool call is unknown, final, or not cancellable", toolCallId=tool_call_id
+            )
+        return {}
+
+    async def cancel_terminal(self, params: dict[str, Any]) -> dict[str, Any]:
+        """``terminal/cancel``: interrupt one command; its tool card and turn state stay put."""
+        session_id = params.get("sessionId")
+        terminal_id = params.get("terminalId")
+        if not isinstance(session_id, str) or not isinstance(terminal_id, str):
+            raise v2.invalid("sessionId and terminalId are required")
+        _session, bridge = self._activity_session(session_id)
+        if not await bridge.cancel_terminal(terminal_id):
+            raise v2.invalid(
+                "Terminal is unknown, exited, or not cancellable", terminalId=terminal_id
+            )
+        return {}
+
     # ---- modes and models ----------------------------------------------
 
     async def set_mode(self, session_id: str, mode_id: str) -> None:
@@ -1350,11 +1415,12 @@ class AtomACPAgent:
         tools: dict[str, MCPTool] = {}
         warnings: list[str] = []
         seen_names: set[str] = set()
+        seen_server_ids: set[str] = set()
         for server in servers:
             server = server if isinstance(server, dict) else {}
             name = server.get("name", "<unnamed>")
             kind = server.get("type")
-            if kind not in ("stdio", "http", "sse"):
+            if kind not in ("stdio", "http", "sse", "acp"):
                 warnings.append(
                     f"MCP server {name!r} was not loaded: unsupported ACP server type "
                     f"{server.get('_typeName') or kind}."
@@ -1365,9 +1431,23 @@ class AtomACPAgent:
                     f"MCP server {name!r} was not loaded: another server has the same name."
                 )
                 continue
+            server_id = server.get("serverId")
+            if kind == "acp" and (
+                not isinstance(server_id, str) or not server_id or server_id in seen_server_ids
+            ):
+                warnings.append(
+                    f"MCP server {name!r} was not loaded: serverId must be non-empty and unique."
+                )
+                continue
             seen_names.add(name)
+            if isinstance(server_id, str):
+                seen_server_ids.add(server_id)
             try:
-                if kind == "stdio":
+                if kind == "acp":
+                    from nooa_atom.acp.mcp_acp import create_acp_server
+
+                    tools[name] = await create_acp_server(self._require_conn(), name, server_id)
+                elif kind == "stdio":
                     env = {item["name"]: item["value"] for item in server.get("env") or []}
                     tools[name] = await MCPManager.create_stdio_server(
                         name,

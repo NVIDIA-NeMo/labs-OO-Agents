@@ -119,9 +119,9 @@ def initialize_response(
             # McpCapabilities defaults to all-false, and a client that honours
             # the handshake then filters its HTTP/SSE servers out of
             # session/new. The adapter connects both transports, so say so.
-            # `acp` stays off: it is unstable in the spec and not
-            # implemented here.
-            mcp_capabilities=McpCapabilities(http=True, sse=True),
+            # ACP transport is the draft MCP-over-ACP RFD; the SDK's v1
+            # server variant already carries name and serverId.
+            mcp_capabilities=McpCapabilities(http=True, sse=True, acp=True),
             session_capabilities=SessionCapabilities(
                 list=SessionListCapabilities(),
                 close=SessionCloseCapabilities(),
@@ -182,7 +182,7 @@ def _mcp_server_to_v2(server: Any) -> dict[str, Any]:
     kind = data.get("type")
     if kind is None and "command" in data:
         kind = "stdio"
-    if kind not in ("stdio", "http", "sse"):
+    if kind not in ("stdio", "http", "sse", "acp"):
         return {"name": data.get("name", "<unnamed>"), "_typeName": type(server).__name__}
     return {**data, "type": kind}
 
@@ -226,11 +226,22 @@ _WHOLE = {
     "agent_thought": "agent_thought_chunk",
 }
 _DROPPED = frozenset(
-    {"state_update", "subagent_update", "session_message", "replay_complete", "plan_removed"}
+    {
+        "state_update",
+        "subagent_update",
+        "session_message",
+        "replay_complete",
+        "plan_removed",
+        "terminal_update",
+        "terminal_output_chunk",
+        "tool_call_content_chunk",
+    }
 )
 
 
 def tool_content_to_v1(item: Any) -> Any:
+    if isinstance(item, dict) and item.get("type") == "terminal":
+        return None  # v1 has no agent-terminal content item
     if not isinstance(item, dict) or item.get("type") != "diff":
         return item
     changes = item.get("changes") or [{}]
@@ -326,8 +337,13 @@ class V1Peer:
             else:
                 tool_call_id = f"{child}:{tool_call_id}"
             out["toolCallId"] = tool_call_id
+        out.pop("capabilities", None)  # v2 tool-call controls have no v1 form
         if isinstance(out.get("content"), list):
-            out["content"] = [tool_content_to_v1(item) for item in out["content"]]
+            out["content"] = [
+                converted
+                for item in out["content"]
+                if (converted := tool_content_to_v1(item)) is not None
+            ]
         if isinstance(out.get("locations"), list):
             out["locations"] = [
                 {**location, "line": location["line"] - 1}
@@ -343,7 +359,18 @@ class V1Peer:
             return {"sessionUpdate": "tool_call", **out}
         return {"sessionUpdate": "tool_call_update", **out}
 
-    async def request(self, method: str, params: dict[str, Any]) -> Any:
+    async def request(
+        self,
+        method: str,
+        params: dict[str, Any],
+        *,
+        on_id: Callable[[Any], None] | None = None,
+    ) -> Any:
+        if method == "mcp/message":
+            conn = self.client._conn
+            if on_id is not None:
+                on_id(conn._next_request_id)
+            return await conn.send_request(method, params)
         if method == "elicitation/create":
             mode = ElicitationFormSessionMode(
                 session_id=params["sessionId"],
@@ -353,6 +380,12 @@ class V1Peer:
         if method.startswith("_"):
             return await self.client.ext_method(method[1:], params)
         raise RequestError.method_not_found(method)
+
+    async def notify(self, method: str, params: dict[str, Any]) -> None:
+        if method.startswith("_"):
+            await self.client.ext_notification(method[1:], params)
+        else:
+            await self.client._conn.send_notification(method, params)
 
 
 # ---- the agent -----------------------------------------------------------------------
