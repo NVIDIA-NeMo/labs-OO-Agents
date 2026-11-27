@@ -223,6 +223,30 @@ def read_catalogue(path, model, *, catalogue_model=None):
     return selected
 
 
+def model_info_effort_warning(details, reasoning_level):
+    """A warning when ``reasoning_level`` is not among the efforts the model metadata lists.
+
+    ``details`` is the model-info stage's data (``ModelDetails`` as a dict):
+    the model's own reasoning facts first, then its OpenRouter catalogue
+    record's. None when no level was given or no efforts are listed.
+    """
+    from nooa.unifiedllm.reasoning import unsupported_effort_warning
+
+    for record, source in (
+        (details.get("model"), "the server metadata"),
+        (details.get("catalogue_model"), "the OpenRouter catalogue"),
+    ):
+        reasoning = (record or {}).get("reasoning") or {}
+        if reasoning.get("supported_efforts"):
+            return unsupported_effort_warning(
+                reasoning_level,
+                reasoning["supported_efforts"],
+                default=reasoning.get("default_effort"),
+                source=source,
+            )
+    return None
+
+
 def listing_key(models_url, endpoint, key, key_env=None):
     """Return the API key to send with the model listing request (or None).
 
@@ -559,6 +583,9 @@ def run_stage(
                     )
                 )
             )
+            if warning := model_info_effort_warning(data, reasoning_level):
+                data["reasoning_warning"] = warning
+                view.warning(f"Warning: {warning}", err=True)
             ok = True
         elif stage == "catalogue":
             models = asyncio.run(connect.catalogue())

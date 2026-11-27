@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Declared effort choices, independent of model names and provider discovery."""
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from typing import Any
 
@@ -160,3 +160,55 @@ def apply_reasoning_level(
         params["extra_body"] = {key: value for key, value in extra.items() if key not in patch}
     params.update(patch)
     return _promote_reply_cap(params)
+
+
+def requested_effort(settings: Mapping[str, Any]) -> str | None:
+    """The raw reasoning effort a request configuration sends, if any.
+
+    Reads ``reasoning_effort`` and OpenRouter's ``reasoning: {effort: ...}``,
+    top level or in ``extra_body``. Level declarations are not requests.
+    """
+    for source in (settings, settings.get("extra_body")):
+        if not isinstance(source, Mapping):
+            continue
+        effort = source.get("reasoning_effort")
+        if isinstance(effort, str) and effort:
+            return effort
+        nested = source.get("reasoning")
+        if isinstance(nested, Mapping) and isinstance(nested.get("effort"), str):
+            return nested["effort"] or None
+    return None
+
+
+def declared_efforts(levels: Mapping[str, Any] | None) -> list[str]:
+    """The effort values a ``reasoning_levels`` declaration sends (its labels if none)."""
+    efforts: list[str] = []
+    for label, settings in (levels or {}).items():
+        effort = requested_effort(settings) if isinstance(settings, Mapping) else None
+        value = effort or label
+        if isinstance(value, str) and value not in efforts:
+            efforts.append(value)
+    return efforts
+
+
+def unsupported_effort_warning(
+    configured: str | None,
+    supported: Sequence[str] | None,
+    *,
+    default: str | None = None,
+    source: str = "the model metadata",
+) -> str | None:
+    """A warning when ``configured`` is not one of ``supported``, else None.
+
+    No warning without a configured effort or without a known non-empty
+    supported list: unknown support is not unsupported.
+    """
+    if not configured or not supported or configured in supported:
+        return None
+    message = (
+        f"Configured reasoning effort {configured!r} is not supported by this model: "
+        f"{source} lists {', '.join(supported)}"
+    )
+    if default:
+        message += f" (default {default})"
+    return message + ". The provider may reject it or silently use another effort."
