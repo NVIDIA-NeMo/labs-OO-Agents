@@ -156,6 +156,7 @@ class WizardState:
     unobserved: Any = None
     working_dir: Any = None
     yes: Any = None
+    save_checks: bool = False
 
     def __post_init__(self):
         # Remember the settings given on the command line, so they can be
@@ -3219,6 +3220,9 @@ def save_model(state: WizardState) -> bool:
             save_key = not state.yes and prompts.confirm(
                 "Save this key for future NOOA runs?", default=True
             )
+        # Check results stay out of the saved entry unless --save-checks is
+        # given: they make it much longer and only help debugging.
+        save_checks = bool(state.save_checks)
         if state.result.entry != reviewed_entry:
             raise ValueError("Model settings changed after review; review and retest before saving")
         if not baseline_allows_save(state):
@@ -3277,7 +3281,11 @@ def save_model(state: WizardState) -> bool:
                 rollback_guard=lambda: connect.registry_write_lock(state.path),
             ):
                 connect.write(
-                    state.result.entry, state.path, alias=state.alias, expected_alias=expected_alias
+                    state.result.entry,
+                    state.path,
+                    alias=state.alias,
+                    expected_alias=expected_alias,
+                    save_checks=save_checks,
                 )
             view.line(
                 scrub_setup(
@@ -3295,7 +3303,11 @@ def save_model(state: WizardState) -> bool:
                 )
         else:
             connect.write(
-                state.result.entry, state.path, alias=state.alias, expected_alias=expected_alias
+                state.result.entry,
+                state.path,
+                alias=state.alias,
+                expected_alias=expected_alias,
+                save_checks=save_checks,
             )
         view.section("Saved model")
         view.fields(scrub_setup(state, [("Alias", state.alias), ("File", state.path)]))

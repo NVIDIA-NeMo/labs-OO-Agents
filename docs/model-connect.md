@@ -393,7 +393,8 @@ never automatically forwards the inference key there.
 against that exact listing source. Advertised identity, interface/media hints,
 and limits remain in discovery output and transient plan provenance for review;
 they do not verify support, enable media, or add chat limits to a decision entry.
-As before, saving writes runtime settings only, not provenance. Decision checks
+As before, saving writes runtime settings only, not provenance (unless
+`--save-checks` is given, see below). Decision checks
 support `plan`, `interfaces`, `routing`, `decision`, `media`, `all`, and `save`.
 A discovery file supplies metadata, never credentials.
 
@@ -748,6 +749,13 @@ export NEMO_OO_LLM_CONFIG="$PWD/llm_config.yaml"
 - Save strips transient provenance and replaces the selected alias as a whole,
   not a merge. Preserve other aliases and review/carry forward approved custom
   fields from the selected alias. Retain reports as evidence.
+- `--save-checks` (wizard or `--stage save`) also writes the check results and
+  their sources (the entry's provenance) under a top-level `checks` key of the
+  saved alias. Use it for debugging only: it makes entries much longer. The
+  wizard never asks about it; only the option saves check results.
+  Credentials are never saved there. NOOA ignores `checks` when it loads the
+  registry; the settings stay the source of truth. Saving the alias again
+  without the flag removes the section.
 - Wizard exit 0 is not proof of save: failed baseline can return normally with
   “Nothing was saved”. Stage save can succeed on an untested or failed proposal
   (the latter emits a stderr warning); neither proves route support.

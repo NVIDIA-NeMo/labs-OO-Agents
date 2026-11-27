@@ -239,18 +239,35 @@ async def test_developer_rejection_detection(monkeypatch, status, message, expec
     assert result.entry["provenance"]["developer_role"]["value"] is expected
 
 
-async def test_litellm_chat_rewrites_developer_so_support_stays_unknown(monkeypatch):
+async def test_litellm_chat_developer_check_sends_developer_on_the_wire(monkeypatch):
     # LiteLLM sends developer messages as system on ordinary Chat routes; the
-    # check sees that on the wire and does not claim support.
+    # role check keeps the developer role for its own request only.
     bodies = serve(monkeypatch, "chat")
     result = await connect.check_stage(
         plan("chat", capability_checks=True), "capabilities", api_key="fake"
     )
     record = result.entry["provenance"]["probes"]["role:developer"]
-    assert record["outcome"] == "not_confirmed"
-    assert "developer_role" not in result.entry
+    assert record["outcome"] == "accepted"
+    assert result.entry["developer_role"] is True
     assert result.entry["structured_output_format"] == "json_schema"
     assert len(bodies) == 3
+    assert bodies[-1]["messages"][0]["role"] == "developer"
+
+
+def test_developer_role_kept_only_inside_the_check():
+    from litellm.types.utils import LlmProviders
+    from litellm.utils import ProviderConfigManager
+
+    from nooa.unifiedllm.adapters.litellm_chat import keep_developer_role
+
+    config = ProviderConfigManager.get_provider_chat_config(
+        model="model", provider=LlmProviders.OPENAI
+    )
+    messages = [{"role": "developer", "content": "x"}]
+    with keep_developer_role():
+        assert config.translate_developer_role_to_system_role(messages)[0]["role"] == "developer"
+    # Normal requests keep LiteLLM's behavior.
+    assert config.translate_developer_role_to_system_role(messages)[0]["role"] == "system"
 
 
 async def test_anthropic_records_no_developer_role_without_probing(monkeypatch):

@@ -11,6 +11,12 @@ the Chat Completions and Responses interfaces:
   when the endpoint rejected ``json_schema`` as unsupported, or when the entry
   selects ``structured_output_format: json_object``.
 - ``role:developer``: one ``developer`` message before the user message.
+  LiteLLM's Chat Completions path rewrites ``developer`` to ``system`` for
+  OpenAI-compatible models (``translate_developer_role_to_system_role``;
+  only o-series models keep it), so this check would never see the role on
+  the wire. The check alone runs inside ``keep_developer_role()``, which keeps
+  the role for its own request; other requests are unchanged
+  (``nooa.unifiedllm.adapters.litellm_chat.keep_developer_role``).
 
 A rejection counts as "unsupported" only for HTTP 400/422 whose error names the
 tested feature (the format field, or the developer role) together with a

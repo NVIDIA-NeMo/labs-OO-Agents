@@ -9,8 +9,10 @@ body. The client owns retries, metrics and debug tracking and calls only
 """
 
 import copy
+import threading
 from collections.abc import Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -140,6 +142,55 @@ def tool_schema(tool: Tool) -> dict[str, Any]:
             "parameters": tool.get_parameter_schema(),
         },
     }
+
+
+_KEEP_DEVELOPER_ROLE: ContextVar[bool] = ContextVar("keep_developer_role", default=False)
+_install_lock = threading.Lock()
+
+
+def _install_developer_role_guard() -> None:
+    """Let ``keep_developer_role()`` skip LiteLLM's developer-to-system rewrite.
+
+    Wraps LiteLLM's base ``translate_developer_role_to_system_role`` once per
+    process. The wrapper calls the original unless the current context is
+    inside ``keep_developer_role()``, so requests outside the check behave
+    exactly as before. LiteLLM runs sync completion work in a copy of the
+    caller's context, so the flag reaches it.
+    """
+    from litellm.llms.base_llm.chat.transformation import BaseConfig
+
+    with _install_lock:
+        original = BaseConfig.translate_developer_role_to_system_role
+        if getattr(original, "_connect_keeps_developer_role", False):
+            return
+
+        def translate_developer_role_to_system_role(self, messages):
+            if _KEEP_DEVELOPER_ROLE.get():
+                return messages
+            return original(self, messages)
+
+        translate_developer_role_to_system_role._connect_keeps_developer_role = True  # type: ignore[attr-defined]
+        BaseConfig.translate_developer_role_to_system_role = (  # type: ignore[method-assign]
+            translate_developer_role_to_system_role
+        )
+
+
+@contextmanager
+def keep_developer_role():
+    """Send ``developer`` messages unchanged in this context.
+
+    LiteLLM Chat Completions rewrites ``developer`` to ``system`` for
+    OpenAI-compatible models other than o-series
+    (``translate_developer_role_to_system_role``). Connect's developer-role
+    check uses this so its request really carries the role; nothing else
+    does, so normal requests keep LiteLLM's behavior.
+    """
+    _install_developer_role_guard()
+    token = _KEEP_DEVELOPER_ROLE.set(True)
+    try:
+        yield
+    finally:
+        _KEEP_DEVELOPER_ROLE.reset(token)
 
 
 def normalize_chat_extensions(api_params, effective_model):

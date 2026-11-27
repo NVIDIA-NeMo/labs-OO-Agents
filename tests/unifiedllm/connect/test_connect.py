@@ -295,6 +295,70 @@ def test_write_persists_settings_without_connect_history(tmp_path):
     assert saved["max_tokens"] == entry["max_tokens"]
 
 
+def _entry_with_checks():
+    entry = make_plan().entry
+    entry["api_key_env"] = "CONNECT_SAVE_CHECKS_KEY"
+    entry["provenance"]["probes"]["routing"] = {
+        "outcome": "accepted",
+        "request": {"input": [{"role": "user", "content": "Reply with ok."}]},
+    }
+    return entry
+
+
+def test_write_saves_checks_only_when_asked(tmp_path, monkeypatch):
+    from nooa.unifiedllm.registry import load_model_entries
+
+    secret = "sk-test-secret-value-1234"
+    monkeypatch.setenv("CONNECT_SAVE_CHECKS_KEY", secret)
+    entry = _entry_with_checks()
+    plain = tmp_path / "plain.yaml"
+    connect.write(entry, plain, alias="local")
+    assert "checks" not in yaml.safe_load(plain.read_text())["models"]["local"]
+
+    path = tmp_path / "llm_config.yaml"
+    connect.write(entry, path, alias="local", save_checks=True)
+    saved = yaml.safe_load(path.read_text())["models"]["local"]
+    expected = connect.configure_entry(entry)
+    provenance = expected.pop("provenance")
+    # The checks section is the entry's provenance, next to the same settings.
+    assert saved.pop("checks") == provenance
+    assert saved == expected
+    assert "provenance" not in saved
+    assert secret not in path.read_text()
+    # The registry loads the entry with its checks (the write verified this
+    # round trip), and the client settings ignore them.
+    assert "checks" in load_model_entries(path)["local"]
+    # The caller's entry is not changed.
+    assert "provenance" in entry and "checks" not in entry
+
+
+def test_resave_without_save_checks_drops_old_checks(tmp_path):
+    entry = _entry_with_checks()
+    path = tmp_path / "llm_config.yaml"
+    connect.write(entry, path, alias="local", save_checks=True)
+    assert "checks" in yaml.safe_load(path.read_text())["models"]["local"]
+    # An entry read back from the file still carries the old section.
+    reloaded = yaml.safe_load(path.read_text())["models"]["local"]
+    connect.write(reloaded, path, alias="local")
+    assert "checks" not in yaml.safe_load(path.read_text())["models"]["local"]
+
+
+def test_saved_checks_never_contain_credentials(tmp_path, monkeypatch):
+    entry = _entry_with_checks()
+    entry["provenance"]["probes"]["routing"]["request"]["headers"] = {"Authorization": "x"}
+    with pytest.raises(ValueError, match="api_key_env"):
+        connect.write(entry, tmp_path / "a.yaml", alias="local", save_checks=True)
+    # The value of the key variable is refused even under an innocent name.
+    secret = "sk-test-secret-value-1234"
+    monkeypatch.setenv("CONNECT_SAVE_CHECKS_KEY", secret)
+    entry = _entry_with_checks()
+    entry["provenance"]["note"] = f"echo {secret}"
+    path = tmp_path / "b.yaml"
+    with pytest.raises(ValueError, match="API key"):
+        connect.write(entry, path, alias="local", save_checks=True)
+    assert not path.exists()
+
+
 @pytest.mark.parametrize(
     "patch",
     [

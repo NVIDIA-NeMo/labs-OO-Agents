@@ -6,6 +6,13 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `nooa connect --save-checks` (wizard or `--stage save`) also saves the
+  entry's check results and their sources under a top-level `checks` key, for
+  debugging; entries get much longer. There is no wizard question for it; only
+  the option saves them. Library: `connect.write(..., save_checks=True)`.
+  Without it nothing changes. Loading ignores `checks`, and
+  saving the alias again without the flag removes it.
+
 - Model entries can declare `media_capabilities` per media kind: accepted
   `mime_types`, `transports` (`inline`, `url`) and `max_bytes` for inline data.
   Each request interface has a provider default; entry fields override it.
@@ -22,8 +29,10 @@ to follow semantic versioning.
   `nooa connect` checks them by default on Chat and
   Responses routes (the wizard's tests, `--stage all`, and the new
   `--stage capabilities`); a result that does not settle a fact (for example
-  LiteLLM sending the developer message as system) leaves it unknown and is
-  not a failure. Library callers opt in with
+  a gateway changing the developer message before sending) leaves it unknown
+  and is not a failure. On LiteLLM Chat routes the developer-role check keeps
+  the `developer` role for its own request (LiteLLM otherwise rewrites it to
+  `system`); other requests are unchanged. Library callers opt in with
   `plan(..., capability_checks=True)` (stage `capabilities`). Connect writes
   one `structured_output_format` value: `json_schema` when it works, else
   `json_object` when that works, else no key (an inconclusive check leaves

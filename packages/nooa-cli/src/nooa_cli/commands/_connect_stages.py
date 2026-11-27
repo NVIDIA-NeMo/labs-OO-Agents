@@ -296,6 +296,7 @@ def run_stage(
     output,
     yes,
     allow_unverified=False,
+    save_checks=False,
     prompt_key=False,
     discovery_file=None,
     catalogue_file=None,
@@ -398,6 +399,10 @@ def run_stage(
             )
         if allow_unverified and stage != "save":
             raise click.UsageError("--allow-unverified requires --stage save")
+        if save_checks and stage != "save":
+            raise click.UsageError(
+                "--save-checks requires --stage save; other stages already report checks in JSON"
+            )
         if stage == "save":
             if not input_file or not output:
                 raise click.UsageError("Save requires --input and --output")
@@ -518,7 +523,13 @@ def run_stage(
                     raise click.UsageError("Alias exists; --yes explicitly permits replacement")
                 view.warning(f"Warning: replacing alias {alias!r} in {path}.", err=True)
             expected_alias = connect.alias_target(existing.get("models") or {}, alias)
-            connect.write(entry, path, alias=alias, expected_alias=expected_alias)
+            connect.write(
+                entry,
+                path,
+                alias=alias,
+                expected_alias=expected_alias,
+                save_checks=save_checks,
+            )
             saved = True
             data = {"alias": alias, "path": str(path), "entry": entry}
             from ._connect_registry import shadowing_source

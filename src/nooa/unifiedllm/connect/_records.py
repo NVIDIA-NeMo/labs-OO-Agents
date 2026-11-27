@@ -198,7 +198,7 @@ def check_status(
         return "passed"
     if name.startswith(("format:", "role:")) and outcome in {"not_confirmed", "rejected"}:
         # The endpoint answered, but the result does not settle the fact (for
-        # example LiteLLM sent the developer message as system, or a rejection
+        # example a gateway changed the developer message, or a rejection
         # did not name the feature). The fact stays unknown and requests stay
         # unchanged, so this is a completed detection, not a failure. Connect
         # runs these checks by default; errors without an answer still need
