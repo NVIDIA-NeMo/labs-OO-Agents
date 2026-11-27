@@ -6,6 +6,14 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Under the `append` live-context policy the recorded `LiveContextSnapshot`
+  now honours the request's token budget (`max_context_tokens` or the
+  half-window default, same token counter): a live block the request would
+  send as EVICTED is snapshotted as EVICTED instead of in full, so `dynamic`
+  and `append` agree on what the budget removes (#670). The budget is one
+  function, `nooa.context_blocks.renderer.budget_context_blocks`, shared by
+  `render_context` and the runtime, and `generate` resolves it once per
+  request for both the snapshot and the message build.
 - The NeMo Relay middleware works with nemo-relay 0.9: the `nemo-relay` extra
   requires `>=0.9.3,<0.10` (was `>=0.6,<0.7`). Code cells run through Relay
   again (0.9 failed every one), with the model's `tool_call_id`.

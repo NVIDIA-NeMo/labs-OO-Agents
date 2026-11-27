@@ -137,6 +137,28 @@ def _apply_context_total_limit(
     return rendered, len(to_evict)
 
 
+def budget_context_blocks(
+    blocks: list[ResolvedBlock],
+    *,
+    context_limit: int | None,
+    count_tokens: Callable[[str], int],
+) -> tuple[list[ResolvedBlock], int]:
+    """The context (SYSTEM) blocks of a request as ``render_context`` sends them.
+
+    Returns the SYSTEM blocks with UTF-8-safe content and, when ``context_limit``
+    is set, over-budget blocks marked EVICTED in place (static blocks are never
+    evicted), plus the number of blocks evicted. The eviction count is reported
+    via ``ContextWindowStats.context_blocks_dropped``; the runtime owns its
+    ``HarnessMetrics`` singleton and increments ``context_limits_blocks_evicted``
+    from that value — this leaf library never reaches into the runtime's
+    metrics (see issue #330). Pure: never mutates ``blocks``.
+    """
+    system_blocks = [_with_utf8_safe_content(b) for b in blocks if b.role == Role.SYSTEM]
+    if context_limit is None:
+        return system_blocks, 0
+    return _apply_context_total_limit(system_blocks, context_limit, count_tokens)
+
+
 def _utf8_safe_text(text: str) -> str:
     """Return ``text`` with lone UTF-16 surrogates escaped as ``\\udXXX`` text."""
     if text.isascii():
@@ -226,8 +248,12 @@ def render_context(
 
     count_fn: Callable[[str], int] = count_tokens if count_tokens is not None else len
 
-    # Partition for truncation only.
-    system_blocks = [_with_utf8_safe_content(b) for b in blocks if b.role == Role.SYSTEM]
+    # Partition for truncation only. Context blocks go through the shared
+    # budget so the runtime's live-context snapshot (``append`` policy) sees
+    # exactly the blocks this request would send.
+    system_blocks, context_blocks_dropped = budget_context_blocks(
+        blocks, context_limit=context_limit, count_tokens=count_fn
+    )
     message_blocks = [b for b in blocks if b.role != Role.SYSTEM]
 
     # Pre-serialize non-tool events so their content can be measured.
@@ -244,18 +270,6 @@ def render_context(
             block = block.model_copy(update={"content": content})
         serialized_messages.append(_with_utf8_safe_content(block))
     message_blocks = serialized_messages
-
-    # Total-context eviction: mark over-budget blocks EVICTED in place.
-    # The eviction count is reported to the caller via
-    # ``ContextWindowStats.context_blocks_dropped`` (below). The runtime owns
-    # its ``HarnessMetrics`` singleton and increments
-    # ``context_limits_blocks_evicted`` from that value — this leaf library
-    # never reaches into the runtime's metrics (see issue #330).
-    context_blocks_dropped = 0
-    if context_limit is not None:
-        system_blocks, context_blocks_dropped = _apply_context_total_limit(
-            system_blocks, context_limit, count_fn
-        )
 
     # Stats — structural only. Token figures are NOT estimated here; the
     # runtime writes the provider-reported prompt_tokens back after the call.

@@ -233,6 +233,11 @@ _ARCHIVE_TARGET_UTILIZATION = 0.60
 # response has calibrated _tokens_per_char from real usage.
 _DEFAULT_TOKENS_PER_CHAR = 0.25
 
+# ``(limits, context_limit, count_tokens)`` as resolved by ``Actor._context_budget``:
+# the request's model limits, its context budget and the token counter used
+# to size blocks against it.
+ContextBudget = tuple[Any, "int | None", Callable[[str], int]]
+
 
 def _collapse_oldest(
     event_manager: Any,
@@ -1131,17 +1136,22 @@ class ActorRuntime:
         # every later one carry the same bytes. Retries after a context-window
         # error rebuild the request but record nothing: the snapshot just
         # recorded has no response after it, so it is not due again.
-        await self._record_live_context_snapshot()
+        # The snapshot and the request share ONE budget resolution: a concurrent
+        # generate() may recalibrate the chars->tokens ratio while the snapshot
+        # awaits _prepare_context, and both must evict the same blocks.
+        budget = self._context_budget(_current_llm_var.get(), kwargs)
+        await self._record_live_context_snapshot(budget)
         # Build messages from context + events (timers inside _build_messages).
         # No proactive clamping — recovery is error-driven. If the API rejects
         # with ContextWindowExceededError, the except handler archives events,
-        # rebuilds messages, and retries.
+        # rebuilds messages, and retries (resolving a fresh budget).
         messages = await self._build_messages(
             self._current_method,
             call_args=self._current_call.args if self._current_call else (),
             call_kwargs=self._current_call.kwargs if self._current_call else {},
             tools=tools,
             request_params=kwargs,
+            budget=budget,
         )
         _gen_hm = get_harness_metrics()
 
@@ -2937,18 +2947,23 @@ class ActorRuntime:
             # (handles nested generation sessions correctly)
             _in_generation_session.set(prev_in_session)
 
-    async def _record_live_context_snapshot(self) -> None:
+    async def _record_live_context_snapshot(self, budget: ContextBudget) -> None:
         """Under ``AppendedLiveContext``, record the live context as history when due.
 
-        Prepares the context exactly as the request will, takes the live blocks
-        the formatter would put after the boundary, and records a
-        :class:`LiveContextSnapshot` if the cadence says so and any live block
-        changed since the last snapshot (the first one always records; a due
-        snapshot is skipped only when no live block changed). Prompt previews call ``_build_messages`` directly and never
-        reach this, so they record nothing.
+        Prepares the context exactly as the request will, applies the request's
+        own token ``budget`` (the ``_context_budget`` triple ``generate`` also
+        hands to ``_build_messages``), takes the live blocks the formatter would put
+        after the boundary, and records a :class:`LiveContextSnapshot` if the
+        cadence says so and any live block changed since the last snapshot (the
+        first one always records; a due snapshot is skipped only when no live
+        block changed). A live block the request would have sent as EVICTED is
+        snapshotted as EVICTED too, so ``dynamic`` and ``append`` agree on what
+        the budget removes (issue #670). Prompt previews call
+        ``_build_messages`` directly and never reach this, so they record nothing.
         """
         from nooa.context_blocks.events import LiveContextSnapshot
         from nooa.context_blocks.live_context import AppendedLiveContext, snapshot_due
+        from nooa.context_blocks.renderer import budget_context_blocks
         from nooa.context_blocks.renderers.cached import live_blocks, snapshot_event
 
         policy = getattr(self.agent.render_config, "live_context", None)
@@ -2957,12 +2972,18 @@ class ActorRuntime:
         events = list(self.event_manager.values())
         if not snapshot_due(events, policy.every_n_turns):
             return
+        _limits, context_limit, count_tokens = budget
         blocks = await self._prepare_context(
             self._current_method,
             self._current_call.args if self._current_call else (),
             self._current_call.kwargs if self._current_call else {},
         )
-        live = live_blocks(blocks)
+        # snapshot: allow whole-block request-budget eviction (the same EVICTED
+        # marker the request itself sends; not a reader preview)
+        budgeted, _dropped = budget_context_blocks(
+            blocks, context_limit=context_limit, count_tokens=count_tokens
+        )
+        live = live_blocks(budgeted)
         if not live:
             return
         snapshot = snapshot_event(live, policy.every_n_turns)
@@ -3092,6 +3113,43 @@ class ActorRuntime:
             )
         return limits
 
+    def _context_budget(self, llm_client: Any, params: dict[str, Any]) -> ContextBudget:
+        """The token budget of the next request: ``(limits, context_limit, count_tokens)``.
+
+        Refreshes the model limits, then resolves the context budget:
+        ``max_context_tokens`` when configured, else up to half the USABLE
+        window (model window minus the output-token reserve; the per-call
+        ``max_tokens`` is the binding reserve when set, otherwise the configured
+        planning reserve). ``_build_messages`` and the live-context snapshot
+        share this so both evict the same blocks.
+
+        Token sizing for eviction uses the provider-calibrated chars→tokens
+        ratio (prompt_tokens / total_chars from the last response), not the
+        LLM's tokenizer. Every token number in the system is therefore
+        chars × the same ratio, anchored to real provider usage. No LLM
+        ``count_tokens`` method is required.
+        """
+        limits = self._update_context_limits(llm_client, params)
+        tc = self.agent._truncation
+        context_limit = tc.max_context_tokens
+        if (
+            context_limit is None
+            and limits.context_window is not None
+            and tc.response_reserve_tokens > 0
+        ):
+            usable_window = max(0, limits.context_window - (limits.reserved_output_tokens or 0))
+            context_limit = usable_window // 2
+
+        ratio = self._tokens_per_char
+
+        def count_tokens(text: str) -> int:
+            # chars × ratio. No per-block floor: the budget is compared against
+            # the SUM, so flooring each tiny block to ≥1 token would over-count
+            # (and spuriously evict) agents with many small context blocks.
+            return round(len(text) * ratio)
+
+        return limits, context_limit, count_tokens
+
     async def _build_messages(
         self,
         method: Any,
@@ -3102,6 +3160,7 @@ class ActorRuntime:
         max_output_tokens: int | None = None,
         request_params: dict[str, Any] | None = None,
         llm_client: Any = None,
+        budget: ContextBudget | None = None,
     ) -> list[dict[str, Any]]:
         """Build messages for LLM API.
 
@@ -3119,47 +3178,21 @@ class ActorRuntime:
         is ``context_window - reserve``. Only an unknown cap falls back to the
         truncation configuration's explicitly labelled planning reserve.
         ``max_output_tokens`` is retained for direct callers of this helper.
+        ``budget`` is a ``_context_budget`` triple already resolved by the caller
+        (``generate`` shares one with the live-context snapshot); when omitted it
+        is resolved here.
         """
-        llm_client = llm_client if llm_client is not None else _current_llm_var.get()
-        params = dict(request_params or {})
-        if max_output_tokens is not None:
-            params["max_tokens"] = max_output_tokens
-        limits = self._update_context_limits(llm_client, params)
+        if budget is None:
+            llm_client = llm_client if llm_client is not None else _current_llm_var.get()
+            params = dict(request_params or {})
+            if max_output_tokens is not None:
+                params["max_tokens"] = max_output_tokens
+            budget = self._context_budget(llm_client, params)
+        limits, effective_context_limit, count_tokens = budget
         hm = get_harness_metrics()
         with hm.timer("time_prepare_context"):
             blocks = await self._prepare_context(method, call_args, call_kwargs)
         tc = self.agent._truncation
-
-        effective_context_limit = tc.max_context_tokens
-        ctx_window = limits.context_window
-
-        # Output-token reserve (see docstring). Per-call max_tokens is the
-        # binding constraint when set; otherwise the configured planning
-        # reserve.
-        reserved_output = limits.reserved_output_tokens
-
-        # Default (unconfigured) context budget: up to half the USABLE window
-        # (model window minus the output reserve).
-        if (
-            effective_context_limit is None
-            and ctx_window is not None
-            and tc.response_reserve_tokens > 0
-        ):
-            usable_window = max(0, ctx_window - (reserved_output or 0))
-            effective_context_limit = usable_window // 2
-
-        # Token sizing for eviction uses the provider-calibrated chars→tokens
-        # ratio (prompt_tokens / total_chars from the last response), not the
-        # LLM's tokenizer. Every token number in the system is therefore
-        # chars × the same ratio, anchored to real provider usage. No LLM
-        # ``count_tokens`` method is required.
-        ratio = self._tokens_per_char
-
-        def count_tokens(text: str) -> int:
-            # chars × ratio. No per-block floor: the budget is compared against
-            # the SUM, so flooring each tiny block to ≥1 token would over-count
-            # (and spuriously evict) agents with many small context blocks.
-            return round(len(text) * ratio)
 
         with hm.timer("time_render_context"):
             result = render_context(
@@ -3170,8 +3203,8 @@ class ActorRuntime:
                 count_tokens=count_tokens,
                 event_format=tc.event_format,
                 event_format_resolver=self._event_format_for_event,
-                model_context_window=ctx_window,
-                reserved_output_tokens=reserved_output,
+                model_context_window=limits.context_window,
+                reserved_output_tokens=limits.reserved_output_tokens,
             )
 
         # ``render_context`` is a framework-agnostic leaf and does not touch the
