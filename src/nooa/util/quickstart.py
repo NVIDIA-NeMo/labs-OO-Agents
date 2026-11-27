@@ -33,7 +33,7 @@ if os.getenv("NVIDIA_API_KEY"):
     # build.nvidia.com NIM. litellm routes `nvidia_nim/*` to
     # integrate.api.nvidia.com; it reads the key from NVIDIA_NIM_API_KEY, so
     # pass NVIDIA_API_KEY (the build.nvidia.com convention) explicitly.
-    MODEL = "nvidia_nim/nvidia/nemotron-3-super-120b-a12b"
+    MODEL = "nvidia_nim/nvidia/nemotron-3.5-super-vl-120b-a12b"
     llm = get_llm_client(MODEL, api_key=os.environ["NVIDIA_API_KEY"])
 elif os.getenv("OPENAI_API_KEY"):
     MODEL = "gpt-5-mini"

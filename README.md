@@ -207,7 +207,11 @@ run `uv run python first_agent.py` in your project. After your final call,
 
 The [checked-in first example](https://github.com/NVIDIA-NeMo/labs-OO-Agents/blob/main/examples/quickstart/01_first_generation_method.py)
 is a separate source-checkout example: it chooses its own client from environment
-credentials and does not automatically use your `my-model` alias.
+credentials and does not automatically use your `my-model` alias. With
+`NVIDIA_API_KEY` set, it uses the public NVIDIA endpoint at
+`integrate.api.nvidia.com` and model `nvidia/nemotron-3.5-super-vl-120b-a12b`.
+Otherwise it selects OpenAI, then the internal NVIDIA inference gateway,
+according to the available credentials.
 
 Rename `analyze_feedback` to `analyze_feedback_briefly` and the output changes — your method name, parameters, and docstring *are* the prompt.
 
