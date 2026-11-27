@@ -3214,7 +3214,8 @@ def save_model(state: WizardState) -> bool:
                 )
             )
             save_key = not state.yes and prompts.confirm(
-                "Save this key for future NOOA runs?", default=True
+                f"Save this key in secrets.yaml as {state.api_key_env} for future NOOA runs?",
+                default=True,
             )
         if state.result.entry != reviewed_entry:
             raise ValueError("Model settings changed after review; review and retest before saving")
