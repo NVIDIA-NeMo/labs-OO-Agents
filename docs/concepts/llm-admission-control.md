@@ -37,6 +37,14 @@ each worker's client with a controller whose state is owned by a parent broker.
   `AdmissionTimeoutError` before provider dispatch and is not retried by the
   provider retry policy.
 - Each retry reacquires capacity. Retry backoff does not hold a slot.
+- CodeAct, CodeAct V2, and PurePython share `TERMINAL_LLM_ERRORS`, exported by
+  `nooa.unifiedllm`: `ReasoningReplayError` and `AdmissionError` (including
+  subclasses). These errors propagate unchanged from model-generation requests
+  and prefill handlers instead of triggering another strategy acquisition or an
+  `LLM API error` event. Applications can distinguish call-cap, admission-timeout,
+  and unavailable-controller decisions and choose their own recovery. Ordinary
+  provider retries and nonterminal prefill recovery remain unchanged, as do
+  normal execution-cell error handling and sandbox exception transport.
 - A queued cancellation removes the waiter. After dispatch, capacity remains
   occupied until the provider task exits, even if its caller is cancelled.
 - Different concurrency, pacing, or cooldown settings for the same process-local

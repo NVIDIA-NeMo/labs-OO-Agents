@@ -94,7 +94,7 @@ from nooa.strategy_validation import (
     run_postconditions,
     run_preconditions,
 )
-from nooa.unifiedllm import LLMResponse, ReasoningReplayError, Tool, ToolCall
+from nooa.unifiedllm import TERMINAL_LLM_ERRORS, LLMResponse, Tool, ToolCall
 
 if TYPE_CHECKING:
     from nooa.config.strategy_config import CodeActConfig
@@ -1217,7 +1217,7 @@ Standard Python builtins and agent instance (`self`) are available."""
         try:
             with _init_hm.timer("time_prefill"):
                 await self._run_prefill(runtime, call, builtins, session)
-        except ReasoningReplayError:
+        except TERMINAL_LLM_ERRORS:
             raise
         except Exception as e:
             logger.warning(f"[CODEACT] Prefill error (continuing): {e}")
@@ -1266,7 +1266,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         tool_choice=tool_choice,
                         **self._build_sampling_kwargs(),
                     )
-                except ReasoningReplayError:
+                except TERMINAL_LLM_ERRORS:
                     turn_state.is_final = True
                     raise
                 except BlockSyntaxError as e:
@@ -3516,6 +3516,8 @@ Standard Python builtins and agent instance (`self`) are available."""
             )
         )
 
+        if isinstance(result.error, TERMINAL_LLM_ERRORS):
+            raise result.error
         if result.error:
             logger.warning(f"[CODEACT] Prefill ({prefill_type}) execution error: {result.error}")
 
