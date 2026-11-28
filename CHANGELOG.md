@@ -6,6 +6,11 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- A `BashSession` dropped without `close()` now reliably ends its bash when it
+  is garbage collected or the interpreter exits, honouring
+  `keep_background_on_close` (now also a settable property). One internal
+  owner holds the process across restarts, so a cancelled `close()` no longer
+  leaks it.
 - The NeMo Relay middleware works with nemo-relay 0.9: the `nemo-relay` extra
   requires `>=0.9.3,<0.10` (was `>=0.6,<0.7`). Code cells run through Relay
   again (0.9 failed every one), with the model's `tool_call_id`.

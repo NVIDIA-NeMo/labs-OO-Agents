@@ -36,7 +36,7 @@ class BackgroundServiceScope:
         """Include a shell constructed before entering the invocation scope."""
         if self._closed:
             raise RuntimeError("Background service scope has already closed")
-        session._keep_background_on_close = True
+        session.keep_background_on_close = True
         self._sessions[id(session)] = session
 
     async def aclose(self) -> None:
@@ -58,7 +58,7 @@ async def preserve_background_services() -> AsyncIterator[BackgroundServiceScope
     """Preserve background jobs from all shells created in this async invocation.
 
     Child asyncio tasks inherit the policy; concurrent unrelated invocations do
-    not. Strong ownership prevents destructors from running on discarded shells.
+    not. Strong ownership prevents finalizers from running on discarded shells.
     At exit, close every owned shell through its preservation path. The external
     harness remains responsible for killing services after grading.
     """

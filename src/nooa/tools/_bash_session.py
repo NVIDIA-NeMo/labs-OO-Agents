@@ -25,7 +25,6 @@ import logging
 import os
 import secrets
 import signal
-import subprocess
 import sys
 import time
 from collections.abc import AsyncIterator
@@ -33,6 +32,7 @@ from pathlib import Path
 
 from nooa._platform import require_posix
 from nooa.agentdoc import TruncatingStringIO
+from nooa.tools._bash_process import _BashProcess
 
 logger = logging.getLogger(__name__)
 
@@ -42,21 +42,6 @@ _BOUNDED_CHUNK_CHARS = 65_536  # Pieces fed to the truncating buffer by _bounded
 _DRAIN_TIMEOUT = 0.05  # Seconds to wait for remaining output after sentinel
 _SIGTERM_GRACE = 5.0  # Seconds to wait for sentinel after SIGTERM
 _SIGKILL_GRACE = 2.0  # Seconds to wait for sentinel after SIGKILL
-
-# Reads the inherited pipe fds (argv) until every writer has exited, so
-# background jobs never write into a pipe without a reader after close().
-# The fds stay non-blocking (shared with asyncio), hence select().
-_DRAIN_SCRIPT = (
-    "import os, select, sys\n"
-    "fds = [int(a) for a in sys.argv[1:]]\n"
-    "while fds:\n"
-    "    for fd in select.select(fds, [], [])[0]:\n"
-    "        try:\n"
-    "            if not os.read(fd, 65536):\n"
-    "                fds.remove(fd)\n"
-    "        except BlockingIOError:\n"
-    "            pass\n"
-)
 
 
 def _bounded(text: str) -> str:
@@ -113,14 +98,14 @@ class BashSession:
     ) -> None:
         """Configure the working directory and optional command to run on each start."""
         self._cwd = Path(cwd).resolve()
-        self._keep_background_on_close = keep_background_on_close
+        # Ends bash, however the session goes away; survives restarts.
+        self._process_owner = _BashProcess(keep_background=keep_background_on_close)
         # PIDs of background jobs as of the last completed command.
         self._background_pids: frozenset[int] = frozenset()
         # Optional shell snippet run once every time the session (re)starts —
         # before any user command — to set up the environment (e.g. activating a
         # conda env). Re-run on reset() because a fresh bash loses prior env.
         self._init_command = init_command
-        self._process: asyncio.subprocess.Process | None = None
         self._control_reader: asyncio.StreamReader | None = None
         self._control_transport: asyncio.BaseTransport | None = None
         self._started = False
@@ -150,24 +135,19 @@ class BashSession:
     def cwd(self, value: str | Path) -> None:
         self._cwd = Path(value).resolve()
 
-    def __del__(self) -> None:
-        """Best-effort cleanup: kill the bash subprocess if still running."""
-        proc = self._process
-        if proc is not None and proc.returncode is None:
-            try:
-                # During interpreter shutdown, module globals (os, signal) may
-                # be None, causing TypeError. Broad except handles all cases.
-                if self._keep_background_on_close:
-                    _spawn_output_drainer(proc)
-                    proc.kill()
-                else:
-                    pgid = os.getpgid(proc.pid)
-                    os.killpg(pgid, signal.SIGKILL)
-            except Exception:
-                try:
-                    proc.kill()
-                except Exception:
-                    pass
+    @property
+    def keep_background_on_close(self) -> bool:
+        """Whether close() ends bash only, leaving its background jobs running."""
+        return self._process_owner.keep_background
+
+    @keep_background_on_close.setter
+    def keep_background_on_close(self, value: bool) -> None:
+        self._process_owner.keep_background = value
+
+    @property
+    def _process(self) -> asyncio.subprocess.Process | None:
+        """The running bash, if any (held by ``_process_owner``)."""
+        return self._process_owner.process
 
     async def __aenter__(self) -> "BashSession":
         """Support ``async with BashSession() as session:`` usage."""
@@ -277,7 +257,7 @@ class BashSession:
         # Create pipe for control channel (fd 3 inside bash).
         ctrl_r, ctrl_w = os.pipe()
         try:
-            self._process = await asyncio.create_subprocess_exec(
+            process = await asyncio.create_subprocess_exec(
                 "/bin/bash",
                 "--norc",
                 "--noprofile",
@@ -294,10 +274,13 @@ class BashSession:
             os.close(ctrl_w)
             raise
 
+        # Before the first await: a drop from here on must end this bash.
+        self._process_owner.attach(self, process)
+
         # Dup the write end to fd 3 inside bash, then close the original.
-        assert self._process.stdin is not None
-        self._process.stdin.write(f"exec 3>&{ctrl_w} {ctrl_w}>&-\n".encode())
-        await self._process.stdin.drain()
+        assert process.stdin is not None
+        process.stdin.write(f"exec 3>&{ctrl_w} {ctrl_w}>&-\n".encode())
+        await process.stdin.drain()
         os.close(ctrl_w)
 
         # Wrap the read end in an asyncio StreamReader.
@@ -314,8 +297,8 @@ class BashSession:
 
         # Drain startup — send a no-op through the control channel.
         sentinel = f"__CTRL_{secrets.token_hex(8)}__"
-        self._process.stdin.write(f"echo {sentinel} >&3\n".encode())
-        await self._process.stdin.drain()
+        process.stdin.write(f"echo {sentinel} >&3\n".encode())
+        await process.stdin.drain()
         await self._read_control_until(sentinel, timeout=5.0)
 
         # Run the one-time init command (env setup) before any user command.
@@ -911,43 +894,7 @@ class BashSession:
             self._control_transport = None
         self._control_reader = None
 
-        if (
-            self._keep_background_on_close
-            and self._process is not None
-            and self._process.returncode is None
-        ):
-            await self._close_keeping_background(self._process)
-        elif self._process is not None and self._process.returncode is None:
-            same_loop = self._started_on_loop is asyncio.get_running_loop()
-            if same_loop:
-                # Graceful shutdown: SIGTERM → wait → SIGKILL on timeout
-                try:
-                    pgid = os.getpgid(self._process.pid)
-                    os.killpg(pgid, signal.SIGTERM)
-                except (ProcessLookupError, OSError):
-                    try:
-                        self._process.kill()
-                    except Exception:
-                        pass
-                try:
-                    await asyncio.wait_for(self._process.wait(), timeout=3.0)
-                except TimeoutError:
-                    try:
-                        pgid = os.getpgid(self._process.pid)
-                        os.killpg(pgid, signal.SIGKILL)
-                    except (ProcessLookupError, OSError):
-                        pass
-            else:
-                # Cross-loop (gl-212): transport is dead, just kill immediately.
-                try:
-                    pgid = os.getpgid(self._process.pid)
-                    os.killpg(pgid, signal.SIGKILL)
-                except (ProcessLookupError, OSError):
-                    try:
-                        self._process.kill()
-                    except Exception:
-                        pass
-        self._process = None
+        await self._process_owner.close()
         self._background_pids = frozenset()
         self._started = False
         self._ready = False
@@ -955,46 +902,3 @@ class BashSession:
         # Locks are not replaced here: close() runs inside run() during a reset,
         # and a fresh lock would let a queued caller bypass the holder. A loop
         # change is handled by _ensure_lock_on_current_loop().
-
-    async def _close_keeping_background(self, proc: asyncio.subprocess.Process) -> None:
-        """End bash only; its background jobs keep running with drained output."""
-        _spawn_output_drainer(proc)
-        same_loop = self._started_on_loop is asyncio.get_running_loop()
-        if same_loop and proc.stdin is not None:
-            # A non-interactive bash exits at EOF without signalling its jobs.
-            try:
-                proc.stdin.close()
-                await asyncio.wait_for(proc.wait(), timeout=3.0)
-                return
-            except (TimeoutError, OSError):
-                pass
-        try:
-            os.kill(proc.pid, signal.SIGKILL)
-        except (ProcessLookupError, OSError):
-            pass
-        if same_loop:
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=3.0)
-            except TimeoutError:
-                pass
-
-
-def _spawn_output_drainer(proc: asyncio.subprocess.Process) -> None:
-    """Keep reading bash's stdout/stderr pipes in a detached process.
-
-    Background jobs inherit these pipes; once this process exits they would get
-    EPIPE/SIGPIPE on their next write. Best-effort: failures are only logged.
-    """
-    try:
-        transport = proc._transport  # type: ignore[attr-defined]
-        fds = [transport.get_pipe_transport(fd).get_extra_info("pipe").fileno() for fd in (1, 2)]
-        subprocess.Popen(
-            [sys.executable, "-c", _DRAIN_SCRIPT, *map(str, fds)],
-            pass_fds=fds,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
-    except Exception:
-        logger.warning("Could not start the background-output drainer", exc_info=True)

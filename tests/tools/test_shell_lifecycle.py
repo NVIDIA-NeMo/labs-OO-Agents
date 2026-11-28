@@ -27,7 +27,7 @@ async def test_fresh_shell_server_survives_discard_and_scope_close(tmp_path):
         nonlocal pid, shell_ref
         shell = ShellTools(cwd=str(tmp_path))
         shell_ref = weakref.ref(shell.session)
-        assert shell.session._keep_background_on_close
+        assert shell.session.keep_background_on_close
         code = (
             "import http.server,os; "
             "s=http.server.HTTPServer(('127.0.0.1',0),http.server.SimpleHTTPRequestHandler); "
@@ -88,28 +88,26 @@ async def test_scope_isolation_adoption_and_failure_cleanup(tmp_path):
 
     running = asyncio.create_task(invocation())
     await entered.wait()
-    assert not outside._keep_background_on_close
-    assert not BashSession(cwd=tmp_path)._keep_background_on_close
-    assert adopted.session._keep_background_on_close
+    assert not outside.keep_background_on_close
+    assert not BashSession(cwd=tmp_path).keep_background_on_close
+    assert adopted.session.keep_background_on_close
     release.set()
     await running
-    assert not BashSession(cwd=tmp_path)._keep_background_on_close
+    assert not BashSession(cwd=tmp_path).keep_background_on_close
 
 
-def test_preservation_destructor_does_not_kill_process_group(monkeypatch):
+def test_preservation_kill_does_not_kill_process_group(monkeypatch):
     from unittest.mock import Mock
 
-    import nooa.tools._bash_session as module
+    import nooa.tools._bash_process as module
 
     session = BashSession(keep_background_on_close=True)
     process = Mock(returncode=None)
-    session._process = process
     killpg = Mock()
     drain = Mock()
     monkeypatch.setattr(module.os, "killpg", killpg)
     monkeypatch.setattr(module, "_spawn_output_drainer", drain)
-    session.__del__()
+    session._process_owner.kill_now(process)
     drain.assert_called_once_with(process)
     process.kill.assert_called_once()
     killpg.assert_not_called()
-    session._process = None

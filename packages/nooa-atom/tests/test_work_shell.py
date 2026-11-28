@@ -577,6 +577,49 @@ async def test_dropped_shell_ends_its_bash(tmp_path):
     await until_dead(pid)
 
 
+async def test_dropped_shell_ends_its_background_processes(tmp_path):
+    import gc
+
+    gc.collect()  # now, not while the Shell runs: pytest keeps an earlier leak's frames
+    sh = Shell(tmp_path)
+    bg = int((await sh.run("sleep 300 & echo $!")).stdout)
+    try:
+        bash = int((await sh.run("echo $$")).stdout)
+        assert alive(bash) and alive(bg)
+        del sh
+        gc.collect()
+        await until_dead(bash, bg)
+    finally:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(bg, 9)
+
+
+async def test_dropped_shell_under_preserve_scope_keeps_its_services(tmp_path):
+    """The scope holds the dropped Shell's session: its exit ends bash only."""
+    import gc
+
+    from nooa.tools.shell_lifecycle import preserve_background_services
+
+    bg = None
+    try:
+        async with preserve_background_services():
+            sh = Shell(tmp_path)
+            bg = int((await sh.run("sleep 300 & echo $!")).stdout)
+            bash = int((await sh.run("echo $$")).stdout)
+            del sh
+            gc.collect()
+            await asyncio.sleep(0.3)
+            assert alive(bash) and alive(bg)
+        await until_dead(bash)
+        await asyncio.sleep(0.3)  # a kill of the service would show by now
+        assert alive(bg)
+    finally:
+        if bg is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(bg, 9)
+            await until_dead(bg)
+
+
 async def test_owner_closes_its_shells_and_their_background_processes(manager, tmp_path):
     from nooa_atom.agent.work_shell import ShellOwner, shell_owner
 
