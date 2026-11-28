@@ -42,17 +42,23 @@ import asyncio
 import contextlib
 import contextvars
 import itertools
+import logging
 import math
 import os
+import select
 import shlex
 import shutil
 import signal
+import subprocess
 import sys
 import tempfile
+import threading
 import weakref
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Annotated, Any, Literal
+from uuid import uuid4
 
 from nooa import hidden
 from nooa.agentdoc import spec
@@ -63,7 +69,18 @@ from nooa_atom.agent.work_manager import _progress_sink, current_name, describe,
 from nooa_atom.agent.work_progress import _ShellProgress
 from nooa_atom.agent.work_subagent import hand_over, still_running_note
 
-__all__ = ["CommandResult", "Shell", "ShellOwner", "default_cwd", "shell_owner"]
+__all__ = [
+    "CommandResult",
+    "Shell",
+    "ShellOwner",
+    "TerminalObservation",
+    "cancel_terminal",
+    "default_cwd",
+    "shell_owner",
+    "terminal_observer",
+]
+
+logger = logging.getLogger(__name__)
 
 # How bash ended during a command: its own exit (``exit N``, errexit) or a signal.
 _Ended = Literal["exit", "signal"] | None
@@ -148,6 +165,54 @@ class CommandResult:
     stderr_path: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class TerminalObservation:
+    """One agent-terminal observation emitted by a ``Shell`` command.
+
+    This is an internal host interface, not an ACP type. ``data`` stays bytes
+    so a host can stream the exact base64 octets ACP v2 requires. ``job_name``
+    is the managed background job running the command, when there is one.
+    """
+
+    phase: Literal["started", "output", "finished"]
+    terminal_id: str
+    command: str = ""
+    cwd: str | None = None
+    data: bytes = b""
+    exit_code: int | None = None
+    timed_out: bool = False
+    cancelled: bool = False
+    error: str = ""
+    job_name: str | None = None
+
+
+terminal_observer: contextvars.ContextVar[Callable[[TerminalObservation], None] | None] = (
+    contextvars.ContextVar("nooa_work_terminal_observer", default=None)
+)
+"""Host callback for terminal observations; ``None`` keeps Shell commands silent."""
+
+
+_live_terminals: dict[str, Shell] = {}
+"""Running observed commands, by terminal id, for ``cancel_terminal``."""
+
+
+async def cancel_terminal(terminal_id: str) -> bool:
+    """Interrupt a running observed command; ``False`` if unknown or already finished."""
+    shell = _live_terminals.get(terminal_id)
+    return await shell._cancel_terminal(terminal_id) if shell is not None else False
+
+
+def _emit_terminal(observation: TerminalObservation) -> None:
+    observer = terminal_observer.get()
+    if observer is None:
+        return
+    try:
+        observer(observation)
+    except Exception:
+        # Display must never change command execution or its exit status.
+        logger.debug("Agent terminal observer failed", exc_info=True)
+
+
 class _Capture:
     """One stream into a file, up to ``limit`` bytes; the last bytes also in memory."""
 
@@ -159,6 +224,7 @@ class _Capture:
         self.total = 0
         self.tail = bytearray()
         self.progress: Any = None  # a managed job's preview stream (work_progress)
+        self.observer: Callable[[bytes], None] | None = None  # raw terminal bytes
 
     def feed(self, chunk: bytes) -> None:
         self.total += len(chunk)
@@ -169,6 +235,8 @@ class _Capture:
             self.written += len(part)
         self.tail += chunk
         del self.tail[:-_TAIL_BYTES]
+        if self.observer is not None:
+            self.observer(chunk)
 
     async def pump(self, stream: asyncio.StreamReader) -> None:
         with contextlib.suppress(Exception):
@@ -231,7 +299,21 @@ def _release(_directory: object) -> None:
 
 
 def _start_time(pid: int) -> str | None:
-    """A process's start time (Linux), so a reused pid is never mistaken for it."""
+    """A process's start identity, so a reused pid is never mistaken for it."""
+    if sys.platform != "linux":
+        # Darwin has no /proc. `ps lstart` is also what _descendants parses,
+        # so the identity comparison in _signal uses one representation.
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "lstart=", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        return result.stdout.strip() or None
     try:
         return Path(f"/proc/{pid}/stat").read_bytes().rsplit(b")", 1)[1].split()[19].decode("ascii")
     except (OSError, IndexError):
@@ -239,21 +321,40 @@ def _start_time(pid: int) -> str | None:
 
 
 def _descendants(pid: int) -> dict[int, str]:
-    """``pid``'s descendant processes (pid -> start time), from /proc; {} when unavailable."""
-    if sys.platform != "linux":
-        return {}
+    """``pid``'s descendants and start identities; {} when inspection is unavailable."""
     children: dict[int, list[tuple[int, str]]] = {}
-    for entry in Path("/proc").iterdir():
-        if not entry.name.isdecimal():
-            continue
+    if sys.platform != "linux":
         try:
-            # Bytes: a process name (comm) may hold bytes that are not UTF-8.
-            fields = (entry / "stat").read_bytes().rsplit(b")", 1)[1].split()
-            children.setdefault(int(fields[1]), []).append(
-                (int(entry.name), fields[19].decode("ascii"))
+            result = subprocess.run(
+                ["ps", "-ax", "-o", "pid=,ppid=,lstart="],
+                capture_output=True,
+                text=True,
+                timeout=2,
+                check=False,
             )
-        except (OSError, IndexError, ValueError):
-            continue
+        except (OSError, subprocess.SubprocessError):
+            return {}
+        for line in result.stdout.splitlines():
+            fields = line.strip().split(None, 2)
+            if len(fields) != 3:
+                continue
+            try:
+                child, parent = int(fields[0]), int(fields[1])
+            except ValueError:
+                continue
+            children.setdefault(parent, []).append((child, fields[2]))
+    else:
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdecimal():
+                continue
+            try:
+                # Bytes: a process name (comm) may hold bytes that are not UTF-8.
+                fields = (entry / "stat").read_bytes().rsplit(b")", 1)[1].split()
+                children.setdefault(int(fields[1]), []).append(
+                    (int(entry.name), fields[19].decode("ascii"))
+                )
+            except (OSError, IndexError, ValueError):
+                continue
     found: dict[int, str] = {}
     pending = list(children.get(pid, []))
     while pending:
@@ -278,12 +379,79 @@ def _close_fds(fds: set[int]) -> None:
             os.close(fds.pop())
 
 
+class _ThreadedFifoTransport(asyncio.BaseTransport):
+    """Feed a StreamReader from a named FIFO on Darwin.
+
+    On macOS, ``connect_read_pipe`` can register a FIFO without ever
+    delivering readable events (reproduced with a 92.5 KiB ``cat``: zero
+    bytes while ``select``/``os.read`` works). Anonymous pipes work. A small
+    blocking reader thread avoids that kqueue/FIFO path and preserves the
+    existing asynchronous ``_Capture.pump`` interface.
+    """
+
+    def __init__(self, fd: int, reader: asyncio.StreamReader) -> None:
+        self._fd = fd
+        self._reader = reader
+        self._loop = asyncio.get_running_loop()
+        self._closed = False
+        self._thread = threading.Thread(target=self._read, name="nooa-fifo-reader", daemon=True)
+
+    def start(self) -> _ThreadedFifoTransport:
+        self._thread.start()
+        return self
+
+    def _deliver(self, data: bytes, *, eof: bool = False) -> None:
+        def deliver() -> None:
+            if self._closed and not eof:
+                return
+            with contextlib.suppress(Exception):
+                if eof:
+                    self._reader.feed_eof()
+                else:
+                    self._reader.feed_data(data)
+
+        with contextlib.suppress(RuntimeError):  # the loop may already be closed
+            self._loop.call_soon_threadsafe(deliver)
+
+    def _read(self) -> None:
+        while not self._closed:
+            try:
+                ready = select.select([self._fd], [], [], 0.1)[0]
+            except (OSError, ValueError):
+                break
+            if not ready:
+                continue
+            try:
+                chunk = os.read(self._fd, _CHUNK_BYTES)
+            except BlockingIOError:
+                continue
+            except OSError:
+                break
+            if not chunk:
+                break
+            self._deliver(chunk)
+        self._deliver(b"", eof=True)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        with contextlib.suppress(OSError):
+            os.close(self._fd)
+
+    def is_closing(self) -> bool:
+        return self._closed
+
+
 async def _open_fifo(path: Path) -> tuple[asyncio.StreamReader, asyncio.BaseTransport, int]:
     """A FIFO read through asyncio; our own write end keeps it from ending before bash opens it."""
     os.mkfifo(path, 0o600)
     read_fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
     write_fd = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
     reader = asyncio.StreamReader(limit=2**20)
+    if sys.platform == "darwin":
+        transport = _ThreadedFifoTransport(read_fd, reader).start()
+        return reader, transport, write_fd
     loop = asyncio.get_running_loop()
     transport, _ = await loop.connect_read_pipe(
         lambda: asyncio.StreamReaderProtocol(reader), os.fdopen(read_fd, "rb", 0)
@@ -479,6 +647,8 @@ class Shell:
         # USR1 trap is set, as bash last reported them (see ``_wrap``).
         self._options = ""
         self._user_usr1 = False
+        # The running observed command: inner task, interrupt inputs and cancel state.
+        self._active_terminal: dict[str, Any] | None = None
 
     def __repr__(self) -> str:
         return f"Shell(cwd={self.cwd!r}; {self.summary()})"
@@ -789,6 +959,9 @@ class Shell:
         write_fds: set[int] = set()
         pumps: list[tuple[asyncio.Task[None], asyncio.BaseTransport, _Capture]] = []
         progress = None
+        result: CommandResult | None = None
+        active: dict[str, Any] | None = None
+        terminal_id = f"term-{uuid4().hex}" if terminal_observer.get() is not None else None
         try:
             sink = _progress_sink()
             if sink is not None:  # a managed job: previews follow its Throttle (None: quiet)
@@ -814,6 +987,31 @@ class Shell:
             )
             if progress is not None:
                 progress.live = lambda: not inner.done() and self._generation == generation
+            if terminal_id is not None:
+                active = {
+                    "inner": inner,
+                    "before": before,
+                    "session": session,
+                    "generation": generation,
+                    "cancelled": False,
+                    "restarted": False,
+                }
+                self._active_terminal = active
+                _live_terminals[terminal_id] = self
+                _emit_terminal(
+                    TerminalObservation(
+                        "started",
+                        terminal_id,
+                        command=command,
+                        cwd=str(session.cwd),
+                        job_name=self._busy_job,
+                    )
+                )
+
+                def output(data: bytes, terminal_id: str = terminal_id) -> None:
+                    _emit_terminal(TerminalObservation("output", terminal_id, data=data))
+
+                out.observer = err.observer = output
             restart_notes: list[str] | None = None
             try:
                 try:
@@ -834,11 +1032,25 @@ class Shell:
             except asyncio.CancelledError:
                 if progress is not None:
                     progress.close()
-                if (deadline := deadline_cancel()) is not None:
-                    deadline.note(_deadline_note(command))
-                if await self._interrupt(inner, before, session, generation):
-                    raise asyncio.CancelledError(self._note) from None
-                raise
+                task = asyncio.current_task()
+                externally_cancelled = (
+                    active is not None
+                    and active["cancelled"]
+                    and (task is None or not task.cancelling())
+                )
+                if externally_cancelled:
+                    # _interrupt cancelled only `inner` in order to restart a
+                    # stubborn bash. The cell/turn itself was not cancelled.
+                    stray_out = stray_err = ""
+                    code, timed_out = 130, False
+                    if active["restarted"]:
+                        restart_notes, self._note = [self._note], ""
+                else:
+                    if (deadline := deadline_cancel()) is not None:
+                        deadline.note(_deadline_note(command))
+                    if await self._interrupt(inner, before, session, generation):
+                        raise asyncio.CancelledError(self._note) from None
+                    raise
             except Exception:
                 self._check_open(generation)  # closed: say so, not how the close broke it
                 raise
@@ -862,6 +1074,11 @@ class Shell:
                 notes.insert(0, cwd_note)
             if timed_out:
                 notes.append(_timeout_note(timeout))
+            if active is not None and active["cancelled"]:
+                code, timed_out = 130, False
+                notes.append("[command cancelled by the ACP client]")
+                if active["restarted"] and self._note:
+                    notes.append(self._note)
             result = _result(code, timed_out, out, err, str(session.cwd))
             if kept is None:
                 self._retain(result, out, err)
@@ -887,6 +1104,22 @@ class Shell:
                 with contextlib.suppress(OSError):
                     fifo.unlink()  # an open reader keeps working; the name is not needed
             self._pidfile = None
+            out.observer = err.observer = None
+            if active is not None and terminal_id is not None:
+                failure = sys.exc_info()[1]
+                _emit_terminal(
+                    TerminalObservation(
+                        "finished",
+                        terminal_id,
+                        exit_code=result.returncode if result is not None else None,
+                        timed_out=result.timed_out if result is not None else False,
+                        cancelled=bool(active["cancelled"]),
+                        error=str(failure) if failure is not None else "",
+                        job_name=self._busy_job,
+                    )
+                )
+                _live_terminals.pop(terminal_id, None)
+                self._active_terminal = None
         extra = "\n".join(text for text in (stray_out, stray_err, *notes) if text)
         if extra:
             result.stderr = f"{result.stderr}\n{extra}" if result.stderr else extra
@@ -1037,6 +1270,25 @@ class Shell:
     def _check_open(self, generation: int) -> None:
         if self._generation != generation:
             raise _closed_error(_CLOSED_DURING)
+
+    async def _cancel_terminal(self, terminal_id: str) -> bool:
+        """Interrupt one observed command without cancelling its cell or background job."""
+        active = self._active_terminal
+        if (
+            active is None
+            or active.get("inner") is None
+            or active["inner"].done()
+            or active["cancelled"]
+            or _live_terminals.get(terminal_id) is not self
+        ):
+            return False
+        active["cancelled"] = True
+        active["restarted"] = bool(
+            await self._interrupt(
+                active["inner"], active["before"], active["session"], active["generation"]
+            )
+        )
+        return True
 
     async def _interrupt(
         self,

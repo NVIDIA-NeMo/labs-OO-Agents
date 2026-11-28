@@ -5,6 +5,7 @@
 import asyncio
 import contextlib
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -30,11 +31,23 @@ def alive(pid: int) -> bool:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
+    if os.path.isdir("/proc"):
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        except (FileNotFoundError, ProcessLookupError):
+            return False  # exited (and was reaped) between the two checks
+        return "Z" not in stat.split()[2]
+    # Darwin has no /proc: ps distinguishes a live process from a zombie.
     try:
-        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
-    except (FileNotFoundError, ProcessLookupError):
-        return False  # exited (and was reaped) between the two checks
-    return "Z" not in stat.split()[2]
+        stat = subprocess.run(
+            ["ps", "-o", "stat=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+    except OSError:
+        return False
+    return bool(stat) and not stat.startswith("Z")
 
 
 async def until_dead(*pids: int, timeout: float = 10.0) -> None:
@@ -752,7 +765,10 @@ async def test_unparsable_command_runs_nothing_and_the_shell_goes_on(tmp_path):
     async with Shell(tmp_path) as sh:
         await sh.run("set -e; K=1")
         r = await sh.run("touch before; echo 'open quote")
-        assert r.returncode == 2 and "unexpected" in r.stderr and not (tmp_path / "before").exists()
+        # Bash 3.2's eval reports a parse error as 1; direct parsing and newer
+        # bash use 2. The contract is failure without running anything.
+        assert r.returncode in (1, 2) and "unexpected" in r.stderr
+        assert not (tmp_path / "before").exists()
         r = await sh.run("cat <<EOF\nno end")
         assert r.returncode != 0 and r.stdout == ""
         r = await sh.run('echo "$K"; case $- in *e*) echo e;; esac; compgen -v __nooa; trap -p')

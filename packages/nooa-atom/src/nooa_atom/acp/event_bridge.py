@@ -1,19 +1,26 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Translate a Session's updates into ACP session updates.
+"""Translate a Session's updates into ACP v2 session updates.
 
 One bridge per session id per adapter. It listens to the Session's
-updates only (``subscribe``): titles, modes, turn ends, cancels,
+updates only (``subscribe``): titles, turn starts and ends, cancels,
 children, admitted items, close, and the agent's events (tool cells,
 messages, file edits, terminal commands, model responses) as
 ``AgentEventUpdate``. The stream is synchronous and ordered, so updates
 reach the client in the order things happened. The bridge never holds
 the agent: status beyond the updates comes from ``model_info()`` and
 ``plan()``.
+
+Updates are v2 values (``nooa_atom.acp.v2``) sent through a ``Peer``:
+messages carry a ``messageId``, tool calls are ``tool_call_update``
+upserts, the session's foreground state goes out as ``state_update``,
+and each child is a subagent session of its own (``subagent_update``)
+whose cards and messages go out under its id.
 """
 
 import asyncio
 import logging
+import os
 import re
 import threading
 from collections import deque
@@ -25,39 +32,19 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 from uuid import uuid4
 
-from acp import (
-    start_tool_call,
-    text_block,
-    tool_content,
-    tool_diff_content,
-    update_agent_message,
-    update_agent_thought_text,
-    update_plan,
-    update_tool_call,
-    update_user_message_text,
-)
-from acp.helpers import plan_entry
-from acp.interfaces import Client
-from acp.schema import (
-    AgentMessageChunk,
-    AgentThoughtChunk,
-    ContentToolCallContent,
-    Cost,
-    CurrentModeUpdate,
-    PlanEntry,
-    SessionInfoUpdate,
-    TextContentBlock,
-    ToolCallLocation,
-    UsageUpdate,
-    UserMessageChunk,
-)
-
 from nooa.agentdoc import pformat
 from nooa.context_blocks.events import EventBase, ResultStatus, ToolCallEvent
 from nooa.events import LLMResponse, PythonOutput, Summary
 from nooa.interactive import AgentMessage, Done, NeedInput, Waiting
+from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUSTED_MESSAGE
+from nooa_atom.acp import v2
 from nooa_atom.acp.protocol import POOLSIDE_DIALECT, PoolDialect
+from nooa_atom.acp.v2 import Peer
+from nooa_atom.agent import work_shell
 from nooa_atom.agent.activity import (
+    AgentTerminalFinished,
+    AgentTerminalOutput,
+    AgentTerminalStarted,
     FileEdit,
     TerminalCommandFinished,
     TerminalCommandOutput,
@@ -124,6 +111,17 @@ class _OpenCard:
     note: str | None = None  # a terminal card's truncation note, kept at the top
 
 
+@dataclass
+class _AgentTerminal:
+    """A terminal's owning card and delivery target; kept after exit for card references."""
+
+    target: str | None
+    tool_call_id: str | None
+    job_name: str | None
+    exited: bool = False
+    owns_card: bool = False
+
+
 """An open tool card: (id of the session that ran it, its tool call id)."""
 
 
@@ -141,8 +139,16 @@ class BridgedSession(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class _Out:
+    """One update for the client: ``session_id`` is a mirrored child's, else ``None``."""
+
+    update: dict[str, Any]
+    session_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class _BestEffortUpdate:
-    value: Any
+    value: _Out
 
 
 @dataclass
@@ -153,7 +159,7 @@ class _RollingSlot:
 
 @dataclass(frozen=True, slots=True)
 class _RollingUpdate:
-    value: Any
+    value: _Out
     epoch: str
     transport_generation: int
 
@@ -162,7 +168,7 @@ class _RollingUpdate:
 class _InputEvent:
     """An input acknowledgement and the future for this specific send attempt."""
 
-    value: SessionInfoUpdate
+    value: dict[str, Any]
     future: asyncio.Future[None]
 
 
@@ -171,6 +177,40 @@ class _ClientInput:
     client_id: str
     future: asyncio.Future[None]
     taken: bool = False
+
+
+def _template_pattern(template: str) -> re.Pattern[str]:
+    """A pattern matching ``template`` (a ``str.format`` string) with any field values."""
+    from string import Formatter
+
+    return re.compile(
+        "".join(
+            re.escape(literal) + (".*?" if field is not None else "")
+            for literal, field, _spec, _conversion in Formatter().parse(template)
+        )
+    )
+
+
+_MAX_ITERATIONS = _template_pattern(MAX_ITERATIONS_MESSAGE)
+
+INTERNAL_ERROR = -32603
+
+
+def limit_stop_reason(message: str) -> str | None:
+    """``max_tokens`` / ``max_turn_requests`` for a turn that hit a generation limit, else ``None``.
+
+    The messages CodeActStrategy raises, from its own constants.
+    max_retries ("failed after N errors") is repeated invalid output, not a
+    limit on turn requests, so it stays an error.
+    """
+    if OUTPUT_TOKENS_EXHAUSTED_MESSAGE in message:
+        return "max_tokens"
+    if _MAX_ITERATIONS.search(message):
+        return "max_turn_requests"
+    return None
+
+
+_STOP_REASONS = {"done": "end_turn", "need_input": "end_turn", "cancelled": "cancelled"}
 
 
 def _observe_future(future: asyncio.Future[None]) -> None:
@@ -187,11 +227,11 @@ def _fenced_code(text: str, language: str) -> str:
     return f"{fence}{language}\n{text}\n{fence}"
 
 
-def _python_content(code: str, output: str | None = None) -> list[ContentToolCallContent]:
+def _python_content(code: str, output: str | None = None) -> list[dict[str, Any]]:
     """Render Python source and output as Markdown visible in ACP clients."""
-    content = [tool_content(text_block(_fenced_code(code, "python")))]
+    content = [v2.tool_text(_fenced_code(code, "python"))]
     if output is not None:
-        content.append(tool_content(text_block(_fenced_code(output, "text"))))
+        content.append(v2.tool_text(_fenced_code(output, "text")))
     return content
 
 
@@ -237,26 +277,25 @@ def result_card(kind: str, outcome: dict[str, Any]) -> tuple[str, str | None] | 
     return title, (explanation if rest else None)
 
 
-def end_line(update: Any) -> Any:
-    """``update``, with its text ending in a blank line when it is a whole agent message.
+def end_line(text: str) -> str:
+    """An agent message's ``text``, ending in a blank line.
 
-    Every agent message the bridge sends is complete, but ACP has no end of
-    message: clients join consecutive agent chunks. Pool 1.0.16 joins them even
-    across ``messageId`` values, and a single line break is only a soft break in
-    Markdown: "Not posted.\n" followed by "Trace viewer:" rendered as one
-    paragraph, "Not posted. Trace viewer:". A blank line ends the paragraph, so
-    the next message (``/usage``, ``/trace-url`` included) starts its own.
+    Every agent message the bridge sends is complete, but clients that join
+    consecutive agent chunks (every v1 client; Pool 1.0.16 even across
+    ``messageId`` values) need a paragraph break: a single line break is only
+    a soft break in Markdown, so "Not posted.\n" followed by "Trace viewer:"
+    rendered as one paragraph, "Not posted. Trace viewer:". A blank line ends
+    the paragraph, so the next message (``/usage``, ``/trace-url`` included)
+    starts its own.
     """
-    if (
-        isinstance(update, AgentMessageChunk)
-        and isinstance(update.content, TextContentBlock)
-        and update.content.text
-        and not update.content.text.endswith("\n\n")
-    ):
-        ending = "\n" if update.content.text.endswith("\n") else "\n\n"
-        content = update.content.model_copy(update={"text": update.content.text + ending})
-        return update.model_copy(update={"content": content})
-    return update
+    if text and not text.endswith("\n\n"):
+        return text + ("\n" if text.endswith("\n") else "\n\n")
+    return text
+
+
+def agent_message(text: str, message_id: str | None = None) -> list[dict[str, Any]]:
+    """A whole agent message (``end_line``), as chunks of one message id."""
+    return v2.message("agent_message", end_line(text), message_id)
 
 
 POOL_INPUT_EVENT_ID = POOLSIDE_DIALECT.input_event_id
@@ -267,7 +306,7 @@ def pool_input_event(
     item_id: str,
     client_input_id: str | None = None,
     dialects: tuple[PoolDialect, ...] = (POOLSIDE_DIALECT,),
-) -> SessionInfoUpdate:
+) -> dict[str, Any]:
     """The update Pool's own agent sends when it takes a person's input.
 
     Pool places a message it queued with ``_poolside/session_steer`` in the
@@ -283,54 +322,26 @@ def pool_input_event(
         if client_input_id is not None:
             meta[dialect.client_input_id] = client_input_id
         meta[dialect.input_event_id] = item_id
-    return SessionInfoUpdate(session_update="session_info_update", field_meta=meta)
+    return {"sessionUpdate": "session_info_update", "_meta": meta}
 
 
-MAX_CHUNK_CHARS = 64_000
-"""Longest text one message or thought chunk carries.
-
-A longer text (a large paste, a long answer, a transcript entry replayed by
-``session/load``) goes out as several chunks of the same kind, which a
-client joins as it joins any stream of chunks. This keeps every message well
-under the 1 MiB that WebSocket clients accept by default (``websockets``):
-64,000 characters are at most about 384 KiB of JSON, even if every
-character needs a six-byte escape.
-"""
-
-_TEXT_CHUNKS = (AgentMessageChunk, UserMessageChunk, AgentThoughtChunk)
-
-
-def split_text_chunk(update: Any) -> list[Any]:
-    """``update`` as a list of updates, split when it is a text chunk over ``MAX_CHUNK_CHARS``."""
-    if not isinstance(update, _TEXT_CHUNKS) or not isinstance(update.content, TextContentBlock):
-        return [update]
-    text = update.content.text
-    if len(text) <= MAX_CHUNK_CHARS:
-        return [update]
-    return [
-        update.model_copy(
-            update={
-                "content": update.content.model_copy(
-                    update={"text": text[start : start + MAX_CHUNK_CHARS]}
-                )
-            }
-        )
-        for start in range(0, len(text), MAX_CHUNK_CHARS)
-    ]
+MAX_CHUNK_CHARS = v2.TEXT_LIMIT
+"""Longest text one message or thought chunk carries (``v2.TEXT_LIMIT``)."""
 
 
 class ACPEventBridge:
     """Send one session's activity to an ACP client, in order, through one pump task.
 
-    ``resolve_child(child_id)`` finds a live child Session; when given, the
-    tool cards of this session's children (and theirs) are mirrored into
-    this session with ids ``"{child_id}:{tool_call_id}"``.
+    ``resolve_child(child_id)`` finds a live child Session; when given, this
+    session's children (and theirs) are followed too: each is announced as
+    a subagent (``subagent_update``) and its cards, messages and state go
+    out under its own session id.
     """
 
     def __init__(
         self,
         session: BridgedSession,
-        client: Client,
+        client: Peer,
         *,
         resolve_child: Callable[[str], BridgedSession | None] | None = None,
         own_sources: frozenset[str] = OWN_SOURCES,
@@ -341,6 +352,20 @@ class ACPEventBridge:
         self.verbosity: Verbosity = "verbose"
         # The Pool meta key sets of input events (``pool_input_event``).
         self.pool_dialects: tuple[PoolDialect, ...] = (POOLSIDE_DIALECT,)
+        # The foreground state the client was last told, by session id (this
+        # one and the followed children): idle, running or requires_action.
+        self._states: dict[str, str] = {}
+        # Requests to the client the foreground work is waiting on (forms).
+        self._asks = 0
+        # A local command's foreground work (``begin_local``), while no turn runs.
+        self._local = False
+        self._turn_running = False
+        # What a waiting turn waits on, shown as background tool calls
+        # ``job:<name>``; ``None`` until a turn has waited on something.
+        self._background: dict[str, str] | None = None
+        # Children announced to the client, and their parents.
+        self._parents: dict[str, str] = {}
+        self._described: set[str] = set()
         self._resolve_child = resolve_child
         self._own_sources = own_sources
         self._loop = asyncio.get_running_loop()
@@ -361,12 +386,13 @@ class ACPEventBridge:
         # wins, whoever started the close.
         self._finish_open = True
         self._open: dict[ToolKey, _OpenCard] = {}
+        self._agent_terminals: dict[str, _AgentTerminal] = {}
         self._rolling: dict[str, _RollingSlot] = {}
         self._helper_names: dict[str, str] = {}
         self._rolling_seen: set[ToolKey] = set()  # ACP execution ids must not be reused
         self._invalid_rolling: set[str] = set()
         self._transport_generation = 0
-        self._plan: list[PlanEntry] = []
+        self._plan: list[dict[str, Any]] = []
         self._children: list[dict[str, Any]] = []
         self._mirrors: dict[str, list[Callable[[], None]]] = {}
         # Keep the association through send failure until the request forgets it.
@@ -385,6 +411,9 @@ class ACPEventBridge:
             "TerminalCommandStarted": self._on_terminal_started,
             "TerminalCommandOutput": self._on_terminal_output,
             "TerminalCommandFinished": self._on_terminal_finished,
+            "AgentTerminalStarted": self._on_agent_terminal_started,
+            "AgentTerminalOutput": self._on_agent_terminal_output,
+            "AgentTerminalFinished": self._on_agent_terminal_finished,
         }
         self._own_handlers: dict[str, Callable[[Any], None]] = {
             "AgentMessage": self._on_agent_message,
@@ -417,7 +446,7 @@ class ACPEventBridge:
         if self.verbosity == "concise":
             text = next((line.strip() for line in text.splitlines() if line.strip()), "")
         if text:
-            self._enqueue(update_agent_thought_text(text.rstrip() + "\n\n"))
+            self._enqueue_all(v2.message("agent_thought", text.rstrip() + "\n\n"))
 
     # ---- subscriptions -----------------------------------------------
 
@@ -446,14 +475,27 @@ class ACPEventBridge:
             kind = getattr(update, "kind", None)
             if isinstance(update, AgentEventUpdate):
                 self._on_agent_event(update.event, child.id)
+                if isinstance(update.event, AgentMessage):
+                    # A child's own conversation, under its id.
+                    self._enqueue_all(agent_message(update.event.content), child.id)
             elif isinstance(update, ChildCreatedUpdate):
                 # Announced like this session's own children, so the client
                 # knows the id before cards arrive under it.
-                self._on_child_created(update)
+                self._on_child_created(update, parent=child.id)
+            elif isinstance(update, ItemAdmittedUpdate):
+                if update.channel in _ECHOED_CHANNELS:
+                    self._child_message(
+                        child.id, update.item_id, getattr(update, "text", "") or update.preview
+                    )
             elif kind == "turn_started":
                 self._reset_rolling("A new helper turn started.", source=child.id)
+                self._set_state("running", child.id)
             elif isinstance(update, TurnEndedUpdate):
                 self._reset_rolling("Helper turn ended before this finished.", source=child.id)
+                reason = _STOP_REASONS.get(update.outcome_kind, "end_turn")
+                if update.outcome_kind == "error":
+                    reason = "error"
+                self._set_state("idle", child.id, stop_reason=reason)
             elif isinstance(update, CancelledUpdate):
                 self._reset_rolling(cancel_text(update.by), source=child.id, title="Cancelled")
             elif kind == "closed":
@@ -478,9 +520,9 @@ class ACPEventBridge:
     def _key(self, tool_call_id: str, source: str | None) -> ToolKey:
         return (source or self.session_id, tool_call_id)
 
-    def _wire_id(self, key: ToolKey) -> str:
-        session_id, tool_call_id = key
-        return tool_call_id if session_id == self.session_id else f"{session_id}:{tool_call_id}"
+    def _target(self, key: ToolKey) -> str | None:
+        """The session a card's updates go to: ``None`` for this one, else the child's id."""
+        return None if key[0] == self.session_id else key[0]
 
     def _discard_rolling(self) -> None:
         """Discard all slots and queued updates, including already-ended epochs."""
@@ -500,12 +542,7 @@ class ACPEventBridge:
             self._rolling.pop(source_id, None)
 
     def _card_title(self, key: ToolKey, card: _OpenCard, status: str | None = None) -> str:
-        title = _python_title(card.code, status)
-        if card.wire_id is not None and key[0] != self.session_id:
-            name = self._helper_names.get(key[0], "helper")
-            name = " ".join(name.split())[:40] or "helper"
-            title = title.replace("python", f"python [{name} · {key[0][:8]}]", 1)
-        return title
+        return _python_title(card.code, status)
 
     # ---- queue -------------------------------------------------------
 
@@ -538,23 +575,38 @@ class ACPEventBridge:
         finally:
             self._draining = False
 
-    def _enqueue(self, update: Any) -> None:
-        if not self._closed:
-            for part in split_text_chunk(end_line(update)):
-                wire_id = getattr(part, "tool_call_id", None)
-                if wire_id is not None and any(
-                    slot.wire_id == wire_id for slot in self._rolling.values()
-                ):
-                    part = _RollingUpdate(part, wire_id, self._transport_generation)
-                self._queue.put_nowait(part)
+    def _enqueue(self, update: dict[str, Any], session_id: str | None = None) -> None:
+        """Queue one v2 update for this session (``session_id``: a followed child's)."""
+        if self._closed:
+            return
+        out = _Out(update, session_id)
+        wire_id = update.get("toolCallId")
+        if wire_id is not None and any(slot.wire_id == wire_id for slot in self._rolling.values()):
+            self._queue.put_nowait(_RollingUpdate(out, wire_id, self._transport_generation))
+        else:
+            self._queue.put_nowait(out)
 
-    def publish(self, update: Any) -> None:
-        """Queue a host-originated session update on the ordered ACP stream."""
-        self._dispatch(self._enqueue, update)
+    def _enqueue_all(self, updates: list[dict[str, Any]], session_id: str | None = None) -> None:
+        for update in updates:
+            self._enqueue(update, session_id)
 
-    def publish_best_effort(self, update: Any) -> None:
+    def publish(self, update: dict[str, Any] | list[dict[str, Any]]) -> None:
+        """Queue host-originated v2 session updates on the ordered ACP stream."""
+        updates = update if isinstance(update, list) else [update]
+        self._dispatch(self._enqueue_all, updates)
+
+    def say(self, text: str) -> None:
+        """Queue a whole agent message, as the host says it (not the agent)."""
+        self.publish(agent_message(text))
+
+    def publish_best_effort(self, update: dict[str, Any]) -> None:
         """Queue bootstrap metadata without poisoning the live event stream."""
-        self._dispatch(self._enqueue, _BestEffortUpdate(update))
+        self._dispatch(
+            lambda value: (
+                self._queue.put_nowait(_BestEffortUpdate(_Out(value))) if not self._closed else None
+            ),
+            update,
+        )
 
     # ---- session updates ---------------------------------------------
 
@@ -669,29 +721,31 @@ class ACPEventBridge:
             ):
                 self._echoed_items.add(update.item_id)
                 text = getattr(update, "text", "") or update.preview
-                self._enqueue(update_user_message_text(text))
+                self._enqueue_all(v2.message("user_message", text, update.item_id))
         elif isinstance(update, TitleChangedUpdate):
             self._enqueue(
-                SessionInfoUpdate(
-                    session_update="session_info_update",
-                    title=update.title,
-                    updated_at=datetime.now(UTC).isoformat(),
-                )
+                {
+                    "sessionUpdate": "session_info_update",
+                    "title": update.title,
+                    "updatedAt": datetime.now(UTC).isoformat(),
+                }
             )
         elif isinstance(update, ModeChangedUpdate):
-            self._enqueue(
-                CurrentModeUpdate(session_update="current_mode_update", current_mode_id=update.mode)
-            )
+            # v2 has no session modes; the v1 shim shows this, V2Peer drops it.
+            self._enqueue({"sessionUpdate": "current_mode_update", "currentModeId": update.mode})
         elif getattr(update, "kind", None) == "turn_started":
             self._reset_rolling("A new turn started.")
+            self._turn_running = True
+            self._set_state("requires_action" if self._asks else "running")
         elif isinstance(update, CancelledUpdate):
             self._reset_rolling(cancel_text(update.by), title="Cancelled")
             # Before the prompt's future resolves: the Session emits this first,
             # so the cards are closed before the prompt answers "cancelled".
             self.fail_open_tools(cancel_text(update.by), title="Cancelled")
-            self._enqueue(update_agent_message(text_block(cancel_text(update.by))))
+            self._enqueue_all(agent_message(cancel_text(update.by)))
         elif isinstance(update, TurnEndedUpdate):
             self._on_turn_ended(update)
+            self._turn_ended_state(update)
         elif isinstance(update, ChildCreatedUpdate):
             self._on_child_created(update)
         elif getattr(update, "kind", None) == "usage_changed":
@@ -705,10 +759,8 @@ class ACPEventBridge:
             # Rendered once per turn, here; the next prompt answers it as text.
             question = str(update.outcome.get("question", ""))
             reason = update.outcome.get("reason")
-            self._enqueue(
-                update_agent_message(
-                    text_block(question_text(question, str(reason) if reason else None))
-                )
+            self._enqueue_all(
+                agent_message(question_text(question, str(reason) if reason else None))
             )
         elif update.outcome_kind in {"done", "waiting"}:
             # A card, not chat text: the turn's last message stays its reply.
@@ -722,33 +774,220 @@ class ACPEventBridge:
             self.fail_open_tools("Did not finish.", title="Unfinished")
         self._publish_plan()
 
-    def _on_child_created(self, update: ChildCreatedUpdate) -> None:
-        self._helper_names[update.child_id] = update.name or "helper"
+    # ---- foreground state ------------------------------------------
+
+    def _set_state(
+        self,
+        state: str,
+        session_id: str | None = None,
+        *,
+        stop_reason: str | None = None,
+        error: dict[str, Any] | None = None,
+        force: bool = False,
+    ) -> None:
+        """Tell the client a session's foreground state (``None``: this session's).
+
+        Repeats are dropped unless ``force`` (a resume's snapshot). A child's
+        state also goes to its parent, in the child's ``subagent_update``.
+        """
+        target = session_id or self.session_id
+        previous = self._states.get(target, "idle")
+        if previous == state and not force:
+            return
+        self._states[target] = state
+        update = v2.state_update(state)
+        if state == "idle":
+            if stop_reason is not None:
+                update["stopReason"] = stop_reason
+            if error is not None:
+                update["error"] = error
+        if target == self.session_id and self._background is not None:
+            update["background"] = [
+                {"type": "tool_call", "toolCallId": tool_call_id}
+                for tool_call_id in self._background
+            ]
+            update["background"] += [
+                {"type": "terminal", "terminalId": terminal_id}
+                for terminal_id, terminal in self._agent_terminals.items()
+                if not terminal.exited
+                and terminal.target is None
+                and terminal.job_name is not None
+                and f"job:{terminal.job_name}" in self._background
+            ]
+        self._enqueue(update, session_id)
+        parent = self._parents.get(target)
+        if parent is not None:
+            state_info = {key: value for key, value in update.items() if key != "sessionUpdate"}
+            self._enqueue(
+                {"sessionUpdate": "subagent_update", "sessionId": target, "state": state_info},
+                None if parent == self.session_id else parent,
+            )
+
+    def state(self, session_id: str | None = None) -> str:
+        """The foreground state last sent for this session (or a followed child)."""
+        return self._states.get(session_id or self.session_id, "idle")
+
+    def snapshot_state(self) -> None:
+        """Send the current foreground state again (``session/resume`` ends with it)."""
+        self._dispatch(lambda _: self._set_state(self.state(), force=True), None)
+
+    def begin_local(self) -> None:
+        """A local command starts foreground work (no turn runs it)."""
+
+        def begin(_: Any) -> None:
+            if self.state() == "idle":
+                self._local = True
+                self._set_state("running")
+
+        self._dispatch(begin, None)
+
+    def end_local(self, stop_reason: str = "end_turn") -> None:
+        """The local command's work ended; idle unless a turn started meanwhile."""
+
+        def end(_: Any) -> None:
+            if self._local:
+                self._local = False
+                if not self._turn_running:
+                    self._set_state("idle", stop_reason=stop_reason)
+
+        self._dispatch(end, None)
+
+    def ask_started(self) -> None:
+        """A request to the client (a form) blocks the foreground work: requires_action."""
+
+        def started(_: Any) -> None:
+            self._asks += 1
+            if self.state() == "running":
+                self._set_state("requires_action")
+
+        self._dispatch(started, None)
+
+    def ask_ended(self) -> None:
+        def ended(_: Any) -> None:
+            self._asks = max(0, self._asks - 1)
+            if not self._asks and self.state() == "requires_action":
+                self._set_state("running")
+
+        self._dispatch(ended, None)
+
+    def _turn_ended_state(self, update: TurnEndedUpdate) -> None:
+        """Idle at a turn's end, with its stop reason; what a waiting turn waits on is background."""
+        self._turn_running = False
+        self._local = False
+        outcome = update.outcome_kind
+        names = (
+            [str(name) for name in update.outcome.get("on") or []] if outcome == "waiting" else []
+        )
+        if names or self._background:
+            self._set_background(names)
+        error = None
+        if outcome == "error":
+            message = str(update.outcome.get("error") or "The turn failed.")
+            stop_reason = limit_stop_reason(message)
+            if stop_reason is None:
+                stop_reason = "error"
+                error = v2.error_object(INTERNAL_ERROR, message)
+        else:
+            stop_reason = _STOP_REASONS.get(outcome, "end_turn")
+        self._set_state("idle", stop_reason=stop_reason, error=error)
+
+    def _set_background(self, names: list[str]) -> None:
+        """List what a waiting turn waits on as background tool calls; finish the rest."""
+        background = self._background if self._background is not None else {}
+        self._background = background
+        wanted = {f"job:{name}": name for name in names}
+        for tool_call_id in list(background):
+            if tool_call_id not in wanted:
+                del background[tool_call_id]
+                self._enqueue(
+                    {
+                        "sessionUpdate": "tool_call_update",
+                        "toolCallId": tool_call_id,
+                        "status": "completed",
+                        "capabilities": None,
+                    }
+                )
+        for tool_call_id, name in wanted.items():
+            if tool_call_id not in background:
+                background[tool_call_id] = name
+                self._enqueue(
+                    v2.tool_call(
+                        tool_call_id,
+                        title=f"Waiting on {name}",
+                        kind="other",
+                        status="in_progress",
+                        content=self._terminal_items(tool_call_id) or None,
+                        capabilities={"cancel": {}},
+                    )
+                )
+
+    # ---- children ----------------------------------------------------
+
+    def _on_child_created(self, update: ChildCreatedUpdate, *, parent: str | None = None) -> None:
+        parent_id = parent or self.session_id
+        child_id = update.child_id
+        child = self._resolve_child(child_id) if self._resolve_child else None
+        if child_id not in self._parents and child_id != parent_id:
+            self._parents[child_id] = parent_id
+            announce: dict[str, Any] = {
+                "sessionUpdate": "subagent_update",
+                "sessionId": child_id,
+                "title": update.name or "helper",
+                "capabilities": {"cancel": {}},
+            }
+            options = getattr(child, "options", None)
+            workspace = getattr(options, "workspace", None)
+            if workspace is not None and Path(workspace).is_absolute():
+                announce["cwd"] = str(workspace)
+            self._enqueue(announce, None if parent_id == self.session_id else parent_id)
+        self._helper_names[child_id] = update.name or "helper"
         self._children.append(
             {
-                "sessionId": update.child_id,
+                "sessionId": child_id,
                 "name": update.name,
                 "depth": update.depth,
                 "retained": update.retained,
             }
         )
         self._enqueue(
-            SessionInfoUpdate(
-                session_update="session_info_update",
-                field_meta={"dev.nooa/children": list(self._children)},
-            )
+            {
+                "sessionUpdate": "session_info_update",
+                "_meta": {"dev.nooa/children": list(self._children)},
+            }
         )
-        if self._resolve_child is not None:
-            child = self._resolve_child(update.child_id)
-            if child is not None:
-                self._mirror(child)
+        if child is not None:
+            self._mirror(child)
+
+    def _child_message(self, child_id: str, message_id: str, text: str) -> None:
+        """A message the parent sent a child: a ``session_message`` in the child's session."""
+        parent = self._parents.get(child_id, self.session_id)
+        self._enqueue(
+            {
+                "sessionUpdate": "session_message",
+                "messageId": message_id or v2.new_message_id(),
+                "senderSessionId": parent,
+                "recipientSessionId": child_id,
+                "content": [v2.text(text)],
+            },
+            child_id,
+        )
+        if child_id not in self._described and text.strip():
+            self._described.add(child_id)
+            self._enqueue(
+                {
+                    "sessionUpdate": "subagent_update",
+                    "sessionId": child_id,
+                    "description": text[:500],
+                },
+                None if parent == self.session_id else parent,
+            )
 
     # ---- agent events ------------------------------------------------
 
     def _on_agent_message(self, event: EventBase) -> None:
         if not isinstance(event, AgentMessage):
             return
-        self._enqueue(update_agent_message(text_block(event.content)))
+        self._enqueue_all(agent_message(event.content))
         self._move_rolling_below()
 
     def _move_rolling_below(self) -> None:
@@ -766,23 +1005,31 @@ class ACPEventBridge:
             if card is None or card.wire_id != slot.wire_id:
                 del self._rolling[source]
                 continue
+            target = self._target(slot.key)
             self._enqueue(
-                update_tool_call(
+                v2.tool_call(
                     slot.wire_id,
                     status="completed",
-                    content=_python_content(card.code, "Continued below."),
-                )
+                    content=_python_content(card.code, "Continued below.")
+                    + self._terminal_items(slot.wire_id),
+                ),
+                target,
             )
+            previous_wire_id = slot.wire_id
             slot.wire_id = card.wire_id = f"concise-python-{uuid4()}"
+            for terminal in self._agent_terminals.values():
+                if terminal.tool_call_id == previous_wire_id:
+                    terminal.tool_call_id = slot.wire_id
             self._enqueue(
-                start_tool_call(
+                v2.tool_call(
                     card.wire_id,
-                    self._card_title(slot.key, card),
+                    title=self._card_title(slot.key, card),
                     kind="other",
                     status="in_progress",
-                    content=_python_content(card.code),
+                    content=_python_content(card.code) + self._terminal_items(card.wire_id),
                     raw_input={"code": card.code},
-                )
+                ),
+                target,
             )
 
     def _on_tool_call(self, event: EventBase, source: str | None) -> None:
@@ -822,30 +1069,23 @@ class ACPEventBridge:
             card = _OpenCard("python", code=code, wire_id=slot.wire_id)
             self._open[key] = card
             title = self._card_title(key, card)
-            if first:
-                update = start_tool_call(
-                    slot.wire_id,
-                    title,
-                    kind="other",
-                    status="in_progress",
-                    content=_python_content(code),
-                    raw_input={"code": code},
-                )
-            else:
-                update = update_tool_call(
+            self._enqueue(
+                v2.tool_call(
                     slot.wire_id,
                     title=title,
+                    kind="other" if first else None,
                     status="in_progress",
                     content=_python_content(code),
                     raw_input={"code": code},
-                )
-            self._enqueue(update)
+                ),
+                self._target(key),
+            )
             return
         self._open[key] = _OpenCard("python", code=code)
         self._enqueue(
-            start_tool_call(
-                self._wire_id(key),
-                _python_title(code),
+            v2.tool_call(
+                key[1],
+                title=_python_title(code),
                 # Zed 1.14 treats every ``execute`` tool as a terminal card.
                 # A plain-content execute card has neither a terminal nor an
                 # output disclosure, so its source cannot be opened. Python is
@@ -854,7 +1094,8 @@ class ACPEventBridge:
                 status="in_progress",
                 content=_python_content(code),
                 raw_input={"code": code},
-            )
+            ),
+            self._target(key),
         )
 
     def _on_python_output(self, event: EventBase, source: str | None) -> None:
@@ -886,13 +1127,15 @@ class ACPEventBridge:
                 key, card, "cancelled" if cancelled else "failed" if status == "failed" else None
             )
             self._enqueue(
-                update_tool_call(
-                    card.wire_id or self._wire_id(key),
+                v2.tool_call(
+                    card.wire_id or key[1],
                     title=title,
                     status=status,
-                    content=_python_content(code, output),
+                    content=_python_content(code, output)
+                    + self._terminal_items(card.wire_id or key[1]),
                     raw_input={"code": code},
-                )
+                ),
+                self._target(key),
             )
         if source is None:
             self._publish_plan()
@@ -900,35 +1143,39 @@ class ACPEventBridge:
     def _on_file_edit(self, event: EventBase, source: str | None) -> None:
         if self.verbosity != "verbose" or not isinstance(event, FileEdit):
             return
-        tool_call_id = self._wire_id(self._key(f"file-edit-{uuid4()}", source))
+        key = self._key(f"file-edit-{uuid4()}", source)
         path = event.path
         title = f"{'Created' if event.operation == 'create' else 'Edited'} {Path(path).name}"
         content: list[Any]
-        if event.content_complete:
-            content = [tool_diff_content(path, event.new_text, event.old_text)]
+        if event.content_complete and os.path.isabs(path):
+            content = [v2.diff(path, event.old_text, event.new_text, start_line=event.start_line)]
+        elif event.content_complete:
+            content = [v2.tool_text(f"Edited {path}")]
         else:
-            content = [tool_content(text_block(event.diff or "File content was truncated."))]
+            content = [v2.tool_text(event.diff or "File content was truncated.")]
             if event.diff and not event.diff_complete:
                 content.append(
-                    tool_content(
-                        text_block("The diff was truncated: the edit is larger than shown.")
-                    )
+                    v2.tool_text("The diff was truncated: the edit is larger than shown.")
                 )
-        line = max(0, event.start_line - 1) if event.start_line is not None else None
+        # v2 lines are 1-based, like the event's.
+        location: dict[str, Any] = {"path": path}
+        if event.start_line is not None:
+            location["line"] = max(1, event.start_line)
         self._enqueue(
-            start_tool_call(
-                tool_call_id,
-                title,
+            v2.tool_call(
+                key[1],
+                title=title,
                 kind="edit",
                 status="completed",
                 content=content,
-                locations=[ToolCallLocation(path=path, line=line)],
+                locations=[location] if os.path.isabs(path) else None,
                 raw_input={"path": path, "operation": event.operation},
                 raw_output={
                     "content_complete": event.content_complete,
                     "diff_complete": event.diff_complete,
                 },
-            )
+            ),
+            self._target(key),
         )
 
     def _on_terminal_started(self, event: EventBase, source: str | None) -> None:
@@ -938,9 +1185,9 @@ class ACPEventBridge:
         note = _TRUNCATION_NOTES.get((event.command_truncated, event.stdin_truncated))
         self._open[key] = _OpenCard("terminal", note=note)
         self._enqueue(
-            start_tool_call(
-                self._wire_id(key),
-                f"$ {event.command}",
+            v2.tool_call(
+                key[1],
+                title=f"$ {event.command}",
                 kind="execute",
                 status="in_progress",
                 content=self._terminal_content(key, None),
@@ -950,14 +1197,15 @@ class ACPEventBridge:
                     "command_truncated": event.command_truncated,
                     "stdin_truncated": event.stdin_truncated,
                 },
-            )
+            ),
+            self._target(key),
         )
 
     def _terminal_content(self, key: ToolKey, output: str | None) -> list[Any] | None:
         """A terminal card's content: its truncation note, if any, then ``output``."""
         card = self._open.get(key)
         texts = [card.note if card is not None else None, output]
-        content = [tool_content(text_block(text)) for text in texts if text is not None]
+        content = [v2.tool_text(text) for text in texts if text is not None]
         return content or None
 
     def _on_terminal_output(self, event: EventBase, source: str | None) -> None:
@@ -973,11 +1221,8 @@ class ACPEventBridge:
         card.output += chunk
         output = card.output
         self._enqueue(
-            update_tool_call(
-                self._wire_id(key),
-                status="in_progress",
-                content=self._terminal_content(key, output),
-            )
+            v2.tool_call(key[1], status="in_progress", content=self._terminal_content(key, output)),
+            self._target(key),
         )
 
     def _on_terminal_finished(self, event: EventBase, source: str | None) -> None:
@@ -1002,8 +1247,8 @@ class ACPEventBridge:
             or (event.exit_code is not None and event.exit_code != 0)
         )
         self._enqueue(
-            update_tool_call(
-                self._wire_id(key),
+            v2.tool_call(
+                key[1],
                 status="failed" if failed else "completed",
                 content=content,
                 raw_output={
@@ -1011,15 +1256,155 @@ class ACPEventBridge:
                     "timed_out": event.timed_out,
                     "output_truncated": event.output_truncated,
                 },
-            )
+            ),
+            self._target(key),
         )
+
+    # ---- agent-owned terminals ------------------------------------------
+
+    def _foreground_terminal_card(self, source_id: str) -> str | None:
+        """The newest open Python card for this source, if a cell started the command."""
+        for key, card in reversed(self._open.items()):
+            if key[0] == source_id and card.kind == "python":
+                return card.wire_id or key[1]
+        return None
+
+    def _terminal_items(self, tool_call_id: str) -> list[dict[str, Any]]:
+        """Terminal references to retain when a card replaces its whole content list."""
+        return [
+            v2.terminal_content(terminal_id)
+            for terminal_id, terminal in self._agent_terminals.items()
+            if terminal.tool_call_id == tool_call_id
+        ]
+
+    async def cancel_terminal(self, terminal_id: str) -> bool:
+        """Cancel a live terminal without changing its tool card or foreground state."""
+        terminal = self._agent_terminals.get(terminal_id)
+        if terminal is None or terminal.exited:
+            return False
+        return await work_shell.cancel_terminal(terminal_id)
+
+    async def cancel_background(self, tool_call_id: str, job: Any) -> bool:
+        """Cancel an advertised background job and finish only its own tool card."""
+        if self._background is None or tool_call_id not in self._background:
+            return False
+        if getattr(job, "status", None) != "running":
+            return False
+        await job.cancel()
+        del self._background[tool_call_id]
+        self._enqueue(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": tool_call_id,
+                "status": "cancelled",
+                "capabilities": None,
+            }
+        )
+        # Never change the foreground state. If it is already idle, refresh
+        # its background list; a running turn will publish the list at its end.
+        if self.state() == "idle":
+            self._set_state("idle", force=True)
+        return True
+
+    def _on_agent_terminal_started(self, event: EventBase, source: str | None) -> None:
+        if self.verbosity == "silent" or not isinstance(event, AgentTerminalStarted):
+            return
+        key = self._key(event.terminal_id, source)
+        target = self._target(key)
+        job_name = event.job_name
+        tool_call_id = f"job:{job_name}" if job_name else self._foreground_terminal_card(key[0])
+        owns_card = tool_call_id is None
+        if owns_card:
+            tool_call_id = f"terminal:{event.terminal_id}"
+        terminal = _AgentTerminal(target, tool_call_id, job_name, owns_card=owns_card)
+        self._agent_terminals[event.terminal_id] = terminal
+        self._enqueue(
+            v2.terminal_update(
+                event.terminal_id,
+                command=event.command,
+                cwd=event.working_directory,
+                capabilities={"cancel": {}},
+            ),
+            target,
+        )
+        reference = v2.terminal_content(event.terminal_id)
+        if owns_card:
+            self._enqueue(
+                v2.tool_call(
+                    tool_call_id,
+                    title=f"$ {event.command}",
+                    kind="execute",
+                    status="in_progress",
+                    content=[reference],
+                    raw_input={
+                        "command": event.command,
+                        "working_directory": event.working_directory,
+                    },
+                ),
+                target,
+            )
+        elif job_name is None or (
+            self._background is not None and tool_call_id in self._background
+        ):
+            self._enqueue(v2.tool_call_content_chunk(tool_call_id, reference), target)
+
+    def _on_agent_terminal_output(self, event: EventBase, source: str | None) -> None:
+        if not isinstance(event, AgentTerminalOutput):
+            return
+        terminal = self._agent_terminals.get(event.terminal_id)
+        if terminal is not None and not terminal.exited:
+            self._enqueue(v2.terminal_output_chunk(event.terminal_id, event.data), terminal.target)
+
+    def _on_agent_terminal_finished(self, event: EventBase, source: str | None) -> None:
+        if not isinstance(event, AgentTerminalFinished):
+            return
+        terminal = self._agent_terminals.get(event.terminal_id)
+        if terminal is None or terminal.exited:
+            return
+        terminal.exited = True
+        if event.error:
+            self._enqueue(
+                v2.terminal_output_chunk(event.terminal_id, (event.error + "\n").encode()),
+                terminal.target,
+            )
+        exit_status: dict[str, Any] = {}
+        if event.exit_code is not None:
+            exit_status["exitCode"] = event.exit_code
+        self._enqueue(
+            v2.terminal_update(
+                event.terminal_id,
+                exitStatus=exit_status,
+                capabilities=None,  # explicit null: cancellation ends with the terminal
+            ),
+            terminal.target,
+        )
+        if terminal.owns_card and terminal.tool_call_id is not None:
+            failed = (
+                event.cancelled
+                or event.timed_out
+                or bool(event.error)
+                or (event.exit_code is not None and event.exit_code != 0)
+            )
+            self._enqueue(
+                v2.tool_call(
+                    terminal.tool_call_id,
+                    status="failed" if failed else "completed",
+                    content=[v2.terminal_content(event.terminal_id)],
+                    raw_output={
+                        "exit_code": event.exit_code,
+                        "timed_out": event.timed_out,
+                        "cancelled": event.cancelled,
+                    },
+                ),
+                terminal.target,
+            )
 
     def _on_llm_response(self, event: EventBase) -> None:
         if self.verbosity != "verbose" or not isinstance(event, LLMResponse):
             return
         reasoning = event.reasoning
         if reasoning:
-            self._enqueue(update_agent_thought_text(reasoning))
+            self._enqueue_all(v2.message("agent_thought", reasoning))
 
     def _on_summary(self, event: EventBase) -> None:
         if not isinstance(event, Summary) or event.summary_text is None:
@@ -1032,12 +1417,12 @@ class ACPEventBridge:
         if self.verbosity == "silent":
             return
         self._enqueue(
-            start_tool_call(
+            v2.tool_call(
                 f"status-{uuid4()}",
-                title,
+                title=title,
                 kind="other",
                 status="completed",
-                content=[tool_content(text_block(body))] if body else None,
+                content=[v2.tool_text(body)] if body else None,
             )
         )
 
@@ -1062,25 +1447,25 @@ class ACPEventBridge:
         )
         meta: dict[str, Any] = {"dev.nooa/usage": meta_totals}
         self._enqueue(
-            UsageUpdate(
-                session_update="usage_update",
-                used=used,
-                size=max(context_window, used),
-                cost=Cost(amount=totals.cost_usd, currency="USD"),
-                field_meta=meta,
-            )
+            {
+                "sessionUpdate": "usage_update",
+                "used": used,
+                "size": max(context_window, used),
+                "cost": {"amount": totals.cost_usd, "currency": "USD"},
+                "_meta": meta,
+            }
         )
 
     def _publish_plan(self) -> None:
         """Send the agent's plan (``Session.plan()``) as an ACP plan update when it changed."""
         entries = [
-            plan_entry(entry.content, status=entry.status, priority=entry.priority)
+            {"content": entry.content, "priority": entry.priority, "status": entry.status}
             for entry in self.session.plan()
         ]
         if entries == self._plan:
             return
         self._plan = entries
-        self._enqueue(update_plan(entries))
+        self._enqueue(v2.plan_update(entries))
 
     # ---- pump --------------------------------------------------------
 
@@ -1145,7 +1530,7 @@ class ACPEventBridge:
                             item.future.set_exception(self._error)
                         continue
                     try:
-                        await self.client.session_update(self.session_id, item.value)
+                        await self.client.update(self.session_id, item.value)
                     except BaseException as exc:
                         if isinstance(exc, Exception):
                             self._error = exc
@@ -1172,7 +1557,7 @@ class ACPEventBridge:
                     item = item.value
                 if isinstance(item, _BestEffortUpdate):
                     try:
-                        await self.client.session_update(self.session_id, item.value)
+                        await self._send(item.value)
                     except Exception:
                         logger.debug(
                             "ACP client rejected best-effort session bootstrap update",
@@ -1180,7 +1565,7 @@ class ACPEventBridge:
                         )
                 elif self._error is None:
                     try:
-                        await self.client.session_update(self.session_id, item)
+                        await self._send(item)
                     except Exception as exc:
                         # Skip the rest of this turn's updates rather than
                         # hammering a transport that just failed; the next
@@ -1196,6 +1581,12 @@ class ACPEventBridge:
                         )
             finally:
                 self._queue.task_done()
+
+    async def _send(self, out: _Out) -> None:
+        if out.session_id is None or out.session_id == self.session_id:
+            await self.client.update(self.session_id, out.update)
+        else:
+            await self.client.update(out.session_id, out.update, mirrored=True)
 
     async def flush(self) -> None:
         self._drain()
@@ -1229,15 +1620,16 @@ class ACPEventBridge:
                 )
             del self._open[key]
             self._enqueue(
-                update_tool_call(
-                    card.wire_id or self._wire_id(key),
+                v2.tool_call(
+                    card.wire_id or key[1],
                     # A Python card keeps its code in the title, with the reason.
                     title=self._card_title(key, card, (title or "interrupted").lower())
                     if card.kind == "python"
                     else title,
                     status="failed",
                     content=content,
-                )
+                ),
+                self._target(key),
             )
 
     def fail_open_tools(self, reason: str, *, title: str | None = None) -> None:

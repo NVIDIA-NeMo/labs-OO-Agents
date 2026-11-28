@@ -15,13 +15,16 @@ from acp.schema import (
     CurrentModeUpdate,
     FileEditToolCallContent,
     SessionInfoUpdate,
+    SessionNotification,
     TextContentBlock,
     ToolCallProgress,
     ToolCallStart,
     UsageUpdate,
     UserMessageChunk,
 )
+from nooa_atom.acp import v2
 from nooa_atom.acp.event_bridge import ACPEventBridge
+from nooa_atom.acp.v1_shim import V1Peer
 from nooa_atom.agent import (
     AtomAgent,
     FileEdit,
@@ -105,6 +108,11 @@ class _RecordingClient:
         self.updates.append((session_id, update))
 
 
+def _v1(update: dict) -> Any:
+    """The v1 form of a v2 update, as a v1 client receives it through ``V1Peer``."""
+    return SessionNotification.model_validate({"sessionId": "s", "update": update}).update
+
+
 def _content_text(content: ContentToolCallContent) -> str:
     block = cast(TextContentBlock, content.content)
     return block.text
@@ -114,7 +122,7 @@ def _content_text(content: ContentToolCallContent) -> str:
 async def test_bridge_preserves_message_tool_and_usage_order(tmp_path, tool_name):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), V1Peer(client))  # type: ignore[arg-type]
 
     agent.event_manager.add(AgentMessage(content="Final answer\n"))
     agent.event_manager.add(
@@ -202,7 +210,7 @@ async def test_the_usage_update_carries_the_token_totals(tmp_path):
     client = _RecordingClient()
     session = _FakeSession(agent, "session-1")
     session.info.usage = Usage(attributed_cached_input_tokens=5)
-    bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(session, V1Peer(client))  # type: ignore[arg-type]
     agent.event_manager.add(LLMResponse(usage=LLMUsage(input_tokens=40, cached_input_tokens=30)))
     await bridge.flush()
 
@@ -217,7 +225,7 @@ async def test_the_usage_update_carries_the_token_totals(tmp_path):
 async def test_the_python_card_names_its_code_like_the_shell_card(tmp_path):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), V1Peer(client))  # type: ignore[arg-type]
     long_line = "total = " + " + ".join(str(n) for n in range(40))
     code = f"\n\n  {long_line}\nprint(total)\n"
 
@@ -251,7 +259,7 @@ async def test_the_python_card_names_its_code_like_the_shell_card(tmp_path):
 async def test_bridge_marks_failed_python_output(tmp_path):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), V1Peer(client))  # type: ignore[arg-type]
 
     agent.event_manager.add(
         ToolCallEvent(
@@ -290,7 +298,7 @@ async def test_bridge_marks_failed_python_output(tmp_path):
 async def test_bridge_retains_python_source_when_interrupted(tmp_path):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), V1Peer(client))  # type: ignore[arg-type]
 
     agent.event_manager.add(
         ToolCallEvent(
@@ -324,7 +332,7 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
     cast(Any, llm)._context_window = None
     agent = AtomAgent(llm=llm, cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), V1Peer(client))  # type: ignore[arg-type]
 
     agent.event_manager.add(AgentMessage(content="alive"))
     agent.event_manager.add(
@@ -348,7 +356,7 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
     # and cannot tell "the guard works" from "usage never fires".
     sized = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     sized_client = _RecordingClient()
-    sized_bridge = ACPEventBridge(_FakeSession(sized, "session-2"), sized_client)  # type: ignore[arg-type]
+    sized_bridge = ACPEventBridge(_FakeSession(sized, "session-2"), V1Peer(sized_client))  # type: ignore[arg-type]
     sized.event_manager.add(
         LLMResponse(usage=LLMUsage(input_tokens=40, output_tokens=10, cost_usd=0.25))
     )
@@ -361,7 +369,7 @@ async def test_bridge_omits_usage_when_context_window_is_unknown(tmp_path):
 async def test_bridge_emits_structured_file_edit(tmp_path):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), V1Peer(client))  # type: ignore[arg-type]
     path = str(tmp_path / "example.py")
 
     agent.event_manager.add(
@@ -399,7 +407,7 @@ async def test_bridge_emits_structured_file_edit(tmp_path):
 async def test_bridge_emits_terminal_lifecycle(tmp_path):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), V1Peer(client))  # type: ignore[arg-type]
 
     agent.event_manager.add(
         TerminalCommandStarted(
@@ -509,7 +517,7 @@ class _BlockingClient(_RecordingClient):
 async def test_cancelled_flush_does_not_stop_update_pump(tmp_path):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _BlockingClient()
-    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), V1Peer(client))  # type: ignore[arg-type]
     agent.event_manager.add(AgentMessage(content="First"))
     flush_task = asyncio.create_task(bridge.flush())
     await asyncio.wait_for(client.started.wait(), timeout=1)
@@ -551,7 +559,7 @@ async def test_a_failed_update_does_not_silence_the_session_for_good(tmp_path):
             self.updates.append(update)
 
     client = _FlakyClient()
-    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), V1Peer(client))  # type: ignore[arg-type]
 
     # Turn 1: the write fails, and the turn is told about it.
     agent.event_manager.add(AgentMessage(content="first turn"))
@@ -573,7 +581,7 @@ async def test_a_cancelled_command_reads_as_cancellation_not_a_crash(tmp_path):
     """The client must see the user's action, not a Python exception name."""
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), V1Peer(client))  # type: ignore[arg-type]
 
     agent.event_manager.add(
         TerminalCommandStarted(
@@ -605,7 +613,7 @@ async def test_bare_expression_result_is_shown_not_reported_as_no_output(tmp_pat
     """
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), V1Peer(client))  # type: ignore[arg-type]
 
     agent.event_manager.add(
         ToolCallEvent(tool_call_id="t1", name="execute_python", arguments={"code": "1 + 1"})
@@ -640,7 +648,7 @@ async def test_a_turn_result_is_not_shown_as_out(tmp_path, value):
     """``return_result(...)`` ends the turn; its value is not output for the card."""
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), V1Peer(client))  # type: ignore[arg-type]
 
     agent.event_manager.add(
         ToolCallEvent(
@@ -670,7 +678,7 @@ async def test_synthetic_text_replies_are_not_rendered_as_python_runs(tmp_path):
     """
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), V1Peer(client))  # type: ignore[arg-type]
 
     agent.event_manager.add(
         ToolCallEvent(
@@ -690,7 +698,7 @@ async def test_an_unfinished_tool_call_does_not_leak_for_the_session(tmp_path):
     """Closing the bridge must not leave a card spinning or state retained."""
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), V1Peer(client))  # type: ignore[arg-type]
 
     agent.event_manager.add(
         ToolCallEvent(tool_call_id="t3", name="execute_python", arguments={"code": "boom"})
@@ -720,7 +728,7 @@ async def test_a_cancelled_tool_card_is_titled_cancelled(tmp_path):
     """
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), V1Peer(client))  # type: ignore[arg-type]
 
     agent.event_manager.add(
         ToolCallEvent(tool_call_id="t9", name="execute_python", arguments={"code": "sleep(60)"})
@@ -738,7 +746,7 @@ async def test_a_force_closed_terminal_card_keeps_what_it_streamed(tmp_path):
     """Cancelling a running command closes its card with its output so far, then the reason."""
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), V1Peer(client))  # type: ignore[arg-type]
 
     agent.event_manager.add(
         TerminalCommandStarted(command_id="cmd-1", command="make", working_directory="/")
@@ -769,7 +777,7 @@ async def test_a_dead_pump_fails_flush_instead_of_hanging(tmp_path):
         async def session_update(self, session_id: str, update: object, **kwargs) -> None:
             raise asyncio.CancelledError()
 
-    bridge = ACPEventBridge(_FakeSession(agent), _DyingClient())  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent), V1Peer(_DyingClient()))  # type: ignore[arg-type]
     agent.event_manager.add(AgentMessage(content="first"))
 
     # Must be the specific error flush() raises. pytest.raises(BaseException)
@@ -824,7 +832,7 @@ async def test_a_root_turn_always_ends_with_reply_text(make_session, code, expec
 
     session, _ = make_session(cell(code))
     client = _RecordingClient()
-    bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(session, V1Peer(client))  # type: ignore[arg-type]
     try:
         await asyncio.wait_for(session.prompt("go"), 30)
         await bridge.flush()
@@ -839,7 +847,7 @@ async def bridged(tmp_path):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     session = _FakeSession(agent)
     client = _RecordingClient()
-    bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(session, V1Peer(client))  # type: ignore[arg-type]
     yield agent, session, client, bridge
     await bridge.close()
     await agent.aclose()
@@ -1136,7 +1144,7 @@ async def test_tool_cards_of_a_child_are_mirrored_under_the_childs_id(tmp_path):
     client = _RecordingClient()
     bridge = ACPEventBridge(
         parent,  # type: ignore[arg-type]
-        client,  # type: ignore[arg-type]
+        V1Peer(client),  # type: ignore[arg-type]
         resolve_child=lambda child_id: child if child_id == "child-1" else None,
     )
     parent.emit(
@@ -1193,7 +1201,7 @@ async def test_ending_the_parents_turn_leaves_a_mirrored_childs_cards_open(tmp_p
     client = _RecordingClient()
     bridge = ACPEventBridge(
         parent,  # type: ignore[arg-type]
-        client,  # type: ignore[arg-type]
+        V1Peer(client),  # type: ignore[arg-type]
         resolve_child=lambda child_id: child if child_id == "child-1" else None,
     )
     parent.emit(
@@ -1259,7 +1267,7 @@ async def test_a_resumed_sessions_cost_continues_from_what_it_already_spent(tmp_
     session = _FakeSession(agent)
     session.info.usage.cost_usd = 2.0  # spent before this bridge was attached
     client = _RecordingClient()
-    bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(session, V1Peer(client))  # type: ignore[arg-type]
     agent.event_manager.add(
         LLMResponse(usage=LLMUsage(input_tokens=40, output_tokens=10, cost_usd=0.25))
     )
@@ -1280,7 +1288,7 @@ async def test_a_grandchild_is_announced_before_its_mirrored_cards(tmp_path):
     client = _RecordingClient()
     bridge = ACPEventBridge(
         parent,  # type: ignore[arg-type]
-        client,  # type: ignore[arg-type]
+        V1Peer(client),  # type: ignore[arg-type]
         resolve_child=sessions.get,
     )
     parent.emit(
@@ -1329,16 +1337,15 @@ async def test_a_long_message_goes_out_as_chunks_under_the_websocket_limit(tmp_p
     """Clients join chunks; no single message may pass 1 MiB, the WebSocket client default."""
     import json
 
-    from acp import text_block, update_user_message
     from nooa_atom.acp.event_bridge import MAX_CHUNK_CHARS
 
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(_FakeSession(agent, "session-1"), V1Peer(client))  # type: ignore[arg-type]
     # Worst case for the wire size: every character needs a six-byte escape.
     long_text = "\x01" * (2 * MAX_CHUNK_CHARS + 5)
     agent.event_manager.add(AgentMessage(content=long_text))
-    bridge.publish(update_user_message(text_block("short")))
+    bridge.publish(v2.message("user_message", "short"))
     await asyncio.wait_for(bridge.flush(), timeout=5)
 
     agent_chunks = [u for _, u in client.updates if isinstance(u, AgentMessageChunk)]
@@ -1362,24 +1369,17 @@ def test_every_agent_message_ends_its_line():
     "Trace viewer:" rendered as "Not posted. Trace viewer:". Every agent
     message therefore ends with a blank line.
     """
-    from acp import text_block, update_agent_message, update_agent_thought_text
     from nooa_atom.acp.event_bridge import end_line
 
-    ended = end_line(update_agent_message(text_block("ending in billing.")))
-    assert ended.content.text == "ending in billing.\n\n"
-    one_break = end_line(update_agent_message(text_block("Not posted.\n")))
-    assert one_break.content.text == "Not posted.\n\n"
-    already = update_agent_message(text_block("```text\nx\n```\n\n"))
-    assert end_line(already) is already
-    thought = update_agent_thought_text("thinking")
-    assert end_line(thought) is thought
+    assert end_line("ending in billing.") == "ending in billing.\n\n"
+    assert end_line("Not posted.\n") == "Not posted.\n\n"
+    assert end_line("```text\nx\n```\n\n") == "```text\nx\n```\n\n"
 
 
 @pytest.mark.parametrize("prior_failure", [False, True], ids=["ack-failed", "ack-skipped"])
 async def test_input_ack_failure_is_not_shown_and_explicit_retry_preserves_ids(
     tmp_path, prior_failure
 ):
-    from acp import text_block, update_agent_message
     from nooa_atom.acp.event_bridge import pool_input_event
 
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
@@ -1395,10 +1395,10 @@ async def test_input_ack_failure_is_not_shown_and_explicit_retry_preserves_ids(
 
     client = FlakyClient()
     session = _FakeSession(agent)
-    bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(session, V1Peer(client))  # type: ignore[arg-type]
     try:
         if prior_failure:
-            bridge.publish(update_agent_message(text_block("before ack")))
+            bridge.publish(v2.message("agent_message", "before ack"))
         shown = bridge.client_input_taken("stable-item", "stable-client")
         assert bridge.client_input_taken("stable-item", "stable-client") is shown
         with pytest.raises(ValueError, match="Conflicting"):
@@ -1426,7 +1426,9 @@ async def test_input_ack_failure_is_not_shown_and_explicit_retry_preserves_ids(
             await bridge.flush()
         await asyncio.wait_for(bridge.retry_client_input("stable-item"), 5)
         await bridge.flush()
-        assert client.updates == [(session.id, pool_input_event("stable-item", "stable-client"))]
+        assert client.updates == [
+            (session.id, _v1(pool_input_event("stable-item", "stable-client")))
+        ]
         with pytest.raises(ValueError, match="not a failed"):
             bridge.retry_client_input("stable-item")
         bridge.forget_client_input("stable-item")
@@ -1439,7 +1441,6 @@ async def test_input_ack_failure_is_not_shown_and_explicit_retry_preserves_ids(
 
 @pytest.mark.parametrize("ack_in_flight", [False, True], ids=["queued", "in-flight"])
 async def test_pump_death_fails_input_ack_and_late_registration(tmp_path, ack_in_flight):
-    from acp import text_block, update_agent_message
 
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
 
@@ -1448,10 +1449,10 @@ async def test_pump_death_fails_input_ack_and_late_registration(tmp_path, ack_in
             raise asyncio.CancelledError()
 
     session = _FakeSession(agent)
-    bridge = ACPEventBridge(session, DyingClient())  # type: ignore[arg-type]
+    bridge = ACPEventBridge(session, V1Peer(DyingClient()))  # type: ignore[arg-type]
     try:
         if not ack_in_flight:
-            bridge.publish(update_agent_message(text_block("before ack")))
+            bridge.publish(v2.message("agent_message", "before ack"))
         shown = bridge.client_input_taken("item", "client")
         session.emit(
             ItemConsumedUpdate(session_id=session.id, channel="user_messages", item_id="item")
@@ -1481,7 +1482,7 @@ async def test_abandoned_input_and_flush_failures_do_not_leak_future_exceptions(
 
     client = FailingClient()
     session = _FakeSession(agent)
-    bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(session, V1Peer(client))  # type: ignore[arg-type]
     loop = asyncio.get_running_loop()
     errors = []
     old_handler = loop.get_exception_handler()
@@ -1535,7 +1536,7 @@ async def test_late_registration_and_registered_consumption_survive_recent_id_ev
 async def test_real_channel_consumption_sends_one_ack(make_session, consume):
     session, _llm = make_session(start=False)
     client = _RecordingClient()
-    bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(session, V1Peer(client))  # type: ignore[arg-type]
     try:
         receipt = await session.submit("multiline\ninput", source="acp")
         shown = bridge.client_input_taken(receipt.item_id, "client")
@@ -1599,7 +1600,6 @@ async def test_live_echo_dedup_is_source_aware_and_not_bounded_by_recent_consump
 @pytest.mark.parametrize("phase", ["never-taken", "queued", "in-flight"])
 @pytest.mark.parametrize("send_failure", [False, True])
 async def test_cancelled_pool_request_does_not_retract_consumed_ack(tmp_path, phase, send_failure):
-    from acp import text_block, update_agent_message
     from nooa_atom.acp.event_bridge import pool_input_event
     from nooa_atom.acp.server import AtomACPAgent
     from nooa_atom.session.items import Receipt
@@ -1635,7 +1635,7 @@ async def test_cancelled_pool_request_does_not_retract_consumed_ack(tmp_path, ph
 
     session = SessionWithInput(agent)
     client = GatedClient()
-    bridge = ACPEventBridge(session, client)  # type: ignore[arg-type]
+    bridge = ACPEventBridge(session, V1Peer(client))  # type: ignore[arg-type]
     adapter = SimpleNamespace(
         _followed=lambda _id: (session, bridge),
         _open={},
@@ -1644,7 +1644,7 @@ async def test_cancelled_pool_request_does_not_retract_consumed_ack(tmp_path, ph
     )
     try:
         if phase == "queued":
-            bridge.publish(update_agent_message(text_block("gated preceding update")))
+            bridge.publish(v2.message("agent_message", "gated preceding update"))
             await asyncio.wait_for(client.started.wait(), 5)
         request = asyncio.create_task(
             AtomACPAgent._pool_steer(
@@ -1679,7 +1679,9 @@ async def test_cancelled_pool_request_does_not_retract_consumed_ack(tmp_path, ph
         else:
             await asyncio.wait_for(bridge.flush(), 5)
         acks = [u for _, u in client.updates if isinstance(u, SessionInfoUpdate)]
-        assert acks == ([] if phase == "never-taken" else [pool_input_event("owed", "client-owed")])
+        assert acks == (
+            [] if phase == "never-taken" else [_v1(pool_input_event("owed", "client-owed"))]
+        )
         if phase == "never-taken":
             # Request cancellation did not withdraw the admission: later
             # consumption must still acknowledge its original client ID.
@@ -1693,7 +1695,7 @@ async def test_cancelled_pool_request_does_not_retract_consumed_ack(tmp_path, ph
             )
             await bridge.flush()
             acks = [u for _, u in client.updates if isinstance(u, SessionInfoUpdate)]
-            assert acks == [pool_input_event("owed", "client-owed")]
+            assert acks == [_v1(pool_input_event("owed", "client-owed"))]
         assert bridge._client_inputs == {}
     finally:
         await bridge.close()
@@ -1723,7 +1725,7 @@ async def test_activity_verbosity(tmp_path, level, tool_name):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     session = _FakeSession(agent)
-    bridge = ACPEventBridge(session, client)
+    bridge = ACPEventBridge(session, V1Peer(client))
     assert bridge.verbosity == "verbose"
     bridge.set_verbosity(level)
     code = "# Inspect the repository\nprint('private output')"
@@ -1808,7 +1810,7 @@ async def test_activity_verbosity(tmp_path, level, tool_name):
 async def test_reduced_detail_ignores_setup_synthetic_and_truncation(tmp_path, level):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge = ACPEventBridge(_FakeSession(agent), V1Peer(client))
     bridge.set_verbosity(level)
     for metadata in ({"prefill": True}, {"synthetic": True}):
         agent.event_manager.add(
@@ -1829,7 +1831,7 @@ async def test_reduced_detail_ignores_setup_synthetic_and_truncation(tmp_path, l
 async def test_changing_detail_closes_open_cards_and_suppresses_late_output(tmp_path):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge = ACPEventBridge(_FakeSession(agent), V1Peer(client))
     agent.event_manager.add(
         TerminalCommandStarted(command_id="bash", command="make", working_directory="/")
     )
@@ -1866,7 +1868,7 @@ async def test_return_activity_does_not_hide_questions(tmp_path, level, kind):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     session = _FakeSession(agent)
-    bridge = ACPEventBridge(session, client)
+    bridge = ACPEventBridge(session, V1Peer(client))
     bridge.set_verbosity(level)
     outcome = (
         {"explanation": "Waiting for review\nMore detail", "on": ["delegates"]}
@@ -1906,7 +1908,7 @@ async def test_reduced_child_activity_preserves_attribution(tmp_path, level):
         "grandchild": _FakeSession(agents["g"], "grandchild"),
     }
     client = _RecordingClient()
-    bridge = ACPEventBridge(parent, client, resolve_child=sessions.get)
+    bridge = ACPEventBridge(parent, V1Peer(client), resolve_child=sessions.get)
     bridge.set_verbosity(level)
     parent.emit(
         ChildCreatedUpdate(
@@ -1970,7 +1972,7 @@ async def test_reduced_child_activity_preserves_attribution(tmp_path, level):
 async def test_rolling_python_output_keeps_full_detail_and_status(tmp_path, status):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge = ACPEventBridge(_FakeSession(agent), V1Peer(client))
     bridge.set_verbosity("concise")
     agent.event_manager.add(
         ToolCallEvent(
@@ -2022,7 +2024,7 @@ async def test_rolling_python_output_keeps_full_detail_and_status(tmp_path, stat
 async def test_rolling_python_cleanup_finishes_display_and_ignores_late_output(tmp_path, finish):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge = ACPEventBridge(_FakeSession(agent), V1Peer(client))
     bridge.set_verbosity("concise")
     agent.event_manager.add(
         ToolCallEvent(
@@ -2059,7 +2061,7 @@ async def test_rolling_python_cleanup_finishes_display_and_ignores_late_output(t
 async def test_rolling_full_card_keeps_bounded_title_and_full_body(tmp_path):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge = ACPEventBridge(_FakeSession(agent), V1Peer(client))
     bridge.set_verbosity("concise")
     first = 'res = await self.shell.run("' + "command; " * 100 + '")'
     agent.event_manager.add(
@@ -2091,7 +2093,7 @@ async def test_concise_replaces_one_full_card_and_clears_previous_output(tmp_pat
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     session = _FakeSession(agent)
-    bridge = ACPEventBridge(session, client)
+    bridge = ACPEventBridge(session, V1Peer(client))
     bridge.set_verbosity("concise")
     for number in (1, 2, 3):
         code = f"# Step {number}\nprint({number})"
@@ -2134,7 +2136,7 @@ async def test_independent_child_results_do_not_replace_parent_card(tmp_path):
     parent = _FakeSession(agents["p"], "parent")
     child = _FakeSession(agents["c"], "child")
     client = _RecordingClient()
-    bridge = ACPEventBridge(parent, client, resolve_child=lambda _: child)
+    bridge = ACPEventBridge(parent, V1Peer(client), resolve_child=lambda _: child)
     bridge.set_verbosity("concise")
     parent.emit(
         ChildCreatedUpdate(
@@ -2194,7 +2196,7 @@ async def test_rolling_slot_resets_with_fresh_ids_and_ignores_late_results(tmp_p
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     session = _FakeSession(agent)
-    bridge = ACPEventBridge(session, client)
+    bridge = ACPEventBridge(session, V1Peer(client))
     bridge.set_verbosity("concise")
     agent.event_manager.add(
         ToolCallEvent(tool_call_id="same-id", name="python_cell", arguments={"code": "# first"})
@@ -2246,7 +2248,7 @@ async def test_child_turn_end_closes_only_its_rolling_card(tmp_path):
     parent = _FakeSession(agents["p"], "parent")
     child = _FakeSession(agents["c"], "child")
     client = _RecordingClient()
-    bridge = ACPEventBridge(parent, client, resolve_child=lambda _: child)
+    bridge = ACPEventBridge(parent, V1Peer(client), resolve_child=lambda _: child)
     bridge.set_verbosity("concise")
     parent.emit(
         ChildCreatedUpdate(
@@ -2298,7 +2300,7 @@ async def test_reused_execution_id_cannot_pair_old_output_with_new_source(tmp_pa
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
     session = _FakeSession(agent)
-    bridge = ACPEventBridge(session, client)
+    bridge = ACPEventBridge(session, V1Peer(client))
     bridge.set_verbosity("concise")
     agent.event_manager.add(
         ToolCallEvent(tool_call_id="same-id", name="python_cell", arguments={"code": "# old"})
@@ -2341,7 +2343,7 @@ async def test_failed_rolling_start_recovery_opens_fresh_card(tmp_path):
 
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = FailOnceClient()
-    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge = ACPEventBridge(_FakeSession(agent), V1Peer(client))
     bridge.set_verbosity("concise")
     agent.event_manager.add(
         ToolCallEvent(tool_call_id="old", name="python_cell", arguments={"code": "# failed send"})
@@ -2399,7 +2401,7 @@ async def test_failed_epoch_updates_queued_after_flush_are_not_delivered(tmp_pat
 
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = GatedFailureClient()
-    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge = ACPEventBridge(_FakeSession(agent), V1Peer(client))
     bridge.set_verbosity("concise")
     agent.event_manager.add(
         ToolCallEvent(tool_call_id="a", name="python_cell", arguments={"code": "# A"})
@@ -2439,7 +2441,7 @@ async def test_failed_epoch_updates_queued_after_flush_are_not_delivered(tmp_pat
 async def test_verbose_execution_id_is_not_readmitted_as_rolling_cell(tmp_path):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge = ACPEventBridge(_FakeSession(agent), V1Peer(client))
     agent.event_manager.add(
         ToolCallEvent(
             tool_call_id="same", name="python_cell", arguments={"code": "# old verbose source"}
@@ -2482,7 +2484,7 @@ async def test_helper_card_titles_use_name_and_short_id(tmp_path, name, label):
     parent = _FakeSession(agents[0], "parent")
     child = _FakeSession(agents[1], "abcdef12-long-child-session-id")
     client = _RecordingClient()
-    bridge = ACPEventBridge(parent, client, resolve_child=lambda _: child)
+    bridge = ACPEventBridge(parent, V1Peer(client), resolve_child=lambda _: child)
     bridge.set_verbosity("concise")
     parent.emit(
         ChildCreatedUpdate(
@@ -2514,7 +2516,7 @@ async def test_multiple_helpers_replace_only_their_own_full_card(tmp_path):
     agents = {sid: AtomAgent(llm=FakeLLMClient(), cwd=tmp_path) for sid in ids}
     sessions = {sid: _FakeSession(agent, sid) for sid, agent in agents.items()}
     client = _RecordingClient()
-    bridge = ACPEventBridge(sessions["parent"], client, resolve_child=sessions.get)
+    bridge = ACPEventBridge(sessions["parent"], V1Peer(client), resolve_child=sessions.get)
     bridge.set_verbosity("concise")
     for sid in ids[1:3]:
         sessions["parent"].emit(
@@ -2585,7 +2587,7 @@ async def test_helper_boundaries_leave_unrelated_progress_running(tmp_path, boun
     agents = {sid: AtomAgent(llm=FakeLLMClient(), cwd=tmp_path) for sid in ("parent", "child")}
     sessions = {sid: _FakeSession(agent, sid) for sid, agent in agents.items()}
     client = _RecordingClient()
-    bridge = ACPEventBridge(sessions["parent"], client, resolve_child=sessions.get)
+    bridge = ACPEventBridge(sessions["parent"], V1Peer(client), resolve_child=sessions.get)
     bridge.set_verbosity("concise")
     sessions["parent"].emit(
         ChildCreatedUpdate(
@@ -2655,7 +2657,7 @@ async def test_failed_transport_invalidates_queued_ended_helper_epoch(tmp_path):
     agents = {sid: AtomAgent(llm=FakeLLMClient(), cwd=tmp_path) for sid in ("parent", "child")}
     sessions = {sid: _FakeSession(agent, sid) for sid, agent in agents.items()}
     client = GatedFailureClient()
-    bridge = ACPEventBridge(sessions["parent"], client, resolve_child=sessions.get)
+    bridge = ACPEventBridge(sessions["parent"], V1Peer(client), resolve_child=sessions.get)
     bridge.set_verbosity("concise")
     sessions["parent"].emit(
         ChildCreatedUpdate(
@@ -2724,7 +2726,7 @@ def _cards_and_messages(client):
 async def test_concise_message_then_a_new_cell_starts_a_new_card_below_it(tmp_path):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge = ACPEventBridge(_FakeSession(agent), V1Peer(client))
     bridge.set_verbosity("concise")
 
     def cell(number):
@@ -2765,7 +2767,7 @@ async def test_concise_message_then_a_new_cell_starts_a_new_card_below_it(tmp_pa
 async def test_concise_message_during_a_running_cell_moves_its_card_below(tmp_path):
     agent = AtomAgent(llm=FakeLLMClient(), cwd=tmp_path)
     client = _RecordingClient()
-    bridge = ACPEventBridge(_FakeSession(agent), client)
+    bridge = ACPEventBridge(_FakeSession(agent), V1Peer(client))
     bridge.set_verbosity("concise")
     code = "self.message('Running the tests.')\nrun_tests()"
     agent.event_manager.add(

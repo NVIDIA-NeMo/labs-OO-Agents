@@ -246,6 +246,40 @@ class TerminalCommandFinished(EventBase):  # type: ignore[misc]
     ] = False
 
 
+class AgentTerminalStarted(EventBase):  # type: ignore[misc]
+    """A ``work_shell.Shell`` command became visible as an agent-owned terminal."""
+
+    _role: ClassVar[Role] = Role.RUNTIME_EVENT
+
+    terminal_id: str
+    command: str
+    working_directory: str
+    job_name: str | None = None
+
+
+class AgentTerminalOutput(EventBase):  # type: ignore[misc]
+    """Raw output bytes from one agent-owned terminal (not conversation history)."""
+
+    _role: ClassVar[Role] = Role.RUNTIME_EVENT
+
+    terminal_id: str
+    data: bytes
+    job_name: str | None = None
+
+
+class AgentTerminalFinished(EventBase):  # type: ignore[misc]
+    """An agent-owned terminal exited or failed before an exit code was available."""
+
+    _role: ClassVar[Role] = Role.RUNTIME_EVENT
+
+    terminal_id: str
+    exit_code: int | None = None
+    timed_out: bool = False
+    cancelled: bool = False
+    error: str = ""
+    job_name: str | None = None
+
+
 class ActivityShellTools(Skill):
     """A composed ``ShellTools`` substitute that emits transient activity events.
 

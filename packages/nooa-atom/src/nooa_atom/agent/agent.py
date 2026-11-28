@@ -59,6 +59,11 @@ with hidden:
     from nooa.tools import TodoManager
     from nooa.tools.shell_tools import FileWrite, Match
     from nooa_atom.agent import work_shell
+    from nooa_atom.agent.activity import (
+        AgentTerminalFinished,
+        AgentTerminalOutput,
+        AgentTerminalStarted,
+    )
     from nooa_atom.agent.base import AtomAgentBase, session_title_request  # noqa: F401
     from nooa_atom.agent.conditions import PERSON_NAMES, require_result
     from nooa_atom.agent.done_reflection import DoneReflectionPlan, reflect_accepted_done
@@ -356,6 +361,36 @@ class AtomCodeAct(CodeActV2):
         owner = getattr(runtime.agent, "_shells", None)
         if owner is not None:  # the session closes the Shells its cells start
             work_shell.shell_owner.set(owner)
+        manager = getattr(runtime.agent, "event_manager", None)
+        if manager is None:
+            work_shell.terminal_observer.set(None)
+        else:
+
+            def observe(observation: work_shell.TerminalObservation) -> None:
+                """Forward raw shell activity as transient events for interactive hosts."""
+                common = {
+                    "terminal_id": observation.terminal_id,
+                    "job_name": observation.job_name,
+                }
+                if observation.phase == "started":
+                    event = AgentTerminalStarted(
+                        **common,
+                        command=observation.command,
+                        working_directory=observation.cwd or "",
+                    )
+                elif observation.phase == "output":
+                    event = AgentTerminalOutput(**common, data=observation.data)
+                else:
+                    event = AgentTerminalFinished(
+                        **common,
+                        exit_code=observation.exit_code,
+                        timed_out=observation.timed_out,
+                        cancelled=observation.cancelled,
+                        error=observation.error,
+                    )
+                manager.add(event)
+
+            work_shell.terminal_observer.set(observe)
         return super()._build_builtins(runtime, call)
 
 

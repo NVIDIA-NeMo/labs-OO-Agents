@@ -2,11 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 """The ACP agent over the Session layer: protocol translation, no session policy.
 
-``AtomACPAgent`` implements the ``acp`` library's ``Agent`` interface on a
-``SessionRegistry``. Sessions, turns, steering, cancellation and
-checkpoints are the Session's; this module maps requests onto it and keeps
-one ``ACPEventBridge`` per session id that sends the session's activity
-to the client.
+``AtomACPAgent`` serves ACP v2 on a ``SessionRegistry``: each request
+method takes the request's v2 params and returns its v2 result, and the
+client is a ``Peer`` (``nooa_atom.acp.v2``). Sessions, turns, steering,
+cancellation and checkpoints are the Session's; this module maps requests
+onto it and keeps one ``ACPEventBridge`` per session id that sends the
+session's activity to the client.
+
+``serve_connection`` serves it to a v2 client directly (``v2.serve_v2``)
+and to a v1 client through the v1 shim (``nooa_atom.acp.v1_shim``), which
+also uses the few methods documented as its own here (``start_prompt``,
+``finish_item``...). See ``docs/acp-v2.md``.
 """
 
 from __future__ import annotations
@@ -14,75 +20,43 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-import re
 import signal
 import uuid
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext, suppress
 from pathlib import Path
-from string import Formatter
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any
 
-from acp import (
-    InitializeResponse,
-    LoadSessionResponse,
-    NewSessionResponse,
-    PromptResponse,
-    RequestError,
-    text_block,
-    update_agent_message,
-    update_user_message,
-)
-from acp.agent.connection import AgentSideConnection
-from acp.helpers import update_available_commands
-from acp.interfaces import Agent, Client
-from acp.schema import (
-    AvailableCommand,
-    AvailableCommandInput,
-    ClientCapabilities,
-    CloseSessionResponse,
-    ConfigOptionUpdate,
-    ElicitationFormSessionMode,
-    ElicitationSchema,
-    ElicitationStringPropertySchema,
-    HttpMcpServer,
-    Implementation,
-    ListSessionsResponse,
-    McpServerStdio,
-    SessionConfigOptionSelect,
-    SessionConfigSelectOption,
-    SessionMode,
-    SessionModeState,
-    SetSessionConfigOptionResponse,
-    SetSessionModeResponse,
-    SseMcpServer,
-    UnstructuredCommandInput,
-)
+from acp import RequestError
 
 from nooa.errors import GenerationError
 from nooa.mcp import MCPManager, MCPTool
 from nooa.slash_dispatch import CoercionError
 from nooa.storage.sqlite import SessionAlreadyActiveError
-from nooa.strategies.codeact import MAX_ITERATIONS_MESSAGE, OUTPUT_TOKENS_EXHAUSTED_MESSAGE
+from nooa_atom.acp import v2
 from nooa_atom.acp.event_bridge import (
     VERBOSITY_LEVELS,
     ACPEventBridge,
+    agent_message,
     cancel_text,
+    end_line,
+    limit_stop_reason,
     pool_input_event,
 )
+from nooa_atom.acp.framing import FRAME_LIMIT, read_frame
 from nooa_atom.acp.listing import list_sessions, validate_workspace
 from nooa_atom.acp.protocol import (
     INJECT_CAPABILITY,
     POOL_DIALECT,
     POOLSIDE_DIALECT,
     PoolDialect,
-    initialize_response,
     open_stdio,
     pool_dialects,
 )
 from nooa_atom.acp.recover import COMMAND as RECOVER
 from nooa_atom.acp.recover import recover
+from nooa_atom.acp.v2 import Peer
 from nooa_atom.agent.slash_commands import RESERVED_COMMAND_NAMES
 from nooa_atom.session.items import (
     CommandInfo,
@@ -150,25 +124,8 @@ _CONNECT_TEXT = (
 )
 
 
-def _template_pattern(template: str) -> re.Pattern[str]:
-    """A pattern matching ``template`` (a ``str.format`` string) with any field values."""
-    return re.compile(
-        "".join(
-            re.escape(literal) + (".*?" if field is not None else "")
-            for literal, field, _spec, _conversion in Formatter().parse(template)
-        )
-    )
-
-
-_MAX_ITERATIONS = _template_pattern(MAX_ITERATIONS_MESSAGE)
-
-_MODES = [
-    SessionMode(
-        id="auto",
-        name="Auto",
-        description="The agent runs its tools without asking first.",
-    )
-]
+MODES = ("auto",)
+"""The permission modes a session can have: only ``auto`` until tools can ask first."""
 
 
 _detached_closes: set[asyncio.Future[Any]] = set()
@@ -278,8 +235,10 @@ class AtomACPAgent:
         self._registries: dict[Path, SessionRegistry] = {}
         self._agent_spec = agent_spec
         self._model = model
-        self._conn: Client | None = None
-        self.client_capabilities: ClientCapabilities | None = None
+        self._conn: Peer | None = None
+        # The client's v2 ``capabilities`` and ``info`` from ``initialize``.
+        self.client_capabilities: dict[str, Any] = {}
+        self.client_info: dict[str, Any] | None = None
         # The client is Pool (``clientInfo.name``): it gets Pool's input events.
         self._pool_client = False
         # The Pool dialects of this connection (``pool_dialects``): which
@@ -293,12 +252,8 @@ class AtomACPAgent:
         # Receipts of prompts still waiting for their turn, by session: Stop
         # answers them "cancelled" and withdraws the ones not yet consumed.
         self._prompts: dict[str, list[Receipt]] = {}
-        # How many session/prompt requests of each session are waiting in
-        # ``_finish``, and the messages Pool handed over with
-        # ``_poolside/session_steer`` meanwhile (receipt, text), in order:
-        # the prompt stays open until they are handled (see ``_finish``).
-        self._open: dict[str, int] = {}
-        self._followers: dict[str, list[tuple[Receipt, str]]] = {}
+        # Message ids of answered prompts, by session and idempotency key.
+        self._idempotent: dict[tuple[str, str], str] = {}
         # Receipts of injected messages, by session and item id, for revoke.
         self._injects: dict[str, dict[str, Receipt]] = {}
         # Client requests (forms, permissions) a prompt is waiting on, by
@@ -310,7 +265,7 @@ class AtomACPAgent:
         # Workspaces whose model configuration files were logged.
         self._logged_config: set[Path] = set()
 
-    def on_connect(self, conn: Client) -> None:
+    def on_connect(self, conn: Peer) -> None:
         self._conn = conn
 
     def _log_llm_config(self, workspace: Path) -> None:
@@ -353,19 +308,16 @@ class AtomACPAgent:
 
     # ---- initialize ----------------------------------------------------
 
-    async def initialize(
-        self,
-        protocol_version: int,
-        client_capabilities: ClientCapabilities | None = None,
-        client_info: Implementation | None = None,
-        **kwargs: Any,
-    ) -> InitializeResponse:
-        del kwargs
-        self.client_capabilities = client_capabilities
-        self._pool_dialects = pool_dialects(client_info)
+    async def initialize(self, params: dict[str, Any]) -> dict[str, Any]:
+        """``initialize`` (v2 params): note the client's capabilities and who it is."""
+        capabilities = params.get("capabilities")
+        self.client_capabilities = capabilities if isinstance(capabilities, dict) else {}
+        info = params.get("info")
+        self.client_info = info if isinstance(info, dict) else None
+        self._pool_dialects = pool_dialects(self.client_info)
         self._pool_client = bool(self._pool_dialects)
         self._pool_forms = self._pool_client
-        return initialize_response(protocol_version, client_info)
+        return v2.initialize_result(self.client_info)
 
     def _use_pool_dialect(self, dialect: PoolDialect) -> None:
         """Speak only ``dialect`` from now on: the client just used its steer method.
@@ -380,15 +332,9 @@ class AtomACPAgent:
 
     # ---- new -----------------------------------------------------------
 
-    async def new_session(
-        self,
-        cwd: str,
-        additional_directories: list[str] | None = None,
-        mcp_servers: list[Any] | None = None,
-        **kwargs: Any,
-    ) -> NewSessionResponse:
-        del kwargs
-        root = validate_workspace(cwd, additional_directories)
+    async def new_session(self, params: dict[str, Any]) -> dict[str, Any]:
+        """``session/new``: ``{cwd, additionalDirectories?, mcpServers?}`` -> ``{sessionId, ...}``."""
+        root = validate_workspace(params.get("cwd"), params.get("additionalDirectories"))
         self._log_llm_config(root)
         options = SessionOptions(
             workspace=root,
@@ -398,6 +344,7 @@ class AtomACPAgent:
         )
         warnings: list[str] = []
         attached: list[ACPEventBridge] = []
+        mcp_servers = params.get("mcpServers")
 
         async def prepare(session: Session) -> None:
             _trace_as(session)
@@ -413,24 +360,29 @@ class AtomACPAgent:
                 await bridge.close(finish_open=False)
             raise
         self._defer_bootstrap_updates(session, warnings)
-        return NewSessionResponse(
-            session_id=session.id,
-            modes=self._modes(session),
-            config_options=self._config_options(session),
-        )
+        return {"sessionId": session.id, **self._setup_result(session)}
 
-    # ---- load ----------------------------------------------------------
+    def _setup_result(self, session: Session) -> dict[str, Any]:
+        """What ``session/new`` and ``session/resume`` answer besides the id."""
+        return {
+            "configOptions": self._config_options(session),
+            "availableCommands": _available_commands(session.commands()),
+        }
 
-    async def load_session(
-        self,
-        cwd: str,
-        session_id: str,
-        mcp_servers: list[Any] | None = None,
-        additional_directories: list[str] | None = None,
-        **kwargs: Any,
-    ) -> LoadSessionResponse:
-        del kwargs
-        root = validate_workspace(cwd, additional_directories)
+    # ---- resume --------------------------------------------------------
+
+    async def resume_session(self, params: dict[str, Any]) -> dict[str, Any]:
+        """``session/resume``: open a stored or live session, replaying it from ``replayFrom``.
+
+        With ``replayFrom`` the transcript is replayed, then
+        ``replay_complete``; the session's foreground state follows either
+        way, before the answer.
+        """
+        session_id = params.get("sessionId")
+        if not isinstance(session_id, str):
+            raise v2.invalid("sessionId is required")
+        replay = params.get("replayFrom") is not None
+        root = validate_workspace(params.get("cwd"), params.get("additionalDirectories"))
         self._log_llm_config(root)
         registry = self.registry_for(root)
         live = self.session(session_id)
@@ -438,22 +390,24 @@ class AtomACPAgent:
             # Attach: the same Session; reuse this adapter's bridge if it has
             # one (a second bridge would send every update twice) and replay.
             bridge = self._bridges.get(session_id) or self._attach(live)
-            self._replay(bridge, live, pool=self._pool_client)
+            if replay:
+                self._replay(bridge, live, pool=self._pool_client)
+            bridge.snapshot_state()
             await bridge.flush()
             self._defer_bootstrap_updates(live, [])
-            return LoadSessionResponse(
-                modes=self._modes(live), config_options=self._config_options(live)
-            )
+            return self._setup_result(live)
 
         warnings: list[str] = []
         attached: list[ACPEventBridge] = []
+        mcp_servers = params.get("mcpServers")
 
         async def prepare(session: Session) -> None:
             _trace_as(session)
             trace_in_relay(session)
             bridge = self._attach(session)
             attached.append(bridge)
-            self._replay(bridge, session, pool=self._pool_client)
+            if replay:
+                self._replay(bridge, session, pool=self._pool_client)
             warnings.extend(await self._prepare_tools(session, mcp_servers))
 
         try:
@@ -463,23 +417,21 @@ class AtomACPAgent:
                 self._bridges.pop(bridge.session_id, None)
                 await bridge.close(finish_open=False)
             raise _load_error(session_id, exc) from exc
-        await self._bridges[session.id].flush()
+        bridge = self._bridges[session.id]
+        bridge.snapshot_state()
+        await bridge.flush()
         self._defer_bootstrap_updates(session, warnings)
-        return LoadSessionResponse(
-            modes=self._modes(session), config_options=self._config_options(session)
-        )
+        return self._setup_result(session)
 
     # ---- list ----------------------------------------------------------
 
-    async def list_sessions(
-        self, cwd: str | None = None, cursor: str | None = None, **kwargs: Any
-    ) -> ListSessionsResponse:
+    async def list_sessions(self, params: dict[str, Any]) -> dict[str, Any]:
         """Root sessions with at least one message, most recent first (see ``list_sessions``).
 
         Without ``cwd``, the stores of the workspaces this connection has
         named; there is no index of every workspace.
         """
-        del kwargs
+        cwd, cursor = params.get("cwd"), params.get("cursor")
         if cwd is not None:
             self.registry_for(validate_workspace(cwd, None))
 
@@ -490,47 +442,53 @@ class AtomACPAgent:
                     return registry.live_info(session).status, session.info.title
             return None
 
-        return await list_sessions(
+        response = await list_sessions(
             self._store_for,
             cwd=cwd,
             cursor=cursor,
             live=live,
             known=[registry.store for registry in self._registries.values()],
         )
+        return response.model_dump(mode="json", by_alias=True, exclude_none=True)
 
     def _store_for(self, workspace: Path) -> SessionStore:
         return self.registry_for(workspace).store
 
     # ---- close and delete ----------------------------------------------
 
-    async def close_session(self, session_id: str, **kwargs: Any) -> CloseSessionResponse:
+    async def close_session(self, params: dict[str, Any]) -> dict[str, Any]:
         """Close a session; for a child whose parent is live, only stop following it."""
-        del kwargs
-        session = self.session(session_id)
-        bridge = self._bridges.pop(session_id, None)
-        self._cancel_client_calls(session_id)
+        session_id = params.get("sessionId")
+        session = self.session(session_id) if isinstance(session_id, str) else None
+        bridge = self._bridges.pop(session_id, None) if isinstance(session_id, str) else None
+        if isinstance(session_id, str):
+            self._cancel_client_calls(session_id)
         if session is None and bridge is None:
             raise RequestError.resource_not_found(session_id)
         if session is not None and self._parent_is_live(session):
             if bridge is not None:
                 await bridge.close(finish_open=False)
-            return CloseSessionResponse()
+            return {}
         if session is not None:
             await session.close()
         if bridge is not None:
             await bridge.close()
-        return CloseSessionResponse()
+        return {}
+
+    def is_subagent(self, session_id: str) -> bool:
+        """Whether ``session_id`` is a live child this connection shows, not one it follows."""
+        session = self.session(session_id)
+        return (
+            session is not None
+            and session_id not in self._bridges
+            and self._descends_from_followed(session)
+        )
 
     async def ext_method(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """``_nooa/session/inject``, ``revoke_inject`` (see ``_inject``), Pool's
         ``_poolside/session_steer`` or ``_pool/session_steer`` (see
-        ``_pool_steer``) and ``delete``. Pool's ``_pool/execute_shell`` (its ``!``
-        shortcut) is refused with a message saying so.
-
-        ``_nooa/session/delete``: ``sessionId``, optional ``keepFiles`` and ``cwd``.
-
-        ``cwd`` names the workspace whose store holds the session; without
-        it the stores of the workspaces this connection has named are searched.
+        ``_pool_steer``) and ``_nooa/session/delete`` (``delete_session``). Pool's
+        ``_pool/execute_shell`` (its ``!`` shortcut) is refused with a message saying so.
         """
         if method == _INJECT_METHOD:
             return await self._inject(params)
@@ -544,6 +502,14 @@ class AtomACPAgent:
             raise RequestError(-32601, _POOL_SHELL_UNSUPPORTED, {"method": f"_{method}"})
         if method != _DELETE_METHOD:
             raise RequestError.method_not_found(f"_{method}")
+        return await self.delete_session(params)
+
+    async def delete_session(self, params: dict[str, Any]) -> dict[str, Any]:
+        """``session/delete``: ``sessionId``, optional ``keepFiles`` and ``cwd``.
+
+        ``cwd`` names the workspace whose store holds the session; without
+        it the stores of the workspaces this connection has named are searched.
+        """
         session_id = params.get("sessionId")
         if not isinstance(session_id, str):
             raise RequestError.invalid_params({"reason": "sessionId must be a string"})
@@ -605,7 +571,11 @@ class AtomACPAgent:
         return {"messageId": receipt.item_id, "delivered": receipt.delivered}
 
     async def _pool_steer(
-        self, params: dict[str, Any], dialect: PoolDialect | None = None
+        self,
+        params: dict[str, Any],
+        dialect: PoolDialect | None = None,
+        *,
+        on_submitted: Callable[[str, Receipt, str], None] | None = None,
     ) -> dict[str, Any]:
         """``_poolside/session_steer``: ``{sessionId, inputId, prompt}`` -> ``{inputId}``.
 
@@ -618,10 +588,9 @@ class AtomACPAgent:
         command is refused, and Pool then sends it as a normal prompt after
         the turn.
 
-        Pool keeps its turn open until the messages it handed over are
-        handled, so the open prompt follows this one: it returns only after
-        the turn that handles it (``_finish``), and Stop withdraws it if no
-        turn took it yet (``cancel``).
+        Pool (a v1 client) keeps its turn open until the messages it handed
+        over are handled: ``on_submitted(session_id, receipt, text)`` lets the
+        v1 shim hold its open prompt for this one.
 
         Pool shows the message in the conversation when it sees the steer's
         ``inputId`` in an input event (``pool_input_event``), which the bridge
@@ -652,8 +621,8 @@ class AtomACPAgent:
         except SessionClosedError:
             raise RequestError.resource_not_found(session_id) from None
         shown = bridge.client_input_taken(receipt.item_id, input_id)
-        if self._open.get(session_id):
-            self._followers.setdefault(session_id, []).append((receipt, text))
+        if on_submitted is not None:
+            on_submitted(session_id, receipt, text)
         request_cancelled = False
         try:
             await _taken_or_settled(
@@ -707,46 +676,128 @@ class AtomACPAgent:
 
     # ---- prompt and cancel ---------------------------------------------
 
-    async def prompt(self, session_id: str, prompt: list[Any], **kwargs: Any) -> PromptResponse:
-        """Run a prompt; a prompt sent while a turn runs is queued behind it.
+    async def prompt(self, params: dict[str, Any]) -> dict[str, Any]:
+        """``session/prompt``: answered with the user message's ``messageId`` once it is inserted.
 
-        The text is submitted on ``user_messages`` and the request waits for
-        the outcome of the turn that consumes it: the next turn, or the
-        running one if the model takes the pending message from its queue
-        (the queues context block lists it). A ``Waiting`` outcome keeps the
-        request open, and so do messages Pool hands over during the prompt
-        (``_pool_steer``) until they are handled. Stop answers a waiting
-        prompt ``cancelled`` and withdraws its message if no turn took it.
-        ``/name`` prompts naming a
-        session command run the command. To steer a running turn, clients
-        use ``_nooa/session/inject`` with ``mode: "steer"``.
+        The message is shown as ``user_message``; the turn's progress follows
+        as updates and ``state_update`` (``running``, ``idle`` with its stop
+        reason). A repeated ``idempotencyKey`` gets the first answer again.
         """
-        del kwargs
+        session_id = params.get("sessionId")
+        if not isinstance(session_id, str):
+            raise v2.invalid("sessionId is required")
+        key = params.get("idempotencyKey")
+        if isinstance(key, str) and (session_id, key) in self._idempotent:
+            return {"messageId": self._idempotent[(session_id, key)]}
+        message_id, completion = await self.start_prompt(session_id, params.get("prompt") or [])
+        completion.add_done_callback(_observe_completion)
+        if isinstance(key, str):
+            self._idempotent[(session_id, key)] = message_id
+        return {"messageId": message_id}
+
+    async def start_prompt(
+        self, session_id: str, blocks: list[Any], *, echo: bool = True
+    ) -> tuple[str, asyncio.Future[str]]:
+        """Insert a prompt; return its message id and a future of its stop reason.
+
+        The text is submitted on ``user_messages``; the future resolves when
+        the turn that consumes it ends: the next turn, or the running one if
+        the model takes the pending message from its queue (the queues
+        context block lists it). A ``Waiting`` outcome keeps it pending.
+        Stop resolves it ``cancelled`` and withdraws the message if no turn
+        took it. A failed turn resolves it with its stop reason
+        (``max_tokens``...) or a ``RequestError``. ``/name`` prompts naming a
+        session command run the command first (a local command resolves at
+        once). To steer a running turn, clients use
+        ``_nooa/session/inject`` with ``mode: "steer"``.
+
+        ``echo`` shows the prompt as a ``user_message`` (the v1 shim does not:
+        a v1 client shows its own prompt).
+        """
         session, bridge = self._followed(session_id)
-        text = self._prompt_text(prompt)
+        text = self._prompt_text(blocks)
+        content = [block for block in blocks if isinstance(block, dict)] or [v2.text(text)]
+        loop = asyncio.get_running_loop()
+        slash = _slash_invocation(text)
         try:
-            slash = _slash_invocation(text)
             if slash is not None:
-                handled = await self._run_command(session, bridge, *slash)
+                bridge.begin_local()
+                try:
+                    handled = await self._run_command(session, bridge, *slash)
+                except TurnFailedError as exc:
+                    bridge.end_local("error")
+                    reason = await self._turn_failed(bridge, exc)
+                    failed: asyncio.Future[str] = loop.create_future()
+                    failed.set_result(reason)
+                    return v2.new_message_id(), failed
+                except BaseException:
+                    bridge.end_local("error")
+                    raise
+                if isinstance(handled, Receipt):
+                    bridge.end_local()
+                    if echo:
+                        bridge.publish(v2.message_update("user_message", handled.item_id, content))
+                    return handled.item_id, self._complete(session, bridge, handled)
                 if handled is not None:
-                    return handled
+                    message_id = v2.new_message_id()
+                    if echo:
+                        bridge.publish(v2.message_update("user_message", message_id, content))
+                    bridge.end_local(handled)
+                    await bridge.flush()
+                    done: asyncio.Future[str] = loop.create_future()
+                    done.set_result(handled)
+                    return message_id, done
+                bridge.end_local()
             await self._request_title(session, text)
             receipt = await session.submit(text, source=SOURCE)
-            if self._pool_client:
-                bridge.publish(pool_input_event(receipt.item_id, dialects=self._pool_dialects))
-            self._prompts.setdefault(session_id, []).append(receipt)
+        except SessionClosedError:
+            raise RequestError.resource_not_found(session_id) from None
+        if echo:
+            bridge.publish(v2.message_update("user_message", receipt.item_id, content))
+        if self._pool_client:
+            bridge.publish(pool_input_event(receipt.item_id, dialects=self._pool_dialects))
+        return receipt.item_id, self._complete(session, bridge, receipt)
+
+    def _complete(
+        self, session: Session, bridge: ACPEventBridge, receipt: Receipt
+    ) -> asyncio.Future[str]:
+        """Track a prompt's receipt until its turn ends; the future of its stop reason."""
+        self._prompts.setdefault(session.id, []).append(receipt)
+
+        async def complete() -> str:
             try:
-                return await self._finish(session, bridge, receipt.item_id)
+                return await self.finish_item(session.id, receipt.item_id)
             finally:
                 with suppress(ValueError):
-                    self._prompts.get(session_id, []).remove(receipt)
+                    self._prompts.get(session.id, []).remove(receipt)
+
+        return asyncio.ensure_future(complete())
+
+    async def finish_item(self, session_id: str, item_id: str) -> str:
+        """The stop reason of the turn that consumes ``item_id``, once it ends.
+
+        ``cancelled`` when it was withdrawn or the turn was cancelled. A
+        ``NeedInput`` is never a dialog: the bridge already sent its question
+        as the turn's final message, so it ends the item with ``end_turn``
+        and the person's next prompt answers it as text. A failed turn is
+        its limit's stop reason, else a ``RequestError``.
+        """
+        session, bridge = self._followed(session_id)
+        try:
+            outcome = await session.outcome(item_id)
         except ItemWithdrawnError:
             await bridge.flush()
-            return PromptResponse(stop_reason="cancelled")
+            return "cancelled"
         except SessionClosedError:
             raise RequestError.resource_not_found(session_id) from None
         except TurnFailedError as exc:
             return await self._turn_failed(bridge, exc)
+        # The bridge closed the open cards when the Session reported a
+        # cancel, which happens before this outcome resolves.
+        await bridge.flush()
+        if isinstance(outcome, TurnCancelledOutcome):
+            return "cancelled"
+        return "end_turn"
 
     async def _request_title(self, session: Session, text: str) -> None:
         """On a session's first prompt, ask the agent to title it (once per session).
@@ -766,56 +817,6 @@ class AtomACPAgent:
         from nooa_atom.agent.base import session_title_request
 
         await session.submit(session_title_request(text), channel="system_messages", source="host")
-
-    async def _finish(
-        self, session: Session, bridge: ACPEventBridge, item_id: str
-    ) -> PromptResponse:
-        """Wait for the turn that consumes ``item_id``, then for the prompt's followers.
-
-        Followers are the messages Pool handed over with
-        ``_poolside/session_steer`` while this prompt was open, in the order
-        they were admitted, including ones admitted while this loop runs.
-        Each is waited for as ``item_id`` is (``_finish_item``); the prompt
-        returns ``end_turn`` when all are done, and stops at the first
-        other answer.
-        """
-        self._open[session.id] = self._open.get(session.id, 0) + 1
-        # Taken now: Stop pops the list but leaves in it the followers a
-        # turn took, whose outcome is then the cancelled turn's.
-        followers = self._followers.setdefault(session.id, [])
-        try:
-            response = await self._finish_item(session, bridge, item_id)
-            while response.stop_reason == "end_turn" and followers:
-                receipt, _text = followers[0]
-                try:
-                    response = await self._finish_item(session, bridge, receipt.item_id)
-                finally:
-                    if followers and followers[0][0] is receipt:
-                        followers.pop(0)
-            return response
-        finally:
-            self._open[session.id] -= 1
-            if not self._open[session.id]:
-                # Left over only when the prompt failed: they stay queued.
-                del self._open[session.id]
-                self._followers.pop(session.id, None)
-
-    async def _finish_item(
-        self, session: Session, bridge: ACPEventBridge, item_id: str
-    ) -> PromptResponse:
-        """Wait for the turn that consumes ``item_id``.
-
-        A ``NeedInput`` is never a dialog: the bridge already sent its
-        question as the turn's final message, so it ends the item with
-        ``end_turn`` and the person's next prompt answers it as text.
-        """
-        outcome = await session.outcome(item_id)
-        # The bridge closed the open cards when the Session reported a
-        # cancel, which happens before this outcome resolves.
-        await bridge.flush()
-        if isinstance(outcome, TurnCancelledOutcome):
-            return PromptResponse(stop_reason="cancelled")
-        return PromptResponse(stop_reason="end_turn")
 
     async def _ask_verbosity(self, session: Session, question: str) -> Any:
         """Ask the client to pick a verbosity level in a form of its own.
@@ -852,18 +853,26 @@ class AtomACPAgent:
             if dialect.form_has_id:
                 # Pool 2 requires it: it ties the answer to the request.
                 params["elicitationId"] = uuid.uuid4().hex
-            request = conn.ext_method(dialect.form_method, params)
+            request = conn.request(f"_{dialect.form_method}", params)
         elif self._client_shows_forms():
-            field = ElicitationStringPropertySchema(
-                type="string",
-                title="Verbosity",
-                description=_VERBOSITY_HELP,
-                enum=list(VERBOSITY_LEVELS),
-            )
-            schema = ElicitationSchema(properties={"verbosity": field}, required=["verbosity"])
-            request = conn.create_elicitation(
-                message=question,
-                mode=ElicitationFormSessionMode(session_id=session.id, requested_schema=schema),
+            field = {
+                "type": "string",
+                "title": "Verbosity",
+                "description": _VERBOSITY_HELP,
+                "enum": list(VERBOSITY_LEVELS),
+            }
+            request = conn.request(
+                "elicitation/create",
+                {
+                    "sessionId": session.id,
+                    "mode": "form",
+                    "message": question,
+                    "requestedSchema": {
+                        "type": "object",
+                        "properties": {"verbosity": field},
+                        "required": ["verbosity"],
+                    },
+                },
             )
         else:
             return None
@@ -885,12 +894,8 @@ class AtomACPAgent:
 
     def _client_shows_forms(self) -> bool:
         """Whether the client advertised standard ACP form elicitation."""
-        capabilities = self.client_capabilities
-        return (
-            capabilities is not None
-            and capabilities.elicitation is not None
-            and capabilities.elicitation.form is not None
-        )
+        elicitation = self.client_capabilities.get("elicitation")
+        return isinstance(elicitation, dict) and isinstance(elicitation.get("form"), dict)
 
     def _client_answer_is_current(
         self, session: Session, bridge: ACPEventBridge, epoch: int
@@ -917,6 +922,9 @@ class AtomACPAgent:
         task = asyncio.ensure_future(request)
         tasks = self._asks.setdefault(session_id, set())
         tasks.add(task)
+        bridge = self._bridges.get(session_id)
+        if bridge is not None:
+            bridge.ask_started()
         try:
             answer = await task
             current = asyncio.current_task()
@@ -939,29 +947,31 @@ class AtomACPAgent:
             logger.warning("The client failed a request in session %s", session_id, exc_info=True)
             return None
         finally:
+            if bridge is not None:
+                bridge.ask_ended()
             tasks.discard(task)
             if not tasks and self._asks.get(session_id) is tasks:
                 del self._asks[session_id]
 
-    async def _turn_failed(self, bridge: ACPEventBridge, exc: TurnFailedError) -> PromptResponse:
+    async def _turn_failed(self, bridge: ACPEventBridge, exc: TurnFailedError) -> str:
         """Map a failed turn: generation limits are stop reasons, anything else an error."""
         await bridge.flush()  # includes the "Unfinished" cards for the failed turn
         error = getattr(exc, "error", None) or exc.__cause__ or exc
         message = str(error)
         if isinstance(error, GenerationError):
-            # The messages CodeActStrategy raises, from its own constants.
-            # max_retries ("failed after N errors") is repeated invalid output,
-            # not a limit on turn requests, so it stays an error.
-            if OUTPUT_TOKENS_EXHAUSTED_MESSAGE in message:
-                return PromptResponse(stop_reason="max_tokens")
-            if _MAX_ITERATIONS.search(message):
-                return PromptResponse(stop_reason="max_turn_requests")
+            stop_reason = limit_stop_reason(message)
+            if stop_reason is not None:
+                return stop_reason
         raise RequestError(-32603, message, {"details": message}) from exc
 
     async def _run_command(
         self, session: Session, bridge: ACPEventBridge, name: str, raw_args: str
-    ) -> PromptResponse | None:
-        """Run ``/name args``; ``None`` when it is not a command, so the text is a prompt."""
+    ) -> str | Receipt | None:
+        """Run ``/name args``; ``None`` when it is not a command, so the text is a prompt.
+
+        A local command returns its stop reason; a command whose output goes
+        to the agent returns the receipt of that message.
+        """
         if name == "verbosity":
             level = raw_args.strip().lower()
             if not level:
@@ -976,10 +986,10 @@ class AtomACPAgent:
                         bridge, f"/verbosity: could not save setting: {exc.data}"
                     )
                 bridge.publish(
-                    ConfigOptionUpdate(
-                        session_update="config_option_update",
-                        config_options=self._config_options(session) or [],
-                    )
+                    {
+                        "sessionUpdate": "config_option_update",
+                        "configOptions": self._config_options(session),
+                    }
                 )
                 message = f"ACP verbosity: {bridge.verbosity}."
             return await self._say(bridge, message)
@@ -1024,20 +1034,19 @@ class AtomACPAgent:
                 )
             channels = session.channels()
             channel = "slash_commands" if "slash_commands" in channels else "user_messages"
-            receipt = await session.submit(result.text, channel=channel, source=SOURCE)
-            return await self._finish(session, bridge, receipt.item_id)
+            return await session.submit(result.text, channel=channel, source=SOURCE)
         return await self._say(bridge, result.text)
 
-    async def _pick_verbosity(self, session: Session, bridge: ACPEventBridge) -> PromptResponse:
+    async def _pick_verbosity(self, session: Session, bridge: ACPEventBridge) -> str:
         """Ask the client locally; neither the command nor its answer enters the agent."""
         question = f"ACP verbosity: {bridge.verbosity}. Choose activity detail."
         epoch = self._ask_epochs.get(session.id, 0)
         level = await self._ask_verbosity(session, question)
         if not self._client_answer_is_current(session, bridge, epoch):
-            return PromptResponse(stop_reason="cancelled")
+            return "cancelled"
         if level is _CANCELLED:
             await bridge.flush()
-            return PromptResponse(stop_reason="cancelled")
+            return "cancelled"
         if level is None:
             return await self._say(
                 bridge,
@@ -1047,7 +1056,7 @@ class AtomACPAgent:
             return await self._say(bridge, f"ACP verbosity unchanged: {bridge.verbosity}.")
         # Reuse local dispatch for validation, confirmation and config-picker sync.
         response = await self._run_command(session, bridge, "verbosity", level)
-        assert response is not None
+        assert isinstance(response, str)
         return response
 
     async def _recover(self, session: Session, raw_args: str) -> str:
@@ -1071,61 +1080,119 @@ class AtomACPAgent:
             return f"/recover failed: {exc}"
 
     @staticmethod
-    async def _say(bridge: ACPEventBridge, message: str) -> PromptResponse:
+    async def _say(bridge: ACPEventBridge, message: str) -> str:
         if message:
-            bridge.publish(update_agent_message(text_block(message)))
+            bridge.say(message)
         await bridge.flush()
-        return PromptResponse(stop_reason="end_turn")
+        return "end_turn"
 
-    async def cancel(self, session_id: str, **kwargs: Any) -> None:
-        """Stop the running turn. The bridge closes its cards when the Session reports it."""
-        del kwargs
-        session = self.session(session_id)
-        if session is None or session_id not in self._bridges:
+    async def cancel(self, params: dict[str, Any]) -> None:
+        """``session/cancel``: stop the running turn; the bridge closes its cards when told.
+
+        A child this connection shows as a subagent (announced with
+        ``capabilities.cancel``) stops on its own; its parent goes on.
+        """
+        session_id = params.get("sessionId")
+        session = self.session(session_id) if isinstance(session_id, str) else None
+        if session is None:
             return  # a notification: nothing to answer
+        if session_id not in self._bridges:
+            if self._descends_from_followed(session):
+                await session.cancel(by="user")
+            return
         self._cancel_client_calls(session_id)
-        # A prompt request must be answered: a prompt whose message no turn
-        # took is withdrawn and returns "cancelled"; the one the running turn
-        # took returns "cancelled" with it. Injected messages stay queued.
+        # A prompt whose message no turn took is withdrawn and ends
+        # "cancelled"; the one the running turn took ends "cancelled" with it.
+        # Injected messages stay queued.
         for receipt in self._prompts.pop(session_id, []):
             session.withdraw(receipt)
-        # Messages Pool handed over during the prompt go with it: the ones
-        # no turn took are withdrawn, so they do not run with no prompt
-        # open, and listed, so none is lost silently.
-        stopped = [
-            text
-            for receipt, text in self._followers.pop(session_id, [])
-            if session.withdraw(receipt)
-        ]
-        if stopped:
-            listed = "\n".join(f"- {text}" for text in stopped)
-            self._bridges[session_id].publish(
-                update_agent_message(
-                    text_block(f"Stopped before these messages were handled:\n\n{listed}")
-                )
-            )
         await session.cancel(by="user")
+
+    async def mcp_notification(self, params: dict[str, Any]) -> None:
+        """Receive a provider notification without ever answering or misrouting it.
+
+        ``MCPTool`` has no progress/subscription consumer. Unknown and late
+        notifications are therefore ignored; they must not be delivered to a
+        different operation. Tool results and errors use the request path.
+        """
+        logger.debug(
+            "Ignoring MCP notification %s for server %s request %s",
+            params.get("method"),
+            params.get("serverId"),
+            params.get("requestId"),
+        )
+
+    # ---- client-initiated cancellation ---------------------------------
+
+    def _activity_session(self, session_id: str) -> tuple[Session, ACPEventBridge]:
+        """A session and the bridge showing its activity (an unloaded child's ancestor's)."""
+        session = self.session(session_id)
+        if session is None:
+            raise RequestError.resource_not_found(session_id)
+        bridge = self._bridges.get(session_id)
+        parent_id = session.parent_id
+        for _ in range(64):
+            if bridge is not None:
+                return session, bridge
+            if parent_id is None:
+                break
+            bridge = self._bridges.get(parent_id)
+            parent = self.session(parent_id)
+            parent_id = parent.parent_id if parent is not None else None
+        raise RequestError.resource_not_found(session_id)
+
+    async def cancel_tool_call(self, params: dict[str, Any]) -> dict[str, Any]:
+        """``tool_call/cancel``: stop one advertised background job, not the foreground turn."""
+        session_id = params.get("sessionId")
+        tool_call_id = params.get("toolCallId")
+        if not isinstance(session_id, str) or not isinstance(tool_call_id, str):
+            raise v2.invalid("sessionId and toolCallId are required")
+        session, bridge = self._activity_session(session_id)
+        if not tool_call_id.startswith("job:"):
+            raise v2.invalid(
+                "Tool call is unknown, final, or not cancellable", toolCallId=tool_call_id
+            )
+        name = tool_call_id.removeprefix("job:")
+        job = session._agent.jobs.get(name)
+        if job is None or not await bridge.cancel_background(tool_call_id, job):
+            raise v2.invalid(
+                "Tool call is unknown, final, or not cancellable", toolCallId=tool_call_id
+            )
+        return {}
+
+    async def cancel_terminal(self, params: dict[str, Any]) -> dict[str, Any]:
+        """``terminal/cancel``: interrupt one command; its tool card and turn state stay put."""
+        session_id = params.get("sessionId")
+        terminal_id = params.get("terminalId")
+        if not isinstance(session_id, str) or not isinstance(terminal_id, str):
+            raise v2.invalid("sessionId and terminalId are required")
+        _session, bridge = self._activity_session(session_id)
+        if not await bridge.cancel_terminal(terminal_id):
+            raise v2.invalid(
+                "Terminal is unknown, exited, or not cancellable", terminalId=terminal_id
+            )
+        return {}
 
     # ---- modes and models ----------------------------------------------
 
-    async def set_session_mode(
-        self, session_id: str, mode_id: str, **kwargs: Any
-    ) -> SetSessionModeResponse:
-        """Set the permission mode. Only ``auto`` exists until tools can ask first."""
-        del kwargs
+    async def set_mode(self, session_id: str, mode_id: str) -> None:
+        """Set the permission mode (a v1 concept, used by the v1 shim). Only ``auto`` exists."""
         session, _bridge = self._followed(session_id)
-        if mode_id not in {mode.id for mode in _MODES}:
+        if mode_id not in MODES:
             raise RequestError.invalid_params(
                 {"modeId": mode_id, "reason": "Unknown mode; this agent offers 'auto' only"}
             )
         await session.set_mode(mode_id)
-        return SetSessionModeResponse()
 
-    async def set_config_option(
-        self, config_id: str, session_id: str, value: str | bool, **kwargs: Any
-    ) -> SetSessionConfigOptionResponse:
-        """Set a model, reasoning level, or ACP-local activity verbosity."""
-        del kwargs
+    async def set_config_option(self, params: dict[str, Any]) -> dict[str, Any]:
+        """``session/set_config_option``: a model, reasoning level, or ACP-local verbosity."""
+        config_id, session_id, value = (
+            params.get("configId"),
+            params.get("sessionId"),
+            params.get("value"),
+        )
+        if not isinstance(session_id, str):
+            raise v2.invalid("sessionId is required")
         session, _bridge = self._followed(session_id)
         if config_id == "verbosity":
             if not isinstance(value, str) or value not in VERBOSITY_LEVELS:
@@ -1137,14 +1204,10 @@ class AtomACPAgent:
                     }
                 )
             await self._set_verbosity(session, _bridge, value)
-            return SetSessionConfigOptionResponse(
-                config_options=self._config_options(session) or []
-            )
+            return {"configOptions": self._config_options(session)}
         if config_id == "reasoning" and isinstance(value, str):
             await self._set_reasoning(session, value)
-            return SetSessionConfigOptionResponse(
-                config_options=self._config_options(session) or []
-            )
+            return {"configOptions": self._config_options(session)}
         if config_id != "model" or not isinstance(value, str):
             raise RequestError.invalid_params(
                 {"configId": config_id, "reason": "Unknown configuration option"}
@@ -1157,7 +1220,7 @@ class AtomACPAgent:
             raise RequestError.invalid_params(
                 {"configId": config_id, "value": value, "reason": str(exc)}
             ) from exc
-        return SetSessionConfigOptionResponse(config_options=self._config_options(session) or [])
+        return {"configOptions": self._config_options(session)}
 
     async def _set_verbosity(self, session: Session, bridge: ACPEventBridge, level: str) -> None:
         followed, current_bridge = self._followed(session.id)
@@ -1194,26 +1257,23 @@ class AtomACPAgent:
                 {"configId": "reasoning", "value": level, "reason": str(exc)}
             ) from exc
 
-    def _config_options(self, session: Session) -> list[Any] | None:
+    def _config_options(self, session: Session) -> list[dict[str, Any]]:
         """The model select option (the registry's aliases plus the current model),
         a reasoning option when the current client declares levels, and ACP verbosity."""
-        options: list[Any] = []
+        options: list[dict[str, Any]] = []
         current = session.info.model or self._model or _default_model(session.options.workspace)
         aliases = model_aliases(session.options.workspace)
         if current and current not in aliases:
             aliases = [current, *aliases]
         if current and aliases:
             options.append(
-                SessionConfigOptionSelect(
-                    id="model",
-                    name="Model",
+                v2.select_option(
+                    "model",
+                    "Model",
+                    current,
+                    [(alias, alias) for alias in aliases],
                     category="model",
                     description="The model this session uses from its next turn on.",
-                    type="select",
-                    current_value=current,
-                    options=[
-                        SessionConfigSelectOption(value=alias, name=alias) for alias in aliases
-                    ],
                 )
             )
         reasoning = self._reasoning_option(session)
@@ -1221,22 +1281,18 @@ class AtomACPAgent:
             options.append(reasoning)
         bridge = self._bridges.get(session.id)
         options.append(
-            SessionConfigOptionSelect(
-                id="verbosity",
-                name="Verbosity",
+            v2.select_option(
+                "verbosity",
+                "Verbosity",
+                bridge.verbosity if bridge is not None else "verbose",
+                [(level, level.title()) for level in VERBOSITY_LEVELS],
                 description="ACP activity detail only; does not change the agent or its reasoning.",
-                type="select",
-                current_value=bridge.verbosity if bridge is not None else "verbose",
-                options=[
-                    SessionConfigSelectOption(value=level, name=level.title())
-                    for level in VERBOSITY_LEVELS
-                ],
             )
         )
         return options
 
     @staticmethod
-    def _reasoning_option(session: Session) -> Any | None:
+    def _reasoning_option(session: Session) -> dict[str, Any] | None:
         """The reasoning select option: the client's declared levels, or nothing.
 
         Offered only when the client declares levels and either a level was
@@ -1252,17 +1308,13 @@ class AtomACPAgent:
             if model.reasoning_default
             else "Model default"
         )
-        return SessionConfigOptionSelect(
-            id="reasoning",
-            name="Reasoning",
+        return v2.select_option(
+            "reasoning",
+            "Reasoning",
+            model.reasoning_level or DEFAULT_REASONING,
+            [(DEFAULT_REASONING, default_name), *((level, level) for level in levels)],
             category="thought_level",
             description="How much the model reasons before answering, from its next call on.",
-            type="select",
-            current_value=model.reasoning_level or DEFAULT_REASONING,
-            options=[
-                SessionConfigSelectOption(value=DEFAULT_REASONING, name=default_name),
-                *(SessionConfigSelectOption(value=level, name=level) for level in levels),
-            ],
         )
 
     def _followed(self, session_id: str) -> tuple[Session, ACPEventBridge]:
@@ -1301,10 +1353,22 @@ class AtomACPAgent:
         unsubscribe = session.subscribe(on_update)
         return bridge
 
+    def _descends_from_followed(self, session: Session) -> bool:
+        """Whether a session is a child (at any depth) of one this connection follows."""
+        parent_id = session.parent_id
+        for _ in range(64):
+            if parent_id is None:
+                return False
+            if parent_id in self._bridges:
+                return True
+            parent = self.session(parent_id)
+            parent_id = parent.parent_id if parent is not None else None
+        return False
+
     def _parent_is_live(self, session: Session) -> bool:
         return session.parent_id is not None and self.session(session.parent_id) is not None
 
-    def _require_conn(self) -> Client:
+    def _require_conn(self) -> Peer:
         if self._conn is None:
             raise RequestError.internal_error({"reason": "ACP client is not connected"})
         return self._conn
@@ -1316,9 +1380,6 @@ class AtomACPAgent:
 
         configured = AtomOptions.load(root).agent_spec
         return canonical_agent_spec(configured) if configured else ATOM_AGENT
-
-    def _modes(self, session: Session) -> SessionModeState:
-        return SessionModeState(current_mode_id=session.info.mode or "auto", available_modes=_MODES)
 
     async def _prepare_tools(self, session: Session, mcp_servers: list[Any] | None) -> list[str]:
         """Give a new or loaded session its tools; return warnings.
@@ -1345,17 +1406,24 @@ class AtomACPAgent:
         self,
         mcp_servers: list[Any] | None,
     ) -> tuple[dict[str, MCPTool], tuple[str, ...]]:
+        """Connect the client's MCP servers (v2 configs; ``sse`` too, for v1 clients).
+
+        A server of another type, or with a name already taken, is skipped
+        with a warning.
+        """
         servers = list(mcp_servers or [])
-        supported_types = (McpServerStdio, HttpMcpServer, SseMcpServer)
         tools: dict[str, MCPTool] = {}
         warnings: list[str] = []
         seen_names: set[str] = set()
+        seen_server_ids: set[str] = set()
         for server in servers:
-            name = getattr(server, "name", "<unnamed>")
-            if not isinstance(server, supported_types):
+            server = server if isinstance(server, dict) else {}
+            name = server.get("name", "<unnamed>")
+            kind = server.get("type")
+            if kind not in ("stdio", "http", "sse", "acp"):
                 warnings.append(
                     f"MCP server {name!r} was not loaded: unsupported ACP server type "
-                    f"{type(server).__name__}."
+                    f"{server.get('_typeName') or kind}."
                 )
                 continue
             if name in seen_names:
@@ -1363,25 +1431,37 @@ class AtomACPAgent:
                     f"MCP server {name!r} was not loaded: another server has the same name."
                 )
                 continue
+            server_id = server.get("serverId")
+            if kind == "acp" and (
+                not isinstance(server_id, str) or not server_id or server_id in seen_server_ids
+            ):
+                warnings.append(
+                    f"MCP server {name!r} was not loaded: serverId must be non-empty and unique."
+                )
+                continue
             seen_names.add(name)
+            if isinstance(server_id, str):
+                seen_server_ids.add(server_id)
             try:
-                if isinstance(server, McpServerStdio):
-                    env = {item.name: item.value for item in server.env}
+                if kind == "acp":
+                    from nooa_atom.acp.mcp_acp import create_acp_server
+
+                    tools[name] = await create_acp_server(self._require_conn(), name, server_id)
+                elif kind == "stdio":
+                    env = {item["name"]: item["value"] for item in server.get("env") or []}
                     tools[name] = await MCPManager.create_stdio_server(
                         name,
-                        command=server.command,
-                        args=server.args,
+                        command=server["command"],
+                        args=list(server.get("args") or []),
                         env=env,
                     )
-                elif isinstance(server, (HttpMcpServer, SseMcpServer)):
-                    headers = {item.name: item.value for item in server.headers}
+                else:
+                    headers = {item["name"]: item["value"] for item in server.get("headers") or []}
                     tools[name] = await MCPManager.create_url_server(
                         name,
-                        server.url,
+                        server["url"],
                         headers=headers,
-                        transport=(
-                            "streamable-http" if isinstance(server, HttpMcpServer) else "sse"
-                        ),
+                        transport="streamable-http" if kind == "http" else "sse",
                     )
             except Exception as exc:
                 warnings.append(f"MCP server {name!r} was not loaded: {exc}")
@@ -1398,14 +1478,12 @@ class AtomACPAgent:
             bridge.publish_best_effort(_available_commands_update(session.commands()))
             if warnings:
                 details = "\n".join(f"- {warning}" for warning in warnings)
-                bridge.publish_best_effort(
-                    update_agent_message(
-                        text_block(
-                            "NOOA started with configuration warnings. The session is still "
-                            f"usable.\n\n{details}"
-                        )
-                    )
+                text = (
+                    "NOOA started with configuration warnings. The session is still "
+                    f"usable.\n\n{details}"
                 )
+                for update in agent_message(text):
+                    bridge.publish_best_effort(update)
             await bridge.flush()
 
         self._spawn(publish(), name="nooa-acp-bootstrap")
@@ -1424,10 +1502,11 @@ class AtomACPAgent:
 
     @staticmethod
     def _replay(bridge: ACPEventBridge, session: Session, *, pool: bool = False) -> None:
-        """Queue the transcript as user and agent message chunks on the bridge.
+        """Queue the transcript as whole user and agent messages, then ``replay_complete``.
 
-        For Pool, each user message is followed by its input event, as Pool's
-        own agent replays them.
+        A user message keeps its item id as its message id, the id its
+        prompt was answered with. For Pool, each user message is followed
+        by its input event, as Pool's own agent replays them.
         """
         for entry in session.transcript():
             if entry.role == "cancelled":
@@ -1435,26 +1514,27 @@ class AtomACPAgent:
                 content = cancel_text(by)
             else:
                 content = entry.content
-            # Each update is a chunk and ACP has no end-of-message marker, so
-            # two entries from one speaker in a row would join into one
-            # bubble. End each entry with a newline to keep them apart.
+            # Clients that join chunks would join two entries from one
+            # speaker in a row: end each entry with a newline.
             content = content if content.endswith("\n") else content + "\n"
-            block = text_block(content)
-            bridge.publish(
-                update_user_message(block) if entry.role == "user" else update_agent_message(block)
-            )
+            if entry.role != "user":
+                content = end_line(content)  # as the live message ended
+            kind = "user_message" if entry.role == "user" else "agent_message"
+            message_id = (entry.item_id if entry.role == "user" else None) or v2.new_message_id()
+            bridge.publish(v2.message_update(kind, message_id, [v2.text(content)]))
             if pool and entry.role == "user" and entry.item_id:
                 bridge.publish(pool_input_event(entry.item_id, dialects=bridge.pool_dialects))
+        bridge.publish({"sessionUpdate": "replay_complete"})
 
     @staticmethod
     def _prompt_text(prompt: list[Any]) -> str:
         parts: list[str] = []
         for block in prompt:
-            block_type = getattr(block, "type", None)
+            block_type = _field(block, "type")
             if block_type == "text":
-                parts.append(block.text)
+                parts.append(str(_field(block, "text")))
             elif block_type == "resource_link":
-                parts.append(f"Resource {block.name}: {block.uri}")
+                parts.append(f"Resource {_field(block, 'name')}: {_field(block, 'uri')}")
             else:
                 raise RequestError.invalid_params(
                     {"reason": f"Unsupported prompt content type: {block_type!r}"}
@@ -1463,6 +1543,17 @@ class AtomACPAgent:
         if not text.strip():
             raise RequestError.invalid_params({"reason": "Prompt text must not be empty"})
         return text
+
+
+def _field(block: Any, name: str) -> Any:
+    """A content block's field, whether the block is a dict or an object."""
+    return block.get(name) if isinstance(block, dict) else getattr(block, name, None)
+
+
+def _observe_completion(future: asyncio.Future[str]) -> None:
+    """A v2 prompt's completion nobody awaits: its failure is the turn's, already reported."""
+    if not future.cancelled() and future.exception() is not None:
+        logger.debug("A prompt ended with an error", exc_info=future.exception())
 
 
 def _trace_as(session: Session) -> None:
@@ -1545,9 +1636,8 @@ def _load_error(session_id: str, exc: BaseException) -> BaseException:
     return exc
 
 
-def _available_commands_update(commands: list[CommandInfo]) -> Any:
+def _available_commands(commands: list[CommandInfo]) -> list[dict[str, Any]]:
     """The session's commands, and the ones this adapter runs itself (``/recover`` and ``/verbosity``)."""
-    available: list[AvailableCommand] = []
     names = {command.name for command in commands}
     verbosity = CommandInfo(
         name="verbosity",
@@ -1555,24 +1645,21 @@ def _available_commands_update(commands: list[CommandInfo]) -> Any:
         input_hint="[silent|concise|verbose]",
     )
     # The ACP-local command wins over a skill command with the same name.
-    for command in [
-        *(c for c in commands if c.name != verbosity.name),
-        *(c for c in (RECOVER,) if c.name not in names),
-        verbosity,
-    ]:
-        input_spec = (
-            AvailableCommandInput(UnstructuredCommandInput(hint=command.input_hint))
-            if command.input_hint
-            else None
-        )
-        available.append(
-            AvailableCommand(
-                name=command.name,
-                description=command.description,
-                input=input_spec,
-            )
-        )
-    return update_available_commands(available)
+    return [
+        v2.command(command.name, command.description, command.input_hint or None)
+        for command in [
+            *(c for c in commands if c.name != verbosity.name),
+            *(c for c in (RECOVER,) if c.name not in names),
+            verbosity,
+        ]
+    ]
+
+
+def _available_commands_update(commands: list[CommandInfo]) -> dict[str, Any]:
+    return {
+        "sessionUpdate": "available_commands_update",
+        "availableCommands": _available_commands(commands),
+    }
 
 
 async def _taken_or_settled(
@@ -1607,7 +1694,7 @@ async def _taken_or_settled(
 
 
 async def serve_connection(
-    agent: Any,
+    agent: AtomACPAgent,
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     *,
@@ -1618,32 +1705,44 @@ async def serve_connection(
 
     Used on standard input and output (``serve``) and on a router's
     socket (the worker). ``id_base`` is the first id of the requests this
-    side sends to the client (permission, elicitation, file and terminal
-    requests); a router gives each worker its own range so replies can be
-    routed by id alone.
+    side sends to the client (form and extension requests); a router gives
+    each worker its own range so replies can be routed by id alone.
+
+    The client's ``initialize`` picks the version (``v2.negotiate``): v2 is
+    served directly, v1 through the v1 shim. This is the one place that
+    chooses; without the shim, a v1 client would get v2's answer to a v1
+    request.
     """
-    # session/close is registered by the library as unstable. initialize()
-    # advertises the close capability, so without this flag the agent
-    # promises a method that answers "method not found".
-    conn = AgentSideConnection(
-        cast(Agent, agent),
-        writer,
-        reader,
-        listening=False,
-        use_unstable_protocol=True,
-        observers=list(observers or []),
-    )
-    if id_base is not None:
-        # acp 0.12 has no option for the first request id: every
-        # agent-to-client request takes Connection._next_request_id and
-        # increments it. Seed it before listen() so no request can go out
-        # with the library's default of 0.
-        # TODO(upstream): ask agent-client-protocol for a request-id option.
-        conn._conn._next_request_id = id_base
-    try:
-        await conn.listen()
-    finally:
-        await asyncio.shield(conn.close())
+    first = await read_frame(reader)
+    if first is None:
+        return
+    inner = _Replayed(reader, first.raw)
+    if first.method == "initialize" and v2.negotiate(first.params) == v2.V2:
+        logger.info("ACP: speaking protocol v2")
+        await v2.serve_v2(agent, inner.reader, writer, id_base=id_base, observers=observers)
+        return
+    from nooa_atom.acp.v1_shim import serve_v1
+
+    await serve_v1(agent, inner.reader, writer, id_base=id_base, observers=observers)
+
+
+class _Replayed:
+    """A reader that yields ``first`` (already read from ``reader``) and then the rest of ``reader``."""
+
+    def __init__(self, reader: asyncio.StreamReader, first: bytes) -> None:
+        self.reader = asyncio.StreamReader(limit=FRAME_LIMIT)
+        self.reader.feed_data(first)
+        self._source = reader
+        self._task = asyncio.ensure_future(self._pump())
+
+    async def _pump(self) -> None:
+        try:
+            while chunk := await self._source.read(1 << 16):
+                self.reader.feed_data(chunk)
+        except (ConnectionError, OSError) as exc:
+            logger.info("ACP: the client connection failed: %s", exc)
+        finally:
+            self.reader.feed_eof()
 
 
 async def serve(
@@ -1709,7 +1808,6 @@ async def serve(
 __all__ = [
     "INJECT_CAPABILITY",
     "AtomACPAgent",
-    "initialize_response",
     "list_sessions",
     "open_stdio",
     "serve",
