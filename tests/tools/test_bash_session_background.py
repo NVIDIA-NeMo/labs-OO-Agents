@@ -19,7 +19,7 @@ from nooa.tools.shell_lifecycle import preserve_background_services
 
 def _alive(pid: int) -> bool:
     try:
-        with open(f"/proc/{pid}/status") as f:
+        with open(f"/proc/{pid}/status", encoding="utf-8") as f:
             return "zombie" not in f.read()
     except (FileNotFoundError, ProcessLookupError):
         # The process can be reaped between open() and read().

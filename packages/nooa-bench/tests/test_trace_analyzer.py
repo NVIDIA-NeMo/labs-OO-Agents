@@ -23,7 +23,7 @@ def _attr(key: str, value: object) -> dict:
 
 
 def _write_jsonl(path: Path, *records: dict) -> None:
-    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+    path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
 
 
 def test_current_otlp_jsonl_extracts_usage(tmp_path: Path) -> None:

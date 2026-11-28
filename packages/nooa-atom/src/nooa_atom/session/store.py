@@ -1003,7 +1003,7 @@ class SessionStore:
             return None
         for owner_path in owners:
             try:
-                pid = json.loads(owner_path.read_text()).get("pid")
+                pid = json.loads(owner_path.read_text(encoding="utf-8")).get("pid")
             except (OSError, ValueError, AttributeError):
                 continue
             if isinstance(pid, int) and pid > 0 and _pid_alive(pid):

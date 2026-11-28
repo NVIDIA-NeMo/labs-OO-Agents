@@ -22,11 +22,6 @@ FINISH = (
 )
 
 
-@pytest.fixture(autouse=True)
-def no_optional_viewer_probe(monkeypatch):
-    monkeypatch.setattr("nooa.agent._auto_tracing_attempted", True)
-
-
 class _Hooks:
     """Records code executions, as a Gym observer would."""
 

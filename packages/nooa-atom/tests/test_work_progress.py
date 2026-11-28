@@ -348,8 +348,8 @@ def assert_full_capture(result, *, out=NOISY_OUT + "TAIL", err=NOISY_ERR):
     assert result.returncode == 0 and not result.timed_out
     read = "bytes omitted; full output: "
     assert read in result.stdout and read in result.stderr
-    assert Path(result.stdout_path).read_text() == out
-    assert Path(result.stderr_path).read_text() == err
+    assert Path(result.stdout_path).read_text(encoding="utf-8") == out
+    assert Path(result.stderr_path).read_text(encoding="utf-8") == err
 
 
 def progress_events(channel):

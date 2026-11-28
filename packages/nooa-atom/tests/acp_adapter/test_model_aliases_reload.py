@@ -15,7 +15,7 @@ def _write(path: Path, *aliases: str) -> None:
     lines = ["models:"]
     for alias in aliases:
         lines += [f"  {alias}:", "    provider: openai", f"    model: {alias}-model"]
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     # A same-size rewrite within one clock tick must still be seen.
     stamp = time.time_ns() + 2_000_000_000
     os.utime(path, ns=(stamp, stamp))

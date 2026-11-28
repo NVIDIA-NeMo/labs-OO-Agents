@@ -44,7 +44,7 @@ EXOTIC_BREAKS = "\v\f\x1c\x1d\x1e\x85\u2028\u2029"
 
 def _legacy_read(path: Path, start: int, end: int) -> tuple[str, int, int]:
     """The pre-#90 implementation, kept as the differential reference."""
-    content = path.read_text()
+    content = path.read_text(encoding="utf-8")
     all_lines = content.splitlines(keepends=True)
     total = len(all_lines)
     start = max(1, start)
@@ -58,7 +58,7 @@ def sh(tmp_path):
 
 
 def _write_lines(path: Path, count: int, width: int = 64) -> None:
-    path.write_text("".join(f"{i:0{width}d}\n" for i in range(1, count + 1)))
+    path.write_text("".join(f"{i:0{width}d}\n" for i in range(1, count + 1)), encoding="utf-8")
 
 
 # --------------------------------------------------------------------------
@@ -150,7 +150,7 @@ async def test_ranged_read_matches_legacy_slice(sh, tmp_path, start, end):
 async def test_exotic_line_breaks_keep_legacy_numbering(sh, tmp_path, breaker):
     """str.splitlines() boundaries are preserved, not \\n-only file iteration."""
     path = tmp_path / "f.txt"
-    path.write_text(f"one{breaker}two\nthree{breaker}four\nfive\n")
+    path.write_text(f"one{breaker}two\nthree{breaker}four\nfive\n", encoding="utf-8")
 
     for start, end in ((1, 1), (1, 3), (2, 4), (3, 6)):
         want_text, want_start, want_end = _legacy_read(path, start, end)
@@ -163,10 +163,10 @@ async def test_exotic_line_breaks_keep_legacy_numbering(sh, tmp_path, breaker):
 def test_iter_lines_matches_splitlines_exactly(tmp_path):
     path = tmp_path / "f.txt"
     body = f"a{EXOTIC_BREAKS}b\nc\r\nd\re\nlast-no-newline"
-    path.write_text(body)
+    path.write_text(body, encoding="utf-8")
 
     assert list(iter_lines_keepends(path, max_line_chars=DEFAULT_MAX_FILE_BYTES)) == (
-        path.read_text().splitlines(keepends=True)
+        path.read_text(encoding="utf-8").splitlines(keepends=True)
     )
 
 
@@ -438,10 +438,13 @@ def test_whole_file_read_is_bounded_for_fifos(tmp_path):
 
 
 def test_whole_file_read_keeps_read_text_decoding(tmp_path):
-    """Universal newlines and the default encoding still match Path.read_text()."""
+    """Universal newlines and UTF-8 decoding match Path.read_text(encoding="utf-8")."""
     path = tmp_path / "mixed.txt"
-    path.write_bytes(b"a\r\nb\rc\n")
-    assert read_whole_file_checked(path, 1024, hint="") == path.read_text() == "a\nb\nc\n"
+    path.write_bytes("a\r\nb\rc\u00e9\n".encode())
+    expected = "a\nb\nc\u00e9\n"
+    assert (
+        read_whole_file_checked(path, 1024, hint="") == path.read_text(encoding="utf-8") == expected
+    )
 
 
 def test_shell_tools_rejects_nonpositive_file_budget(tmp_path):

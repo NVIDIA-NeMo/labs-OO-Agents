@@ -262,11 +262,11 @@ async def main():
     # each step carries it in extra.ancestry.parent_name (e.g. the nested
     # fact_check turns report parent_name="ResearchAgent.fact_check").
     # Event dispatch is async in nemo_relay; flush before reading the export.
-    nemo_relay.subscribers.flush()
+    await nemo_relay.subscribers.flush_async()
     trajectory_json = exporter.export_json()
     trajectory = json.loads(trajectory_json)
     trajectory_path = "/tmp/nemo_relay_trajectory_research.json"
-    with open(trajectory_path, "w") as f:
+    with open(trajectory_path, "w", encoding="utf-8") as f:
         json.dump(trajectory, f, indent=2, default=str)
     print(f"\n--- Research trajectory → {trajectory_path} ---")
 
@@ -308,7 +308,7 @@ async def main():
         async with nemo_relay_scope(demo_agent, f"demo-{method_name}"):
             value = await method()
 
-        nemo_relay.subscribers.flush()
+        await nemo_relay.subscribers.flush_async()
         traj = json.loads(exporter.export_json())
 
         # Tool outputs are captured by _capture_tool_output subscriber
@@ -329,7 +329,7 @@ async def main():
             print("  NeMo Relay sees: (no tool output captured)")
 
     demo_traj_path = "/tmp/nemo_relay_trajectory_demo.json"
-    with open(demo_traj_path, "w") as f:
+    with open(demo_traj_path, "w", encoding="utf-8") as f:
         json.dump(traj, f, indent=2, default=str)
     print(f"\n--- Last demo trajectory → {demo_traj_path} ---")
 

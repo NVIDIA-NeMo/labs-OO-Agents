@@ -348,7 +348,7 @@ def _debug_signal_handler(signum: int, frame: FrameType | None) -> None:
     llm_in_stack = _detect_llm_in_stack(frame)
 
     try:
-        with open(debug_file_path, "w") as debug_file:
+        with open(debug_file_path, "w", encoding="utf-8") as debug_file:
             for file in [sys.stderr, debug_file]:
                 assert file is not None
                 file.write("\n")

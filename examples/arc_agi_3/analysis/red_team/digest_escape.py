@@ -73,7 +73,7 @@ def norm_cmd(c: str) -> str:
 
 
 def main() -> int:
-    flat = json.loads((EV / "escape_calls_flat.json").read_text())
+    flat = json.loads((EV / "escape_calls_flat.json").read_text(encoding="utf-8"))
     # distinct command -> aggregated record
     dist: dict[str, dict] = {}
     for cell in flat:
@@ -133,7 +133,8 @@ def main() -> int:
                 "n_breach_commands": len(breaches),
             },
             indent=2,
-        )
+        ),
+        encoding="utf-8",
     )
 
     # Markdown
@@ -171,7 +172,7 @@ def main() -> int:
             "```",
             "",
         ]
-    (EV / "escape_digest.md").write_text("\n".join(lines))
+    (EV / "escape_digest.md").write_text("\n".join(lines), encoding="utf-8")
 
     print("distinct escape commands:", len(records))
     print("outcome tally:", dict(tally))

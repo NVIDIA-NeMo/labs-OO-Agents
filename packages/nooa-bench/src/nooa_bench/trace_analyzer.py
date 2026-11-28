@@ -169,7 +169,7 @@ class TraceAnalyzer:
         trace_end_ns: int | None = None
         total_llm_calls = 0
 
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:

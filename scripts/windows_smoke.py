@@ -101,7 +101,9 @@ def _real_windows_checks() -> None:
         assert save.returncode == 0, save.stdout.decode(errors="replace") + save.stderr.decode(
             errors="replace"
         )
-        assert "fake" in yaml.safe_load(out.read_text())["models"], out.read_text()
+        assert "fake" in yaml.safe_load(out.read_text(encoding="utf-8"))["models"], out.read_text(
+            encoding="utf-8"
+        )
     print("redirected output: real `nooa connect` saved model 'fake'")
 
 
@@ -229,7 +231,9 @@ def main() -> None:
                     out = Path(tmp) / "llm_config.yaml"
                     res = CliRunner().invoke(connect_command, [*CONNECT_ARGS, "--output", str(out)])
                     assert res.exit_code == 0, (res.exit_code, res.output)
-                    assert "fake" in yaml.safe_load(out.read_text())["models"], out.read_text()
+                    assert "fake" in yaml.safe_load(out.read_text(encoding="utf-8"))["models"], (
+                        out.read_text(encoding="utf-8")
+                    )
                 print("connect: saved model 'fake' (filelock on Windows)")
 
         from nooa.storage import SQLiteStorageManager

@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+from collections.abc import Mapping
 from pathlib import Path
 from tempfile import mkdtemp
 from typing import Any
 
 from nooa import Agent
 from nooa.agentdoc import hidden
+from nooa.context_blocks import RenderConfig
 from nooa.interactive import Done, TaskResult
 from nooa.runtime.hooks import compose_hooks, get_hooks, set_hooks
 from nooa_atom.agent.factory import create_session_agent
@@ -74,6 +76,7 @@ class AtomHarness(Agent):
         experimental_reflection_min_seconds: float = 3600.0,
         session_name: str | None = None,
         reflection: bool | None = None,
+        render_config: RenderConfig | Mapping[str, Any] | None = None,
         **extra: Any,
     ) -> None:
         if turn_method not in TURN_METHODS:
@@ -137,6 +140,8 @@ class AtomHarness(Agent):
             name=session_name,
             # Reflection is off headless; True turns it on for an A/B arm.
             reflection=reflection,
+            # The agent's RenderConfig, e.g. {"live_context": {"kind": "off"}}.
+            render_config=render_config,
             experimental_reflection_min_turns=experimental_reflection_min_turns,
             experimental_reflection_min_seconds=experimental_reflection_min_seconds,
             **config,

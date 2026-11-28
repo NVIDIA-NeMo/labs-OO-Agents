@@ -129,8 +129,8 @@ class ValidationContext:
     blocked_modules: frozenset[str] = field(default_factory=frozenset)
     # Return type of the currently executing generation method, when known.
     # Drives ReturnTypeShadowValidator: if the generated code redefines a class
-    # whose name is part of this annotation, the resulting __repl_wrapper__-scoped
-    # class will not pass return_result Pydantic validation (see issue gl-143).
+    # whose name is part of this annotation, the cell rebinds that name to a new
+    # class that will not pass return_result Pydantic validation (see issue gl-143).
     return_type: Any = None
 
 
@@ -1191,9 +1191,10 @@ class ReturnTypeShadowValidator:
     3. ``Answer = ...`` — assignment overwrites the type reference (the model
        may set it to None or a wrong value, breaking later return_result calls)
 
-    Generated code runs inside ``async def __repl_wrapper__():`` (see
-    ``runtime/actor.py``), so any local binding of the return type name
-    creates a scoped shadow that breaks ``return_result()`` validation.
+    A cell's top-level bindings rebind the session's globals (in-process:
+    ``nooa.runtime.execution_namespace``; the sandbox worker's own wrapper
+    has the same effect), so any binding of the return type name replaces the
+    type ``return_result()`` validates against.
 
     The validator looks up the class names referenced by the method's declared
     return type (via ``ValidationContext.return_type``) and rejects any local
@@ -1269,7 +1270,7 @@ class ReturnTypeShadowValidator:
                         message=(
                             f"Cannot redefine '{name}' here — it is already in scope as "
                             f"the return type of this method. A local {kind} definition "
-                            f"shadows it with a __repl_wrapper__-scoped {kind}, and "
+                            f"replaces it with a new session-scoped {kind}, and "
                             f"return_result() will reject the resulting value as the wrong "
                             f"type. Use the existing '{name}' (already imported) instead."
                         ),
@@ -1784,7 +1785,7 @@ def validate_code(
         agent: Agent instance for method introspection
         return_type: Return type annotation of the executing method, used by
             ReturnTypeShadowValidator to reject local class definitions that
-            would shadow the return type in __repl_wrapper__ scope.
+            would shadow (rebind) the return type name.
 
     Raises:
         ValidationError: If validation fails

@@ -54,7 +54,7 @@ def analyze_md(knowledge_dir: Path) -> None:
         print("  no knowledge .md files")
         return
     for f in files:
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8")
         entries = len(re.findall(r"^#{1,3} ", text, re.M))
         table_rows = len(re.findall(r"^\|[^-|]", text, re.M))
         print(f"  {f.name}: {len(text)} chars, {entries} headed entries, {table_rows} table rows")
@@ -64,7 +64,7 @@ def analyze_run(run_dir: Path) -> None:
     print(f"\n=== {run_dir.name} ===")
     result = run_dir / "result.json"
     if result.exists():
-        r = json.loads(result.read_text())
+        r = json.loads(result.read_text(encoding="utf-8"))
         print(
             f"  result: levels={r.get('levels_completed')} steps={r.get('total_steps')} "
             f"turns={r.get('turns')} wall={r.get('wall_time_seconds')}s "
@@ -81,7 +81,9 @@ def analyze_run(run_dir: Path) -> None:
     print(f"  helper modules: {[h.name for h in helpers]}")
     actions = run_dir / "ipc" / "actions.jsonl"
     if actions.exists():
-        batches = [json.loads(ln) for ln in actions.read_text().splitlines() if ln.strip()]
+        batches = [
+            json.loads(ln) for ln in actions.read_text(encoding="utf-8").splitlines() if ln.strip()
+        ]
         sizes = [len(b.get("actions", [])) for b in batches]
         if sizes:
             print(

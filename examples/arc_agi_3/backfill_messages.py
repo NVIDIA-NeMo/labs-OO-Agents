@@ -23,7 +23,7 @@ def backfill(run_dir: Path) -> int:
     msgs.mkdir(exist_ok=True)
     turns: list[dict] = []
     steps: list[dict] = []
-    for line in events_path.read_text().splitlines():
+    for line in events_path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
         e = json.loads(line)
@@ -65,8 +65,8 @@ def backfill(run_dir: Path) -> int:
             f"- diff_pixels: {s.get('diff_pixels')}\n"
             f"- levels_completed: {s.get('levels_completed')}\n"
         )
-        (msgs / f"step_{n:03d}_round_00_user.md").write_text(user)
-        (msgs / f"step_{n:03d}_round_00_assistant.md").write_text(assistant)
+        (msgs / f"step_{n:03d}_round_00_user.md").write_text(user, encoding="utf-8")
+        (msgs / f"step_{n:03d}_round_00_assistant.md").write_text(assistant, encoding="utf-8")
         written += 1
     return written
 
@@ -78,7 +78,7 @@ def backfill_step_actions(run_dir: Path) -> int:
     gameplay = run_dir / "gameplay.json"
     if gameplay.exists():
         try:
-            for entry in json.loads(gameplay.read_text()).get("log", []):
+            for entry in json.loads(gameplay.read_text(encoding="utf-8")).get("log", []):
                 if entry.get("type") == "step":
                     rewards[entry.get("global_step")] = entry.get("reward", 0.0)
         except json.JSONDecodeError:
@@ -86,14 +86,14 @@ def backfill_step_actions(run_dir: Path) -> int:
     fixed = 0
     for f in sorted(run_dir.glob("steps/step_*.json")):
         try:
-            obs = json.loads(f.read_text())
+            obs = json.loads(f.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             continue
         if "action_chosen" in obs:
             continue
         obs["action_chosen"] = obs.get("producer_action", "")
         obs.setdefault("reward", rewards.get(obs.get("step"), 0.0))
-        f.write_text(json.dumps(obs))
+        f.write_text(json.dumps(obs), encoding="utf-8")
         fixed += 1
     return fixed
 

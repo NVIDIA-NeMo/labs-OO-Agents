@@ -81,7 +81,7 @@ def _load_server_config(
     path = mcp_file or Path(".mcp.json")
     if path.exists():
         try:
-            root = json.loads(path.read_text())
+            root = json.loads(path.read_text(encoding="utf-8"))
             file_servers = root.get("mcpServers", {}) if isinstance(root, dict) else {}
             if isinstance(file_servers, dict):
                 configured.update(file_servers)
@@ -386,7 +386,7 @@ class MCPApprovalStore:
 
     def _load(self) -> dict[str, Any]:
         try:
-            data = json.loads(self.path.read_text())
+            data = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {"version": _STORE_VERSION, "approvals": {}}
         if not isinstance(data, dict) or data.get("version") != _STORE_VERSION:

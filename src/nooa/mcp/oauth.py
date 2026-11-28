@@ -956,7 +956,7 @@ def _load_cached_token(server_url: str) -> OAuthToken | None:
     """Load a cached OAuth token for ``server_url`` if present and well-formed."""
     path = _token_cache_path()
     try:
-        data = json.loads(path.read_text())
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(data, dict):
@@ -981,7 +981,7 @@ def _save_cached_token(server_url: str, token: OAuthToken) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
                 data = {}
         except (OSError, ValueError):
@@ -995,7 +995,7 @@ def _save_cached_token(server_url: str, token: OAuthToken) -> None:
             "client_id": token.client_id,
             "client_secret": token.client_secret,
         }
-        path.write_text(json.dumps(data, indent=2))
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         with contextlib.suppress(OSError):
             path.chmod(stat.S_IRUSR | stat.S_IWUSR)
     except OSError as e:

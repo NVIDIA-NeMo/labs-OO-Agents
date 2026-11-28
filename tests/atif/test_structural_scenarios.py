@@ -72,7 +72,7 @@ _TEST_LLM_DEFAULT = FakeLLMClient()
 
 def _loaded(path: Path) -> Trajectory:
     """Read the on-disk trajectory, validating schema + normative invariants."""
-    traj = Trajectory.model_validate_json(path.read_text())
+    traj = Trajectory.model_validate_json(path.read_text(encoding="utf-8"))
     assert_atif_normative(traj)
     return traj
 

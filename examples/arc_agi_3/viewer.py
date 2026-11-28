@@ -434,7 +434,7 @@ def resolve_container(path: Path) -> Path | None:
 
 def read_status(container: Path) -> dict:
     try:
-        return json.loads((container / "status.json").read_text())
+        return json.loads((container / "status.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, ValueError):
         return {}
 

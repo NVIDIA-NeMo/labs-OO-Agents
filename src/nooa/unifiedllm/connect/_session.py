@@ -274,6 +274,7 @@ async def _session_steps(alias, entry, *, api_key, budget_tokens):
     hook on the test's own client only.
     """
     from nooa.context_blocks.formatter import OpenAIProviderFormatter
+    from nooa.context_blocks.live_context import DynamicLiveContext
     from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
     from nooa.context_blocks.renderer import render_context
     from nooa.context_blocks.renderers.cached import CachedBlockFormatter
@@ -319,7 +320,9 @@ async def _session_steps(alias, entry, *, api_key, budget_tokens):
         # Offered to the model, but Connect never runs tools during tests.
         raise RuntimeError("Setup checks never execute model tools")
 
-    formatter = CachedBlockFormatter()
+    # One request with no history: render the task per request (the dynamic
+    # policy) so it reaches the model as the trailing USER message.
+    formatter = CachedBlockFormatter(live_context=DynamicLiveContext())
     provider = OpenAIProviderFormatter()
     # Generated, varied filler text forms a long prefix that the provider can
     # cache, without using any user data. Short hex IDs are used instead of

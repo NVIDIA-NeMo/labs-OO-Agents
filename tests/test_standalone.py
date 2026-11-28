@@ -616,7 +616,8 @@ class TestStandaloneHistoryIsolation:
         await fn(CALL2)
 
         assert len(recording_llm.all_calls) == 2
-        call2_messages = json.dumps(recording_llm.all_calls[1]["messages"])
+        # ``default=str``: the rendered request carries a CacheBoundary marker.
+        call2_messages = json.dumps(recording_llm.all_calls[1]["messages"], default=str)
         # If EventManager were shared, CALL1 would appear in call 2's history.
         assert CALL1 not in call2_messages, (
             "First call's task text leaked into second call — EventManager not fresh per call."

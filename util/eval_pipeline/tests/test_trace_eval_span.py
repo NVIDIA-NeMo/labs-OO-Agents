@@ -14,7 +14,7 @@ from tests.otlp_helpers import _otlp_attrs_to_dict
 
 def _read_first_span_from_otlp_file(trace_file: Path) -> tuple[str, dict]:
     """Parse first OTLP TracesData line and return (span_name, flat_attributes)."""
-    line = trace_file.read_text().strip()
+    line = trace_file.read_text(encoding="utf-8").strip()
     assert line, "Trace file is empty"
     payload = json.loads(line)
     res = payload["resourceSpans"][0]

@@ -22,7 +22,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    "pydantic>=2.14",
+    "pydantic>=2.14.2",
     # context_blocks + unifiedllm now ship as nooa.context_blocks /
     # nooa.unifiedllm subpackages — pull their formerly-external deps in.
     # >=1.97.0: routes GPT-5.4 tool calls through Responses and replays reasoning_items;
@@ -170,18 +170,10 @@ mcp = [
 # export).
 # See src/nooa/nemo_relay_middleware.py and examples/quickstart/15_nemo_relay.py.
 #
-# Floor is 0.6: LLM request intercepts must return `LLMRequestInterceptOutcome`
-# (0.5+) rather than a `(request, annotated)` tuple, and that type does not
-# exist in 0.4 — so there is no single callback shape that spans 0.4 and 0.6.
-#
-# Ceiling is <0.7: 0.7 changes the LLM sanitizer contract to the two-argument
-# form `(payload, directional_context) -> payload | None` with no compatibility
-# shim, and makes an implicit `return` mean "omit the payload" (fail-closed).
-# Our library code (nemo_relay_middleware.py) registers no sanitizers and is
-# unaffected, but tests/test_nemo_relay_middleware.py does — see the sanitizer
-# registrations there before lifting this bound.
+# Floor 0.9.3: 0.9 needs `ToolExecutionResult` from a tool callback and
+# `flush_async()` inside an event loop. Ceiling <0.10: tested with 0.9.4.
 nemo-relay = [
-    "nemo-relay>=0.6,<0.7",
+    "nemo-relay>=0.9.3,<0.10",
 ]
 
 # CLI ships as a separate package: `uv add nooa-cli`.
@@ -350,7 +342,13 @@ select = [
     "B",   # flake8-bugbear
     "C4",  # flake8-comprehensions
     "UP",  # pyupgrade
+    "PLW1514",  # unspecified-encoding: text I/O must name its encoding (preview rule)
 ]
+# PLW1514 is a preview rule in the pinned Ruff. Preview is on for lint only, and
+# explicit-preview-rules keeps every other preview rule off unless selected by
+# its exact code.
+preview = true
+explicit-preview-rules = true
 ignore = [
     "E501",  # line too long (handled by formatter)
 ]
@@ -360,6 +358,11 @@ ignore = [
 # Tests intentionally use legacy typing syntax (Optional[X], Union[X,Y], Generic[T])
 # to verify that _get_complex_type() handles those annotation forms correctly.
 "tests/test_pure_functions_gl105.py" = ["UP007", "UP045", "UP046"]
+# These packages export names lazily through a module-level __getattr__. Stable
+# F822 skips such modules; its preview behavior (on for PLW1514) flags them.
+"src/nooa/__init__.py" = ["F822"]
+"packages/nooa-atom/src/nooa_atom/agent/__init__.py" = ["F822"]
+"packages/nooa-cli/src/nooa_cli/coding/__init__.py" = ["F822"]
 [tool.ruff.lint.isort]
 known-first-party = ["nooa", "eval_pipeline", "evaluation", "agentdoc"]
 

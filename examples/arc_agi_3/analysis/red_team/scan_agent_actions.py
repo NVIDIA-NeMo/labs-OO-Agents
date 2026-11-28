@@ -69,7 +69,7 @@ def scan_game(alias: str, run_dir: Path) -> dict:
             continue
         step, rnd, kind = sr
         try:
-            text = f.read_text(errors="replace")
+            text = f.read_text(errors="replace", encoding="utf-8")
         except OSError:
             continue
 
@@ -134,7 +134,7 @@ def main() -> int:
     }
     for alias, run_dir in rt.game_dirs():
         res = scan_game(alias, run_dir)
-        (ev / f"actions_{alias}.json").write_text(json.dumps(res, indent=2))
+        (ev / f"actions_{alias}.json").write_text(json.dumps(res, indent=2), encoding="utf-8")
         summary["games"][alias] = {
             "n_code_cells": res.get("n_code_cells", 0),
             "n_tool_outputs": res.get("n_tool_outputs", 0),
@@ -151,7 +151,7 @@ def main() -> int:
             f"hits={res.get('hits_by_rule', {})}"
         )
     summary["totals"] = dict(summary["totals"])
-    (ev / "actions_summary.json").write_text(json.dumps(summary, indent=2))
+    (ev / "actions_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(
         "\nTOTALS:",
         json.dumps(summary["totals"]),

@@ -170,7 +170,9 @@ def main() -> int:
     # ---- 4) the fix must NOT break the harness (root) or the agent's own run
     root_still = runs["ar25"].parent / "_harness"
     root_reads = root_still.exists() and any(root_still.iterdir())  # root unaffected
-    own_run_ok = _as_uid(games["ar25"], lambda: open(runs["ar25"] / "ipc" / "states.jsonl").read(4))
+    own_run_ok = _as_uid(
+        games["ar25"], lambda: open(runs["ar25"] / "ipc" / "states.jsonl", encoding="utf-8").read(4)
+    )
     print(
         f"  [{'ok  ' if root_reads else 'FAIL'}] root harness still reads _harness    -> {root_reads}"
     )

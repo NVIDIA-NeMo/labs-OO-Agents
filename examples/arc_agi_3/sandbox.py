@@ -66,7 +66,7 @@ def preflight() -> tuple[bool, str]:
     lock = Path("/proc/sys/kernel/apparmor_restrict_unprivileged_userns")
     if lock.exists():
         try:
-            if lock.read_text().strip() == "1" and not _has_setuid_bwrap():
+            if lock.read_text(encoding="utf-8").strip() == "1" and not _has_setuid_bwrap():
                 return False, (
                     "unprivileged user namespaces are restricted by "
                     "AppArmor (kernel.apparmor_restrict_unprivileged_userns=1) "
@@ -75,7 +75,7 @@ def preflight() -> tuple[bool, str]:
         except OSError:
             pass
     maxns = Path("/proc/sys/user/max_user_namespaces")
-    if maxns.exists() and maxns.read_text().strip() == "0":
+    if maxns.exists() and maxns.read_text(encoding="utf-8").strip() == "0":
         return False, "user namespaces disabled (max_user_namespaces=0)"
     # Actually attempt a throwaway namespace — the only definitive check.
     tool = shutil.which("bwrap")

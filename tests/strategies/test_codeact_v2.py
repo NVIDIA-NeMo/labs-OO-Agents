@@ -10,7 +10,11 @@ import pytest
 
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig
-from nooa.context_blocks import ToolCallEvent
+from nooa.context_blocks import (
+    DynamicLiveContext,
+    RenderConfig,
+    ToolCallEvent,
+)
 from nooa.events import PythonOutput, Task
 from nooa.strategies.codeact import CodeActStrategy
 from nooa.strategies.codeact_v2 import CodeActV2
@@ -77,6 +81,51 @@ async def test_current_call_id_matches_events(strategy_type, tool_name):
         assert task.metadata["call_id"] == result["id"]
         assert task.tag == result["tag"]
         assert result["id"] != result["tag"]
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "strategy_type,tool_name", [(CodeActStrategy, "execute_python"), (CodeActV2, "python_cell")]
+)
+async def test_helper_from_an_ended_call_prints_into_the_next_calls_cell(strategy_type, tool_name):
+    define = (
+        "def helper():\n"
+        "    print('from helper')\n"
+        "    return self is not None\n"
+        "self.saved['helper'] = helper\n"
+        "return_result(1)"
+    )
+    use = "return_result(self.saved['helper']())"
+
+    def cell(code: str, call_id: str) -> LLMResponse:
+        arguments = json.dumps({"code": code})
+        return LLMResponse(
+            tool_calls=[ToolCall(id=call_id, name=tool_name, arguments=arguments)],
+            finish_reason="tool_calls",
+        )
+
+    llm = FakeLLMClient(scripted_responses=[cell(define, "a"), cell(use, "b")])
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(strategy_type(config=CodeActConfig(prefill=None)))
+        async def define(self) -> int:
+            """Define the helper."""
+            ...
+
+        @strategy(strategy_type(config=CodeActConfig(prefill=None)))
+        async def use(self) -> bool:
+            """Use the helper."""
+            ...
+
+    agent = TestAgent()
+    agent.saved = {}
+    try:
+        assert await agent.define() == 1
+        assert await agent.use() is True
+        outputs = [event.stdout for event in agent.events.query(type="PythonOutput")]
+        assert outputs[-1] == "from helper\n", outputs
     finally:
         await agent.aclose()
 
@@ -513,7 +562,8 @@ async def test_text_only_retry_preserves_response_and_uses_python_cell():
             """Calculate the result."""
             ...
 
-    agent = TestAgent()
+    # The state block after the boundary is inspected on the retry request.
+    agent = TestAgent(render_config=RenderConfig(live_context=DynamicLiveContext()))
     assert await agent.answer() == 42
     assert agent.event_manager[original.id] is original
     assert any(message is original for message in llm.request_messages)
@@ -937,7 +987,8 @@ async def test_python_cell_state_lists_user_created_locals():
             """Uppercase the question."""
             ...
 
-    agent = TestAgent()
+    # The state block of the last request is inspected: regenerate it every request.
+    agent = TestAgent(render_config=RenderConfig(live_context=DynamicLiveContext()))
     assert await agent.answer("hello") == "HELLO"
     rendered_context = "\n".join(
         str(message.get("content", "")) for message in fake_llm.last_messages

@@ -4,6 +4,7 @@
 
 import inspect
 import logging
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Annotated, Any, cast
 from uuid import uuid4
 
@@ -193,7 +194,7 @@ class Agent(metaclass=AgentMeta):
         *,
         decision_model: "UnifiedDecisionModel | str | None | _InheritSentinel" = INHERIT,
         truncation: "TruncationConfig | None" = None,
-        render_config: "RenderConfig | None" = None,
+        render_config: "RenderConfig | Mapping[str, Any] | None" = None,
         context: "dict[str, str | DynamicContext | None] | None" = None,
         event_query: "EventQuery | None" = None,
         storage: "StorageManager | None" = None,
@@ -207,7 +208,10 @@ class Agent(metaclass=AgentMeta):
                 from the class or parent agent. Pass ``None`` to disable an
                 inherited decision model.
             truncation: Optional truncation configuration.
-            render_config: RenderConfig for block/provider formatter selection.
+            render_config: RenderConfig for block/provider formatter selection and
+                the live-context policy, or its mapping form (for example
+                ``{"live_context": {"kind": "off"}}``), validated with
+                ``RenderConfig.model_validate``.
             context: Instance-level context block overrides.
                 - str: Static content
                 - DynamicContext("expr"): DynamicContext expression, re-evaluated each turn
@@ -257,7 +261,9 @@ class Agent(metaclass=AgentMeta):
         # Resolve render config (instance overrides class default)
         from nooa.context_blocks.render_config import RenderConfig as _RC
 
-        self.render_config = render_config or _RC()
+        self.render_config = (
+            _RC.model_validate(render_config) if render_config is not None else _RC()
+        )
 
         # Resolve and store event query (instance overrides class-level)
         self.event_query = self._resolve_event_query(event_query)
@@ -540,11 +546,15 @@ class Agent(metaclass=AgentMeta):
     def execution_namespace_for(self, call: Any) -> "ExecutionNamespace":
         """Hook: the owned namespace this method call's cells run in.
 
-        CodeAct's in-process backend calls it once per call (``call`` is the
-        :class:`~nooa.strategies.current_call.CurrentCall`). The default is a
-        fresh :class:`~nooa.runtime.execution_namespace.ExecutionNamespace` per
-        call (the call's arguments and the runtime names are reserved); override
-        it to share one namespace across calls.
+        Only CodeAct's in-process backend calls it, once per call (``call`` is
+        the :class:`~nooa.strategies.current_call.CurrentCall`); PurePython always
+        runs in a fresh namespace per call. The default is a fresh
+        :class:`~nooa.runtime.execution_namespace.ExecutionNamespace` per call
+        (the call's arguments and the runtime names are reserved); override it
+        to share one namespace across calls. A shared namespace holds one call
+        at a time: a call that enters it while another call (or a cell nested
+        in one) occupies it raises. Seeding and write-back: "session_locals
+        seeding and write-back" in ``nooa/runtime/README.md``.
         """
         from nooa.runtime.execution_namespace import default_execution_namespace
 

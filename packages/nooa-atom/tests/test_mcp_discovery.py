@@ -14,6 +14,7 @@ from nooa_atom.session.registry import SessionRegistry
 from nooa_atom.session.store import SessionStore
 from nooa_atom.skills.mcp_servers import MCPServers
 
+from nooa.context_blocks import DynamicLiveContext, RenderConfig
 from nooa.interactive import Done
 from nooa.unifiedllm import FakeLLMClient
 
@@ -179,7 +180,12 @@ async def test_the_skills_block_has_the_server_line_and_status_does_not(registry
         cell("return_result(Done(explanation='ok'))"),
     ]
     root = await registry.create(
-        SessionOptions(workspace=tmp_path, agent_spec="nooa_atom.agent:AtomAgent")
+        SessionOptions(
+            workspace=tmp_path,
+            agent_spec="nooa_atom.agent:AtomAgent",
+            # Both calls are inspected for their skills block: regenerate it every request.
+            render_config=RenderConfig(live_context=DynamicLiveContext()),
+        )
     )
     assert await root.register_tools({"mcp.hcb_resources": Resources()}) == {}
     assert await root.prompt("go") == Done(explanation="ok")

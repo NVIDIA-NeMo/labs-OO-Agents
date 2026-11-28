@@ -157,7 +157,9 @@ def test_documented_headless_workflow_with_mocked_native_requests(monkeypatch, t
             or "current settings have not passed checks" in result.stderr
         )
 
-    entry = yaml.safe_load(Path(".nooa/llm_config.yaml").read_text())["models"]["work"]
+    entry = yaml.safe_load(Path(".nooa/llm_config.yaml").read_text(encoding="utf-8"))["models"][
+        "work"
+    ]
     assert entry["max_tokens"] == 1024
     assert entry["context_window"] == 16384
     assert entry["api_key_env"] == "MODEL_KEY"
@@ -169,7 +171,9 @@ def test_documented_headless_workflow_with_mocked_native_requests(monkeypatch, t
     assert (
         len(seen) == 15
     )  # 3 model-info GETs, 1 routing, 2 metadata GETs, 4 interface, 5 decision/image.
-    metadata_entry = yaml.safe_load(Path("llm_config.yaml").read_text())["models"]["work"]
+    metadata_entry = yaml.safe_load(Path("llm_config.yaml").read_text(encoding="utf-8"))["models"][
+        "work"
+    ]
     assert metadata_entry["model_name"] == "openai/example-model"
     assert metadata_entry["media_inputs"] == []
 

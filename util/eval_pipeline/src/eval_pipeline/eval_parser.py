@@ -142,7 +142,7 @@ class EvalFileParser:
         completion: EvalCompletionLine | None = None
         annotations: list[EvalAnnotationLine] = []
 
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             for line_number, line in enumerate(f, start=1):
                 line = line.strip()
                 if not line:

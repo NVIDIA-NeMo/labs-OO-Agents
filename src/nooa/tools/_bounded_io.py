@@ -26,9 +26,8 @@ adopting file iteration would silently renumber every :class:`Match` in a file
 containing any of those characters. These helpers reproduce the
 ``splitlines()`` boundary set exactly.
 
-Text decoding also matches the previous code path: files are opened with the
-locale default encoding and universal-newline translation, the same as
-``Path.read_text()``.
+Text is decoded as UTF-8 regardless of locale, with universal-newline
+translation, the same as ``Path.read_text(encoding="utf-8")``.
 """
 
 from __future__ import annotations
@@ -90,7 +89,7 @@ def iter_lines_keepends(
         OSError: The file could not be opened or read.
     """
     carry = ""
-    with open(path) as handle:
+    with open(path, encoding="utf-8") as handle:
         while True:
             chunk = handle.read(chunk_chars)
             if not chunk:
@@ -193,8 +192,8 @@ def read_whole_file_checked(path: Path, max_bytes: int, *, hint: str) -> str:
     that grow after their size was checked. A regular file that ``fstat``
     already shows to be too large is refused before any data is read.
 
-    Decoding matches ``Path.read_text()``: locale default encoding and
-    universal newlines.
+    Decoding matches ``Path.read_text(encoding="utf-8")``: UTF-8 regardless of
+    locale, and universal newlines.
 
     Raises:
         FileTooLargeError: The file is larger than ``max_bytes``.
@@ -211,4 +210,4 @@ def read_whole_file_checked(path: Path, max_bytes: int, *, hint: str) -> str:
         raise FileTooLargeError(
             path, len(data), max_bytes, hint, f"is over the {max_bytes:,}-byte limit"
         )
-    return io.TextIOWrapper(io.BytesIO(data)).read()
+    return io.TextIOWrapper(io.BytesIO(data), encoding="utf-8").read()

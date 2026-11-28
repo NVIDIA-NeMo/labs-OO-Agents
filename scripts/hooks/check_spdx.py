@@ -18,7 +18,7 @@ HEADER = (
 retval = 0
 for filename in sys.argv[1:]:
     try:
-        with open(filename) as f:
+        with open(filename, encoding="utf-8") as f:
             content = f.read()
     except (UnicodeDecodeError, PermissionError):
         continue
@@ -34,7 +34,7 @@ for filename in sys.argv[1:]:
     else:
         content = HEADER + content
 
-    with open(filename, "w") as f:
+    with open(filename, "w", encoding="utf-8") as f:
         f.write(content)
 
     print(f"Added SPDX header: {filename}")

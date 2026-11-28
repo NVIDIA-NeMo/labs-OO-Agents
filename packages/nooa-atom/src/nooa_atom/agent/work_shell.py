@@ -233,7 +233,7 @@ def _release(_directory: object) -> None:
 def _start_time(pid: int) -> str | None:
     """A process's start time (Linux), so a reused pid is never mistaken for it."""
     try:
-        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+        return Path(f"/proc/{pid}/stat").read_bytes().rsplit(b")", 1)[1].split()[19].decode("ascii")
     except (OSError, IndexError):
         return None
 
@@ -247,8 +247,11 @@ def _descendants(pid: int) -> dict[int, str]:
         if not entry.name.isdecimal():
             continue
         try:
-            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
-            children.setdefault(int(fields[1]), []).append((int(entry.name), fields[19]))
+            # Bytes: a process name (comm) may hold bytes that are not UTF-8.
+            fields = (entry / "stat").read_bytes().rsplit(b")", 1)[1].split()
+            children.setdefault(int(fields[1]), []).append(
+                (int(entry.name), fields[19].decode("ascii"))
+            )
         except (OSError, IndexError, ValueError):
             continue
     found: dict[int, str] = {}
@@ -938,7 +941,7 @@ class Shell:
     def _read_status(self, statusfile: Path) -> None:
         """Take the options and USR1-trap state the epilogue reported (none: bash ended first)."""
         try:
-            _rc, flags, usr1 = statusfile.read_text().split()
+            _rc, flags, usr1 = statusfile.read_text(encoding="utf-8").split()
         except (OSError, ValueError):
             return
         self._options = "".join(f for f in "euxvp" if f in flags)
@@ -980,7 +983,7 @@ class Shell:
             self._note = ""
         self._lost = False
         try:
-            ran_in = int(pidfile.read_text().strip())
+            ran_in = int(pidfile.read_text(encoding="utf-8").strip())
         except (OSError, ValueError):
             ran_in = None
         if ran_in is not None and self._bash is None:
@@ -1085,7 +1088,7 @@ class Shell:
         """The pid of the bash running the current command, checked against pid reuse."""
         pidfile = self._pidfile
         try:
-            pid = int(pidfile.read_text().strip()) if pidfile is not None else None
+            pid = int(pidfile.read_text(encoding="utf-8").strip()) if pidfile is not None else None
         except (OSError, ValueError):
             pid = None
         if pid is not None and self._bash is not None and pid == self._bash[0]:

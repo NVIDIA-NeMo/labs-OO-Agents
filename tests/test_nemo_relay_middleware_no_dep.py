@@ -28,9 +28,11 @@ def test_canonical_response_projects_to_relay_shape_without_private_state():
         usage=LLMUsage(input_tokens=12, output_tokens=3, cached_input_tokens=8),
     )
 
-    payload = nm._relay_response(response)
+    payload = nm._relay_response(response, "test-model")
 
-    assert payload["message"] == {
+    assert payload["model"] == "test-model"
+    assert payload["choices"][0]["finish_reason"] == "tool_calls"
+    assert payload["choices"][0]["message"] == {
         "role": "assistant",
         "content": "hello",
         "reasoning_content": "plain reasoning",
@@ -42,7 +44,8 @@ def test_canonical_response_projects_to_relay_shape_without_private_state():
             }
         ],
     }
-    assert payload["usage"]["cached_tokens"] == 8
+    assert payload["usage"]["prompt_tokens"] == 12
+    assert payload["usage"]["prompt_tokens_details"] == {"cached_tokens": 8}
     assert "llm_state" not in payload
     assert "raw_response" not in payload
     assert "parsed" not in payload
@@ -61,9 +64,18 @@ def test_canonical_response_never_exposes_private_raw_response_to_relay():
 
     payload = nm._relay_response(response)
 
-    assert payload["message"]["content"] == "public answer"
+    assert payload["choices"][0]["message"]["content"] == "public answer"
     assert "provider-secret" not in repr(payload)
     raw.model_dump.assert_not_called()
+
+
+def test_no_cost_estimate_is_not_sent_as_a_cost():
+    payload = nm._relay_response(
+        LLMResponse(content="hi", usage=LLMUsage(input_tokens=1, output_tokens=1))
+    )
+
+    assert "cost_usd" not in payload["usage"]
+    assert "model" not in payload
 
 
 def test_state_only_response_does_not_create_a_relay_message():
@@ -71,7 +83,7 @@ def test_state_only_response_does_not_create_a_relay_message():
         LLMResponse(parts=(AssistantReasoning(text="", native={"opaque": "provider-only"}),))
     )
 
-    assert "message" not in payload
+    assert "message" not in payload["choices"][0]
     assert "provider-only" not in repr(payload)
 
 

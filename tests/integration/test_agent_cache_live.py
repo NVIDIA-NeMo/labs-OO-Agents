@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from nooa import Agent, Context, hidden, strategy
 from nooa.config import CodeActConfig
+from nooa.context_blocks import DynamicLiveContext, RenderConfig
 from nooa.strategies.codeact_v2 import CodeActV2
 
 with hidden:
@@ -87,7 +88,9 @@ class CacheAgent(Agent):
     """Execute the requested Python cells; do not inspect inert reference padding."""
 
     def __init__(self, *, llm, reference):
-        super().__init__(llm=llm)
+        # The cases read the live suffix of every request: the ``dynamic`` policy
+        # (the default appends a snapshot every few turns).
+        super().__init__(llm=llm, render_config=RenderConfig(live_context=DynamicLiveContext()))
         self._live_state = 0
         self.context["cache_reference"] = Context(reference, prefix=True)
         self.context["live_state"] = Context(expr="self._live_state")

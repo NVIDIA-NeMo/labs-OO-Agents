@@ -57,7 +57,7 @@ async def test_fresh_shell_server_survives_discard_and_scope_close(tmp_path):
             os.kill(pid, signal.SIGKILL)  # Harness teardown after grading.
             for _ in range(100):
                 try:
-                    state = open(f"/proc/{pid}/stat").read().split()[2]
+                    state = open(f"/proc/{pid}/stat", encoding="utf-8").read().split()[2]
                     if state == "Z":
                         break
                 except FileNotFoundError:

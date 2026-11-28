@@ -12,7 +12,7 @@ dependencies = [
     "nooa-cli[ast]",
     "agent-client-protocol>=0.12.1,<0.13",
     "click>=8.1.0",
-    "pydantic>=2.5.0",
+    "pydantic>=2.14.2",
     "pyyaml>=6.0",
     # nooa atom --http (ACP over WebSocket).
     "websockets>=14",

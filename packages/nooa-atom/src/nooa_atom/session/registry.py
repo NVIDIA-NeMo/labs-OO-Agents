@@ -58,7 +58,7 @@ from nooa_atom.session.store import (
     SessionNotFoundError,
     SessionStore,
 )
-from nooa_atom.session.tracing import trace_in_tree, trace_under_caller
+from nooa_atom.session.tracing import trace_in_relay, trace_in_tree, trace_under_caller
 
 logger = logging.getLogger(__name__)
 
@@ -229,6 +229,7 @@ class SessionRegistry:
             session = await self._build(options, handle)
             if parent is not None:
                 trace_under_caller(session)
+                trace_in_relay(session)
                 await self._inherit_tools(session, parent)
             if prepare is not None:
                 await prepare(session)
@@ -953,6 +954,7 @@ class SessionRegistry:
 
         async def trace(child: Session) -> None:
             trace_under_caller(child)
+            trace_in_relay(child)
 
         return await self.load(
             child_id,

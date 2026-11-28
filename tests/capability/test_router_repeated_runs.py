@@ -40,6 +40,7 @@ from typing import TypedDict
 import pytest
 
 from nooa import Agent
+from nooa.context_blocks import DynamicLiveContext, RenderConfig
 from nooa.unifiedllm import LLMResponse, ToolCall
 
 
@@ -335,7 +336,7 @@ return_result(result)
             else:
                 # Router code - delegate to validator
                 code = """
-validator = self.ValidatorSubAgent(llm=self._llm)
+validator = self.ValidatorSubAgent(llm=self._llm, render_config=self.render_config)
 result = await validator.validate(values)
 return_result(agents_called=["Validator"], results={"Validator": result})
 """
@@ -355,7 +356,11 @@ return_result(agents_called=["Validator"], results={"Validator": result})
     results = []
     for run_id in range(1, 21):
         llm = RouterFakeLLM()
-        agent = RouterTestWrapper(llm=llm)
+        # The fake reads the last message; the live-context snapshot event would
+        # take that place under the append policy, so pin the dynamic policy.
+        agent = RouterTestWrapper(
+            llm=llm, render_config=RenderConfig(live_context=DynamicLiveContext())
+        )
 
         try:
             result = await agent.process(user_message="validate this data", values=[1, 2, 3, 4, 5])

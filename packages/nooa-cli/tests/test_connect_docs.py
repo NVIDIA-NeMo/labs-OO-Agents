@@ -38,7 +38,8 @@ def test_documented_decision_catalogue_reuse_keeps_key_source(monkeypatch, tmp_p
                     "models": [{"id": "decision-model", "context_window": 4096}],
                 }
             }
-        )
+        ),
+        encoding="utf-8",
     )
     mock_http(monkeypatch, lambda request: pytest.fail("Documented plan must be offline"))
     args = shlex.split(snippet.replace("\\\n", " "))[4:]

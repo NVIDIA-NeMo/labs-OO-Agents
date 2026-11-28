@@ -57,7 +57,7 @@ MEMORY_LIMIT_MB = 3500  # exit gracefully before 4096M container OOM
 def _get_rss_mb() -> float:
     """Current RSS in MB from /proc."""
     try:
-        with open("/proc/self/status") as f:
+        with open("/proc/self/status", encoding="utf-8") as f:
             for line in f:
                 if line.startswith("VmRSS:"):
                     return int(line.split()[1]) / 1024
@@ -444,7 +444,7 @@ class CyberGymAgent(Agent, context={"state": None}):
 
     async def solve(self, instruction: str) -> str:
         """Main solve loop."""
-        self.description = DESCRIPTION_PATH.read_text()
+        self.description = DESCRIPTION_PATH.read_text(encoding="utf-8")
 
         # Extract source archive once before spawning finders (shared filesystem)
         tar_path = DESCRIPTION_PATH.parent / "repo-vul.tar.gz"

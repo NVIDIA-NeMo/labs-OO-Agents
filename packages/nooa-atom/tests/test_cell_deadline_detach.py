@@ -345,7 +345,7 @@ async def test_a_user_cancel_still_stops_an_awaited_shell_command(registry, opti
 def _alive(pid):
     """Whether process ``pid`` still exists."""
     try:
-        with open(f"/proc/{pid}/stat") as stat:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as stat:
             return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
     except OSError:
         return False

@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
     from nooa.context_blocks import DynamicContext
     from nooa.decisions import DecisionRequest, DecisionResponse, UnifiedDecisionModel
+    from nooa.runtime.execution_namespace import ExecutionNamespace
     from nooa.runtime.restrictions import RestrictionsConfig
     from nooa.strategies.current_call import CurrentCall
 
@@ -94,20 +95,29 @@ class RuntimeServices(Protocol):
         execution_count: int = 1,
         restrictions: "RestrictionsConfig | None" = None,
         sandbox_executor: Any = None,
+        execution_namespace: "ExecutionNamespace | None" = None,
+        framework_bindings: dict[str, Any] | None = None,
     ) -> Any:
         """Execute Python code with namespace + strategy builtins.
 
         Args:
             code: Python code to execute.
-            builtins: Strategy-provided functions (return_result, message, etc.)
+            builtins: Strategy-provided functions (return_result, message, etc.);
+                they seed a reused ``execution_namespace`` on its first cell only.
             validate: Run planning language validation first.
-            wrap_in_function: Wrap code in an async function for proper await support.
+            wrap_in_function: Return the value of a final expression (REPL
+                style). A cell always runs as an async body (top-level
+                ``await`` and ``return`` work either way).
             timeout: Max seconds before aborting execution (None = no limit).
             tool_call_id: LLM's tool call ID for trace correlation (OpenAI format).
             execution_count: Execution number for Jupyter-style "Cell In[N]" filename.
             restrictions: Code execution restrictions (blocked modules/calls).
                 None uses defaults from RestrictionsConfig().
             sandbox_executor: Optional guarded worker used instead of in-process execution.
+            execution_namespace: The in-process namespace the cell runs in (its
+                globals persist across cells); None runs it in a fresh one.
+            framework_bindings: Dynamic framework names (e.g. strategy classes)
+                offered to the namespace as fallbacks, never as user globals.
 
         Returns:
             ExecutionResult with stdout, error, defined_methods.

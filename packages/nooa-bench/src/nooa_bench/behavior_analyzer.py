@@ -281,7 +281,7 @@ def analyze_trajectory(
 ) -> BehaviorReport:
     """Analyze a runner ``trajectory.json`` file."""
     trajectory_path = Path(path)
-    raw = json.loads(trajectory_path.read_text())
+    raw = json.loads(trajectory_path.read_text(encoding="utf-8"))
     if not isinstance(raw, list):
         raise ValueError("trajectory must be a JSON list of serialized events")
     return analyze_events(
@@ -328,7 +328,7 @@ def aggregate_reports(reports: Iterable[BehaviorReport]) -> list[dict[str, Any]]
 
 def load_behavior_report(path: str | Path) -> BehaviorReport:
     """Load one ``behavior.json`` artifact."""
-    data = json.loads(Path(path).read_text())
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("behavior report must be an object")
     if type(data.get("schema_version")) is not int or data["schema_version"] != 2:

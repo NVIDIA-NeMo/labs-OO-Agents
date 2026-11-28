@@ -6,10 +6,10 @@ Flow:
 1. Build prompt (task + agent state + available methods)
 2. Call LLM with NO tools - just get text output
 3. Validate code (REPL policy: no classes, await async methods)
-4. Pre-compile helper functions (before execution for same-turn use)
-5. Execute output as Python via runtime.execute_code()
-6. If code has return statement OR method returns None → validate and complete
-7. Otherwise → send feedback (stdout, defined helpers) and continue loop
+4. Execute output as Python via runtime.execute_code() in the call's
+   ExecutionNamespace (the same owned-namespace engine as CodeAct)
+5. If code has return statement OR method returns None → validate and complete
+6. Otherwise → send feedback (stdout, defined helpers) and continue loop
 
 Strategy Variants:
 - PurePythonStrategy: Strategy instructions in system message (default)
@@ -37,15 +37,18 @@ from nooa.events import (
     PythonOutput,
     Task,
 )
+from nooa.runtime.execution_namespace import (
+    ExecutionNamespace,
+    enter_call_namespace,
+    write_back_session_locals,
+)
 from nooa.runtime.harness_metrics import get_harness_metrics
 from nooa.runtime.sandbox.errors import SandboxExecutionError
 from nooa.strategies.base import RuntimeServices
 from nooa.strategies.codeact_errors import format_validation_error
 from nooa.strategies.composite import CompositeStrategy
 from nooa.strategies.generated_code import (
-    ExecutionNamespaceBuilder,
     GeneratedCodeValidator,
-    HelperFunctionManager,
     ReturnValueValidator,
 )
 from nooa.strategies.template import TemplateStrategy
@@ -87,6 +90,8 @@ class GenerationSession:
     error_count: int = 0
     consecutive_api_errors: int = 0
     session_locals: dict[str, Any] = field(default_factory=dict)
+    # The namespace the cells run in (CurrentCall.execution_namespace).
+    execution_namespace: ExecutionNamespace | None = None
     task_event_id: str = ""
     out_accessor: Any = field(default=None)  # OutAccessor instance, created lazily
 
@@ -94,10 +99,9 @@ class GenerationSession:
         """Initialize OutAccessor for Jupyter-style Out[n] access."""
         from nooa.runtime.out_accessor import OutAccessor
 
-        # Use event manager-backed mode if provided, otherwise internal storage
+        # Use event manager-backed mode if provided, otherwise internal storage.
+        # Cells see it as the ``Out`` builtin (``_run_loop``).
         self.out_accessor = OutAccessor(event_manager=self.event_manager)
-        # Make Out available in session namespace for LLM code
-        self.session_locals["Out"] = self.out_accessor
 
     def is_exhausted(self) -> bool:
         return self.iteration >= self.max_iterations or self.error_count >= self.max_retries
@@ -248,30 +252,30 @@ class PurePythonStrategy(CompositeStrategy):
         """Code executed successfully. Please continue (if you know the result use `return` to complete the task)"""
         ...
 
-    # Keys added by the session itself that should not leak to the caller.
-    _SESSION_INTERNAL_KEYS = frozenset({"Out", "__repl_captured_locals__"})
-
-    @staticmethod
-    def _sync_session_locals(call: "CurrentCall", session: "GenerationSession") -> None:
-        """Write back session_locals to caller's dict, filtering session internals."""
-        if call.session_locals is None:
-            return
-        filtered = {
-            k: v
-            for k, v in session.session_locals.items()
-            if k not in PurePythonStrategy._SESSION_INTERNAL_KEYS
-        }
-        call.session_locals.clear()
-        call.session_locals.update(filtered)
-
     async def execute(self, runtime: RuntimeServices, call: "CurrentCall") -> Any:
-        session = self._initialize_session(call, runtime)
+        """Run the loop with every cell in the call's owned namespace (as CodeAct).
 
-        # Seed session_locals from caller-provided dict (persistent stack)
-        if call.session_locals is not None:
-            session.session_locals.update(call.session_locals)
+        The namespace is fresh for every call (``Agent.execution_namespace_for``
+        is CodeAct's). The method's arguments are ordinary names there, like a
+        function's locals: a cell can read, rebind and delete them.
+        """
+        with enter_call_namespace(
+            runtime.agent, call, arguments=self._call_arguments(runtime, call)
+        ) as namespace:
+            call.execution_namespace = namespace
+            return await self._run_loop(runtime, call, namespace)
+
+    async def _run_loop(
+        self, runtime: RuntimeServices, call: "CurrentCall", namespace: ExecutionNamespace
+    ) -> Any:
+        session = self._initialize_session(call, runtime)
+        session.execution_namespace = namespace
+        # The cells' globals (seeded with the caller's session_locals).
+        session.session_locals = namespace.globals
+        call.execution_locals = namespace.globals
 
         builtins = self._build_builtins(runtime, call)
+        builtins["Out"] = session.out_accessor
 
         task_content = await self._build_task_message(runtime, original_call=call)
         runtime.event_manager.add(Task(prompt=task_content))
@@ -341,6 +345,7 @@ class PurePythonStrategy(CompositeStrategy):
                     if session.api_errors_exhausted():
                         turn_final = True
                         turn_exception = "GenerationError"
+                        write_back_session_locals(call)
                         raise GenerationError(
                             f"LLM request timed out after {session.max_retries} retries. "
                             f"Original error: {type(e).__name__}: {e}"
@@ -358,7 +363,7 @@ class PurePythonStrategy(CompositeStrategy):
                     if session.is_exhausted():
                         turn_final = True
                         turn_exception = "GenerationError"
-                        self._sync_session_locals(call, session)
+                        write_back_session_locals(call)
                         raise session.build_failure_error() from None
                 except Exception as e:
                     # Catch other LLM API errors (rate limits, connection errors, etc.).
@@ -390,6 +395,7 @@ class PurePythonStrategy(CompositeStrategy):
                     if session.api_errors_exhausted():
                         turn_final = True
                         turn_exception = "GenerationError"
+                        write_back_session_locals(call)
                         raise GenerationError(
                             f"LLM API error after {session.max_retries} retries. "
                             f"Original error: {error_name}: {e}"
@@ -420,13 +426,6 @@ class PurePythonStrategy(CompositeStrategy):
                 result = await self._execute_code(
                     runtime, code, builtins, session, call.method_name
                 )
-
-                # Merge captured locals into session for REPL-style persistence
-                if result.captured_locals:
-                    session.session_locals.update(result.captured_locals)
-                    logger.debug(
-                        f"[PURE_PYTHON] Captured locals: {list(result.captured_locals.keys())}"
-                    )
 
                 if result.error:
                     session.record_error()
@@ -469,7 +468,7 @@ class PurePythonStrategy(CompositeStrategy):
                     if success:
                         turn_success = True
                         turn_final = True
-                        self._sync_session_locals(call, session)
+                        write_back_session_locals(call)
                         return validated  # finally runs, then returns
                     # If validation failed, turn_success stays False
                     continue
@@ -507,7 +506,7 @@ class PurePythonStrategy(CompositeStrategy):
             ),
             record=False,
         )
-        self._sync_session_locals(call, session)
+        write_back_session_locals(call)
         raise session.build_failure_error()
 
     def _initialize_session(
@@ -569,13 +568,6 @@ class PurePythonStrategy(CompositeStrategy):
         with warn_on_prefill_truncation(call):
             result = await self._execute_code(
                 runtime, code, prefill_builtins, session, call.method_name
-            )
-
-        # Merge captured locals into session
-        if result.captured_locals:
-            session.session_locals.update(result.captured_locals)
-            logger.debug(
-                f"[PURE_PYTHON] Prefill captured locals: {list(result.captured_locals.keys())}"
             )
 
         # Emit PythonOutput for the prefill execution result (mirrors normal turn event sequence).
@@ -763,50 +755,6 @@ class PurePythonStrategy(CompositeStrategy):
             logger.warning(f"[PURE_PYTHON] Validation errors: {validation_errors}")
             return ExecutionResult(stdout="", error=None, defined_methods={})
 
-        # 2) Build execution namespace (consistent with ActorRuntime.execute_code)
-        # Include strategy symbols for LLM-generated helper methods
-        strategy_extras: dict[str, Any] = {
-            "PurePythonStrategy": type(self),
-        }
-        # Try to import other strategies for helper method decorators
-        try:
-            from nooa.strategies.predict import PredictStrategy
-            from nooa.strategies.reflexion import ReflexionStrategy
-
-            strategy_extras["PredictStrategy"] = PredictStrategy
-            strategy_extras["ReflexionStrategy"] = ReflexionStrategy
-        except ImportError:
-            pass
-
-        namespace = ExecutionNamespaceBuilder.build(
-            runtime.agent, extra={**builtins, **session.session_locals, **strategy_extras}
-        )
-
-        # 3) Pre-compile helper function defs so @strategy decorators can see
-        # _generated_source at decoration time. Helpers are never attached to the agent.
-        helper_compiler = HelperFunctionManager()
-        helper_result = helper_compiler.apply(
-            code,
-            runtime.agent,
-            session.session_locals,
-            namespace=namespace,
-        )
-
-        if helper_result.errors:
-            session.record_error()
-            error_msg = "**Error**: Failed to define helper function(s):\n" + "\n".join(
-                f"- {e}" for e in helper_result.errors
-            )
-            runtime.event_manager.add(Error(content=error_msg))
-            logger.warning(f"[PURE_PYTHON] Helper compile errors: {helper_result.errors}")
-            return ExecutionResult(stdout="", error=None, defined_methods={})
-
-        if helper_result.installed:
-            logger.debug(f"[PURE_PYTHON] Compiled helpers: {helper_result.installed}")
-
-        # 4) Execute with session locals (includes pre-compiled helpers)
-        execution_builtins = {**builtins, **session.session_locals}
-
         # Track this execution so the /activity slash command can report that
         # the agent is currently running a code cell (vs blocked on an LLM call).
         from nooa.runtime.debug_handler import code_exec_context
@@ -814,10 +762,11 @@ class PurePythonStrategy(CompositeStrategy):
         with code_exec_context(code):
             return await runtime.execute_code(
                 code,
-                builtins=execution_builtins,
+                builtins=builtins,
                 validate=True,
                 wrap_in_function=True,
                 execution_count=session.execution_count,
+                execution_namespace=session.execution_namespace,
             )
 
     def _is_task_complete(self, result: Any, runtime: RuntimeServices, call: "CurrentCall") -> bool:
@@ -960,10 +909,13 @@ class PurePythonStrategy(CompositeStrategy):
         def emit_message(text: str) -> None:
             runtime.event_manager.add(Message(content=str(text)), record=False)
 
-        builtins: dict[str, Any] = {
-            "message": emit_message,
-        }
+        # The arguments are namespace globals already (``enter_call_namespace``).
+        return {"message": emit_message}
 
+    @staticmethod
+    def _call_arguments(runtime: RuntimeServices, call: "CurrentCall") -> dict[str, Any]:
+        """The method's arguments by parameter name (positional ones mapped by the signature)."""
+        arguments: dict[str, Any] = {}
         method = getattr(runtime.agent, call.method_name, None)
         if method and callable(method):
             try:
@@ -971,15 +923,14 @@ class PurePythonStrategy(CompositeStrategy):
                 param_names = [p for p in sig.parameters.keys() if p != "self"]
                 for i, name in enumerate(param_names):
                     if i < len(call.args):
-                        builtins[name] = call.args[i]
+                        arguments[name] = call.args[i]
             except (ValueError, TypeError):
                 pass
 
-        # Always inject call kwargs (CurrentCall.from_method maps positional
+        # Always include call kwargs (CurrentCall.from_method maps positional
         # args to names, so this covers Skill methods and agent methods alike).
-        builtins.update(call.kwargs)
-
-        return builtins
+        arguments.update(call.kwargs)
+        return arguments
 
     # ── Post-response cleanup (PurePython) ─────────────────────
     # Intercept point: strategy-specific response transforms.

@@ -55,7 +55,7 @@ def level_index(run_dir: Path):
             if not m:
                 continue
             try:
-                lvl = json.loads(f.read_text()).get("level")
+                lvl = json.loads(f.read_text(encoding="utf-8")).get("level")
             except (OSError, json.JSONDecodeError):
                 continue
             if lvl is not None:
@@ -97,7 +97,7 @@ def first_violation(alias: str, run_dir: Path):
     )
     for f in files:
         step, rnd, _ = rt.parse_step_round(f)
-        text = f.read_text(errors="replace")
+        text = f.read_text(errors="replace", encoding="utf-8")
         for _, code in rt.iter_code_cells(text):
             if not ACCESS.search(code):
                 continue
@@ -144,7 +144,7 @@ def main() -> int:
                 f"{str(fv['level_at_step']):>5}  {','.join(fv['rules'])} | "
                 f"{fv['command'][:90]}"
             )
-    (ev / "first_violation.json").write_text(json.dumps(out, indent=2))
+    (ev / "first_violation.json").write_text(json.dumps(out, indent=2), encoding="utf-8")
     print("\nwrote evidence/first_violation.json")
     return 0
 

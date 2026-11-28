@@ -154,7 +154,7 @@ class NooaBenchAgent(BaseInstalledAgent):
         if not result_path.exists():
             return
         try:
-            data = json.loads(result_path.read_text())
+            data = json.loads(result_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return
         context.n_input_tokens = data.get("n_input_tokens")

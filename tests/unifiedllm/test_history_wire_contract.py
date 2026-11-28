@@ -16,6 +16,7 @@ import pytest
 
 from nooa.context_blocks.events import ToolCallEvent, ToolResult, UserEvent
 from nooa.context_blocks.formatter import OpenAIProviderFormatter
+from nooa.context_blocks.live_context import DynamicLiveContext
 from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
@@ -191,7 +192,10 @@ def _render(turn, state):
         )
     )
     return render_context(
-        blocks, block_formatter=CachedBlockFormatter(), provider_formatter=OpenAIProviderFormatter()
+        blocks,
+        # A live suffix that changes on every request: the ``dynamic`` policy.
+        block_formatter=CachedBlockFormatter(live_context=DynamicLiveContext()),
+        provider_formatter=OpenAIProviderFormatter(),
     ).output
 
 

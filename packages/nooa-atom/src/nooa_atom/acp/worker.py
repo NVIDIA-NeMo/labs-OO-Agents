@@ -31,6 +31,7 @@ from typing import Any
 from nooa._platform import require_posix
 from nooa_atom.acp.framing import FRAME_LIMIT
 from nooa_atom.acp.server import serve_connection
+from nooa_atom.session.tracing import relay_activated
 
 logger = logging.getLogger(__name__)
 
@@ -42,16 +43,21 @@ async def serve_worker(
     agent: Any,
     observers: list[Callable[[Any], None]] | None = None,
 ) -> None:
-    """Serve ACP for ``agent`` on ``sock`` until the router closes it, then close the agent."""
+    """Serve ACP for ``agent`` on ``sock`` until the router closes it, then close the agent.
+
+    NeMo Relay's plugin host, when one is configured, closes before the socket: the router
+    kills a worker soon after its socket closes.
+    """
     reader, writer = await asyncio.open_unix_connection(sock=sock, limit=FRAME_LIMIT)
     try:
-        await serve_connection(agent, reader, writer, id_base=id_base, observers=observers)
+        async with relay_activated():
+            try:
+                await serve_connection(agent, reader, writer, id_base=id_base, observers=observers)
+            finally:
+                with suppress(Exception):
+                    await agent.close()
     finally:
-        try:
-            with suppress(Exception):
-                await agent.close()
-        finally:
-            writer.close()
+        writer.close()
 
 
 def run_worker(

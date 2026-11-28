@@ -39,7 +39,7 @@ DEFAULT_LLM_API_BASE = "https://inference-api.nvidia.com/v1"
 def load_dotenv(path: Path) -> None:
     if not path.is_file():
         return
-    for raw_line in path.read_text().splitlines():
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -325,7 +325,9 @@ def main(argv: list[str] | None = None) -> int:
         "max_concurrent_expanders": args.max_concurrent_expanders,
         "reasoning_effort": args.reasoning_effort,
     }
-    (log_dir / "args.json").write_text(json.dumps(args_record, indent=2, default=str) + "\n")
+    (log_dir / "args.json").write_text(
+        json.dumps(args_record, indent=2, default=str) + "\n", encoding="utf-8"
+    )
 
     try:
         exit_code = run_container(args, task_dir, log_dir, env, network)

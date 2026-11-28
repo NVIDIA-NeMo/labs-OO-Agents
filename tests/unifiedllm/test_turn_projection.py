@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from nooa.context_blocks.events import ToolCallEvent, ToolResult
 from nooa.context_blocks.formatter import OpenAIProviderFormatter
+from nooa.context_blocks.live_context import DynamicLiveContext
 from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
@@ -104,7 +105,9 @@ def blocks(response, state="live 1"):
 def render(response, state="live 1", formatter=None):
     return render_context(
         blocks(response, state),
-        block_formatter=formatter or CachedBlockFormatter(),
+        # These contracts exercise a live suffix that changes on every request:
+        # the ``dynamic`` live-context policy (the default is ``append``).
+        block_formatter=formatter or CachedBlockFormatter(live_context=DynamicLiveContext()),
         provider_formatter=OpenAIProviderFormatter(),
     )
 

@@ -158,6 +158,18 @@ async def test_a_session_runs_a_turn_over_stdio(tmp_path):
     assert "NOOA ACP smoke test passed.\n\n" in client.texts()
 
 
+async def test_without_relay_configured_the_server_never_imports_its_relay_module(tmp_path):
+    client = _RecordingClient()
+    async with _spawn(client, "--relay-probe", cwd=tmp_path) as (connection, _process):
+        await connection.initialize(PROTOCOL_VERSION)
+        session = await connection.new_session(str(tmp_path))
+        await asyncio.wait_for(
+            connection.prompt(session.session_id, [text_block("probe")]), _HANG_TIMEOUT
+        )
+
+    assert "relay imported: False\n\n" in client.texts()
+
+
 async def test_cancellation_finishes_open_tools_and_says_so(tmp_path):
     client = _RecordingClient()
     async with _spawn(client, "--blocking", cwd=tmp_path) as (connection, _process):

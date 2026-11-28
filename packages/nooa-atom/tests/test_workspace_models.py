@@ -21,7 +21,7 @@ def write_models(path: Path, **aliases: str) -> Path:
     lines = ["models:"]
     for alias, model_name in aliases.items():
         lines += [f"  {alias}:", f"    model_name: {model_name}"]
-    path.write_text("\n".join(lines) + "\n")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     # A same-size rewrite within one clock tick must still be seen.
     stamp = time.time_ns() + 2_000_000_000
     os.utime(path, ns=(stamp, stamp))

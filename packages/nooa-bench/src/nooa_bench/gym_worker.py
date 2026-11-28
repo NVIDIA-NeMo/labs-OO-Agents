@@ -252,7 +252,7 @@ def _enable_artifacts(payload: dict[str, Any]) -> dict[str, str]:
 
 
 async def main(input_path: Path, output_path: Path) -> None:
-    payload = json.loads(input_path.read_text())
+    payload = json.loads(input_path.read_text(encoding="utf-8"))
     trace_env = ",".join(sorted(name for name in os.environ if name.startswith(("OTLP_", "OTEL_"))))
     agent_cls = _import(payload["agent"])
     turn_method = payload.get("turn_method") or "solve"
@@ -327,7 +327,7 @@ async def main(input_path: Path, output_path: Path) -> None:
             **({"stop_signal": stop["signal"]} if stop["signal"] else {}),
         )
         tmp = output_path.with_suffix(".tmp")
-        tmp.write_text(episode.to_json())
+        tmp.write_text(episode.to_json(), encoding="utf-8")
         tmp.replace(output_path)
 
     def on_sigterm() -> None:

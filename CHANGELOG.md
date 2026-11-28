@@ -6,6 +6,59 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- The NeMo Relay middleware works with nemo-relay 0.9: the `nemo-relay` extra
+  requires `>=0.9.3,<0.10` (was `>=0.6,<0.7`). Code cells run through Relay
+  again (0.9 failed every one), with the model's `tool_call_id`.
+- The NeMo Relay middleware hands Relay the model's response as an OpenAI chat
+  completion, so Relay's events and OpenTelemetry `chat` spans carry the
+  model's output, finish reason and token usage. Breaking for Relay
+  guardrails and subscribers that read the LLM response JSON: the message is
+  at `choices[0].message`, cached tokens at
+  `usage.prompt_tokens_details.cached_tokens` and reasoning tokens at
+  `usage.completion_tokens_details.reasoning_tokens`, and a zero `cost_usd`
+  is left out.
+- **Behaviour change:** the live `<context>` (state, todo status, context usage,
+  `set_dynamic` blocks) is now **appended to the history at least every 5 turns**
+  (exactly every 5 when nothing is archived) instead of being regenerated on
+  every request. `RenderConfig(live_context=...)` takes one of
+  three policy classes: `AppendedLiveContext(every_n_turns=5)` (`kind: append`,
+  default: right before a due request the runtime records the live context as
+  a `LiveContextSnapshot` event, a prefaced `<context>` envelope that stays in
+  the history, so requests are append-only and prefix-stable; a snapshot is due
+  when no snapshot is visible or five or more responses follow the last one,
+  and is skipped only when no live block changed), `DynamicLiveContext()` (`kind: dynamic`, the
+  previous trailing message on every request) or `NoLiveContext()` (`kind:
+  off`, static prefix and history only). `RenderConfig` is the only place the
+  policy lives: a policy object, its dict form or a bare kind name, and
+  `Agent(render_config=...)` also accepts the mapping form
+  (`{"live_context": "off"}`); Atom reads the `render_config` key under `atom` in
+  `settings.yaml` (overridden by `SessionOptions.render_config`, which
+  `AtomHarness` forwards; Atom's `workspace_settings.set_live_context(...)` and
+  the `/live-context` command save it and switch the running agent), and NeMo
+  Gym sets
+  `init_kwargs.render_config.live_context.kind=off`. In `off` and
+  `append` the cache boundary follows the last event. The `dynamic_context` stamp on
+  responses is unchanged (observability only). `RenderConfig(live_context=...)`
+  configures its formatter and refuses an explicit `block_formatter` alongside;
+  `render_config.live_context` reads the formatter's policy back. Without static blocks, fixed text
+  stays in the system message while expression-backed blocks follow the policy.
+- Dependency security update. Pydantic is now locked at 2.14.3 with
+  pydantic-core 2.50.4, and the `pydantic` requirement starts at 2.14.2, the
+  first release that fixes CVE-2026-133276, CVE-2026-133421 and
+  CVE-2026-133424. This applies to the root project, nooa-memory, nooa-atom
+  and the cybergym example.
+- Text files are now read and written as UTF-8 regardless of the locale: the
+  library, `nooa-cli`, `nooa-bench`, the eval pipeline, scripts and examples
+  pass `encoding="utf-8"` to every text-mode `open()`, `Path.read_text()`,
+  `Path.write_text()` and `tempfile` call (configs, settings, model registry,
+  `.mcp.json`, OAuth token cache, traces, HTTP logs, viewer sources,
+  ShellTools file reads and edits, repo search). Before, these used the locale
+  default encoding, so on a non-UTF-8 locale (cp1252 on Windows, `LANG=C`
+  before Python 3.15) writes of non-ASCII text raised and reads silently
+  decoded UTF-8 wrongly. A file that an earlier version wrote in a legacy
+  codec on such a machine is now decoded as UTF-8. Ruff rule `PLW1514`
+  (unspecified-encoding) is on, so new text I/O must name its encoding.
+
 - Dependency security update. LiteLLM is now locked at 1.100.5
   (CVE-2026-114612); the `litellm` requirement starts at 1.100.4 and excludes
   the unfixed 1.101-1.103 releases. LiteLLM now requires boto3. Chat
@@ -45,6 +98,46 @@ to follow semantic versioning.
   rejection: it is not retried unchanged, and the existing retry-with-a-note
   recovery handles it at once. That recovery no longer blames an image that
   was already replaced by a note.
+- In-process cells have one execution path: `PurePythonStrategy` now runs its
+  cells in the call's owned `ExecutionNamespace` like CodeAct
+  (`enter_call_namespace`), and `ActorRuntime.execute_code` no longer copies
+  session state into and out of every cell (locals wrapper, helper
+  pre-compilation). PurePython gets a fresh namespace per call, as before:
+  `Agent.execution_namespace_for` stays CodeAct-only. A direct `execute_code`
+  call without a namespace runs in a fresh one (pass an `ExecutionNamespace`
+  to keep what a cell binds). In-process, `ExecutionResult.captured_locals` is
+  no longer filled (read the namespace's globals) and `wrapper_line_offset` is
+  0. A cell always runs as an async body, so
+  `execute_code(wrap_in_function=False)` now accepts a top-level `return`; the
+  flag only adds the implicit return of a final expression. PurePython method
+  arguments are ordinary names a cell can rebind or delete (seeded each call;
+  `del arg` stays deleted in later cells); CodeAct keeps reserving them. A
+  helper that outlives its cell (in a thread or executor, another call's cell,
+  or with no cell running) keeps `print`, `pprint`, `show` and `self` instead
+  of raising: output goes to the cell running in the caller's context, else to
+  the process's stdout. Other runtime names (`return_result`, `_call`,
+  CodeAct's arguments) raise there (an asyncio task created in a cell keeps
+  its originating call's names), and once a call ends the namespace keeps only
+  those four of its runtime names. Tracebacks shown to the model name
+  in-process cells `Cell In[N], line L, in <module>` (no internal wrapper name
+  or namespace id), for CodeAct too. The sandbox backend is unchanged: its
+  worker keeps one owned namespace per session, seeded from `_session_locals`
+  and never written back.
+- `_session_locals` still seeds the call's namespace and is written back when
+  the call ends, with these changes (rules: "session_locals seeding and
+  write-back" in `src/nooa/runtime/README.md`):
+  - Write-back merges instead of replacing the caller's dict: it takes only
+    what the call changed (rebinds, new names, deletions of its seeds). Keys
+    others added or changed while the call ran keep their current value, and
+    a reused namespace's older names no longer reach later callers.
+  - The call's arguments never reach `_session_locals`, and a caller key named
+    like an argument keeps its value. Inside a PurePython call the argument
+    beats a same-named seed (before, the seed won).
+  - Changes are detected by object identity against the call's entry state,
+    not by binding syntax: a rebound environment name (`asyncio = 5`) writes
+    back, an unchanged re-import (`import json`) does not, and a rebound
+    seeded dunder (`__version__`) writes back.
+
 - `nooa.runtime.channels.StreamEnd` is removed: `QueueManager.spawn` no longer
   publishes a runtime event when a job finishes (the job's handle state and
   result say it ended).

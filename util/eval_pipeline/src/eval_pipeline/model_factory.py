@@ -37,7 +37,7 @@ _error_capture_enabled = False
 def _load_models_yaml() -> dict[str, Any]:
     """Load and cache models.yaml from this package."""
     yaml_path = Path(__file__).parent / "models.yaml"
-    with open(yaml_path) as f:
+    with open(yaml_path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 

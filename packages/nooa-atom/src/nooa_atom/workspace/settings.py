@@ -196,7 +196,50 @@ def behavior_fields() -> frozenset[str]:
 def load_settings_data(workspace: str | Path | None = None) -> dict[str, Any]:
     project = Path(workspace).expanduser().resolve() / ".nooa" if workspace is not None else None
     copy_coding_settings(project)
-    return load_settings_layers(project)
+    data = load_settings_layers(project)
+    _replace_live_context_whole(data, project)
+    return data
+
+
+_LIVE_CONTEXT_PATH = (SETTINGS_SECTION, "render_config", "live_context")
+
+
+def _replace_live_context_whole(data: dict[str, Any], project: Path | None) -> None:
+    """The live-context policy is one value, not a mapping to merge field by field.
+
+    The layered deep merge would combine a user-scope ``{kind: append,
+    every_n_turns: 3}`` with a project-scope ``{kind: off}`` into a policy no
+    kind accepts (``NoLiveContext`` forbids ``every_n_turns``). The highest
+    layer that sets ``atom.render_config.live_context`` wins as a whole.
+    """
+    import yaml
+
+    from nooa.layered_config import layered_paths
+
+    chosen: Any = _MISSING
+    for path in layered_paths(SETTINGS_FILENAME, SETTINGS_ENV_VAR, project_dir=project):
+        try:
+            layer = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, UnicodeError, yaml.YAMLError):
+            continue  # load_layered_yaml already skipped and reported it
+        value: Any = layer
+        for key in _LIVE_CONTEXT_PATH:
+            value = value.get(key, _MISSING) if isinstance(value, Mapping) else _MISSING
+            if value is _MISSING:
+                break
+        if value is not _MISSING:
+            chosen = value
+    if chosen is _MISSING:
+        return
+    render_config = data.get(SETTINGS_SECTION, {}).get("render_config")
+    if isinstance(render_config, dict):
+        if chosen is None:
+            render_config.pop("live_context", None)
+        else:
+            render_config["live_context"] = deepcopy(chosen)
+
+
+_MISSING = object()
 
 
 def load_acp_verbosity(workspace: str | Path) -> Literal["silent", "concise", "verbose"]:
@@ -219,14 +262,29 @@ def load_behavior_settings(workspace: str | Path) -> dict[str, Any]:
     """
     from pydantic import ValidationError
 
+    data = load_settings_data(workspace)
     try:
-        return resolve_behavior_settings(load_settings_data(workspace))
+        return resolve_behavior_settings(data)
     except ValidationError as exc:
         errors = "; ".join(
             f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}"
             for error in exc.errors()
         )
         files = ", ".join(_invalid_settings_files(workspace)) or "the merged settings"
+        if all(error["loc"] and error["loc"][0] == "render_config" for error in exc.errors()):
+            # Only the render config is wrong: keep every other saved setting.
+            logger.warning(
+                "Invalid Atom render_config in %s (%s); ignoring it and keeping the other settings",
+                files,
+                errors,
+            )
+            for section in ("tui", SETTINGS_SECTION):
+                if isinstance(data.get(section), dict):
+                    data[section].pop("render_config", None)
+            try:
+                return resolve_behavior_settings(data)
+            except ValidationError:
+                pass
         logger.warning("Invalid Atom settings in %s (%s); using the defaults", files, errors)
         return {}
 
@@ -246,7 +304,7 @@ def _invalid_settings_files(workspace: str | Path) -> list[str]:
         project_dir=project,
     ):
         try:
-            data = yaml.safe_load(path.read_text())
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, yaml.YAMLError):
             continue  # load_layered_yaml already skipped and reported it
         if not isinstance(data, dict):
@@ -282,9 +340,15 @@ def resolve_behavior_settings(data: dict[str, Any]) -> dict[str, Any]:
                 if name == SETTINGS_SECTION and key != "agent_spec":
                     logger.warning("Ignoring unsupported Atom setting %r", key)
                 continue
-            if key in ("summarization", "reflection") and isinstance(value, dict):
-                values.setdefault(key, {}).update(value)
+            current = values.get(key)
+            if (
+                key in ("summarization", "reflection", "render_config")
+                and isinstance(value, dict)
+                and isinstance(current, dict)
+            ):
+                current.update(value)
             else:
+                # A nested override replaces a layer that set the key to null.
                 values[key] = deepcopy(value)
     servers = values.get("mcp_servers")
     if isinstance(servers, dict):
@@ -340,7 +404,7 @@ def write_settings_updates(
         _copy_coding_section(path)
     data: dict[str, Any] = {}
     if path.exists():
-        loaded = yaml.safe_load(path.read_text())
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
         if isinstance(loaded, dict):
             data = loaded
 
@@ -358,7 +422,7 @@ def write_settings_updates(
 
     if not dry_run:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(yaml.safe_dump(data, sort_keys=False))
+        path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
     return path, data
 
 

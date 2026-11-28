@@ -32,7 +32,7 @@ def _read_eval_span_attrs(trace_file: Path) -> dict:
     """Read the eval span from a trace file and return flat attributes dict."""
     from tests.otlp_helpers import _otlp_attrs_to_dict
 
-    for line in trace_file.read_text().strip().splitlines():
+    for line in trace_file.read_text(encoding="utf-8").strip().splitlines():
         payload = json.loads(line)
         for rs in payload.get("resourceSpans", []):
             for ss in rs.get("scopeSpans", []):

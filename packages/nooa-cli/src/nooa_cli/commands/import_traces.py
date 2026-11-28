@@ -24,6 +24,7 @@ from ._otlp_helpers import (
     get_journal_record,
     get_session_span_count,
     inject_resource_attrs,
+    is_valid_utf8,
     post_annotations,
     post_journal_record,
     post_traces_batch_with_retry,
@@ -253,8 +254,13 @@ def command(
         deferred_annotations: list[dict] = []
         batch = _TraceBatch()
 
-        with open(file) as f:
+        # surrogateescape keeps universal-newline splitting and lets one line
+        # that is not valid UTF-8 be reported instead of aborting the file.
+        with open(file, encoding="utf-8", errors="surrogateescape") as f:
             for line_num, raw_line in enumerate(f, 1):
+                if not is_valid_utf8(raw_line):
+                    file_errors.append(f"{file.name}:{line_num}: not valid UTF-8")
+                    continue
                 raw_line = raw_line.strip()
                 if not raw_line:
                     continue

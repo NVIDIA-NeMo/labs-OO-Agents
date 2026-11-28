@@ -360,7 +360,7 @@ class SkillWriting(Skill):
             description = "{first_line}"
             dependencies = []
         """)
-        (lib_dir / "pyproject.toml").write_text(pyproject)
+        (lib_dir / "pyproject.toml").write_text(pyproject, encoding="utf-8")
 
         # Scaffold a Skill subclass so doc(self.<lib>) shows methods.
         class_name = "".join(w.capitalize() for w in lib_name.split("_"))
@@ -370,7 +370,7 @@ class SkillWriting(Skill):
             f"class {class_name}(Skill):\n"
             f'    """{first_line}"""\n'
         )
-        (lib_dir / "__init__.py").write_text(init_content)
+        (lib_dir / "__init__.py").write_text(init_content, encoding="utf-8")
 
         return f"Created skill '{lib_name}' at {lib_dir}"
 
@@ -397,7 +397,7 @@ class SkillWriting(Skill):
         for py_file in lib_dir.rglob("*.py"):
             if py_file.name == "__init__.py":
                 continue
-            source = py_file.read_text()
+            source = py_file.read_text(encoding="utf-8")
             report = self._lint_source(source)
             rel = py_file.relative_to(lib_dir)
             all_errors.extend(f"{rel}: {e}" for e in report.errors)
@@ -545,7 +545,7 @@ class SkillWriting(Skill):
         pyproject_path = self._path / lib_name / "pyproject.toml"
         if not pyproject_path.exists():
             return set()
-        return set(self._parse_pyproject_deps(pyproject_path.read_text()))
+        return set(self._parse_pyproject_deps(pyproject_path.read_text(encoding="utf-8")))
 
     def _parse_pyproject_deps(self, content: str) -> Sequence[str]:
         """Extract dependency names from pyproject.toml content."""

@@ -59,7 +59,7 @@ class Toy:
 
 def test_manager_imports_no_work_kind():
     """Orthogonality: the manager imports no shell, session or agent code."""
-    tree = ast.parse(Path(work_manager.__file__).read_text())
+    tree = ast.parse(Path(work_manager.__file__).read_text(encoding="utf-8"))
     imported = {
         alias.name
         for node in ast.walk(tree)
@@ -245,7 +245,7 @@ async def test_file_watch_sees_appended_lines(setup, tmp_path):
     log.write_text("old\n")
 
     async def follow(path):
-        with open(path) as handle:
+        with open(path, encoding="utf-8") as handle:
             handle.seek(0, 2)
             while True:
                 line = handle.readline()
@@ -259,7 +259,7 @@ async def test_file_watch_sees_appended_lines(setup, tmp_path):
 
     async def append():
         await asyncio.sleep(0.05)
-        with open(log, "a") as handle:
+        with open(log, "a", encoding="utf-8") as handle:
             handle.write("one\nREADY\n")
 
     writer = asyncio.create_task(append())

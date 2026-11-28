@@ -25,6 +25,8 @@ from atom_test_agents import (
     wait_on,
 )
 
+from nooa.context_blocks import DynamicLiveContext, RenderConfig
+
 TIMEOUT = 30
 
 
@@ -111,8 +113,12 @@ async def _until(predicate) -> None:
 async def test_a_second_prompt_during_a_turn_is_queued_for_its_own_turn(make_adapter, workspace):
     """A queue is a queue: the running turn sees the message pending, not injected."""
     started, block = fresh_events()
+    # The check reads the status block of the very next model call, which only the
+    # ``dynamic`` live-context policy regenerates on every request (the default
+    # appends a snapshot every few turns).
     models = ScriptedModels(
-        {None: [cell(BLOCKING_CELL), reply("Did the first."), reply("Did the second.")]}
+        {None: [cell(BLOCKING_CELL), reply("Did the first."), reply("Did the second.")]},
+        render_config=RenderConfig(live_context=DynamicLiveContext()),
     )
     adapter = await make_adapter(models)
     session_id = await _new(adapter, workspace)

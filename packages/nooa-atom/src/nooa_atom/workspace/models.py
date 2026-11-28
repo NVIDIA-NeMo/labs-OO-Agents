@@ -79,7 +79,7 @@ def _read_models(path: Path) -> dict[str, Any]:
     import yaml
 
     try:
-        data = yaml.safe_load(path.read_text())
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, yaml.YAMLError) as exc:
         logger.warning("Could not read model configuration %s: %s", path, exc)
         return {}

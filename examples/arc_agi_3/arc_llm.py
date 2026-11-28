@@ -32,7 +32,7 @@ def _load_dotenv() -> None:
     for d in [Path.cwd(), *Path(__file__).resolve().parents]:
         f = d / ".env"
         if f.exists():
-            for line in f.read_text().splitlines():
+            for line in f.read_text(encoding="utf-8").splitlines():
                 line = line.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue

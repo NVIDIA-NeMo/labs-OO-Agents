@@ -114,7 +114,7 @@ def enable_http_request_logging(
         """Append a JSON entry to the JSONL error file."""
         if jsonl_file is None:
             return
-        with open(jsonl_file, "a") as f:
+        with open(jsonl_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry) + "\n")
 
     def _log_request(request, counter):
@@ -127,7 +127,7 @@ def enable_http_request_logging(
 
                 filename = output_path / f"request_{counter}_{model_name}.json"
 
-                with open(filename, "w") as f:
+                with open(filename, "w", encoding="utf-8") as f:
                     json.dump(_redact_body(body_dict), f, indent=2)
 
                 if verbose:
@@ -148,7 +148,7 @@ def enable_http_request_logging(
     def _save_response_file(response_dict, counter, model_name):
         """Save response dict to file."""
         response_filename = output_path / f"response_{counter}_{model_name}.json"
-        with open(response_filename, "w") as f:
+        with open(response_filename, "w", encoding="utf-8") as f:
             json.dump(response_dict, f, indent=2)
         if verbose:
             print(f"   Response status: {response_dict['status_code']}")

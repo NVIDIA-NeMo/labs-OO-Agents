@@ -432,4 +432,4 @@ class TextSkill(Skill):
         resolved = _resolve_skill_path(self._skill_path, path)
         if not resolved.is_file():
             raise ValueError(f"{path!r} is not a file.")
-        return resolved.read_text()
+        return resolved.read_text(encoding="utf-8")

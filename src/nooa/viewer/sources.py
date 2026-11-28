@@ -61,7 +61,7 @@ def configured_sources() -> dict[str, TraceSource]:
         return {}
     entries = entry_points(group="nooa.viewer.sources")
     result = {}
-    for item in json.loads(Path(config).read_text())["sources"]:
+    for item in json.loads(Path(config).read_text(encoding="utf-8"))["sources"]:
         name = item["name"]
         if not re.fullmatch(r"[a-zA-Z0-9_-]+", name) or name in result:
             raise ValueError("Source names must be unique letters, digits, underscores or hyphens")
@@ -92,7 +92,7 @@ def add_run(name: str, run_id: str) -> dict[str, Any]:
         if name not in configured_sources():
             raise KeyError(name)
         path = Path(os.environ["NOOA_VIEWER_SOURCES_CONFIG"])
-        config = json.loads(path.read_text())
+        config = json.loads(path.read_text(encoding="utf-8"))
         item = next((s for s in config["sources"] if s["name"] == name), None)
         if item is None:
             raise KeyError(name)
@@ -119,7 +119,9 @@ def add_run(name: str, run_id: str) -> dict[str, Any]:
             item["options"] = options
             temporary = None
             try:
-                with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as f:
+                with tempfile.NamedTemporaryFile(
+                    encoding="utf-8", mode="w", dir=path.parent, delete=False
+                ) as f:
                     temporary = Path(f.name)
                     os.chmod(temporary, path.stat().st_mode & 0o777)
                     json.dump(config, f, indent=2)

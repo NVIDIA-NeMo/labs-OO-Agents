@@ -50,7 +50,7 @@ def _clean_env(monkeypatch, tmp_path):
 
 def _write_yaml(path: Path, alias: str = "x") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(f"models:\n  {alias}:\n    model_name: m\n")
+    path.write_text(f"models:\n  {alias}:\n    model_name: m\n", encoding="utf-8")
 
 
 class TestEmpty:

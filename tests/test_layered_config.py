@@ -51,7 +51,7 @@ def _clean_env(monkeypatch, tmp_path):
 
 def _write(path: Path, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(body)
+    path.write_text(body, encoding="utf-8")
 
 
 # ── layered_paths ──────────────────────────────────────────────────────────

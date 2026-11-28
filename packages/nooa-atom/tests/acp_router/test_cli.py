@@ -220,7 +220,7 @@ def test_the_cli_module_imports_nothing_heavy_at_load_time():
     """
     import ast
 
-    tree = ast.parse(Path(cli.__file__).read_text())
+    tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
     loaded: list[str] = []
     for node in tree.body:
         if isinstance(node, ast.Import):

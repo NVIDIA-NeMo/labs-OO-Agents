@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
-from nooa.skill import Skill
+from nooa.skill import Skill, slash_command
 
 _ENV_PLACEHOLDER_ONLY = re.compile(r"^\$\{[A-Za-z_][A-Za-z0-9_]*\}$")
 # Command-line flags whose value is a credential, e.g. --token X or --api-key=X.
@@ -64,6 +64,21 @@ def _literal_credentials(definition: dict[str, Any]) -> list[str]:
         if not _is_placeholder(value):
             found.append(f"args value for {flag}")
     return found
+
+
+def _describe(summary: dict[str, Any] | None) -> str:
+    if not summary:
+        return "unset"
+    if summary["kind"] == "append":
+        return f"append every {summary['every_n_turns']} turns"
+    return summary["kind"]
+
+
+def _policy_summary(policy: Any) -> dict[str, Any] | None:
+    """``{"kind": ..., "every_n_turns": ...}`` for a live-context policy, ``None`` when unset."""
+    if policy is None:
+        return None
+    return policy.model_dump()
 
 
 class WorkspaceSettings(Skill):
@@ -188,6 +203,65 @@ class WorkspaceSettings(Skill):
         )
         return f"Forgot MCP startup preference `{name}` in {path}."
 
+    def set_live_context(self, kind: str, every_n_turns: int | None = None) -> str:
+        """Choose how the live <context> block reaches the model, now and in future sessions.
+
+        kind is "append" (a snapshot is appended to the history at least every
+        every_n_turns turns; default 5), "dynamic" (regenerated on every request)
+        or "off". every_n_turns is for "append" only. The running agent switches
+        at its next model call; the saved setting applies to fresh sessions.
+        """
+        from nooa.context_blocks import RenderConfig, coerce_live_context
+
+        if not isinstance(kind, str) or not kind.strip():
+            raise ValueError('kind must be "append", "dynamic" or "off"')
+        kind = kind.strip()
+        if every_n_turns is not None and kind != "append":
+            raise ValueError('every_n_turns applies to kind="append" only')
+        request: Any = (
+            {"kind": kind, "every_n_turns": every_n_turns} if every_n_turns is not None else kind
+        )
+        policy = coerce_live_context(request)
+        path = self._save({("atom", "render_config", "live_context"): policy.model_dump()})
+        agent = self._agent
+        if agent is not None and hasattr(agent, "render_config"):
+            agent.render_config = RenderConfig(live_context=policy)
+            applied = "applied from the next model call"
+        else:
+            applied = "applies from the next session"
+        detail = f" every {policy.every_n_turns} turns" if policy.kind == "append" else ""
+        return f"Live context set to {policy.kind}{detail}; saved in {path}, {applied}."
+
+    @slash_command(
+        "live-context",
+        argument_hint="<dynamic|off|append> [every_n_turns]",
+        completions=("dynamic", "off", "append"),
+        output_to_agent=False,
+    )
+    async def live_context_command(self, args: str) -> str:
+        """Show or set how the live <context> block reaches the model."""
+        words = args.split()
+        if not words:
+            status = self.status()
+            saved, current = status["saved"]["live_context"], status["current"]["live_context"]
+            return (
+                f"Live context now: {_describe(current)}; saved for future sessions: "
+                f"{_describe(saved) if saved else 'default (append every 5 turns)'}. "
+                "Usage: /live-context <dynamic|off|append> [every_n_turns]"
+            )
+        if len(words) > 2:
+            return "Usage: /live-context <dynamic|off|append> [every_n_turns]"
+        try:
+            every_n = int(words[1]) if len(words) == 2 else None
+            return self.set_live_context(words[0], every_n_turns=every_n)
+        except ValueError as exc:
+            return f"Not changed: {exc}. Usage: /live-context <dynamic|off|append> [every_n_turns]"
+
+    def clear_live_context(self) -> str:
+        """Forget this workspace's live-context choice; fresh sessions use the default (append every 5)."""
+        path = self._save({("atom", "render_config", "live_context"): None})
+        return f"Cleared the live-context setting in {path}; the running agent is unchanged."
+
     def status(self) -> dict[str, Any]:
         """Inspect effective saved defaults and current state without credentials.
 
@@ -205,10 +279,16 @@ class WorkspaceSettings(Skill):
                 "default_model": options.default_model,
                 "mcp_servers": sorted(options.mcp_servers),
                 "mcp_auto_connect": options.mcp_auto_connect,
+                "live_context": _policy_summary(
+                    options.render_config.live_context if options.render_config else None
+                ),
             },
             "current": {
                 "active_skills": self._agent.skills.activated(),
                 "model": getattr(getattr(self._agent, "llm", None), "model", None),
+                "live_context": _policy_summary(
+                    getattr(getattr(self._agent, "render_config", None), "live_context", None)
+                ),
                 "connected_mcp": self._agent.skills.mcp.connected(),
                 "active_mcp_skills": [
                     name for name in self._agent.skills.activated() if name.startswith("mcp.")
@@ -233,7 +313,7 @@ class WorkspaceSettings(Skill):
         if not path.exists():
             return []
         try:
-            data = yaml.safe_load(path.read_text())
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, yaml.YAMLError):
             return []
         if not isinstance(data, dict):

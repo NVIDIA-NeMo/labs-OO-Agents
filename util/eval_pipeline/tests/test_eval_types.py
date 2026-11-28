@@ -274,7 +274,9 @@ class TestFileParser:
         sample_annotation: EvalAnnotationLine,
     ):
         """Parser correctly parses a complete file."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        with tempfile.NamedTemporaryFile(
+            encoding="utf-8", mode="w", suffix=".jsonl", delete=False
+        ) as f:
             f.write(sample_metadata.model_dump_json(by_alias=True) + "\n")
             f.write(sample_result.model_dump_json(by_alias=True) + "\n")
             f.write(sample_completion.model_dump_json(by_alias=True) + "\n")
@@ -301,7 +303,9 @@ class TestFileParser:
         sample_result: EvalTestResult,
     ):
         """Parser handles files without completion line (still running)."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        with tempfile.NamedTemporaryFile(
+            encoding="utf-8", mode="w", suffix=".jsonl", delete=False
+        ) as f:
             f.write(sample_metadata.model_dump_json(by_alias=True) + "\n")
             f.write(sample_result.model_dump_json(by_alias=True) + "\n")
             path = Path(f.name)
@@ -319,7 +323,9 @@ class TestFileParser:
 
     def test_parse_file_without_metadata_raises(self, sample_result: EvalTestResult):
         """File without metadata line raises EvalParseError."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        with tempfile.NamedTemporaryFile(
+            encoding="utf-8", mode="w", suffix=".jsonl", delete=False
+        ) as f:
             f.write(sample_result.model_dump_json(by_alias=True) + "\n")
             path = Path(f.name)
 
@@ -334,7 +340,9 @@ class TestFileParser:
 
     def test_parse_empty_lines_skipped(self, sample_metadata: EvalMetadataLine):
         """Empty lines in file are skipped."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as f:
+        with tempfile.NamedTemporaryFile(
+            encoding="utf-8", mode="w", suffix=".jsonl", delete=False
+        ) as f:
             f.write(sample_metadata.model_dump_json(by_alias=True) + "\n")
             f.write("\n")  # Empty line
             f.write("   \n")  # Whitespace-only line

@@ -28,6 +28,7 @@ from ._otlp_helpers import (
     check_endpoint_reachable,
     get_journal_record,
     inject_resource_attrs,
+    is_valid_utf8,
     post_journal_record,
     post_traces_batch,
     session_exists,
@@ -51,7 +52,7 @@ def _find_harbor_traces(root: Path) -> list[Path]:
 def _read_json(path: Path) -> dict:
     """Read a JSON file, returning an empty dict on any failure."""
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return {}
 
@@ -94,7 +95,7 @@ def _read_score(trial_dir: Path, trial_result: dict) -> float | None:
 
     reward_txt = trial_dir / "verifier" / "reward.txt"
     if reward_txt.exists():
-        return _coerce_float(reward_txt.read_text().strip())
+        return _coerce_float(reward_txt.read_text(encoding="utf-8").strip())
 
     return None
 
@@ -341,8 +342,13 @@ def _import_trace_file(
         batch = []
         batch_input_bytes = 0
 
-    with open(jsonl_path) as f:
-        for raw_line in f:
+    # surrogateescape keeps universal-newline splitting and lets one line
+    # that is not valid UTF-8 be reported instead of aborting the file.
+    with open(jsonl_path, encoding="utf-8", errors="surrogateescape") as f:
+        for line_num, raw_line in enumerate(f, 1):
+            if not is_valid_utf8(raw_line):
+                errors.append(f"{jsonl_path.name}:{line_num}: not valid UTF-8")
+                continue
             raw_line = raw_line.strip()
             if not raw_line:
                 continue

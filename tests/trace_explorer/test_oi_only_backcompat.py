@@ -54,7 +54,7 @@ def _span(name: str, span_id: str, attrs: dict, *, parent: str | None = None, st
 
 
 def _write(spans: list[dict]) -> Path:
-    f = tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False)
+    f = tempfile.NamedTemporaryFile(encoding="utf-8", mode="w", suffix=".jsonl", delete=False)
     for s in spans:
         f.write(json.dumps(s) + "\n")
     f.close()

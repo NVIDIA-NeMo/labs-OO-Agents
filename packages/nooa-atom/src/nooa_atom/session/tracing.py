@@ -28,8 +28,14 @@ names.
 
 Tracing is optional: without ``nooa.tracing`` (or OpenTelemetry) this
 does nothing.
+
+NeMo Relay capture (``session.relay``) is opt-in: the hosts reach it
+through ``relay_activated`` and ``trace_in_relay``, which import it only
+when ``RELAY_CONFIG_ENV`` is set.
 """
 
+import os
+from contextlib import AbstractAsyncContextManager, nullcontext
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -111,3 +117,23 @@ def trace_in_tree(session: "Session", trace_session_id: str) -> None:
         attach_trace_context(captured, attributes)
 
     session.add_loop_context_hook(enter)
+
+
+RELAY_CONFIG_ENV = "NEMO_RELAY_PLUGIN_CONFIG_PATH"
+
+
+def relay_activated() -> AbstractAsyncContextManager[None]:
+    """``session.relay.activated()`` when ``RELAY_CONFIG_ENV`` is set, else nothing."""
+    if not os.environ.get(RELAY_CONFIG_ENV):
+        return nullcontext()
+    from nooa_atom.session import relay
+
+    return relay.activated()
+
+
+def trace_in_relay(session: "Session") -> None:
+    """``session.relay.trace_session(session)`` when ``RELAY_CONFIG_ENV`` is set, else nothing."""
+    if os.environ.get(RELAY_CONFIG_ENV):
+        from nooa_atom.session import relay
+
+        relay.trace_session(session)
