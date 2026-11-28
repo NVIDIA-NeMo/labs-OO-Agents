@@ -27,7 +27,7 @@ async def test_fresh_shell_server_survives_discard_and_scope_close(tmp_path):
         nonlocal pid, shell_ref
         shell = ShellTools(cwd=str(tmp_path))
         shell_ref = weakref.ref(shell.session)
-        assert shell.session.process_owner.keep_background
+        assert shell.session.keep_background_on_close
         code = (
             "import http.server,os; "
             "s=http.server.HTTPServer(('127.0.0.1',0),http.server.SimpleHTTPRequestHandler); "
@@ -88,12 +88,12 @@ async def test_scope_isolation_adoption_and_failure_cleanup(tmp_path):
 
     running = asyncio.create_task(invocation())
     await entered.wait()
-    assert not outside.process_owner.keep_background
-    assert not BashSession(cwd=tmp_path).process_owner.keep_background
-    assert adopted.session.process_owner.keep_background
+    assert not outside.keep_background_on_close
+    assert not BashSession(cwd=tmp_path).keep_background_on_close
+    assert adopted.session.keep_background_on_close
     release.set()
     await running
-    assert not BashSession(cwd=tmp_path).process_owner.keep_background
+    assert not BashSession(cwd=tmp_path).keep_background_on_close
 
 
 def test_preservation_kill_does_not_kill_process_group(monkeypatch):
@@ -107,7 +107,7 @@ def test_preservation_kill_does_not_kill_process_group(monkeypatch):
     drain = Mock()
     monkeypatch.setattr(module.os, "killpg", killpg)
     monkeypatch.setattr(module, "_spawn_output_drainer", drain)
-    session.process_owner.kill_now(process)
+    session._process_owner.kill_now(process)
     drain.assert_called_once_with(process)
     process.kill.assert_called_once()
     killpg.assert_not_called()

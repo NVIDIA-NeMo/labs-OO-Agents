@@ -462,7 +462,7 @@ def test_bench_agent_shell_keeps_background_jobs_on_close():
 
     agent = BenchAgent(llm=FakeLLMClient())
 
-    assert agent.shell.session.process_owner.keep_background is True
+    assert agent.shell.session.keep_background_on_close is True
 
 
 def test_tool_repr_shows_state():

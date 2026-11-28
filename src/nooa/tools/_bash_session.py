@@ -99,7 +99,7 @@ class BashSession:
         """Configure the working directory and optional command to run on each start."""
         self._cwd = Path(cwd).resolve()
         # Ends bash, however the session goes away; survives restarts.
-        self.process_owner = _BashProcess(keep_background=keep_background_on_close)
+        self._process_owner = _BashProcess(keep_background=keep_background_on_close)
         # PIDs of background jobs as of the last completed command.
         self._background_pids: frozenset[int] = frozenset()
         # Optional shell snippet run once every time the session (re)starts —
@@ -136,9 +136,18 @@ class BashSession:
         self._cwd = Path(value).resolve()
 
     @property
+    def keep_background_on_close(self) -> bool:
+        """Whether close() ends bash only, leaving its background jobs running."""
+        return self._process_owner.keep_background
+
+    @keep_background_on_close.setter
+    def keep_background_on_close(self, value: bool) -> None:
+        self._process_owner.keep_background = value
+
+    @property
     def _process(self) -> asyncio.subprocess.Process | None:
-        """The running bash, if any (held by ``process_owner``)."""
-        return self.process_owner.process
+        """The running bash, if any (held by ``_process_owner``)."""
+        return self._process_owner.process
 
     async def __aenter__(self) -> "BashSession":
         """Support ``async with BashSession() as session:`` usage."""
@@ -266,7 +275,7 @@ class BashSession:
             raise
 
         # Before the first await: a drop from here on must end this bash.
-        self.process_owner.attach(self, process)
+        self._process_owner.attach(self, process)
 
         # Dup the write end to fd 3 inside bash, then close the original.
         assert process.stdin is not None
@@ -885,7 +894,7 @@ class BashSession:
             self._control_transport = None
         self._control_reader = None
 
-        await self.process_owner.close()
+        await self._process_owner.close()
         self._background_pids = frozenset()
         self._started = False
         self._ready = False

@@ -36,7 +36,7 @@ class BackgroundServiceScope:
         """Include a shell constructed before entering the invocation scope."""
         if self._closed:
             raise RuntimeError("Background service scope has already closed")
-        session.process_owner.keep_background = True
+        session.keep_background_on_close = True
         self._sessions[id(session)] = session
 
     async def aclose(self) -> None:

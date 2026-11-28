@@ -52,6 +52,9 @@ class _BashProcess:
 
     def attach(self, session: object, process: asyncio.subprocess.Process) -> None:
         """Own a bash just started on the running loop; it ends if ``session`` is dropped."""
+        if self._finalizer is not None:
+            # A bash started without close() first: only the newest one is owned.
+            self._finalizer.detach()
         self.process = process
         self._loop = asyncio.get_running_loop()
         self._finalizer = weakref.finalize(session, self.kill_now, process)

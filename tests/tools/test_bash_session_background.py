@@ -42,7 +42,7 @@ async def _wait_group_gone(pgid: int, timeout: float = 5.0) -> bool:
         pids = []
         for pid in filter(str.isdigit, os.listdir("/proc")):
             try:
-                with open(f"/proc/{pid}/stat") as f:
+                with open(f"/proc/{pid}/stat", encoding="utf-8", errors="replace") as f:
                     # After "pid (comm)": state, ppid, pgrp, ...
                     state, _, pgrp = f.read().rsplit(")", 1)[1].split()[:3]
             except (FileNotFoundError, ProcessLookupError):
@@ -251,13 +251,31 @@ async def test_drop_under_preserve_scope_keeps_services(tmp_path, reap):
 async def test_close_detaches_the_finalizer(tmp_path):
     session = BashSession(cwd=tmp_path)
     await session.run("true")
-    finalizer = session.process_owner._finalizer
+    finalizer = session._process_owner._finalizer
     assert finalizer.alive
 
     await session.close()
 
     assert not finalizer.alive
-    assert session.process_owner.process is None
+    assert session._process_owner.process is None
+
+
+async def test_attach_detaches_an_earlier_finalizer():
+    from unittest.mock import Mock
+
+    from nooa.tools._bash_process import _BashProcess
+
+    class Session:
+        pass
+
+    owner, session = _BashProcess(keep_background=False), Session()
+    owner.attach(session, Mock(returncode=None))
+    first = owner._finalizer
+    owner.attach(session, Mock(returncode=None))
+
+    assert not first.alive
+    assert owner._finalizer.alive
+    owner._finalizer.detach()
 
 
 async def test_drop_after_cancelled_close_ends_bash(tmp_path, reap, collected):
